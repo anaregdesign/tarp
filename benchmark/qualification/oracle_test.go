@@ -90,6 +90,44 @@ func TestDefinitiveOracleOutcomesDoNotKeepAnUnknownWindow(t *testing.T) {
 	}
 }
 
+func TestRotatingPowerCutSequenceRange(t *testing.T) {
+	cases, err := CampaignCases("mutate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		if tc.Mode != "rotate" {
+			continue
+		}
+		events := []OracleEvent{
+			{Type: "ack", Key: []byte("k"), Value: []byte("old")},
+			{Type: "intent", Key: []byte("k"), Value: []byte("new")},
+		}
+		wantLow, wantHigh := uint64(1), uint64(1)
+		switch tc.Phase {
+		case "current.rename:after", "current.dirsync:before":
+			wantHigh = 2
+		case "operation.ack:after":
+			events = append(events, OracleEvent{Type: "ack", Key: []byte("k"), Value: []byte("new")})
+			fallthrough
+		case "current.dirsync:after":
+			wantLow, wantHigh = 2, 2
+		}
+		oracle, err := ReplayOracle(append(events, OracleEvent{Type: "phase", Phase: tc.Phase}), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lo, hi := oracle.PowerCutSequenceRange(tc.Mode); lo != wantLow || hi != wantHigh {
+			t.Errorf("%s: got [%d,%d], want [%d,%d]", tc.Phase, lo, hi, wantLow, wantHigh)
+		}
+		if tc.Phase == "current.dirsync:after" {
+			if lo, hi := oracle.PowerCutSequenceRange("overlap"); lo != 1 || hi != 2 {
+				t.Errorf("unrelated publication constrained pending write to [%d,%d]", lo, hi)
+			}
+		}
+	}
+}
+
 func TestColdOracleBindsSequenceContentAndEntireLiveCardinality(t *testing.T) {
 	for _, pending := range []OracleEvent{
 		{Type: "intent", Key: []byte("k"), Value: []byte("new")},

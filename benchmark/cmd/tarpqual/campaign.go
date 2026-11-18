@@ -186,7 +186,7 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 		if err != nil {
 			return false, err
 		}
-		sequenceMin, sequenceMax = model.SequenceRange()
+		sequenceMin, sequenceMax = model.PowerCutSequenceRange(cfg.Mode)
 		witnessed = model
 		if cfg.Mode == "init" && (sequenceMin != 0 || sequenceMax != 0) {
 			return false, errors.New("initialization emitted unexpected logical mutations")

@@ -115,9 +115,9 @@ func guestOracle(t *testing.T, name string, allowEmpty bool) *qualification.Orac
 	return oracle
 }
 
-func verifyVMDatabase(t *testing.T, db *DB, oracle *qualification.Oracle) string {
+func verifyVMDatabase(t *testing.T, db *DB, oracle *qualification.Oracle, mode string) string {
 	t.Helper()
-	lo, hi := oracle.SequenceRange()
+	lo, hi := oracle.PowerCutSequenceRange(mode)
 	seq := Observe(db).Frontier().Sequence
 	if seq < lo || seq > hi {
 		t.Fatalf("recovered sequence %d outside acknowledged/pending interval [%d,%d]", seq, lo, hi)
@@ -153,7 +153,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 		t.Fatalf("file-only source recovery: %v", err)
 	}
 	oracle := guestOracle(t, "oracle.jsonl", cfg.Mode == "init")
-	digest := verifyVMDatabase(t, db, oracle)
+	digest := verifyVMDatabase(t, db, oracle, cfg.Mode)
 	sequence := Observe(db).Frontier().Sequence
 	liveKeys := Observe(db).LiveKeys()
 	if cfg.Mode == "init" && liveKeys != 0 {
@@ -173,7 +173,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 			if seq := Observe(db).Frontier().Sequence; seq != cfg.CaptureSequence {
 				t.Fatalf("snapshot sequence %d != capture %d", seq, cfg.CaptureSequence)
 			}
-			verifyVMDatabase(t, db, capture)
+			verifyVMDatabase(t, db, capture, cfg.Mode)
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}

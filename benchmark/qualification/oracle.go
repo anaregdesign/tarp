@@ -188,6 +188,25 @@ func (o *Oracle) SequenceRange() (uint64, uint64) {
 	return o.acks, upper
 }
 
+// PowerCutSequenceRange uses the witnessed I/O boundary when a rotating Put
+// publishes the record and the new log together through a single CURRENT.
+func (o *Oracle) PowerCutSequenceRange(mode string) (uint64, uint64) {
+	low, high := o.SequenceRange()
+	if mode == "rotate" {
+		switch o.Phase {
+		case "segment.write:before", "segment.write:after", "data.write:before", "data.write:after",
+			"segment.sync:before", "segment.sync:after", "catalog.write:before", "catalog.write:after",
+			"catalog.sync:before", "catalog.sync:after", "catalog.dirsync:before", "catalog.dirsync:after",
+			"current.write:before", "current.write:after", "current.sync:before", "current.sync:after",
+			"current.rename:before":
+			return low, low
+		case "current.dirsync:after":
+			return high, high
+		}
+	}
+	return low, high
+}
+
 // StateAt binds the one pending mutation to the actual reopened frontier.
 // The complete returned live set also makes unexpected index entries detectable.
 func (o *Oracle) StateAt(sequence uint64) (map[string][]byte, error) {
