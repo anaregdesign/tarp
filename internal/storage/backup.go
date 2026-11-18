@@ -77,7 +77,7 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 		}
 	}()
 	meta := format.Backup{UUID: capture.Current.UUID, Sequence: capture.Current.Sequence, Cutoff: capture.Catalog.Cutoff,
-		SourceCacheBytes: cfg.CacheBytes, SourceRecordBytes: cfg.RecordBytes, SourceFileBytes: cfg.FileBytes}
+		SourceCacheBytes: cfg.CacheBytes, SourceRecordBytes: cfg.RecordBytes}
 	addBytes := func(name string, b []byte) error {
 		if err := fs.NewFile(filepath.Join(stage, name), b, "backup.metadata"); err != nil {
 			return err

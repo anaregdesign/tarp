@@ -72,38 +72,38 @@ records, or total disk quota is provided.
 
 ## Limits
 
-Zero selects a default, not disabled caching or syncing. Negative settings fail.
+Each zero-valued field in `Options{}` selects its default. Negative or
+inconsistent settings return `ErrInvalidOptions`. Normal writes always use
+the commit sync protocol.
 
-| Option | Default | Meaning |
+| Option | Default | What the limit applies to |
 | --- | ---: | --- |
-| `CacheBytes` | 64 MiB | Logical cached key/value/entry charges |
-| `MaxRecordBytes` | 1 MiB | Complete encoded record |
-| `TargetSegmentBytes` | 4 MiB | Soft rotation target for new log appends, including the header |
-| `MaxDataFileBytes` | 128 MiB | Complete data file, including its 64-byte header |
-| `ReadFileHandles` | 64 | Reusable read-handle pool, not all process descriptors |
+| `CacheBytes` | 64 MiB | Total logical charge of entries in this DB's LRU cache. A Put must fit as a single entry. |
+| `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
+| `TargetSegmentBytes` | 4 MiB | Target size for new log and checkpoint snapshot files, including the 64-byte file header. |
+| `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
 
-For `K` key bytes and `V` value bytes, the record is `48+K+V` bytes and cache
-charge is `128+K+V` bytes. Each must fit its respective bound; the record must also
-fit `MaxDataFileBytes-64`. Minimum settings are 129 cache bytes, 49 record bytes,
-113 file bytes, and one handle. The record limit cannot exceed the file limit
-minus 64. Arithmetic is checked.
+For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
+bytes and `128 + K + V` cache bytes. An entry that exceeds either limit returns
+`ErrTooLarge`. For example, the default record limit permits a 1,048,512-byte
+value with a 16-byte key. When several individually admissible entries fill the
+cache, the least recently used entries are evicted. The full key index, Go
+runtime overhead, in-flight operations and OS page cache use additional memory.
 
-The effective rotation target fits one maximum-size record and its header and
-is capped at `MaxDataFileBytes`. The next append rotates a nonempty log only
-when the whole record would exceed that target. An existing file larger than
-4 MiB can be opened or restored under compatible hard limits. Smaller log
-segments reduce the usual amount of data examined per cleaning step and
-increase rotation, catalog publication, and sync frequency.
+The effective target is at least `64 + MaxRecordBytes` so a whole record fits.
+An exact fit stays in the current file. If the next append would exceed the
+target, tarp seals the log and writes the record to a new file. Sealed logs
+become candidates for automatic compaction when cleaning would save enough space.
+Manual `Compact` uses the same target to split its snapshot output.
 
-The cache bound excludes the full in-memory key index, map/allocator/GC overhead,
-in-flight callers, maintenance maps/buffers, and the OS page cache. It is not a
-Go heap or RSS bound. Defaults are starting hypotheses, not measured optima.
+For example, 32 files of 4 MiB total 128 MiB. The next write can create a
+33rd file. Available disk space and filesystem quotas govern total capacity.
+Backup and compaction also need temporary space.
 
-Reopening with smaller limits validates every live record/cache charge and every
-selected physical file before truncation or cleanup. Incompatible settings fail
-with `ErrIncompatibleOptions` and typed required minima; persisted values are
-never silently made unreadable or admitted without caching. Obsolete records
-are still checked even when larger than a new admission bound.
+Lowering the target still allows `Open` and `Restore` to read larger existing
+files. If a live entry exceeds the new cache or record limit, they return
+`ErrIncompatibleOptions`. Minimum settings are 129 cache bytes, 49 record
+bytes and one read handle.
 
 ## Backup, restore, and maintenance
 
@@ -143,12 +143,17 @@ Supply cancellable contexts for manual maintenance and backup.
 
 ## Development
 
+The root package exposes the public API. The implementation and its functional
+tests live in `internal/engine/`. The [runnable example](examples/example_test.go)
+covers backup, compaction and restore. The [benchmark directory](benchmark/)
+contains the Go benchmarks, measurement drivers, guest scripts and controller tools.
+
 Use the latest supported patches of Go 1.26 and 1.27 initially; advance this
 matrix with Go's supported-release policy. The module minimum is Go 1.26.0.
 The [recorded virtual Linux amd64/ext4 stack](docs/durability.md#support-boundary)
 documents the configuration used for historical qualification.
 Run targeted development checks on macOS. For example, use
-`go test -run TestSoftRotationBoundary .` for rotation changes. Leave Linux
+`go test -run TestSoftRotationBoundary ./internal/engine` for rotation changes. Leave Linux
 validation to CI. The following commands cover the full functional checks
 and the bounded decoder fuzz target.
 

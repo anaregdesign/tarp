@@ -4,13 +4,36 @@ No latency, throughput, capacity SLO, or universally-fastest claim is implied.
 The cleaner's one-third savings threshold and 4 MiB rotation target are tuning
 hypotheses. Smaller active logs can reduce the size of a cleaning step and
 increase foreground catalog publications and syncs. Record the effective
-target, hard limits, worker status and revision for any new comparison.
+segment target, cache and record limits, worker status and revision for any new comparison.
 Development measurements do not qualify a production filesystem or prove
 physical storage reads.
 
 Benchmarks, smoke measurement profiles, and the VM measurement workflow run only
 on a separate explicit user request. Ordinary functional and race tests provide
 the routine PR checks.
+
+## Compaction comparison
+
+`BenchmarkCompaction` and the opt-in JSONL drivers compare two operations on private
+copies of the same closed database. The fixture has one eligible sealed log with a
+surviving Put and a retained Delete, plus an active log containing live data.
+Each value size (64 B, 1 KiB, 4 KiB) uses a segment target of one file header
+plus 32 full Put records for both log rotation and manual checkpoint output.
+
+| Mode | Timed interval |
+| --- | --- |
+| `automatic-incremental` | Release the real worker on reopen through its post-publication retirement directory sync. It replaces one sealed log and preserves the active log. |
+| `manual-full-checkpoint` | Run one public `Compact(ctx)` with the worker parked. It checkpoints the entire committed prefix, including the active records. |
+
+Fixture creation, cloning, Open, and verification take place outside the timer.
+For each mode the driver checks the original files that disappeared, counts the
+newly published DATA file lengths (including headers), then reopens the result
+and verifies the same keys, values, and committed sequence. Net DATA bytes freed
+equals unlinked DATA bytes minus published DATA bytes. Manifest sizes and
+filesystem allocation are recorded separately where sampled. The JSONL rows
+`compaction_automatic-incremental` and `compaction_manual-full-checkpoint`
+include effective options, checkpoint cutoff, pruning boundary and the state
+digest. The two modes perform different amounts of work.
 
 ## Selected-target bounded driver
 
@@ -38,9 +61,9 @@ Linux/latest-stable job.
 
 The **plain** build prepares 4,096 16-byte keys once and records five explicitly
 warmed measurement windows. Options are 64 KiB logical cache, 8 KiB records,
-1 MiB files and four read handles: every value fits individually, while every
-complete working set exceeds cache capacity. Eight hot keys fit at all sizes.
-Maintenance adds one separately identified writer key.
+a 1 MiB segment target and four read handles. Every value fits individually,
+while every complete working set exceeds cache capacity. Eight hot keys fit at all sizes.
+The interference profiles add one separately identified writer key.
 
 - Hit profiles retain all 8,192 individual durations for one/four workers,
   plus a 10,000-call batch ns/op and allocated-byte sample, allocations/op and
@@ -60,9 +83,10 @@ Maintenance adds one separately identified writer key.
   active IDs must match their declared rotating/nonrotating mode. Each
   rotating Delete follows a fully synced full-segment Put outside its timer,
   and the driver verifies all 64 Delete rotations.
-- Each of baseline, backup, compaction, their overlap and slow-copy overlap
+- Each of baseline, backup, manual checkpoint, their overlap and slow-copy overlap
   starts from a fresh private copy of the **same closed fixture** and runs for
-  at least 500 ms and until maintenance completes. The plain fixture has 4,096
+  at least 500 ms and until maintenance completes. The worker is parked during
+  fixture preparation and in these five controls so its writes do not enter the comparison. The plain fixture has 4,096
   seed keys plus 1,024 updates and 256 deletes/reinsertions; the diagnostic
   fixture has 512 keys plus 512 updates and 128 deletes/reinsertions. Preparation,
   complete-state digesting and hot-key warmup occur outside the timed window;
@@ -88,7 +112,10 @@ Maintenance adds one separately identified writer key.
 - An additional 8,192 updates, 1,024 deletes and 1,024 reinsertions over 1,024
   keys form a disclosed 10,240-operation history. Five warm and five guest-cold
   file-only reopens **each** before and after checkpoint record elapsed startup
-  and committed record-scan bytes (logical scan bytes, not assumed physical I/O).
+  and the selected replay layout. Each probe opens a copy of a frozen image
+  with the worker parked; the default-history image may contain already-cleaned
+  intervals. Empty cleaned intervals add no file or header. Retained Delete
+  bytes are tracked separately from obsolete Put bytes.
   Each cold Open has independently acknowledged external NBD read intervals;
   cache purge and handshake time are excluded from Open latency.
 - Complete-index retention is measured by retaining then releasing the **actual**
@@ -103,7 +130,7 @@ Maintenance adds one separately identified writer key.
   a sample maximum, not a precise population-tail estimate.
 
 The **diagnostic-only** `tarpprofile` build separately uses 512 keys (still larger
-than cache for every size), five repetitions and all maintenance modes. It
+than cache for every size), five repetitions and the five interference controls. It
 records actual acquired-lock-to-Unlock-entry spans for writer/state/lifecycle
 locks, including all-observation count/sum/max and bounded raw-prefix samples.
 Recording extends actual holds but is excluded from that reported span.
@@ -122,7 +149,7 @@ purged: report guest-OS-cold virtual-device latency, never physical-media-cold
 latency or a general physical-device performance result. No numeric SLO was
 agreed, and these smaller fixture limits do not tune the published defaults.
 
-## Legacy development smoke driver
+## Native development smoke driver
 
 Choose a **new** output filename on a volume with headroom. It is created
 exclusively; raw JSONL and a sibling `.mutex.pprof` are retained.
@@ -131,19 +158,18 @@ exclusively; raw JSONL and a sibling `.mutex.pprof` are retained.
 GOMAXPROCS=4 \
 TARP_MEASURE_OUTPUT=/existing-evidence-directory/run.jsonl \
 TARP_MEASURE_ENVIRONMENT='record OS/kernel/CPU/RAM/storage/filesystem/mounts here' \
-go test -run '^TestMeasurementProfiles$' -count=1 -timeout 8m -v .
+go test -run '^TestMeasurementProfiles$' -count=1 -timeout 8m -v ./benchmark
 ```
 
 Run on an otherwise quiet recorded system, and retain the output and command
 log. The native development matrix is not a qualified production benchmark.
-For isolated Linux, use the restricted container from `qualification.md`, with
-only an explicit evidence directory additionally mounted writable; /tmp must
-remain disposable container storage. Do not share host data devices.
+Use macOS for local checks. The disposable Linux guest is a separate, explicitly requested profile.
 
 The standard-library test driver uses 64 B, 1 KiB, and 4 KiB fixed-pattern values,
 16-byte binary-safe hex-text keys, 128 live seed keys, seed 42, five repetitions,
 and 2,048 samples per standalone read profile. Explicit options are recorded:
-whole files 64 KiB, records 8 KiB, eight read handles, and cache charge exactly
+a 64 KiB segment target, 8 KiB records,
+eight read handles, and cache charge exactly
 128 entries for hits or eight entries for misses. These deliberately bounded
 smoke datasets are not a capacity claim.
 
@@ -163,9 +189,9 @@ Each repetition records:
 - Two full update passes and deletion of one quarter of keys, followed by reopen
   timings before and after checkpointing. These are bounded histories, not a
   production-scale startup qualification.
-- Read plus synced-writer interference during baseline, backup, compaction,
+- Read plus synced-writer interference on identical private fixtures during baseline, backup, manual checkpoint,
   backup+compaction, and deliberately slow backup+compaction. Each lasts at least
-  30 ms and through maintenance completion. Slow copies sleep 1 ms per copy
+  30 ms and through maintenance completion. These controls park the automatic worker. Slow copies sleep 1 ms per copy
   write. Per-worker Algorithm R reservoirs retain at most 2,048 durations.
 - Maintenance time, actual operation counts, sampled heap/disk peaks and
   retired pinned bytes, and CompactResult. Outputs are restored/validated.
@@ -181,18 +207,20 @@ and accompanying report. Record failed runs too; do not blend them into passes.
 ## Standard Go benchmarks
 
 ```sh
-GOMAXPROCS=4 go test -run '^$' -bench 'BenchmarkGet|BenchmarkDurablePut' \
-  -benchmem -benchtime=100x -count=5 .
+GOMAXPROCS=4 go test -run '^$' -bench 'Benchmark(Get|DurablePut|Compaction)$' \
+  -benchmem -benchtime=100x -count=5 ./benchmark
 go tool pprof -top /existing-evidence-directory/run.jsonl.mutex.pprof
 ```
 
 Fixed operation counts keep rotating-write file creation bounded.
 `BenchmarkGet/.../application-hit-parallel` uses Go's `RunParallel` with
-GOMAXPROCS workers. `force-rotation-false` uses a 1 MiB file and may still
-rotate during longer custom benchmark runs; `true` forces one-record files.
-The repeated JSON driver uses 32 normal writes that fit its 1 MiB file.
+GOMAXPROCS workers. `BenchmarkDurablePut` records observed rotations per timed
+Put. The `default-target` case can rotate during longer runs. The
+`one-record-target` case changes only the soft rotation target between arms
+and prefills one record before timing. Both arms use the same cache and record
+limits. The native JSONL driver times 32 Puts per case.
 
-## Legacy smoke interpretation limits
+## Development smoke interpretation limits
 
 Per-operation clock calls, hooks, sampling, GC, scheduler activity, and shared
 host load affect the result. The driver also enables mutex profiling at

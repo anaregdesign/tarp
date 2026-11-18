@@ -303,8 +303,8 @@ Go patch, machine image, phase, occurrence, and artifact digests.
 Build the guest test binary and controller verifier from the same source:
 
 ```sh
-go test -c -o /tmp/tarp-qualification.test .
-go build -o /tmp/tarporacle ./cmd/tarporacle
+go test -c -o /tmp/tarp-qualification.test ./internal/engine
+go build -o /tmp/tarporacle ./benchmark/cmd/tarporacle
 ```
 
 Those binaries must match their respective execution architectures. The

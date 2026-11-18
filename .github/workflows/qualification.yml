@@ -66,7 +66,7 @@ jobs:
           TARP_QUAL_GROUP: ${{ inputs.group }}
           TARP_QUAL_CASE: ${{ inputs.case }}
           TARP_QUAL_VALUE_BYTES: ${{ inputs.value-bytes }}
-        run: bash .github/qualification/probe.sh
+        run: bash benchmark/scripts/probe.sh
       - name: Retain isolated guest evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

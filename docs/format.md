@@ -23,9 +23,8 @@ DATA-<32 lowercase UUID hex>-<16 lowercase nonzero ID hex>
 IDs share one allocation space and do not wrap. Recognized names are inspected
 before assigning IDs on reopen. UUID-bound names allow safe recognition of an
 unselected partially written header; unknown objects are not garbage. `CURRENT`
-alone selects the authoritative catalog. Metadata is not a data file subject
-to `MaxDataFileBytes`. Backup excludes LOCK, unselected objects, and temporary
-files and adds one `BACKUP` metadata file.
+alone selects the authoritative catalog. Backup excludes LOCK, unselected
+objects, and temporary files and adds one `BACKUP` metadata file.
 
 ## Data segment header: 64 bytes
 
@@ -134,7 +133,9 @@ Reopen, streamed backup and manual checkpoint replay apply the same rules.
 ## BACKUP payload
 
 UUID[16], sequence u64, cutoff u64, advisory source cache bytes u64, advisory source
-record bytes u64, advisory source file bytes u64, file count u64. Each variable
+record bytes u64, an unused u64, and file count u64. Writers store zero in the
+unused field at payload offset 48. Readers also accept values up to 2⁶³−1
+that older writers stored there as an advisory per-file limit. Each variable
 entry is name length u16, ASCII name bytes, exact file length u64, SHA-256[32].
 Names are 1..96 bytes and must be generated CURRENT/DATA/MANIFEST names for the
 same UUID. Reject duplicates, unsafe/missing/extra/nonregular objects, trailing

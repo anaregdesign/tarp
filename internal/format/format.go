@@ -390,16 +390,16 @@ type BackupFile struct {
 
 // Backup source settings are advisory; restore derives live minima by replay.
 type Backup struct {
-	UUID                                                 [16]byte
-	Sequence, Cutoff                                     uint64
-	SourceCacheBytes, SourceRecordBytes, SourceFileBytes int64
-	Files                                                []BackupFile
+	UUID                                [16]byte
+	Sequence, Cutoff                    uint64
+	SourceCacheBytes, SourceRecordBytes int64
+	Files                               []BackupFile
 }
 
 func EncodeBackup(b Backup) []byte {
 	p := make([]byte, 64)
 	copy(p, b.UUID[:])
-	for i, n := range []uint64{b.Sequence, b.Cutoff, uint64(b.SourceCacheBytes), uint64(b.SourceRecordBytes), uint64(b.SourceFileBytes), uint64(len(b.Files))} {
+	for i, n := range []uint64{b.Sequence, b.Cutoff, uint64(b.SourceCacheBytes), uint64(b.SourceRecordBytes), 0, uint64(len(b.Files))} {
 		order.PutUint64(p[16+8*i:], n)
 	}
 	for _, f := range b.Files {
@@ -424,12 +424,11 @@ func DecodeBackup(b []byte) (Backup, error) {
 	}
 	copy(result.UUID[:], p[:16])
 	result.Sequence, result.Cutoff = order.Uint64(p[16:]), order.Uint64(p[24:])
-	for i, target := range []*int64{&result.SourceCacheBytes, &result.SourceRecordBytes, &result.SourceFileBytes} {
-		n := order.Uint64(p[32+8*i:])
-		if n > math.MaxInt64 {
-			return result, bad("backup source settings")
-		}
-		*target = int64(n)
+	result.SourceCacheBytes = int64(order.Uint64(p[32:]))
+	result.SourceRecordBytes = int64(order.Uint64(p[40:]))
+	// Older backups used the slot at offset 48 for an advisory file size limit.
+	if result.SourceCacheBytes < 0 || result.SourceRecordBytes < 0 || order.Uint64(p[48:]) > math.MaxInt64 {
+		return result, bad("backup source settings")
 	}
 	count := order.Uint64(p[56:])
 	p = p[64:]

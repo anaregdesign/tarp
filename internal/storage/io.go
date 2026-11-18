@@ -17,6 +17,8 @@ type IO struct {
 	CleanerStart <-chan struct{}
 	Hook         func(string) error
 	WriteAt      func(*os.File, []byte, int64) (int, error)
+	// Wrote observes the bytes accepted by each write, including short writes.
+	Wrote func(point string, bytes int)
 }
 
 func (i *IO) Check(point string) error {
@@ -48,6 +50,9 @@ func (i *IO) Write(f *os.File, b []byte, offset int64, point string) error {
 			}
 			if n < 0 || n > len(b) {
 				return fmt.Errorf("storage: invalid write count %d", n)
+			}
+			if i != nil && i.Wrote != nil && n > 0 {
+				i.Wrote(point, n)
 			}
 			if err != nil {
 				return err
