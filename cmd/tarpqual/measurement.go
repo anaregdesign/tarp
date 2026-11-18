@@ -193,7 +193,7 @@ func measurementVM(parent context.Context, work string, cfg qualification.Measur
 				verdict.WorkingKeys != expectedKeys || verdict.Repetitions != 5 || verdict.Rows != rows || activeKind != "" {
 				return false, errors.New("incomplete measurement verdict")
 			}
-			required := []string{"cache_hit_1_worker", "cache_hit_4_worker", "cache_hit_batch", "application_miss_os_warm",
+			required := []string{"cache_hit_1_worker", "cache_hit_4_worker", "cache_hit_batch", "cache_hit_batch_4_worker", "application_miss_os_warm",
 				"mixed_95r_5w", "mixed_reads", "mixed_durable_writes", "durable_put_rotate_false", "durable_put_rotate_true",
 				"durable_delete_rotate_false", "durable_delete_rotate_true", "resources", "guest_os_cold_virtual_device_get",
 				"startup_history_compacted_false", "startup_history_compacted_true",

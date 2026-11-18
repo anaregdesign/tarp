@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -107,6 +108,52 @@ func vmStartupData(t *testing.T, db *DB, elapsed time.Duration, cold bool) map[s
 		"guest_page_cache_purged_before_open": cold,
 		"note":                                "encoded committed prefix bytes, not a physical I/O counter; cold Opens additionally have independent NBD read intervals; no oracle input",
 		"resources":                           vmResources(t, db),
+	}
+}
+
+func vmParallelHitBatch(t *testing.T, get func([]byte) error, keys [][]byte) map[string]any {
+	t.Helper()
+	const workers, operations = 4, 10000
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	var ready, done sync.WaitGroup
+	ready.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		done.Go(func() {
+			err := get(keys[worker%len(keys)])
+			ready.Done()
+			if err != nil {
+				results <- err
+				return
+			}
+			<-start
+			for i := worker; i < operations; i += workers {
+				if err := get(keys[i%len(keys)]); err != nil {
+					results <- err
+					return
+				}
+			}
+		})
+	}
+	ready.Wait()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	begin := time.Now()
+	close(start)
+	done.Wait()
+	elapsed := time.Since(begin)
+	runtime.ReadMemStats(&after)
+	close(results)
+	for err := range results {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"workers": workers, "operations": operations, "wall_ns": elapsed.Nanoseconds(),
+		"ns_per_op":                    float64(elapsed.Nanoseconds()) / operations,
+		"allocated_bytes_per_op":       float64(after.TotalAlloc-before.TotalAlloc) / operations,
+		"allocations_per_op":           float64(after.Mallocs-before.Mallocs) / operations,
+		"returned_value_copy_included": true,
+		"allocation_scope":             "process deltas; workers/channels are prestarted/preallocated and each worker warms its stack before snapshots; release/wait, goroutine completion and concurrent runtime costs remain included",
 	}
 }
 
@@ -272,6 +319,20 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 			t.Fatal(err)
 		}
 	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := "/mnt/tarp-data/interference-fixture"
+	measurementPrepareFixture(t, dir, fixture, opts, keys, value)
+	db, err = openWithIO(dir, opts, &storage.IO{Hook: hooks.hook})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	cpu, err := os.ReadFile("/proc/cpuinfo")
 	if err != nil {
 		t.Fatal(err)
@@ -287,9 +348,10 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		"read_samples": 8192, "mixed_samples": 4096, "durable_samples": 64,
 		"cold_get_samples_per_rep": 32, "cold_open_samples_per_history_state": 5,
 		"seed": 42, "dataset": "one prepared 4096-key set, five explicitly warmed windows; maintenance adds one writer key",
-		"instrumentation": "plain build; time.Now per sampled operation; 5 ms sampled peaks for all interference modes",
-		"sync_policy":     "data Sync + temporary CURRENT Sync + directory Sync; rotation/checkpoint retain all extra barriers",
-		"cold_scope":      "guest page cache dropped only in this guarded VM; host caches/physical media remain unpurged",
+		"interference_fixture": "fresh private closed-fixture copy for every mode/window; same 4096 seeded keys plus 1024 updates, 256 deletes/reinserts; full contents witnessed before workers; fixtures removed after each mode",
+		"instrumentation":      "plain build; time.Now per sampled operation; 5 ms sampled peaks for all interference modes",
+		"sync_policy":          "data Sync + temporary CURRENT Sync + directory Sync; rotation/checkpoint retain all extra barriers",
+		"cold_scope":           "guest page cache dropped only in this guarded VM; host caches/physical media remain unpurged",
 	})
 	hot := keys[:8]
 	get := func(key []byte) error {
@@ -325,11 +387,12 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 			}
 		})
 		write("cache_hit_batch", repetition, map[string]any{
-			"operations": 10000, "wall_ns": elapsed.Nanoseconds(), "ns_per_op": float64(elapsed.Nanoseconds()) / 10000,
+			"workers": 1, "operations": 10000, "wall_ns": elapsed.Nanoseconds(), "ns_per_op": float64(elapsed.Nanoseconds()) / 10000,
 			"allocated_bytes_per_op": float64(afterMemory.TotalAlloc-beforeMemory.TotalAlloc) / 10000,
 			"allocations_per_op":     allocations, "allocation_probe_gomaxprocs": 1,
 			"storage_reads": hooks.reads.Load() - before, "returned_value_copy_included": true,
 		})
+		write("cache_hit_batch_4_worker", repetition, vmParallelHitBatch(t, get, hot))
 		if hooks.reads.Load() != before {
 			t.Fatal("qualified cache hits performed storage reads")
 		}
@@ -368,14 +431,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		vmMeasureLatency(write, "mixed_durable_writes", repetition, latency(writeSamples, int64(len(writeSamples)), time.Duration(mixed.WallNS)))
 		for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
 			t.Run(fmt.Sprintf("interference-%d-%s", repetition, mode), func(t *testing.T) {
-				for _, key := range hot {
-					if err := get(key); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if err := db.Put(hot[0], value); err != nil {
-					t.Fatal(err)
-				}
+				db, hooks := measurementOpenClone(t, fixture, opts)
 				data := measureInterferenceFor(t, db, hooks, hot, value, mode, 500*time.Millisecond)
 				for _, name := range []string{"read", "durable_put"} {
 					vmMeasureLatency(write, "interference_"+mode+"_"+name, repetition, data[name].(sampledLatency))
@@ -392,8 +448,28 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 					writeOpts.MaxDataFileBytes = writeOpts.MaxRecordBytes + 64
 				}
 				writer := newTestDB(t, writeOpts, nil)
-				result := measureCalls(t, 64, 1, func(int) error { return writer.Put(keys[0], value) })
-				vmMeasureLatency(write, fmt.Sprintf("durable_put_rotate_%t", rotate), repetition, result)
+				if err := writer.Put(keys[0], value); err != nil {
+					t.Fatal(err)
+				}
+				putRaw := make([]int64, 64)
+				var putElapsed time.Duration
+				for i := range putRaw {
+					id := writer.store.Current.ActiveID
+					start := time.Now()
+					if err := writer.Put(keys[0], value); err != nil {
+						t.Fatal(err)
+					}
+					putRaw[i] = time.Since(start).Nanoseconds()
+					putElapsed += time.Duration(putRaw[i])
+					if (writer.store.Current.ActiveID != id) != rotate {
+						t.Fatal("durable Put rotation did not match its declared mode")
+					}
+				}
+				vmMeasureLatency(write, fmt.Sprintf("durable_put_rotate_%t", rotate), repetition, latency(putRaw, 64, putElapsed))
+				write(fmt.Sprintf("durable_put_rotation_checks_%t", rotate), repetition, map[string]any{
+					"prefills": 1, "timed_puts": 64, "verified_samples": 64, "rotation_expected": rotate,
+					"scope": "one fully synced prefill outside timing; active IDs checked after every timed Put; wall_ns sums only timed API intervals",
+				})
 				if rotate {
 					raw := make([]int64, 64)
 					var elapsed time.Duration
@@ -423,8 +499,12 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 							t.Fatal(err)
 						}
 					}
-					vmMeasureLatency(write, "durable_delete_rotate_false", repetition,
-						measureCalls(t, 64, 1, func(i int) error { return writer.Delete(keys[i]) }))
+					id := writer.store.Current.ActiveID
+					deletes := measureCalls(t, 64, 1, func(i int) error { return writer.Delete(keys[i]) })
+					if writer.store.Current.ActiveID != id {
+						t.Fatal("declared nonrotating Delete sample rotated")
+					}
+					vmMeasureLatency(write, "durable_delete_rotate_false", repetition, deletes)
 				}
 			})
 		}

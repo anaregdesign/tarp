@@ -34,16 +34,29 @@ Maintenance adds one separately identified writer key.
 - Hit profiles retain all 8,192 individual durations for one/four workers,
   plus a 10,000-call batch ns/op and allocated-byte sample, allocations/op and
   an asserted zero Get-storage-read count. Required returned-value copying stays
-  enabled. The allocation probe temporarily uses GOMAXPROCS=1; timings use 2.
+  enabled. Both one- and four-worker batches report ns/op, bytes/op and
+  allocations/op. Four workers/channels are prestarted/preallocated, and each
+  worker warms its stack before the process Mallocs/TotalAlloc snapshots;
+  release/wait, goroutine completion and runtime overhead remain included.
+  The separate sequential AllocsPerRun probe temporarily uses GOMAXPROCS=1;
+  timings use 2.
 - Cyclic warm-OS application misses assert 8,192 actual Get file reads. A
   reproducible 4,096-operation, four-worker uniform-key workload records both
   combined and separate read/durable-write distributions at approximately
   95%/5%. Sixty-four fully durable Put/Delete samples cover ordinary and
-  record-by-record-rotation configurations without disabling any sync. Each
+  record-by-record-rotation configurations without disabling any sync. One
+  fully synced Put prefills the segment outside timing; all measured Put
+  active IDs must match their declared rotating/nonrotating mode. Each
   rotating Delete follows a fully synced full-segment Put outside its timer,
   and the driver verifies all 64 Delete rotations.
 - Each of baseline, backup, compaction, their overlap and slow-copy overlap
-  runs for at least 500 ms and until maintenance completes. Bounded Algorithm R
+  starts from a fresh private copy of the **same closed fixture** and runs for
+  at least 500 ms and until maintenance completes. The plain fixture has 4,096
+  seed keys plus 1,024 updates and 256 deletes/reinsertions; the diagnostic
+  fixture has 512 keys plus 512 updates and 128 deletes/reinsertions. Preparation,
+  complete-state digesting and hot-key warmup occur outside the timed window;
+  fixture copies are removed after each mode. This closed test-fixture copy is
+  not an online backup strategy. Bounded Algorithm R
   reservoirs retain at most 2,048 samples per worker. Five-millisecond sampled
   heap, logical/allocated temporary disk, available headroom and retired pins
   are reported; the sampler's own I/O/writer-lock acquisitions perturb all modes.
@@ -53,7 +66,11 @@ Maintenance adds one separately identified writer key.
   Overlap modes pause the first backup copy until the first checkpoint record
   write, with that controlled coordination included in reported API time.
   Copy bytes divided by the respective API time give reproducible effective
-  copy throughput, not a physical copy-engine utilization claim.
+  copy throughput, not a physical copy-engine utilization claim. Each produced
+  backup is restored, reopened at its independently observed staging-CURRENT
+  capture sequence and checked against the complete pre-window fixture digest
+  and live cardinality. The only concurrent mutation is an already-present
+  fixed-value writer key, so full expected contents remain invariant.
 - Current/peak RSS, Go heap/inuse/idle/released, stacks, Sys and GC metrics are
   separate from logical cache charges. Actual read/write data descriptors,
   file-handle configuration and live/obsolete/pinned encoded storage are reported.

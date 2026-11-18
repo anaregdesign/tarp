@@ -33,32 +33,32 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 			t.Fatal(err)
 		}
 	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := "/mnt/tarp-data/diagnostic-fixture"
+	measurementPrepareFixture(t, db.store.Dir, fixture, opts, keys, value)
 	write("diagnostic_environment", 0, map[string]any{
 		"working_keys": 512, "hot_keys": 8, "options": opts, "go": runtime.Version(),
 		"primary_latency_baseline": false, "mutex_build_tag": "tarpprofile",
 		"hold_scope":      "underlying Lock returned through Unlock entry; recording overhead excluded but extends actual lock hold; count/sum/max cover all observations",
 		"raw_hold_scope":  "at most 1024 evenly spaced samples from the bounded first 65536 retained spans per mutex/window",
-		"observer_effect": "all modes include the 5 ms resource sampler, whose writer-lock inventory acquisitions are included",
+		"observer_effect": "all modes include 5 ms resource/copy inventory acquisitions; preparation and restore verification are outside the measured lock window",
+		"fixture":         "fresh private closed-fixture copy per mode/window; 512 seeded keys plus 512 updates and 128 deletes/reinserts",
 	})
 	for repetition := 1; repetition <= 5; repetition++ {
 		for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
 			t.Run(fmt.Sprintf("holds-%d-%s", repetition, mode), func(t *testing.T) {
-				for _, key := range keys[:8] {
-					if _, err := db.Get(key); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if err := db.Put(keys[0], value); err != nil {
-					t.Fatal(err)
-				}
+				db, hooks := measurementOpenClone(t, fixture, opts)
+				defer profileLocks.Store(false)
+				hooks.windowStart = func() { profileLocks.Store(true) }
+				hooks.windowEnd = func() { profileLocks.Store(false) }
 				for _, mutex := range []*engineMutex{&db.writer, &db.state, &db.life} {
 					mutex.metrics.Lock()
 					mutex.samples, mutex.count, mutex.sum, mutex.maximum = nil, 0, 0, 0
 					mutex.metrics.Unlock()
 				}
-				profileLocks.Store(true)
 				measureInterferenceFor(t, db, hooks, keys[:8], value, mode, 500*time.Millisecond)
-				profileLocks.Store(false)
 				for name, mutex := range map[string]*engineMutex{"writer": &db.writer, "state": &db.state, "lifecycle": &db.life} {
 					mutex.metrics.Lock()
 					var raw []int64
