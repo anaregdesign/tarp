@@ -304,26 +304,25 @@ func TestCrashHelper(t *testing.T) {
 		t.Fatal("invalid occurrence")
 	}
 	parent := os.Getenv("TARP_CRASH_DIR")
-	armed := false
-	count := 0
+	var armed atomic.Bool
+	var count atomic.Int64
 	fs := &storage.IO{Hook: func(point string) error {
-		if armed && point == os.Getenv("TARP_CRASH_POINT") {
-			count++
-			if count == n {
+		if armed.Load() && point == os.Getenv("TARP_CRASH_POINT") {
+			if count.Add(1) == int64(n) {
 				os.Exit(91)
 			}
 		}
 		return nil
 	}}
 	if os.Getenv("TARP_CRASH_MODE") == "restore" {
-		armed = true
+		armed.Store(true)
 		t.Fatal(restoreWithIO(context.Background(), filepath.Join(parent, "backup"), filepath.Join(parent, "output"), testOptions(), fs))
 	}
 	db, err := openWithIO(filepath.Join(parent, "db"), testOptions(), fs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	armed = true
+	armed.Store(true)
 	switch os.Getenv("TARP_CRASH_MODE") {
 	case "put", "rotate":
 		err = db.Put([]byte("k"), []byte("new"))
@@ -387,7 +386,7 @@ func TestPowerCutGuest(t *testing.T) {
 	}
 	faults := &storage.IO{Hook: func(p string) error {
 		if mode == "overlap" && p == "backup.copy:before" && captured.CompareAndSwap(false, true) {
-			fmt.Printf("TARP_CAPTURE %d\n", db.store.Current.Sequence)
+			fmt.Printf("TARP_CAPTURE %d\n", observedFrontier(db).Sequence)
 			close(captureReady)
 			<-releaseBackup
 		}
@@ -439,7 +438,7 @@ func TestPowerCutGuest(t *testing.T) {
 	put("oracle", "acknowledged")
 	if mode == "rotate" {
 		pendingBytes := int64(format.RecordHeaderBytes + len("oracle") + len("possible"))
-		for db.store.Current.ActiveEnd+pendingBytes <= db.opts.MaxDataFileBytes {
+		for observedFrontier(db).ActiveEnd+pendingBytes <= db.opts.TargetSegmentBytes {
 			put("p", "")
 		}
 	}
@@ -448,7 +447,7 @@ func TestPowerCutGuest(t *testing.T) {
 	}
 	backup := filepath.Join(filepath.Dir(dir), filepath.Base(dir)+"-restore-source")
 	if mode == "restore" {
-		fmt.Printf("TARP_CAPTURE %d\n", db.store.Current.Sequence)
+		fmt.Printf("TARP_CAPTURE %d\n", observedFrontier(db).Sequence)
 		if err := db.Backup(context.Background(), backup); err != nil {
 			t.Fatal(err)
 		}
@@ -457,7 +456,9 @@ func TestPowerCutGuest(t *testing.T) {
 		}
 	}
 	if mode == "recover" {
+		db.writer.Lock()
 		active := db.store.Files[db.store.Current.ActiveID].Path
+		db.writer.Unlock()
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -483,7 +484,7 @@ func TestPowerCutGuest(t *testing.T) {
 	case "compact":
 		_, err = db.Compact(context.Background())
 	case "backup":
-		fmt.Printf("TARP_CAPTURE %d\n", db.store.Current.Sequence)
+		fmt.Printf("TARP_CAPTURE %d\n", observedFrontier(db).Sequence)
 		err = db.Backup(context.Background(), output)
 	case "restore":
 		err = restoreWithIO(context.Background(), backup, output, testOptions(), faults)

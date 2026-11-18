@@ -1,6 +1,10 @@
-# Selected virtual-stack measurement baseline
+# Historical virtual-stack measurement baseline
 
-Recorded 2026-11-18. All six profiles passed after the
+Recorded 2026-11-18 for the previous storage format at revisions
+`e2bb779` and `36d5f40`. These historical numbers cover a library with manual
+full checkpoints and a 128 MiB default rotation boundary. Automatic segment
+cleaning and the 4 MiB soft target require a new measurement series before
+making performance claims. All six historical profiles passed after the
 [composed durability qualification](qualification.md#final-selected-target-execution-matrix).
 This is a reproducible baseline, not a latency/throughput/capacity SLO, an
 optimized-default claim, or physical-device certification.
@@ -253,15 +257,15 @@ spans. These diagnostic numbers must not replace the plain-build latency table.
 
 ## Acceptance and operational interpretation
 
-The required composed correctness campaigns and reproducible baseline have
-actual evidence; no numeric performance threshold was invented. Hits avoid file
+For the two measured revisions, the composed correctness campaigns and baseline
+have recorded evidence; no numeric performance threshold was invented. Hits avoid file
 reads but retain copy allocation and exact-global-recency serialization. File
 misses, OS-cold virtual reads, three-barrier durable writes and rotation are
 different costs. Checkpointing trades temporary space/memory/copy interference
 for shorter recovery; slow backup pins increase headroom needs.
 
-The published 64 MiB cache, 1 MiB record bound, 128 MiB files and 64 read handles
-remain starting hypotheses, not optima established by these smaller fixtures.
+The tested defaults of 64 MiB cache, 1 MiB record bound, 128 MiB files and 64 read handles
+were starting hypotheses. These fixtures did not establish optima.
 No default, copying/admission/LRU policy, sync barrier or support minimum was
 changed to improve measurements. Physical-media-cold behavior, arbitrary scale,
 other kernels/filesystems and particular SSD/firmware certification remain

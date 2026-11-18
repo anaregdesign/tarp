@@ -18,13 +18,14 @@ type failure struct{ err error }
 
 // DB owns its directory until Close finishes. Do not copy a DB.
 type DB struct {
-	opts   Options
-	store  *storage.Store
-	writer engineMutex
-	state  engineMutex
-	index  map[string]storage.Location
-	cache  *cache.Cache
-	failed atomic.Pointer[failure]
+	cleaner cleaner
+	opts    Options
+	store   *storage.Store
+	writer  engineMutex
+	state   engineMutex
+	index   map[string]storage.Location
+	cache   *cache.Cache
+	failed  atomic.Pointer[failure]
 
 	life     engineMutex
 	cond     *sync.Cond
@@ -36,7 +37,8 @@ type DB struct {
 	compact  atomic.Bool
 }
 
-// Open creates a database or validates/reopens one. The parent must exist.
+// Open creates or reopens a database and starts automatic incremental compaction.
+// The parent directory must exist.
 // Incompatible smaller limits do not truncate or clean existing data.
 func Open(dir string, opts Options) (*DB, error) { return openWithIO(dir, opts, nil) }
 
@@ -45,7 +47,7 @@ func openWithIO(dir string, opts Options, fs *storage.IO) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, index, err := storage.Open(dir, storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, FileBytes: opts.MaxDataFileBytes, Handles: opts.ReadFileHandles}, fs)
+	s, index, err := storage.Open(dir, storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, FileBytes: opts.MaxDataFileBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}, fs)
 	if err != nil {
 		return nil, operationError("open", "recovery", err)
 	}
@@ -53,7 +55,9 @@ func openWithIO(dir string, opts Options, fs *storage.IO) (*DB, error) {
 	db.cond = sync.NewCond(&db.life)
 	for _, loc := range index {
 		loc.File.Pin()
+		loc.File.LiveBytes.Add(loc.Bytes)
 	}
+	db.startCleaner()
 	return db, nil
 }
 
@@ -120,6 +124,9 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		}
 		value, err := db.store.Read(loc, k)
 		loc.File.Unpin()
+		if db.cleaner.pinned.Load() {
+			db.notifyCleaner()
+		}
 		if err != nil {
 			db.poison(err)
 			return nil, operationError("get", "read", err)
@@ -171,8 +178,20 @@ func (db *DB) mutate(kind uint8, key string, value []byte) error {
 	if kind == format.Delete {
 		op = "delete"
 	}
+	db.cleaner.writers.Add(1)
 	db.writer.Lock()
-	defer db.writer.Unlock()
+	previousActive := db.store.Current.ActiveID
+	invalidatedSealed := false
+	defer func() {
+		rotated := previousActive != db.store.Current.ActiveID
+		db.writer.Unlock()
+		if db.cleaner.writers.Add(-1) == 0 {
+			db.resumeCleaner()
+		}
+		if rotated || invalidatedSealed {
+			db.notifyCleaner()
+		}
+	}()
 	if err := db.health(); err != nil {
 		return err
 	}
@@ -198,13 +217,17 @@ func (db *DB) mutate(kind uint8, key string, value []byte) error {
 		return &OpError{Operation: op, Phase: "memory-publication", Outcome: Committed, Err: err}
 	}
 	if old, exists := db.index[key]; exists {
+		invalidatedSealed = old.File != loc.File
+		old.File.LiveBytes.Add(-old.Bytes)
 		old.File.Unpin()
 	}
 	if kind == format.Delete {
+		loc.File.DeleteBytes.Add(loc.Bytes)
 		delete(db.index, key)
 		db.cache.Delete(key)
 	} else {
 		loc.File.Pin()
+		loc.File.LiveBytes.Add(loc.Bytes)
 		db.index[key] = loc
 		db.cache.Put(key, value)
 	}
@@ -223,10 +246,12 @@ func (db *DB) Close() error {
 		return db.closeErr
 	}
 	db.closing = true
+	db.cleaner.cancel()
 	for db.active != 0 {
 		db.cond.Wait()
 	}
 	db.life.Unlock()
+	<-db.cleaner.done
 	for _, loc := range db.index {
 		loc.File.Unpin()
 	}

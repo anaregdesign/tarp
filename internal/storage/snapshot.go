@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"hash"
 	"io"
 	"math"
@@ -15,7 +14,7 @@ import (
 
 type CapturedFile struct {
 	File  *File
-	Bytes int64
+	Entry format.File
 }
 
 type Capture struct {
@@ -27,17 +26,23 @@ type Capture struct {
 
 // Capture pins exact committed prefixes, without copying the logical key index.
 // The caller holds the writer gate; metadata is immutable after publication.
-func (s *Store) Capture() *Capture {
+func (s *Store) Capture() (*Capture, error) {
+	active, err := s.Catalog.ActiveFile(s.Current)
+	if err != nil {
+		return nil, err
+	}
 	c := &Capture{Current: s.Current, Catalog: s.Catalog, Manifest: bytes.Clone(s.Manifest)}
 	c.Catalog.Files = append([]format.File(nil), s.Catalog.Files...)
 	for _, entry := range s.Catalog.Files {
-		c.Files = append(c.Files, CapturedFile{File: s.Files[entry.ID], Bytes: entry.Bytes})
+		if entry.ID != 0 {
+			c.Files = append(c.Files, CapturedFile{File: s.Files[entry.ID], Entry: entry})
+		}
 	}
-	c.Files = append(c.Files, CapturedFile{File: s.Files[s.Current.ActiveID], Bytes: s.Current.ActiveEnd})
-	for _, entry := range c.Files {
-		entry.File.Pin()
+	c.Files = append(c.Files, CapturedFile{File: s.Files[active.ID], Entry: active})
+	for _, captured := range c.Files {
+		captured.File.Pin()
 	}
-	return c
+	return c, nil
 }
 
 func (c *Capture) Release() {
@@ -87,47 +92,33 @@ func (w *outputWriter) Write(b []byte) (int, error) {
 
 func (c *Capture) Replay(ctx context.Context, fs *IO) (map[string]Location, error) {
 	index := make(map[string]Location)
-	last := c.Catalog.Cutoff
 	for _, captured := range c.Files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		fd, err := OpenRegular(captured.File.Path)
+		fd, _, _, err := openSelected(captured.File.Path, c.Current.UUID, captured.Entry, captured.File.ID == c.Current.ActiveID)
 		if err != nil {
 			return nil, &SourceError{Err: err}
 		}
 		err = fs.Do("compact.scan", func() error {
-			header := make([]byte, format.SegmentHeaderBytes)
-			if _, err := fd.ReadAt(header, 0); err != nil {
-				return &SourceError{Err: err}
-			}
-			s, err := format.DecodeSegment(header)
-			if err != nil {
-				return err
-			}
-			if s.UUID != c.Current.UUID || s.ID != captured.File.ID || s.Kind != captured.File.Kind {
-				return fmt.Errorf("%w: captured segment identity", ErrCorrupt)
-			}
-			st, err := fd.Stat()
-			if err != nil {
-				return &SourceError{Err: err}
-			}
-			if st.Size() < captured.Bytes || captured.File.ID != c.Current.ActiveID && st.Size() != captured.Bytes {
-				return fmt.Errorf("%w: captured segment length", ErrCorrupt)
-			}
-			return format.Scan(sourceReader{fd}, captured.Bytes, func(offset int64, r format.Record, key string) error {
+			span := format.NewRecordRange(captured.Entry, c.Catalog.Cutoff)
+			err := format.Scan(sourceReader{fd}, captured.Entry.Bytes, func(offset int64, r format.Record, key string) error {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				return applyRecord(index, captured.File, c.Catalog.Cutoff, &last, offset, r, key)
+				if err := span.Accept(r); err != nil {
+					return err
+				}
+				return applyRecord(index, captured.File, c.Catalog.PrunedThrough, offset, r, key)
 			})
+			if err != nil {
+				return err
+			}
+			return span.Finish()
 		})
 		if err = errors.Join(err, fd.Close()); err != nil {
 			return nil, err
 		}
-	}
-	if last != c.Current.Sequence {
-		return nil, fmt.Errorf("%w: captured frontier sequence", ErrCorrupt)
 	}
 	return index, nil
 }
@@ -155,16 +146,13 @@ func (s *Store) InstallCheckpoint(capture *Capture, outputs []format.File) error
 	if s.Current.Generation == math.MaxUint64 {
 		return fault("compact.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
 	}
-	old := make(map[uint64]bool)
-	for _, f := range capture.Catalog.Files {
-		old[f.ID] = true
+	// Incremental work is serialized with a full checkpoint. Only foreground
+	// rotations can extend this captured prefix while copying takes place.
+	catalog := format.Catalog{
+		UUID: s.Current.UUID, Cutoff: capture.Current.Sequence, PrunedThrough: capture.Current.Sequence,
+		ActiveID: s.Current.ActiveID, Files: append([]format.File(nil), outputs...),
 	}
-	catalog := format.Catalog{UUID: s.Current.UUID, Cutoff: capture.Current.Sequence, ActiveID: s.Current.ActiveID, Files: append([]format.File(nil), outputs...)}
-	for _, file := range s.Catalog.Files {
-		if !old[file.ID] {
-			catalog.Files = append(catalog.Files, file)
-		}
-	}
+	catalog.Files = append(catalog.Files, s.Catalog.Files[len(capture.Catalog.Files):]...)
 	candidate := s.Current
 	candidate.Generation++
 	return s.publishCatalog(catalog, candidate)

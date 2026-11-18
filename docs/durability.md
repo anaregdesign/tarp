@@ -2,10 +2,17 @@
 
 ## Support boundary
 
-The [selected Linux/ext4 qualification](qualification.md#final-selected-target-execution-matrix)
-passed on Go 1.26.11/1.27.4: Ubuntu 24.04.5 amd64, kernel 6.8.0-147-generic,
+The current unversioned format and its automatic cleaner have a functional
+recovery test suite. Their whole-VM power-loss behavior and performance require
+fresh evidence. The historical qualification below belongs to the previous
+storage implementation. Its frozen source fingerprint and run links are in the
+[execution matrix](qualification.md#final-selected-target-execution-matrix).
+
+That qualification passed on revision
+[`347a1a1`](https://github.com/anaregdesign/tarp/commit/347a1a1f53be13100a8c83da7378b9af26e4657c)
+with Go 1.26.11/1.27.4, Ubuntu 24.04.5 amd64, kernel 6.8.0-147-generic,
 local guest ext4 `data=ordered` with normal journaling/barriers and no DAX,
-QEMU 8.2.2 and a separately verified honest-flush volatile NBD block model.
+QEMU 8.2.2 and an honest-flush volatile NBD block model.
 The external controller performed 328 phase cuts and two post-exhaustion cuts,
 waited for NBD EOF, discarded any RAM overlay, and verified file-only recovery/
 captured backups. All 330 engine cuts recorded zero dirty NBD overlay bytes;
@@ -16,8 +23,7 @@ The recorded image/kernel hashes, exact features/mounts, storage parameters,
 source fingerprint and raw witnesses define this experimental boundary.
 NBD here backs a guest block device; it is not a network filesystem.
 
-This qualifies the protocol on that precisely tested virtual stack, not any
-particular physical SSD/controller or arbitrary Linux installation. A physical
+Qualification applies to that revision and that precisely tested virtual stack. A physical
 deployment must satisfy the same documented filesystem/sync and honest-flush
 assumptions; no firmware/cache certification is inferred from a VM result.
 Additional kernels/filesystems/storage configurations require separate evidence.
@@ -85,13 +91,21 @@ This conservative protocol normally uses three sync barriers per mutation.
 There is no asynchronous acknowledgment, disabled-sync setting, or group commit.
 Rotation first durably creates/syncs a header-only segment and immutable catalog,
 syncs names, and publishes a new frontier with unchanged user sequence, then
-appends the pending record. Sequences, generations, and file IDs never wrap.
+appends the pending record. A normal append rotates a nonempty log before it
+would exceed its soft target (4 MiB by default). The hard default limit is
+128 MiB. Full-checkpoint sealing also rotates a nonempty log. Sequences, generations, and file IDs never wrap.
 No record spans files or overwrites previously committed bytes.
 
-Recovery locks the directory and validates the exact selected `CURRENT`, its
+An unknown outer signature in an existing `CURRENT` returns
+`ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
+supported layout, recovery locks the directory and validates the selected `CURRENT`, its
 SHA-256-bound catalog, every selected segment header/identity, every committed
 record/checksum/sequence, and all live option minima. It rebuilds the full index
-with a cold value cache. Only afterward may it truncate/sync the active suffix
+with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
+preserve coverage even when they have zero records. Deletes through the catalog
+pruning boundary may refer to a Put removed by cleaning. All selected physical
+files must exist. See the [replay rules](format.md#catalog-payload).
+Only after that validation may recovery truncate/sync the active suffix
 strictly beyond the committed frontier or delete recognized unselected objects.
 
 An incomplete or checksum-invalid final **committed** record is corruption, not
@@ -131,15 +145,32 @@ failure is not revoked. Close/reopen to inspect the authoritative files;
 an uncertain operation may appear or not, and errors do not universally roll back.
 Never blindly retry an unknown write assuming it did not occur.
 
-Close stops new admission, waits for all admitted calls including queued writers
-and maintenance, closes handles, and releases ownership last. Concurrent/repeated
+Close stops new admission, cancels and joins its worker, waits for admitted
+calls including writers and manual maintenance, closes handles and releases ownership last. Concurrent/repeated
 calls return the same cached joined close/unhealthy result. `ErrClosed` takes
 precedence over unhealthy for newly called methods. Close does not repair
 uncertainty or supply the first durability barrier.
 
 ## Maintenance, capacity, and backup
 
-Compaction durably captures a complete prefix at cutoff C, validates its segment
+On fresh Open and reopen one worker considers the selected immutable segments.
+Per-file live Put and required Delete byte counts estimate replacement size.
+For a candidate with source bytes S and estimated bytes to write W (including
+metadata), the initial eligibility rule is `W <= S/2`. This gives estimated
+net savings of at least one third of read-plus-write bytes. The worker ranks
+eligible files by highest savings per I/O byte, with stable tie breaks. It
+yields in bounded chunks for queued writers and backup. It validates all bytes
+of its chosen source, including obsolete records, independently of cache-hit reads.
+
+After copying, the worker takes the writer gate and rebases one replacement on
+the latest catalog and frontier. Replacement data and catalog reach stable
+storage before the temporary CURRENT is synced, renamed and directory-synced.
+An uncertain publication fail-stops while the writer gate is still held and
+retains both layouts for validated reopen. After durable publication, remapping
+checks file, offset and sequence so later changes win. Reclamation waits for all
+pins. No incremental publication advances the user sequence.
+
+Manual `Compact(ctx)` durably captures a complete prefix at cutoff C, validates its segment
 headers and records, and rebuilds cutoff state outside root locks. It streams live
 Put records into bounded snapshot files, preserving versions. Tombstones can
 be dropped only because all earlier history is replaced. Publication combines the
@@ -149,21 +180,24 @@ index location under short state locks. Later Put/Delete wins.
 Old paths remain until they are unselected, have no index references, and have
 no reader/backup/compaction pins. The compaction releases its own capture pins
 before cleanup; successful unlinks also remove retired registry objects.
-Leased read descriptors are never evicted/closed. Releasing pins does no I/O;
-later Compact/Open performs eligible cleanup. Cleanup errors do not claim a net
-free-space gain or silently discard evidence.
+Leased read descriptors close after their final release. Pin release performs
+no disk I/O. The worker revisits its pending retirements, and full checkpoint
+and validated reopen can also clean eligible files. `DB.MaintenanceStatus`
+reports the worker's deferral reason, most recent error, pinned retired byte
+count and logical bytes unlinked by the worker during this DB lifetime.
 
-There is no total quota or automatic background scheduler. Provision current
-data plus copied live records/headers/catalogs, backup files, pinned generations,
-concurrent tail growth, and filesystem allocation overhead. Free-space inspection
-is advisory, not reserved capacity. If safe progress lacks headroom, free space
-outside the engine or add capacity; never delete selected live data.
+Provision space for current data, copied live records and tombstones, headers,
+catalogs, backup files, pinned generations, concurrent tail growth and allocation
+overhead. Free-space inspection is advisory. Insufficient scratch space defers
+incremental work. Recoverable staging ENOSPC/EDQUOT leaves selected sources
+intact. Maintain enough free space for concurrent foreground writes.
 
 Online backup captures metadata bytes and exact committed prefixes at S under
 the writer gate, pins them, and copies outside it. The active file can grow;
 only its captured prefix is copied. Source CRCs are checked on copied bytes and
-each output file is SHA-256 hashed. A versioned `BACKUP` manifest records advisory
-source settings; restore derives actual live compatibility minima independently.
+each output file is SHA-256 hashed. The unversioned `BACKUP` envelope records advisory
+source settings. Restore rejects an unsupported outer signature before publishing
+a destination. For supported backups it derives live compatibility minima independently.
 
 Backup/restore use private sibling staging, file syncs, staging-directory sync,
 atomic no-replace directory rename, and parent sync. Linux amd64/arm64 use

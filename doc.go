@@ -1,16 +1,21 @@
 // Package tarp implements a file-backed, hash-indexed key-value store.
 //
-// Keys and values are bytes. Empty keys are invalid; empty values are valid.
-// Retained inputs and returned values are copied. Callers must not mutate
-// input backing arrays while a call using them is in progress.
+// Keys and values are bytes. Empty keys are invalid and empty values are valid.
+// Retained inputs and returned values are copied. Keep input backing arrays
+// stable until all calls using them have returned.
 //
-// A DB supports concurrent goroutines and linearizable individual key
-// operations, not multi-key transactions. Nil write errors acknowledge durable
-// commits on the documented, qualified Linux storage configuration. An error
-// does not always imply rollback; inspect OpError. Close is not a commit barrier.
+// One process owns a directory. Its DB supports concurrent goroutines and
+// linearizable single-key operations. Successful writes sync the data and
+// commit frontier before acknowledgment. Inspect OpError for the outcome of
+// failed writes. See the durability contract for storage assumptions.
 //
-// One process exclusively owns a directory. Use Backup, not a live directory
-// copy, for a consistent image. Applications schedule Compact and provision
-// maintenance headroom. The value-cache limit is logical, not a process-memory
-// or full-index limit. See README.md and docs/ for the durability/support policy.
+// Open starts one incremental compaction worker on each new or reopened DB.
+// It reclaims eligible sealed files and yields for writers and backup. Compact
+// explicitly builds a full checkpoint. MaintenanceStatus reports worker
+// activity, deferred retirement and logical bytes unlinked. Provide temporary
+// space for both maintenance and backup. Close joins the worker.
+//
+// Open and Restore accept one unversioned format. A database or backup from
+// the previous implementation is unsupported. Use Backup for a consistent
+// image. See README.md and docs/ for limits, recovery and qualification evidence.
 package tarp

@@ -1,11 +1,14 @@
 # Safe qualification procedure
 
-**The selected virtual Linux/ext4 crash and exhaustion campaigns passed.**
-The exact model and actual results are recorded below; this is not physical-device
-certification or a generic Linux guarantee. Passing deterministic fault tests,
-process exits, macOS tests, or Docker overlayfs tests alone is not proof
-of OS-crash/power-loss persistence. Do not execute privileged, disk-filling,
-cache-dropping, block-device, or host-power experiments on a shared machine.
+**The recorded Linux/ext4 crash and exhaustion campaigns cover the previous
+storage implementation.** The final phase-cut matrix used revision `347a1a1`,
+the exact source fingerprint and virtual device described in the
+[execution matrix](#final-selected-target-execution-matrix). The unversioned
+format, incremental publication and default worker require their own evidence
+for any VM power-loss or real capacity claim. Ordinary process exits and
+deterministic error injection exercise recovery and concurrency on the local
+filesystem. Run privileged or disk-filling experiments only on a dedicated,
+disposable guest.
 
 ## Ordinary repeatable checks
 
@@ -32,9 +35,16 @@ Other deterministic tests cover binary/empty values, copying, exact-fit
 admission and no-mutation rejection, strict smaller-limit reopen, exact global
 LRU and zero-I/O hits, stale miss fills, relocation pins, seeded per-key
 linearizability, Close admission/error retention, duplicate/aliased owners,
-short writes, corrupt committed bytes, incompatible versions, and maintenance
+short writes, corrupt committed bytes, unsupported signatures, and maintenance
 overlap/cancellation. Named hooks inject EIO, ENOSPC, EDQUOT, sync/publication,
 unlink, and close errors without filling a filesystem.
+
+The cleaner suite uses small fixtures, actor-scoped I/O hooks and barriers for
+interrupted replacement, catalog and CURRENT publication, remapping and
+retirement. Check that the reopened image, committed user sequence and next
+append agree with the model. Include a pinned reader/backup, concurrent
+write or rotation, insufficient staging space and a queued writer when
+publication is uncertain. These checks are part of the ordinary test suite.
 
 Regression cases explicitly cover generation exhaustion across required
 rotation, captured-header checksum/UUID/ID/kind corruption, and retired metadata
@@ -57,9 +67,10 @@ loss or real device exhaustion. Older supported Go families and macOS are not
 part of automated CI; their manual development checks do not change the module
 minimum or the production support boundary.
 
-## Safe isolated Linux functional testing
+## Optional isolated Linux functional testing
 
-With an available Docker server and Go image:
+Use macOS for local development and GitHub Actions for routine Linux coverage.
+Use this Docker procedure only when explicitly requested.
 
 ```sh
 docker run --rm --network none --cpus 2 --memory 2g --pids-limit 512 \
@@ -71,7 +82,7 @@ docker run --rm --network none --cpus 2 --memory 2g --pids-limit 512 \
     go vet ./... && go list -m all'
 ```
 
-Repeat with the corresponding latest supported Go 1.26 image. Source is
+Select the Go image for the requested reproduction. Source is
 read-only, data lives in disposable container /tmp, there is no network/capability
 or host-device access. Record architecture/kernel/filesystem: LinuxKit arm64
 overlayfs is useful functional coverage, **not** Linux amd64/ext4 qualification.
@@ -205,8 +216,9 @@ unflushed device controls before testing the engine.
 The frozen ordinary-library fingerprint is
 `52f6ccde9bd3ca02be8e98465994a7130ab50b9fca763e5963b5e9d50c5bf8c8`.
 Each artifact contains its relative-path source manifest, the manifest's hash,
-exact test-binary and boot hashes, and the checked Git revision. Later measurement/
-documentation changes do not alter this tested library.
+exact test-binary and boot hashes, and the checked Git revision. The measurement
+revisions recorded in the [historical baseline](measurement-baseline.md) have
+this same ordinary-library fingerprint.
 
 Exact target: Ubuntu 24.04.5, amd64 `6.8.0-147-generic`
 (`#147-Ubuntu`, package `6.8.0-147.147-generic`, underlying 6.8.12),
@@ -407,9 +419,8 @@ and reopened/restore verdicts. Distinguish:
 | Actual modeled VM power cuts | Only the precisely tested durability configuration |
 | Actual bounded-device exhaustion | Only the recorded allocation/writeback/headroom behavior |
 
-The selected modeled-power-cut and actual bounded-filesystem execution evidence
-now exists above; ordinary development checks alone did not establish it.
-Dependent [measurement/release acceptance](https://github.com/anaregdesign/tarp/issues/5)
-still requires the complete separately guarded workload matrix and its reviewed
-baseline. Physical-device certification, arbitrary kernels/filesystems and
-unbounded capacity/performance claims remain outside the tested scope.
+The historical modeled power-cut and actual bounded-filesystem campaigns above
+apply to their recorded source fingerprint. The [measurement acceptance](https://github.com/anaregdesign/tarp/issues/5)
+and [baseline](measurement-baseline.md) record the earlier measured workload.
+Any claims for automatic incremental compaction must identify a new checked
+revision, environment, workload, and run evidence.

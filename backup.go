@@ -23,13 +23,22 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	if !db.backup.CompareAndSwap(false, true) {
 		return ErrBusy
 	}
-	defer db.backup.Store(false)
+	defer func() {
+		db.backup.Store(false)
+		db.resumeCleaner()
+		db.notifyCleaner()
+	}()
 	db.writer.Lock()
 	if err := db.health(); err != nil {
 		db.writer.Unlock()
 		return err
 	}
-	capture := db.store.Capture()
+	capture, err := db.store.Capture()
+	if err != nil {
+		db.poison(err)
+		db.writer.Unlock()
+		return operationError("backup", "capture", err)
+	}
 	db.writer.Unlock()
 	defer capture.Release()
 	if err := storage.Backup(ctx, capture, db.store.Config, db.store.IO, destination); err != nil {
@@ -56,7 +65,7 @@ func restoreWithIO(ctx context.Context, backup, destination string, opts Options
 	if err != nil {
 		return err
 	}
-	if err := storage.Restore(ctx, backup, destination, storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, FileBytes: opts.MaxDataFileBytes, Handles: opts.ReadFileHandles}, fs); err != nil {
+	if err := storage.Restore(ctx, backup, destination, storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, FileBytes: opts.MaxDataFileBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}, fs); err != nil {
 		return operationError("restore", "validation/copy", err)
 	}
 	return nil

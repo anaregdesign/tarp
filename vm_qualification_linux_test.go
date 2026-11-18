@@ -184,10 +184,11 @@ func guestOracle(t *testing.T, name string, allowEmpty bool) *qualification.Orac
 func verifyVMDatabase(t *testing.T, db *DB, oracle *qualification.Oracle) string {
 	t.Helper()
 	lo, hi := oracle.SequenceRange()
-	if seq := db.store.Current.Sequence; seq < lo || seq > hi {
+	seq := observedFrontier(db).Sequence
+	if seq < lo || seq > hi {
 		t.Fatalf("recovered sequence %d outside acknowledged/pending interval [%d,%d]", seq, lo, hi)
 	}
-	digest, err := oracle.VerifyAt(db.store.Current.Sequence, len(db.index), func(key []byte) ([]byte, bool, error) {
+	digest, err := oracle.VerifyAt(seq, observedLiveKeys(db), func(key []byte) ([]byte, bool, error) {
 		value, err := db.Get(key)
 		if errors.Is(err, ErrNotFound) {
 			return nil, false, nil
@@ -219,9 +220,9 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 	}
 	oracle := guestOracle(t, "oracle.jsonl", cfg.Mode == "init")
 	digest := verifyVMDatabase(t, db, oracle)
-	sequence := db.store.Current.Sequence
-	liveKeys := len(db.index)
-	if cfg.Mode == "init" && len(db.index) != 0 {
+	sequence := observedFrontier(db).Sequence
+	liveKeys := observedLiveKeys(db)
+	if cfg.Mode == "init" && liveKeys != 0 {
 		t.Fatal("initialization invented a logical history")
 	}
 	if err := db.Close(); err != nil {
@@ -235,8 +236,8 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 			if err != nil {
 				t.Fatal(err)
 			}
-			if db.store.Current.Sequence != cfg.CaptureSequence {
-				t.Fatalf("snapshot sequence %d != capture %d", db.store.Current.Sequence, cfg.CaptureSequence)
+			if seq := observedFrontier(db).Sequence; seq != cfg.CaptureSequence {
+				t.Fatalf("snapshot sequence %d != capture %d", seq, cfg.CaptureSequence)
 			}
 			verifyVMDatabase(t, db, capture)
 			if err := db.Close(); err != nil {

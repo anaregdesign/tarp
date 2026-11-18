@@ -101,12 +101,27 @@ func measurementOpenClone(t *testing.T, source string, opts Options) (*DB, *meas
 	return db, hooks
 }
 
+// These probes run with an active cleaner, even in fixtures with no foreground writers.
+func observedFrontier(db *DB) format.Frontier {
+	db.writer.Lock()
+	defer db.writer.Unlock()
+	return db.store.Current
+}
+
+func observedLiveKeys(db *DB) int {
+	db.state.Lock()
+	defer db.state.Unlock()
+	return len(db.index)
+}
+
 func measurementState(t *testing.T, db *DB) (string, int) {
 	t.Helper()
+	db.state.Lock()
 	keys := make([]string, 0, len(db.index))
 	for key := range db.index {
 		keys = append(keys, key)
 	}
+	db.state.Unlock()
 	sort.Strings(keys)
 	hash := sha256.New()
 	var length [8]byte

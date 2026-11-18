@@ -1,11 +1,14 @@
-# Version-one file and backup formats
+# Storage and backup format
 
-All integers are unsigned little-endian unless stated otherwise. Version is 1.
-CRC32C means the Castagnoli polynomial; SHA-256 covers complete file bytes.
-Reserved fields must be zero. CRCs are accidental-corruption detection, not
-authenticity. Unknown versions fail with `ErrUnsupportedFormat`; invalid lengths,
-reserved fields, checksums, identities, or structural sequences fail explicitly.
-Do not silently migrate or guess a format.
+All integers are unsigned little-endian unless stated otherwise. Each object has
+one fixed eight-byte ASCII signature. There is no format-version field. All
+reserved bytes are zero. CRC32C uses the Castagnoli polynomial. SHA-256 covers
+complete file bytes. These checks detect accidental corruption.
+
+An unknown outer signature in `CURRENT` or `BACKUP` returns
+`ErrUnsupportedFormat`. Existing databases stay untouched and restore leaves
+the destination unpublished. A recognized envelope with inconsistent contents,
+a bad checksum, or a selected object with the wrong signature is corruption.
 
 ## Names and selection
 
@@ -28,10 +31,10 @@ files and adds one `BACKUP` metadata file.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | ASCII `TARPSEG1` |
-| 8 | 2 | Version |
+| 0 | 8 | ASCII `TARPSEGM` |
+| 8 | 2 | Reserved |
 | 10 | 2 | Header length, 64 |
-| 12 | 4 | Kind: log=1, snapshot=2 |
+| 12 | 4 | Kind: raw log=1, checkpoint snapshot=2, cleaned log=3 |
 | 16 | 16 | Database UUID |
 | 32 | 8 | Nonzero file ID |
 | 40 | 20 | Reserved |
@@ -41,8 +44,8 @@ files and adds one `BACKUP` metadata file.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | ASCII `TARPREC1` |
-| 8 | 2 | Version |
+| 0 | 8 | ASCII `TARPRECD` |
+| 8 | 2 | Reserved |
 | 10 | 1 | Kind: Put=1, Delete=2 |
 | 11 | 1 | Flags, zero |
 | 12 | 4 | CRC32C of complete header with this field zero |
@@ -63,8 +66,8 @@ Obsolete records are validated even above a new admission limit.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | ASCII `TARPCUR1` |
-| 8 | 2 | Version |
+| 0 | 8 | ASCII `TARPCURR` |
+| 8 | 2 | Reserved |
 | 10 | 2 | Length, 128 |
 | 12 | 4 | Reserved |
 | 16 | 16 | Database UUID |
@@ -85,8 +88,8 @@ end is discardable after validation and compatible-options checks.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | `TARPCAT1` or `TARPBAK1` |
-| 8 | 2 | Version |
+| 0 | 8 | `TARPCATL` or `TARPBACK` |
+| 8 | 2 | Reserved |
 | 10 | 2 | Reserved |
 | 12 | 8 | Payload length, exactly file size minus 32 |
 | 20 | 4 | Payload CRC32C |
@@ -95,17 +98,38 @@ end is discardable after validation and compatible-options checks.
 
 ## Catalog payload
 
-UUID[16], cutoff sequence u64, active ID u64, entry count u64, followed by
-24-byte entries: ID u64, exact length u64, kind u64.
-The count must exactly match the remaining payload. IDs are nonzero and unique,
-including the active ID. Snapshot entries precede log entries; no snapshot is
-allowed with cutoff zero. The active header-only/log prefix is selected separately
-by CURRENT, not duplicated in the entry list.
+The 48-byte prefix contains the database UUID[16], full-checkpoint cutoff C u64,
+pruned-through sequence H u64, active file ID u64, and entry count u64, in that
+order. Exactly that many 40-byte entries follow. Each holds five consecutive u64
+fields giving the file ID, exact length, kind, first sequence and last sequence.
 
-Snapshot records are unique live Put keys with original nonzero versions at or
-below the cutoff. Subsequent logs contain contiguous sequences beginning at
-cutoff+1. A Delete must remove a live key. An empty checkpoint still preserves
-its cutoff and next sequence; do not infer them from surviving keys.
+| Entry kind | Selected file and coverage |
+| --- | --- |
+| Snapshot | Nonzero unique ID. First and last are zero. Appears before all log intervals. Only allowed for C > 0. |
+| Raw log | Nonzero unique ID. Contains every record from first through last, in order. |
+| Cleaned log | Retains its original [first,last] even on repeated cleaning. A physical file contains at least one record, in strictly increasing sequence order within that interval. |
+| Empty cleaned interval | Kind=cleaned log, ID=0 and length=0. A catalog entry alone represents the covered interval. |
+
+All nonzero DATA IDs are distinct and exclude the active ID and selected catalog ID. A physical sealed
+file contains at least a header and a record. Log intervals immediately follow
+each other beginning at C+1. A cleaned interval ends at or below H. For active
+log replay, `CURRENT` defines S, the last committed user sequence. If S equals
+the last covered sequence (or C when there are no sealed logs), the active
+committed end must be header-only. Otherwise the active prefix must contain
+every remaining sequence through S exactly once. Compute endpoints without
+wrapping at the maximum u64. Missing selected physical files are corruption.
+
+The initial C, H and S are zero. C ≤ H ≤ S at every publication. Snapshot Puts
+have unique keys across the entire checkpoint, and retain their original nonzero
+sequences at or below C. Their physical order is arbitrary. At an incremental
+replacement that prunes a Put, set H to the latest committed S under the writer
+gate. Keep all post-checkpoint Deletes, including those whose predecessor was
+discarded. A replayed Delete of an absent key is permitted only at or below H.
+Consequently an omitted Put followed by a Delete in a later raw log still leaves
+the key absent. Public Delete requires a live key. A full checkpoint replaces
+the complete prefix, can discard all tombstones in that prefix, and sets C and H
+to its captured user sequence. Later committed records survive publication.
+Reopen, streamed backup and manual checkpoint replay apply the same rules.
 
 ## BACKUP payload
 
@@ -117,10 +141,11 @@ same UUID. Reject duplicates, unsafe/missing/extra/nonregular objects, trailing
 bytes, unsupported metadata, and inconsistent cutoff/frontier identities.
 
 The listed files are exactly captured CURRENT, selected catalog, selected
-snapshot/sealed files, and the active committed prefix. BACKUP does not list
-itself or LOCK. Source options are not minimum limits: restore independently
-replays the complete image and derives live minima, checks exact prefixes, and
-validates staged bytes rather than relying on hashes alone.
+snapshot/sealed files, and the active committed prefix. Empty logical intervals
+reside entirely in the captured catalog. Its digest in CURRENT binds H and the
+interval metadata to the backup. BACKUP excludes itself and LOCK. Restore
+independently replays the complete image, derives live minima, checks exact
+prefixes, and validates staged bytes.
 
-Independent fixed hex vectors for all five codecs, per-byte bit flips,
+Independent fixed hex vectors for all five codecs and cleaned-interval variants, per-byte bit flips,
 truncations, and decoder fuzzing live in `internal/format/format_test.go`.

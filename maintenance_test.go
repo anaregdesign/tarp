@@ -77,6 +77,7 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 	mustPut(t, db, "a", "old")
 	mustPut(t, db, "d", "keep-in-backup")
 	target := filepath.Join(t.TempDir(), "backup")
+	pinnedFile := db.index["a"].File
 	armed.Store(true)
 	done := make(chan error, 1)
 	go func() { done <- db.Backup(context.Background(), target) }()
@@ -96,10 +97,16 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 		t.Fatalf("pinned compaction: %+v %v", result, err)
 	}
 	wantValue(t, db, "a", "new")
+	beforeRelease := db.MaintenanceStatus().UnlinkedBytes
+	if _, err := os.Stat(pinnedFile.Path); err != nil {
+		t.Fatalf("pinned source disappeared: %v", err)
+	}
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+	// Backup release wakes the default worker even on an otherwise idle DB.
+	waitForUnlink(t, db, pinnedFile.Path)
 	restored := filepath.Join(t.TempDir(), "restored")
 	if err := Restore(context.Background(), target, restored, testOptions()); err != nil {
 		t.Fatal(err)
@@ -118,8 +125,9 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err = db.Compact(context.Background())
-	if err != nil || result.ReclaimedBytes == 0 || result.PinnedBytes != 0 {
-		t.Fatalf("deferred cleanup: %+v %v", result, err)
+	status := db.MaintenanceStatus()
+	if err != nil || result.PinnedBytes != 0 || status.UnlinkedBytes-beforeRelease < uint64(pinnedFile.Size.Load()) {
+		t.Fatalf("deferred cleanup: manual %+v automatic %+v error %v", result, status, err)
 	}
 }
 
