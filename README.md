@@ -47,10 +47,45 @@ The parent directory must exist. One process exclusively owns a directory, while
 its `DB` supports concurrent goroutines without caller locks. Individual key
 operations are atomic and linearizable; separate calls are not a transaction.
 
+## Typed keys and values
+
+`OpenTyped` infers the key and value types from the supplied codecs. For
+example, this function stores a string key and returns an `int64` value.
+
+```go
+func storeScore(dir string) (score int64, err error) {
+	db, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.StringCodec{}, tarp.Int64Codec{})
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = errors.Join(err, db.Close()) }()
+	if err := db.Put("score", 42); err != nil {
+		return 0, err
+	}
+	return db.Get("score")
+}
+```
+
+`TypedDB` also supports `Delete`, snapshot iteration with `Scan`, and the same
+backup and maintenance operations as `DB`. Use `NewTypedDB` to wrap an open
+`*DB`. Both handles share the same records and closing either closes both.
+
+Built-in codecs cover `bool`, `string`, all integer, float and complex types,
+and `[]byte`. Use `Uint8Codec` for `byte` and `Int32Codec` for `rune`. Numeric
+encodings are fixed-width and big-endian, with eight bytes for `int`, `uint`
+and `uintptr`. String and byte-slice codecs store their bytes verbatim, so an
+empty string or slice used as a key returns `ErrEmptyKey`.
+
+To store an application type, implement `Codec[T]` with `Encode(T) ([]byte, error)`
+and `Decode([]byte) (T, error)`. Key identity is the encoded byte sequence.
+Reuse compatible codecs on reopen and after `Restore`. See the
+[runnable typed example](examples/typed_db_test.go).
+
 ## Contract
 
-`Open`, `Get`, `Scan`, upserting `Put`, `Delete`, `Close`, online `Backup`, offline
-`Restore`, explicit online `Compact`, and `DB.MaintenanceStatus` form the public API.
+`DB` provides `Get`, `Scan`, upserting `Put`, `Delete`, `Close`, online `Backup`,
+explicit online `Compact`, and `MaintenanceStatus`. Use `Open` to create or
+reopen a database and `Restore` to restore a backup offline.
 
 - Keys and values are `[]byte`. Empty keys are rejected; empty values are valid.
   Missing `Get` and `Delete` return `ErrNotFound`.
