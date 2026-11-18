@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,7 +88,10 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 
 func vmPendingMemory(t *testing.T, opts engine.Options, value []byte, callers, repetition int, write vmMeasureWriter) {
 	t.Helper()
-	db := newTestDB(t, opts, nil)
+	var copied atomic.Int64
+	db := newTestDB(t, opts, &storage.IO{PutCopied: func(keyBytes, valueBytes int) {
+		copied.Add(int64(keyBytes + valueBytes))
+	}})
 	inputs := make([][]byte, callers)
 	for i := range inputs {
 		inputs[i] = []byte(fmt.Sprintf("%016x", i))
@@ -112,16 +116,11 @@ func vmPendingMemory(t *testing.T, opts engine.Options, value []byte, callers, r
 		time.Sleep(time.Millisecond)
 	}
 	if probe.WaitingWriters() != int64(callers) {
-		t.Fatal("not every pending Put reached the post-copy writer queue")
+		t.Fatal("not every pending Put reached the writer queue")
 	}
 	runtime.GC()
 	after := vmProcessMemory(t)
-	write("pending_owned_buffers", repetition, map[string]any{
-		"callers": callers, "foreground_writer_waiters": probe.WaitingWriters(),
-		"owned_key_value_bytes": callers * (16 + len(value)),
-		"before":                before, "all_callers_queued": after, "cache_limit_bytes": opts.CacheBytes,
-		"scope": "exact logical copied key/value bytes after admission; process deltas also include goroutine/closure/stack costs, not solely engine heap and not a hard bound",
-	})
+	waiters, queuedBytes := probe.WaitingWriters(), copied.Load()
 	release()
 	locked = false
 	workers.Wait()
@@ -130,4 +129,14 @@ func vmPendingMemory(t *testing.T, opts engine.Options, value []byte, callers, r
 			t.Fatal(err)
 		}
 	}
+	totalInput := int64(callers * (len(inputs[0]) + len(value)))
+	if queuedBytes != 0 || copied.Load() != totalInput {
+		t.Fatalf("Put input copies: %d bytes queued, %d bytes after completion, want 0 and %d", queuedBytes, copied.Load(), totalInput)
+	}
+	write("pending_owned_buffers", repetition, map[string]any{
+		"callers": callers, "foreground_writer_waiters": waiters,
+		"owned_key_value_bytes": queuedBytes, "copied_bytes_after_completion": copied.Load(),
+		"before": before, "all_callers_queued": after, "cache_limit_bytes": opts.CacheBytes,
+		"scope": "observed index/cache input copies while the writer gate was held and after all Puts completed; process memory also includes caller and goroutine costs",
+	})
 }

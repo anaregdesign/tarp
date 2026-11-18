@@ -19,6 +19,8 @@ type IO struct {
 	WriteAt      func(*os.File, []byte, int64) (int, error)
 	// Wrote observes the bytes accepted by each write, including short writes.
 	Wrote func(point string, bytes int)
+	// PutCopied observes the key/value bytes copied for the index and cache.
+	PutCopied func(keyBytes, valueBytes int)
 }
 
 func (i *IO) Check(point string) error {

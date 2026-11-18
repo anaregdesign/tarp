@@ -121,6 +121,31 @@ func TestPersistenceOwnershipAndRotation(t *testing.T) {
 	}
 }
 
+func TestQueuedPutDefersOwnedInput(t *testing.T) {
+	var copied atomic.Int64
+	db := newTestDB(t, testOptions(), &storage.IO{PutCopied: func(k, v int) {
+		copied.Add(int64(k + v))
+	}})
+	db.writer.Lock()
+	key, value := []byte("key"), []byte("value")
+	done := make(chan error, 1)
+	go func() { done <- db.Put(key, value) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for db.cleaner.writers.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	waiters, queued := db.cleaner.writers.Load(), copied.Load()
+	db.writer.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if waiters != 1 || queued != 0 || copied.Load() != int64(len(key)+len(value)) {
+		t.Fatalf("waiters=%d, bytes copied while queued=%d, after Put=%d", waiters, queued, copied.Load())
+	}
+	key[0], value[0] = 'X', 'X'
+	wantValue(t, db, "key", "value")
+}
+
 func TestOversizedPutIsPreMutation(t *testing.T) {
 	for _, opts := range []Options{
 		{CacheBytes: 140, MaxRecordBytes: 128, ReadFileHandles: 1},

@@ -16,6 +16,41 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+func TestCheckpointCopiesInSourceOrderAndReusesReaders(t *testing.T) {
+	var opens, records int
+	db := newTestDB(t, Options{MaxRecordBytes: 64, TargetSegmentBytes: 180}, &storage.IO{
+		CleanerStart: make(chan struct{}),
+		Hook: func(point string) error {
+			switch point {
+			case "compact.source.open:after":
+				opens++
+			case "compact.record:after":
+				records++
+			}
+			return nil
+		},
+	})
+	// Two records per log. Both records in the first file are overwritten.
+	for _, key := range []string{"a", "b", "c", "d", "e", "f", "a", "b"} {
+		mustPut(t, db, key, "v")
+	}
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if opens != 3 || records != 6 {
+		t.Fatalf("copied %d records with %d source opens; want six records from three logs", records, opens)
+	}
+	var previous storage.Location
+	for _, key := range []string{"c", "d", "e", "f", "a", "b"} {
+		loc := db.index[key]
+		if previous.File != nil && (loc.File.ID < previous.File.ID ||
+			loc.File.ID == previous.File.ID && loc.Offset <= previous.Offset) {
+			t.Fatalf("key %q copied out of source order", key)
+		}
+		previous = loc
+	}
+}
+
 func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 	db := newTestDB(t, testOptions(), nil)
 	for round := 0; round < 6; round++ {

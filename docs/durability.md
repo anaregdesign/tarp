@@ -79,20 +79,23 @@ duplicate-value redo WAL. A backup is not a WAL.
 
 For an ordinary mutation:
 
-1. Reject invalid/oversized input and take owned copies.
+1. Reject invalid or oversized input. The caller keeps the input stable through return.
 2. Under the writer gate, append a whole record at the known active end.
 3. Sync the data file.
 4. Completely write and sync a private replacement `CURRENT`.
 5. Rename it over `CURRENT` and sync the directory.
-6. Publish the index/cache update under state, then return nil.
+6. For a Put, copy the key and value for the index and cache. Publish the update
+   under the state lock, then return nil. Writers waiting for the gate retain
+   their callers' input slices.
 
 This conservative protocol normally uses three sync barriers per mutation.
 There is no asynchronous acknowledgment, disabled-sync setting, or group commit.
-Rotation first durably creates/syncs a header-only segment and immutable catalog,
-syncs names, and publishes a new frontier with unchanged user sequence, then
-appends the pending record. A normal append rotates a nonempty log before it
-would exceed its target (4 MiB by default). Full-checkpoint sealing also rotates
-a nonempty log. Sequences, generations, and file IDs never wrap.
+When an append would take a nonempty log past its target (4 MiB by default),
+tarp writes the new segment header and first record, then syncs them together.
+It writes and syncs the new catalog and syncs the directory before replacing
+`CURRENT`. This one frontier publication selects both the new active log and
+the committed record. Explicit full-checkpoint sealing instead selects an empty
+active log at the existing sequence. Sequences, generations and file IDs never wrap.
 No record spans files or overwrites previously committed bytes.
 
 An unknown outer signature in an existing `CURRENT` returns
@@ -170,8 +173,9 @@ checks file, offset and sequence so later changes win. Reclamation waits for all
 pins. No incremental publication advances the user sequence.
 
 Manual `Compact(ctx)` durably captures a complete prefix at cutoff C, validates its segment
-headers and records, and rebuilds cutoff state outside root locks. It streams live
-Put records into snapshot files using the same size target as log appends,
+headers and records, and rebuilds cutoff state outside root locks. It groups live
+Put records by source file, reads them in offset order with one source descriptor
+open at a time, and writes snapshot files using the same size target as log appends,
 preserving record sequences. Tombstones can
 be dropped only because all earlier history is replaced. Publication combines the
 checkpoint with **all** current tail files after C, then remaps each still-unchanged

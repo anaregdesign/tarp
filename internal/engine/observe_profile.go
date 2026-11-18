@@ -34,8 +34,8 @@ func (o Observer) LockProfile() map[string]LockStats {
 	return stats
 }
 
-// HoldWriter lets a diagnostic probe queue foreground writes after their input
-// buffers have been copied. The caller releases the gate using the result.
+// HoldWriter lets a diagnostic probe queue foreground writes.
+// The caller releases the gate using the result.
 func (o Observer) HoldWriter() func() {
 	o.db.writer.Lock()
 	return o.db.writer.Unlock

@@ -216,9 +216,10 @@ func TestProcessCrashRecoveryMatrix(t *testing.T) {
 		{"put", "data.sync:after", 1}, {"put", "current.write:after", 1},
 		{"put", "current.sync:after", 1}, {"put", "current.rename:before", 1},
 		{"put", "current.rename:after", 1}, {"put", "current.dirsync:after", 1},
-		{"rotate", "segment.write:before", 1}, {"rotate", "segment.sync:after", 1},
+		{"rotate", "segment.write:before", 1}, {"rotate", "data.write:after", 1}, {"rotate", "segment.sync:after", 1},
 		{"rotate", "catalog.write:after", 1}, {"rotate", "catalog.sync:after", 1},
-		{"rotate", "catalog.dirsync:after", 1}, {"rotate", "current.rename:after", 1},
+		{"rotate", "catalog.dirsync:after", 1}, {"rotate", "current.rename:before", 1},
+		{"rotate", "current.rename:after", 1}, {"rotate", "current.dirsync:after", 1},
 		{"compact", "compact.segment.write:after", 1}, {"compact", "compact.write:after", 1},
 		{"compact", "compact.sync:after", 1}, {"compact", "current.rename:after", 2},
 		{"compact", "compact.remap:after", 1}, {"compact", "cleanup.unlink:after", 1},
@@ -261,10 +262,13 @@ func TestProcessCrashRecoveryMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("recovery: %v\n%s", err, output)
 			}
-			value, err := reopened.Get([]byte("k"))
-			if err != nil || string(value) != "old" && (tc.mode != "put" && tc.mode != "rotate" || string(value) != "new") {
-				t.Fatalf("crash lost acknowledged state: %q %v", value, err)
+			// This child exits without stopping the kernel. A completed rename is
+			// visible on reopen even if the process exited before directory sync.
+			want := "old"
+			if (tc.mode == "put" || tc.mode == "rotate") && (tc.point == "current.rename:after" || tc.point == "current.dirsync:after") {
+				want = "new"
 			}
+			wantValue(t, reopened, "k", want)
 			if err := reopened.Close(); err != nil {
 				t.Fatal(err)
 			}

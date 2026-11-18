@@ -2,12 +2,15 @@ package storage
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"math"
 	"os"
+	"slices"
 
 	"github.com/anaregdesign/tarp/internal/format"
 )
@@ -90,7 +93,9 @@ func (w *outputWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (c *Capture) Replay(ctx context.Context, fs *IO) (map[string]Location, error) {
+// Replay validates the entire captured image before scheduling the live records
+// in physical read order. The same slice later carries the index relocations.
+func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error) {
 	index := make(map[string]Location)
 	for _, captured := range c.Files {
 		if err := ctx.Err(); err != nil {
@@ -120,26 +125,76 @@ func (c *Capture) Replay(ctx context.Context, fs *IO) (map[string]Location, erro
 			return nil, err
 		}
 	}
-	return index, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	moves := make([]Relocation, 0, len(index))
+	for key, loc := range index {
+		moves = append(moves, Relocation{Key: key, Old: loc})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(moves, func(a, b Relocation) int {
+		if a.Old.File != b.Old.File {
+			return cmp.Compare(a.Old.File.ID, b.Old.File.ID)
+		}
+		return cmp.Compare(a.Old.Offset, b.Old.Offset)
+	})
+	return moves, nil
 }
 
 func (s *Store) NewSnapshotFile() (*File, *os.File, error) {
-	return s.newSegment(format.Snapshot, "compact.segment")
+	return s.newSegment(format.Snapshot, "compact.segment", nil)
 }
 
-func (s *Store) CopyRecord(ctx context.Context, old Location, key string, dst *os.File, offset int64, buffer []byte) error {
-	fd, err := OpenRegular(old.File.Path)
+// SnapshotReader reuses a single source descriptor while copying a pinned
+// checkpoint in physical read order. Close it before publishing the result.
+type SnapshotReader struct {
+	source *File
+	fd     *os.File
+}
+
+func (r *SnapshotReader) Close() error {
+	if r.fd == nil {
+		return nil
+	}
+	err := r.fd.Close()
+	r.source, r.fd = nil, nil
 	if err != nil {
-		return &SourceError{Err: err}
+		return &SourceError{err}
 	}
-	writer := &outputWriter{fs: s.IO, fd: dst, offset: offset, point: "compact.write"}
-	_, err = format.CopyRecord(ctx, sourceReader{fd}, writer, old.Offset, old.Bytes,
+	return nil
+}
+
+func (r *SnapshotReader) CopyRecord(ctx context.Context, fs *IO, old Location, key string, dst *os.File, offset int64, buffer []byte) error {
+	if r.source != old.File {
+		if err := r.Close(); err != nil {
+			return err
+		}
+		fd, err := OpenRegular(old.File.Path)
+		if err != nil {
+			return &SourceError{err}
+		}
+		r.source, r.fd = old.File, fd
+		if err := fs.Check("compact.source.open:after"); err != nil {
+			return &SourceError{err}
+		}
+	}
+	writer := &outputWriter{fs: fs, fd: dst, offset: offset, point: "compact.write"}
+	record, err := format.CopyRecord(ctx, sourceReader{r.fd}, writer, old.Offset, old.Bytes,
 		&format.Identity{Key: key, Sequence: old.Sequence}, buffer)
-	var destination *destinationError
-	if err != nil && !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		err = &SourceError{Err: err}
+	if err == nil {
+		if record.Bytes() != old.Bytes {
+			return fmt.Errorf("%w: changed checkpoint record length", ErrCorrupt)
+		}
+		return fs.Check("compact.record:after")
 	}
-	return errors.Join(err, fd.Close())
+	var destination *destinationError
+	if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return &SourceError{err}
+	}
+	return err
 }
 
 func (s *Store) InstallCheckpoint(capture *Capture, outputs []format.File) error {

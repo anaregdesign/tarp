@@ -74,13 +74,12 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 			capture.Release()
 		}
 	}()
-	index, err := capture.Replay(ctx, db.store.IO)
+	moves, err := capture.Replay(ctx, db.store.IO)
 	if err != nil {
 		db.compactFailure(err)
 		return result, operationError("compact", "scan", err)
 	}
-	type relocation struct{ old, new storage.Location }
-	moves := make(map[string]relocation, len(index))
+	var reader storage.SnapshotReader
 	var files []*storage.File
 	var outputs []format.File
 	var fd *os.File
@@ -100,6 +99,10 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		return err
 	}
 	defer func() {
+		if closeErr := reader.Close(); closeErr != nil {
+			db.compactFailure(closeErr)
+			returned = errors.Join(returned, operationError("compact", "source-close", closeErr))
+		}
 		if fd != nil {
 			returned = errors.Join(returned, fd.Close())
 		}
@@ -112,7 +115,9 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		}
 	}()
 	buffer := make([]byte, 32<<10)
-	for key, loc := range index {
+	for i := range moves {
+		move := &moves[i]
+		loc := move.Old
 		if err := ctx.Err(); err != nil {
 			return result, operationError("compact", "copy", err)
 		}
@@ -135,13 +140,17 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 			files = append(files, active)
 			offset = format.SegmentHeaderBytes
 		}
-		if err := db.store.CopyRecord(ctx, loc, key, fd, offset, buffer); err != nil {
+		if err := reader.CopyRecord(ctx, db.store.IO, loc, move.Key, fd, offset, buffer); err != nil {
 			db.compactFailure(err)
 			return result, operationError("compact", "copy", err)
 		}
-		next := storage.Location{File: active, Offset: offset, Bytes: loc.Bytes, ValueBytes: loc.ValueBytes, Sequence: loc.Sequence}
-		moves[key] = relocation{old: loc, new: next}
+		move.New = loc
+		move.New.File, move.New.Offset = active, offset
 		offset += loc.Bytes
+	}
+	if err := reader.Close(); err != nil {
+		db.compactFailure(err)
+		return result, operationError("compact", "source-close", err)
 	}
 	if err := finishFile(); err != nil {
 		db.compactFailure(err)
@@ -159,14 +168,14 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	for key, move := range moves {
+	for _, move := range moves {
 		db.state.Lock()
-		current, exists := db.index[key]
-		if exists && current.Sequence == move.old.Sequence && current.File == move.old.File && current.Offset == move.old.Offset {
-			move.new.File.Pin()
-			move.new.File.LiveBytes.Add(move.new.Bytes)
+		current, exists := db.index[move.Key]
+		if exists && current.Sequence == move.Old.Sequence && current.File == move.Old.File && current.Offset == move.Old.Offset {
+			move.New.File.Pin()
+			move.New.File.LiveBytes.Add(move.New.Bytes)
 			current.File.LiveBytes.Add(-current.Bytes)
-			db.index[key] = move.new
+			db.index[move.Key] = move.New
 			current.File.Unpin()
 		}
 		db.state.Unlock()

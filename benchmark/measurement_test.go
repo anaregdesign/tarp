@@ -312,15 +312,17 @@ func resourceSample(t *testing.T, db *engine.DB) map[string]any {
 }
 
 type measurementHooks struct {
-	backupBytes atomic.Int64
-	manualBytes atomic.Int64
-	windowStart func()
-	windowEnd   func()
-	reads       atomic.Int64
-	slow        atomic.Bool
-	started     atomic.Pointer[chan struct{}]
-	overlap     atomic.Pointer[chan struct{}]
-	capture     atomic.Pointer[measurementCapture]
+	backupBytes       atomic.Int64
+	manualBytes       atomic.Int64
+	manualSourceOpens atomic.Int64
+	manualRecords     atomic.Int64
+	windowStart       func()
+	windowEnd         func()
+	reads             atomic.Int64
+	slow              atomic.Bool
+	started           atomic.Pointer[chan struct{}]
+	overlap           atomic.Pointer[chan struct{}]
+	capture           atomic.Pointer[measurementCapture]
 }
 
 // The worker is held from Open through Close for the controlled interference
@@ -345,11 +347,15 @@ func (h *measurementHooks) releaseOverlap() {
 }
 
 func (h *measurementHooks) hook(point string) error {
-	if point == "read:before" {
+	switch point {
+	case "read:before":
 		h.reads.Add(1)
-	}
-	if point == "compact.write:before" {
+	case "compact.write:before":
 		h.releaseOverlap()
+	case "compact.source.open:after":
+		h.manualSourceOpens.Add(1)
+	case "compact.record:after":
+		h.manualRecords.Add(1)
 	}
 	if point == "backup.copy:before" {
 		gate := h.overlap.Load()
@@ -502,6 +508,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}()
 	readStart := hooks.reads.Load()
 	backupBefore, manualBefore := hooks.backupBytes.Load(), hooks.manualBytes.Load()
+	opensBefore, recordsBefore := hooks.manualSourceOpens.Load(), hooks.manualRecords.Load()
 	if hooks.windowStart != nil {
 		hooks.windowStart()
 	}
@@ -587,6 +594,8 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 		"automatic_cleaner": "held from Open through Close for controlled foreground and manual-checkpoint comparisons",
 		"backup_copy_bytes": backupCopied, "backup_elapsed_ns": backupEnd.Sub(backupStart).Nanoseconds(),
 		"compact_copy_bytes": compactCopied, "compact_elapsed_ns": compactEnd.Sub(compactStart).Nanoseconds(),
+		"compact_copy_source_opens":           hooks.manualSourceOpens.Load() - opensBefore,
+		"compact_records_copied":              hooks.manualRecords.Load() - recordsBefore,
 		"observed_maintenance_api_overlap_ns": overlapNS,
 		"copy_measurement_scope":              "bytes accepted by backup DATA writes and manual checkpoint DATA writes, including segment headers; metadata and foreground writes are excluded; elapsed and overlap cover complete API calls",
 		"overlap_coordination":                "overlap modes pause the first backup copy until the first checkpoint record write; released on any checkpoint return; this controlled delay is included in API elapsed times",

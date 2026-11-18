@@ -97,7 +97,10 @@ The interference profiles add one separately identified writer key.
   are reported; the sampler's own I/O/writer-lock acquisitions perturb all modes.
   Backup and compaction each retain actual copied DATA-file bytes (including
   headers, excluding metadata) and their complete API elapsed time, separately
-  from the combined window. Their observed API-interval intersection is recorded.
+  from the combined window. For manual checkpoints, `compact_copy_source_opens`
+  and `compact_records_copied` count source opens and successfully copied live
+  records during the copy phase. The preceding validation scan is excluded.
+  The driver records the overlap between the two API calls.
   Overlap modes pause the first backup copy until the first checkpoint record
   write, with that controlled coordination included in reported API time.
   Copy bytes divided by the respective API time give reproducible effective
@@ -137,9 +140,10 @@ Recording extends actual holds but is excluded from that reported span.
 Writer statistics include the disclosed resource/copy inventory, not just mutations.
 These are not wait-time proxies and instrumented timings are not the primary
 latency baseline. The plain library remains a direct `sync.Mutex` alias.
-With 1/8/32 callers held at the post-copy writer queue, logical copied key/value
-bytes and actual heap/stack/RSS/runtime changes characterize pending buffering;
-process deltas include harness/goroutine costs and are not an engine-only cap.
+With 1, 8 or 32 callers waiting at the writer gate, the diagnostic driver
+records actual input copies and process memory. It checks zero owned input
+bytes while queued and the full expected byte count after all Puts return.
+Heap, stack and RSS deltas also include caller and runtime costs.
 
 `measurement.jsonl` syncs every bounded raw/summary row outside the guest.
 Per-VM console logs, exact source/library/binary/image hashes, host and guest
@@ -231,11 +235,9 @@ be represented as end-to-end Get latency.
 
 RSS is process high-water, not isolated current DB RSS. Map/key clone deltas are
 noisy GC estimates including cloned map overhead but sharing file metadata; the
-logical index estimate omits allocator/bucket overhead. Pending callers are not
-globally capped: Put copies inputs before waiting for the writer, so caller
-concurrency can increase heap independently of the cache budget. Interference
-reports one writer's caller buffer plus process-level heap, not a hard aggregate
-pending-buffer bound.
+logical index estimate omits allocator/bucket overhead. Pending callers retain
+their input slices. Caller concurrency can increase heap independently of the
+cache budget. Interference reports one writer's caller buffer and process-level heap.
 
 Five-millisecond resource sampling can miss short peaks; directory-byte counts
 are logical file lengths, not allocated blocks or guaranteed free-space deltas.

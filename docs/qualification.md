@@ -25,7 +25,7 @@ go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=15s -parall
 The only module must be `github.com/anaregdesign/tarp`. Tests/tools use standard
 library imports only; the importable root remains package tarp.
 
-`TestProcessCrashRecoveryMatrix` runs 30 bounded subprocess exits across writes,
+`TestProcessCrashRecoveryMatrix` runs bounded subprocess exits across writes,
 rotation, checkpoint output/publication/remapping/unlink, backup, and restore.
 It checks the acknowledged seed, whole old/new permitted pending states, and
 every published artifact's recoverability. `-short` skips that subprocess sweep.
@@ -160,7 +160,10 @@ deletes remain explicit absent states, so older values cannot resurrect.
 Definitive `not-applied` and `committed` error outcomes resolve the pending
 intent rather than incorrectly retaining an old/new window. A genuinely unknown
 mutation permits its old state at the acknowledged sequence or its whole new
-state at the next sequence, not an arbitrary independent combination. Capture markers
+state at the next sequence, not an arbitrary independent combination. For a rotating
+Put, the witness requires the old sequence before the CURRENT rename and the new
+sequence after its directory sync. Either whole state may survive between those
+boundaries. Capture markers
 bind a backup's separate acknowledged prefix and sequence before later writes.
 Reboot verification calls Open using files alone **before reading the oracle**,
 then checks values, absence, exact sequence/content binding, complete live-index
@@ -360,7 +363,7 @@ Sweep before/after points for `data.write`, `data.sync`, `current.write`,
 
 | Mode | Additional setup/output | Useful boundaries |
 | --- | --- | --- |
-| `rotate` | Acknowledged padding forces the pending Put to rotate | `segment.write`, `segment.sync`, `catalog.write`, `catalog.sync`, `catalog.dirsync`, frontier |
+| `rotate` | Acknowledged padding forces the pending Put into a new log | `segment.write`, `data.write`, `segment.sync`, `catalog.write`, `catalog.sync`, `catalog.dirsync`, one frontier publication |
 | `compact` | Seeded obsolete version, no pending logical change | `compact.segment.write`, `compact.write`, `compact.sync`, second `current.rename`, `compact.remap:after`, `cleanup.unlink` |
 | `backup` | Set `TARP_POWERCUT_OUTPUT` to a new external destination | `backup.copy`, `backup.file.sync`, `backup.manifest.sync`, `backup.rename`, `backup.parent.sync` |
 | `restore` | Creates a stable source backup before arming; set new output path | `restore.copy`, `restore.file.sync`, `restore.stage.sync`, `restore.rename`, `restore.parent.sync` |
