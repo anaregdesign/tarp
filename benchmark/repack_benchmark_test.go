@@ -18,10 +18,12 @@ const (
 	repackConcurrent = "concurrent"
 	repackGetsPerPut = 8
 	repackPuts       = 128
+	repackWriteGap   = time.Millisecond
 )
 
 type repackMeasurement struct {
 	Mode               string            `json:"mode"`
+	WriteGapNS         int64             `json:"write_gap_ns"`
 	Options            engine.Options    `json:"options"`
 	Get                sampledLatency    `json:"get"`
 	Put                sampledLatency    `json:"put"`
@@ -161,6 +163,15 @@ func (f repackFixture) measureWindow(t testing.TB, mode string, puts int) repack
 			if putErr != nil {
 				return
 			}
+			// The cleaner yields to pending writers. Leave the same gap in
+			// each arm so it can copy between bursts of foreground work.
+			if i+1 < len(writes) {
+				select {
+				case <-time.After(repackWriteGap):
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 	})
 	defer func() { cancel(); workers.Wait() }()
@@ -197,7 +208,8 @@ func (f repackFixture) measureWindow(t testing.TB, mode string, puts int) repack
 	if err := errors.Join(getErr, putErr, ctx.Err()); err != nil {
 		t.Fatal(err)
 	}
-	result := repackMeasurement{Mode: mode, Options: f.opts, WallNS: wall.Nanoseconds(), DataFilesBefore: len(f.inputs) + 1}
+	result := repackMeasurement{Mode: mode, WriteGapNS: repackWriteGap.Nanoseconds(), Options: f.opts,
+		WallNS: wall.Nanoseconds(), DataFilesBefore: len(f.inputs) + 1}
 	result.Get, result.OverlappingGets, result.GetDuringRepack = summarizeRepackCalls(gets, begin, retired)
 	result.Put, result.OverlappingPuts, result.PutDuringRepack = summarizeRepackCalls(writes, begin, retired)
 	if repacking {

@@ -44,6 +44,8 @@ makes all eight sealed logs eligible to be packed together. Both arms read the
 same warm key and durably overwrite the same active key.
 
 Each arm performs 128 synced Puts and 1,024 Gets, with eight reads per write.
+The writer waits 1 ms between calls in both arms so the cleaner can run between
+writes. The gap is included in wall time and excluded from individual latencies.
 The `parked` arm holds the worker for the whole window. In the `concurrent`
 arm the first copy and foreground operations start together. After syncing its
 output the worker waits for the first Get and Put if either is still pending.
