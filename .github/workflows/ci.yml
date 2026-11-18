@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Linux amd64 / Go stable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: off
+      GOFLAGS: -mod=readonly
+      GOPROXY: off
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+      - name: Record environment
+        run: |
+          go version
+          go env GOOS GOARCH
+          uname -smr
+          test "$(go env GOOS)/$(go env GOARCH)" = linux/amd64
+      - name: Require standard-library-only module
+        run: |
+          modules="$(go list -m all)"
+          printf '%s\n' "$modules"
+          test "$modules" = github.com/anaregdesign/tarp
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 -timeout=5m ./...
+      - name: Race test
+        run: go test -race -count=1 -timeout=5m ./...
