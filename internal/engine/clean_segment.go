@@ -47,7 +47,21 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 		db.writer.Unlock()
 		return operationError("clean", "pre-publication", err)
 	}
-	err = db.store.InstallCleaned(work)
+	// Prepare the still-unselected immutable manifest outside the writer gate.
+	err = db.store.InstallCleaned(work, func(prepare func() error) error {
+		db.writer.Unlock()
+		err := prepare()
+		db.writer.Lock()
+		if err != nil {
+			return err
+		}
+		if db.health() != nil {
+			// A failed foreground CURRENT can be uncertain. This cleaner has
+			// not attempted its own CURRENT and may discard its staging files.
+			return ErrUnhealthy
+		}
+		return ctx.Err()
+	})
 	if err != nil {
 		var fault *storage.Fault
 		if errors.As(err, &fault) && fault.Outcome == string(Unknown) {

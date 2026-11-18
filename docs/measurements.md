@@ -192,6 +192,17 @@ purged: report guest-OS-cold virtual-device latency, never physical-media-cold
 latency or a general physical-device performance result. No numeric SLO was
 agreed, and these smaller fixture limits do not tune the published defaults.
 
+## Focused foreground diagnostics
+
+Use the following macOS commands to isolate a maintenance path with real durable writes. Both use the ordinary engine with observation hooks and report timings separately from the plain VM profile.
+
+```sh
+GOMAXPROCS=2 TARP_MAINTENANCE_BENCH=1 go test -run '^TestMaintenanceForeground$' -count=1 -v ./benchmark
+GOMAXPROCS=4 TARP_REPACK_TRACE=/tmp/repack-new.jsonl go test -run '^TestRepackStageTrace$' -count=1 ./benchmark
+```
+
+The first command uses the same 4 KiB fixture and 128 foreground Puts per arm. Its JSON records align individual requests with maintenance, writer-gate waits and foreground syncs. It verifies the checkpoint or restored backup against the captured data. The second command needs a new output filename. It runs five paired 64 B repacks and records timestamps for writer waits, syncs, catalog publication, index updates and file retirement. Compare the slowest overlapping Put against an equal-size prefix of the parked control.
+
 ## Native development smoke driver
 
 Choose a **new** output filename on a volume with headroom. It is created

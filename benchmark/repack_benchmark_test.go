@@ -73,6 +73,11 @@ func (f repackFixture) measure(t testing.TB, mode string) repackMeasurement {
 // Foreground calls never wait at a measurement hook. Record any controlled wait.
 func (f repackFixture) measureWindow(t testing.TB, mode string, puts int) repackMeasurement {
 	t.Helper()
+	return f.measureTraced(t, mode, puts, nil)
+}
+
+func (f repackFixture) measureTraced(t testing.TB, mode string, puts int, trace *repackTrace) repackMeasurement {
+	t.Helper()
 	repacking := mode == repackConcurrent
 	if !repacking && mode != repackParked || puts <= 0 {
 		t.Fatalf("invalid repack measurement mode %q or Put count %d", mode, puts)
@@ -84,7 +89,10 @@ func (f repackFixture) measureWindow(t testing.TB, mode string, puts int) repack
 	retirement := make(chan time.Time, 1)
 	var sawCopy, published bool // hooks below run on the single cleaner
 	var coordinationWait time.Duration
-	db, cleanup := f.openClone(t, &storage.IO{CleanerStart: workerStart, Hook: func(point string) error {
+	fs := &storage.IO{CleanerStart: workerStart, Hook: func(point string) error {
+		if trace != nil {
+			trace.record(point)
+		}
 		switch point {
 		case "clean.copy:before":
 			if !sawCopy {
@@ -115,7 +123,11 @@ func (f repackFixture) measureWindow(t testing.TB, mode string, puts int) repack
 			}
 		}
 		return nil
-	}})
+	}}
+	if trace != nil {
+		fs.WriterWait = trace.writerWait
+	}
+	db, cleanup := f.openClone(t, fs)
 	defer cleanup()
 
 	gets := make([]repackCall, puts*repackGetsPerPut)
@@ -218,6 +230,9 @@ func (f repackFixture) measureWindow(t testing.TB, mode string, puts int) repack
 		if result.OverlappingGets == 0 || result.OverlappingPuts == 0 {
 			t.Fatal("repack finished without overlapping both foreground operations")
 		}
+	}
+	if trace != nil {
+		trace.addCalls(begin, writes, retired)
 	}
 	result.DataFilesAfter, result.ReopenedStateHash = f.verify(t, db, repacking, puts)
 	return result

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -11,10 +12,12 @@ import (
 )
 
 func (s *Store) publishCatalog(catalog format.Catalog, candidate format.Frontier) error {
-	return s.publishCatalogFor(catalog, candidate, "")
+	return s.publishCatalogFor(catalog, candidate, "", nil)
 }
 
-func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Frontier, actor string) (result error) {
+var errCatalogChanged = errors.New("storage: catalog changed while preparing cleaner manifest")
+
+func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Frontier, actor string, offGate func(func() error) error) (result error) {
 	id, err := s.allocateID()
 	if err != nil {
 		return fault("catalog.identity", "not-applied", false, err)
@@ -46,11 +49,31 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 			}
 		}()
 	}
-	if err := s.IO.NewFile(name, b, actor+"catalog"); err != nil {
-		return fault("catalog.prepare", "not-applied", true, err)
+	prepare := func() error {
+		if err := s.IO.NewFile(name, b, actor+"catalog"); err != nil {
+			return fault("catalog.prepare", "not-applied", true, err)
+		}
+		if err := s.IO.SyncDir(s.Dir, actor+"catalog.dirsync"); err != nil {
+			return fault("catalog.dirsync", "not-applied", true, err)
+		}
+		return nil
 	}
-	if err := s.IO.SyncDir(s.Dir, actor+"catalog.dirsync"); err != nil {
-		return fault("catalog.dirsync", "not-applied", true, err)
+	if offGate != nil {
+		if err := offGate(prepare); err != nil {
+			return err
+		}
+		// Concurrent appends keep this catalog valid but advance the frontier.
+		// A rotation installs another catalog and requires a fresh splice.
+		if candidate.ManifestID != s.Current.ManifestID {
+			return errCatalogChanged
+		}
+		if s.Current.Generation == math.MaxUint64 {
+			return fault("clean.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
+		}
+		candidate = s.Current
+		candidate.Generation++
+	} else if err := prepare(); err != nil {
+		return err
 	}
 	candidate.ManifestID, candidate.ManifestHash = id, sha256.Sum256(b)
 	previous := s.Current.ManifestID
