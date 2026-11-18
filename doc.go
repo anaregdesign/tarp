@@ -4,6 +4,10 @@
 // Retained inputs and returned values are copied. Keep input backing arrays
 // stable until all calls using them have returned.
 //
+// Use OpenTyped with a Codec for each of the key and value types to work with
+// Go values. NewTypedDB shares an open DB with a typed view. Use compatible
+// codecs across reopens and restores.
+//
 // One process owns a directory. Its DB supports concurrent goroutines and
 // linearizable single-key operations. Successful writes sync the data and
 // commit frontier before acknowledgment. Inspect OpError for the outcome of
