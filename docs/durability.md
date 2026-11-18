@@ -7,7 +7,11 @@ passed on Go 1.26.11/1.27.4: Ubuntu 24.04.5 amd64, kernel 6.8.0-147-generic,
 local guest ext4 `data=ordered` with normal journaling/barriers and no DAX,
 QEMU 8.2.2 and a separately verified honest-flush volatile NBD block model.
 The external controller performed 328 phase cuts and two post-exhaustion cuts,
-discarded unflushed block state and verified file-only recovery/captured backups.
+waited for NBD EOF, discarded any RAM overlay, and verified file-only recovery/
+captured backups. All 330 engine cuts recorded zero dirty NBD overlay bytes;
+they still abruptly lost the complete guest CPU/RAM, including its page cache.
+The separate raw-device controls actually discarded 4,096 overlay-page bytes:
+flushed A survived and unflushed B was absent. Observed guest FUA traffic was zero.
 The recorded image/kernel hashes, exact features/mounts, storage parameters,
 source fingerprint and raw witnesses define this experimental boundary.
 NBD here backs a guest block device; it is not a network filesystem.

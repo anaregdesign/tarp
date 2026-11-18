@@ -184,8 +184,12 @@ The final homogeneous matrix at
 [`347a1a1f53be13100a8c83da7378b9af26e4657c`](https://github.com/anaregdesign/tarp/commit/347a1a1f53be13100a8c83da7378b9af26e4657c)
 passed **164 phase-cut cases per Go family**, with the strict live verifier in
 every case. A separate actual-exhaustion case adds one cut/reboot per family.
-These are real whole-QEMU SIGKILLs followed by independently discarded volatile
-NBD state, not engine-only process exits. Each job reran the actual flushed/
+These are real whole-QEMU SIGKILLs followed by NBD EOF and the controller's
+discard-any-RAM-overlay step, not engine-only process exits. All 328 phase
+cuts and both post-exhaustion cuts observed zero dirty/discarded NBD overlay
+bytes; complete guest RAM/page-cache loss still occurred. The separate raw
+controls actually discarded 4,096 overlay-page bytes while retaining flushed A
+and losing unflushed B. Each job reran those actual flushed/
 unflushed device controls before testing the engine.
 
 | Group | Cases/family | Go 1.27.4 | Go 1.26.11 |
@@ -236,7 +240,9 @@ ownership, and reopened after removing only the filler. The final cold reboot
 verified sequence 256, 128 live keys and capture/restore sequence 128, digest
 `d0abd8addaf476805e3cd7a8d6c67cdf2b4459514aea9d7f7b4c0600f21922d1`.
 EDQUOT and sync/close/unlink failure semantics have deterministic injected
-coverage; no quota-enabled physical device was tested or is implied.
+coverage. In particular, sync-time ENOSPC is injected evidence; the real
+bounded-device failures above were observed on writes. No quota-enabled
+physical device was tested or is implied.
 
 Retained `qualification-RUN_ID-1` artifacts contain `campaign.jsonl`,
 per-case `NNN-oracle.jsonl`, cut/recovery console logs, device controls and
