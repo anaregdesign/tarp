@@ -111,8 +111,12 @@ The interference profiles add one separately identified writer key.
   timings use 2.
 - Cyclic warm-OS application misses assert 8,192 actual Get file reads. A
   reproducible 4,096-operation, four-worker uniform-key workload records both
-  combined and separate read/durable-write distributions at approximately
-  95%/5%. Sixty-four fully durable Put/Delete samples cover ordinary and
+  combined and separate read/durable-write distributions. Its 3,891 Gets and
+  205 durable Puts use the same keys as the historical single-writer
+  `mixed_95r_5w` row. The new `mixed_multi_writer` schedule assigns 51–52
+  Puts to each worker and reports each worker’s counts and the number of
+  Puts whose API calls overlapped another Put. Run both schedules on matched
+  1 KiB clones with `go test -run '^$' -bench '^BenchmarkMixedWriters$' -benchtime=1x -v ./benchmark`. Sixty-four fully durable Put/Delete samples cover ordinary and
   record-by-record-rotation configurations without disabling any sync. One
   fully synced Put prefills the segment outside timing; all measured Put
   active IDs must match their declared rotating/nonrotating mode. Each

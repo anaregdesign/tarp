@@ -396,24 +396,11 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		if hooks.reads.Load()-before != 8192 {
 			t.Fatal("qualified application-miss window included cache hits")
 		}
-		mixed := measureCalls(t, 4096, 4, func(i int) error {
-			key := keys[(uint64(i)*2654435761)%uint64(len(keys))]
-			if i%20 == 0 {
-				return db.Put(key, value)
-			}
-			return get(key)
-		})
-		var readSamples, writeSamples []int64
-		for i, sample := range mixed.SamplesNS {
-			if i%20 == 0 {
-				writeSamples = append(writeSamples, sample)
-			} else {
-				readSamples = append(readSamples, sample)
-			}
-		}
-		vmMeasureLatency(write, "mixed_95r_5w", repetition, mixed)
-		vmMeasureLatency(write, "mixed_reads", repetition, latency(readSamples, int64(len(readSamples)), time.Duration(mixed.WallNS)))
-		vmMeasureLatency(write, "mixed_durable_writes", repetition, latency(writeSamples, int64(len(writeSamples)), time.Duration(mixed.WallNS)))
+		mixed := measureMixed(t, db, keys, value, true)
+		vmMeasureLatency(write, "mixed_multi_writer", repetition, mixed.all)
+		vmMeasureLatency(write, "mixed_multi_writer_reads", repetition, mixed.reads)
+		vmMeasureLatency(write, "mixed_multi_writer_puts", repetition, mixed.puts)
+		write("mixed_multi_writer_schedule", repetition, mixed.schedule)
 		for _, rotate := range []bool{false, true} {
 			t.Run(fmt.Sprintf("durable-%d-%t", repetition, rotate), func(t *testing.T) {
 				writeOpts := measurementWriteOptions(opts, len(keys[0]), size, rotate)
