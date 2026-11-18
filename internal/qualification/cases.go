@@ -20,6 +20,7 @@ type PowerCase struct {
 type RecoveryVerdict struct {
 	Source          string `json:"source"`
 	SourceSequence  uint64 `json:"source_sequence"`
+	SourceLiveKeys  int    `json:"source_live_keys"`
 	StateSHA256     string `json:"state_sha256"`
 	Output          string `json:"output"`
 	CaptureSequence uint64 `json:"capture_sequence"`
@@ -74,6 +75,7 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	pair("recovery", "overlap", 1, "compact.write", "compact.sync", "cleanup.unlink", "backup.parent.sync")
 	add("recovery", "overlap", "compact.remap:after", 1)
 	add("recovery", "overlap", "operation.ack:after", 1)
+	add("exhaustion", "exhaustion", "exhaustion.complete", 1)
 	if group == "smoke" {
 		wanted := map[string]string{
 			"init": "current.rename:after", "put": "data.sync:after", "insert": "current.dirsync:after",

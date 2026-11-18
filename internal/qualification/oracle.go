@@ -51,9 +51,11 @@ func ParseOracle(line string) (OracleEvent, bool, error) {
 	kind := map[string]string{
 		"TARP_ACK": "ack", "TARP_INTENT": "intent",
 		"TARP_ACK_DELETE": "ack_delete", "TARP_INTENT_DELETE": "intent_delete",
+		"TARP_NOT_APPLIED": "not_applied", "TARP_ERROR_COMMITTED": "error_committed",
 	}[parts[0]]
 	deleting := kind == "ack_delete" || kind == "intent_delete"
-	if kind == "" || deleting && len(parts) != 2 || !deleting && len(parts) != 3 {
+	keyOnly := deleting || kind == "not_applied" || kind == "error_committed"
+	if kind == "" || keyOnly && len(parts) != 2 || !keyOnly && len(parts) != 3 {
 		return OracleEvent{}, false, fmt.Errorf("invalid guest oracle event: %q", line)
 	}
 	key, err := hex.DecodeString(parts[1])
@@ -61,7 +63,7 @@ func ParseOracle(line string) (OracleEvent, bool, error) {
 		return OracleEvent{}, false, errors.New("oracle keys must be nonempty hexadecimal")
 	}
 	value := []byte{}
-	if !deleting && parts[2] != "-" {
+	if !keyOnly && parts[2] != "-" {
 		value, err = hex.DecodeString(parts[2])
 		if err != nil {
 			return OracleEvent{}, false, err
@@ -140,6 +142,20 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			pending := event
 			pending.Key, pending.Value = bytes.Clone(event.Key), bytes.Clone(event.Value)
 			oracle.pending = &pending
+		case "not_applied", "error_committed":
+			pending := oracle.pending
+			if pending == nil || !bytes.Equal(pending.Key, event.Key) || len(event.Value) != 0 {
+				return nil, errors.New("definitive outcome does not match a pending mutation")
+			}
+			if event.Type == "error_committed" {
+				oracle.values[string(event.Key)] = oracleValue{
+					Key: pending.Key, Value: pending.Value, Present: pending.Type == "intent",
+				}
+				oracle.acks++
+			} else if _, exists := oracle.values[string(event.Key)]; !exists {
+				oracle.values[string(event.Key)] = oracleValue{Key: pending.Key}
+			}
+			oracle.pending = nil
 		case "phase":
 			if event.Phase == "" {
 				return nil, errors.New("empty phase barrier")
@@ -158,7 +174,7 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			return nil, fmt.Errorf("unknown oracle event: %q", event.Type)
 		}
 	}
-	if oracle.Phase == "" || !allowEmptyInitialization && len(oracle.values) == 0 {
+	if oracle.Phase == "" || !allowEmptyInitialization && oracle.acks == 0 {
 		return nil, errors.New("a durably observed acknowledgment and terminal phase barrier are required")
 	}
 	return oracle, nil
@@ -170,6 +186,65 @@ func (o *Oracle) SequenceRange() (uint64, uint64) {
 		upper++
 	}
 	return o.acks, upper
+}
+
+// StateAt binds the one pending mutation to the actual reopened frontier.
+// The complete returned live set also makes unexpected index entries detectable.
+func (o *Oracle) StateAt(sequence uint64) (map[string][]byte, error) {
+	low, high := o.SequenceRange()
+	if sequence < low || sequence > high {
+		return nil, fmt.Errorf("recovered sequence %d outside [%d,%d]", sequence, low, high)
+	}
+	state := make(map[string][]byte, len(o.values)+1)
+	for key, value := range o.values {
+		if value.Present {
+			state[key] = bytes.Clone(value.Value)
+		}
+	}
+	if pending := o.pending; pending != nil && sequence == high {
+		key := string(pending.Key)
+		if pending.Type == "intent_delete" {
+			if _, present := state[key]; !present {
+				return nil, errors.New("an absent-key Delete cannot advance the committed sequence")
+			}
+			delete(state, key)
+		} else {
+			state[key] = bytes.Clone(pending.Value)
+		}
+	}
+	return state, nil
+}
+
+func (o *Oracle) VerifyAt(sequence uint64, liveKeys int, lookup func([]byte) ([]byte, bool, error)) (string, error) {
+	state, err := o.StateAt(sequence)
+	if err != nil {
+		return "", err
+	}
+	if liveKeys != len(state) {
+		return "", fmt.Errorf("recovered live index cardinality %d != witnessed %d", liveKeys, len(state))
+	}
+	return o.Verify(func(key []byte) ([]byte, bool, error) {
+		actual, present, err := lookup(key)
+		expected, expectedPresent := state[string(key)]
+		if err == nil && (present != expectedPresent || present && !bytes.Equal(actual, expected)) {
+			return nil, false, fmt.Errorf("key %x disagrees with reopened sequence %d", key, sequence)
+		}
+		return actual, present, err
+	})
+}
+
+// DigestAt permits the external witness to independently reconcile a recorded
+// recovery digest, without reading or repairing the guest's data files.
+func (o *Oracle) DigestAt(sequence uint64) (string, int, error) {
+	state, err := o.StateAt(sequence)
+	if err != nil {
+		return "", 0, err
+	}
+	digest, err := o.VerifyAt(sequence, len(state), func(key []byte) ([]byte, bool, error) {
+		value, present := state[string(key)]
+		return value, present, nil
+	})
+	return digest, len(state), err
 }
 
 // Verify runs only after file-only recovery; the oracle never repairs files.

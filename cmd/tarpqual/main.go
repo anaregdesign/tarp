@@ -28,6 +28,7 @@ func run(args []string, output io.Writer) error {
 	target := flags.String("output", "", "new output initramfs filename")
 	controls := flags.String("block-controls", "", "prepared disposable hosted-runner work directory")
 	campaignDir := flags.String("campaign", "", "prepared disposable hosted-runner work directory")
+	runtimeDir := flags.String("runtime-suite", "", "prepared disposable hosted-runner full-suite work directory")
 	group := flags.String("group", "", "bounded campaign group (default smoke)")
 	selected := flags.String("case", "", "one exact case name within the selected group")
 	list := flags.String("list-cases", "", "print the bounded phase matrix without running a VM")
@@ -39,6 +40,12 @@ func run(args []string, output io.Writer) error {
 		return errors.New("qualification: unexpected arguments")
 	}
 	idle := *probe == "" && *initrd == "" && *init == "" && *target == ""
+	if *runtimeDir != "" {
+		if !idle || *controls != "" || *campaignDir != "" || *group != "" || *selected != "" || *list != "" {
+			return errors.New("runtime-only arguments used with another mode")
+		}
+		return runtimeSuite(*runtimeDir, *confirm, output)
+	}
 	if *list != "" && idle && *controls == "" && *campaignDir == "" && *group == "" && *selected == "" && *confirm == "" {
 		cases, err := qualification.CampaignCases(*list)
 		if err != nil {

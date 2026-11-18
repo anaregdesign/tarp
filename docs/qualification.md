@@ -120,7 +120,7 @@ Recorded controls:
 `tarpqual -list-cases all` prints the named matrix without starting a guest.
 The optional `campaign` mode first reruns the independent device controls,
 then executes a selected group (`smoke`, `initialize`, `mutate`, `checkpoint`,
-`snapshots`, `recovery`, or `all`). A single exact case name can be selected
+`snapshots`, `recovery`, `exhaustion`, or `all`). A single exact case name can be selected
 for reproduction. Each case has a disclosed seed and occurrence, a fresh
 256 MiB data disk, and separate cut/recovery guests. Initial formatting uses
 4 KiB ext4 blocks, an internal journal, zero reserved-block percentage, and
@@ -137,17 +137,21 @@ The manual qualification selector also permits `1.26.x` to resolve that
 supported family's latest patch. This is **not** a PR/push CI matrix. Each
 manual job is limited to 60 minutes, its controller to 50 minutes/192 cases,
 and each guest to four minutes; only one guest runs at a time in a job.
-Same-ref jobs serialize per selected family/group. Independent bounded groups
+Same-ref jobs serialize per selected mode/family/group. Independent bounded groups
 can run on separate disposable hosted runners. Ordinary CI remains one
 Linux/latest-stable job.
 
 The external controller syncs every Put/Delete intent, nil acknowledgment and
 terminal phase to its own newly created journal before a cut. Acknowledged
-deletes remain explicit absent states, so older values cannot resurrect;
-one pending mutation permits only its whole old/new state. Capture markers
+deletes remain explicit absent states, so older values cannot resurrect.
+Definitive `not-applied` and `committed` error outcomes resolve the pending
+intent rather than incorrectly retaining an old/new window. A genuinely unknown
+mutation permits its old state at the acknowledged sequence or its whole new
+state at the next sequence, not an arbitrary independent combination. Capture markers
 bind a backup's separate acknowledged prefix and sequence before later writes.
 Reboot verification calls Open using files alone **before reading the oracle**,
-then checks values, absence, commit-sequence bounds and any published backup or
+then checks values, absence, exact sequence/content binding, complete live-index
+cardinality and any published backup or
 restore. An acknowledged publication must be present. Early initialization
 without CURRENT may instead be explicitly uninitialized; this is never
 permitted after the initial frontier's successful directory sync or API return.
@@ -160,6 +164,32 @@ state digest. Successful private raw disks are removed only after validation;
 the first failed disk is preserved in the bounded evidence directory. A missing
 phase or malformed/partial verdict fails the run. Implementing this matrix does
 not itself establish that all its cases have passed.
+
+The first 11-mode actual cut/reboot smoke passed in
+[44287402298](https://github.com/anaregdesign/tarp/actions/runs/44287402298).
+The full 63-case mutation/rotation group then passed on Go 1.27.4
+([44289411337](https://github.com/anaregdesign/tarp/actions/runs/44289411337)) and
+Go 1.26.11
+([44289418766](https://github.com/anaregdesign/tarp/actions/runs/44289418766)).
+These initial runs predate the stricter sequence/cardinality verifier: retain
+their raw journals/digests and explicitly distinguish retrospective
+sequence/digest reconciliation from a live-index cardinality observation.
+They are not, alone, completion of the full qualification matrix.
+
+### Selected-target full runtime and fuzz suite
+
+The separate manual `runtime` mode builds every package's race test binary on
+the selected Go family and records a bounded package/binary/SHA-256 manifest.
+The format package is additionally **compiled** with `-fuzz '^FuzzDecoders$'`;
+merely passing `-test.fuzz` to an ordinary binary is not coverage guidance.
+Inside the exact verified guest, all full suites run with temporary files on
+the disposable ext4 mount, followed by 15 seconds of coverage-guided fuzzing.
+Baseline completion and positive execution counts are required and retained.
+Opt-in helper environment variables are removed from child suites to prevent
+recursive VM/campaign execution. Child commands have three-minute bounds;
+the complete guest has a fifteen-minute bound. Host-side vet/module audits
+are recorded for the same selected family. This remains a manual qualification
+operation, not an older-Go or macOS normal-CI matrix.
 
 The diagnostic-only `tarpprofile` build tag records bounded acquired-lock to
 Unlock-entry spans and queued-writer counts for resource characterization.
@@ -257,6 +287,20 @@ backups. Their actual execution and the separate filesystem-exhaustion campaign
 remain release gates; a deterministic/subprocess pass does not replace them.
 
 ## Bounded-device exhaustion campaign
+
+The manual `campaign` mode's `exhaustion` group implements a real fixture,
+not injected ENOSPC. It holds a captured backup, acknowledges a 128-key
+4 KiB-value working set and updates, then fills only a regular filler file
+on the guarded 256 MiB guest device. Actual ENOSPC and allocated/free bytes
+are recorded. Releasing measured 128–256 KiB headroom must make checkpoint
+copy fail without publishing or poisoning the source. After releasing another
+2 MiB, checkpoint retry must preserve pinned old generations; completing the
+backup and retrying cleanup must reclaim them. A second real exhaustion must
+surface an admitted mutation's cause/outcome, uniformly fail-stop hot/miss
+reads, retain the repeated-Close error, and permit file-only reopen after
+removing only the filler. An externally witnessed final whole-VM cut and
+separate cold reboot validate all acknowledgments and the captured backup.
+The structured exhaustion verdict is mandatory before that phase can pass.
 
 Use only a dedicated disposable bounded filesystem in that VM. Injected space
 errors are already ordinary tests; actual delayed allocation/quota/writeback

@@ -95,13 +95,37 @@ func TestVMCampaignGuest(t *testing.T) {
 	if !known || cfg.Action != "crash" && cfg.Action != "verify" {
 		t.Fatal("case is not in the bounded phase matrix")
 	}
+	vmMountTarget(t, cfg.Action == "crash", cfg.Name, cfg.Seed)
+	dir, output := "/mnt/tarp-data/db", "/mnt/tarp-data/output"
+	if cfg.Action == "crash" {
+		if cfg.Mode == "exhaustion" {
+			vmExhaustion(t, dir, output, cfg.Seed)
+			t.Fatal("external exhaustion barrier returned")
+		}
+		for key, value := range map[string]string{
+			"TARP_POWERCUT_CONFIRM": "disposable-vm-only", "TARP_POWERCUT_DIR": dir,
+			"TARP_POWERCUT_POINT": cfg.Phase, "TARP_POWERCUT_MODE": cfg.Mode,
+			"TARP_POWERCUT_OUTPUT": output, "TARP_POWERCUT_N": strconv.Itoa(cfg.Occurrence),
+			"TARP_POWERCUT_SEED": strconv.FormatUint(cfg.Seed, 10),
+		} {
+			t.Setenv(key, value)
+		}
+		TestPowerCutGuest(t)
+		t.Fatal("external phase barrier returned")
+	}
+	verifyVMCampaign(t, cfg, dir, output)
+}
+
+func vmMountTarget(t *testing.T, format bool, name string, seed uint64) {
+	t.Helper()
+	requireDisposableGuest(t)
 	release, err := os.ReadFile("/etc/os-release")
 	kernel, kernelErr := os.ReadFile("/proc/sys/kernel/osrelease")
 	if err != nil || kernelErr != nil || !bytes.Contains(release, []byte("\nID=ubuntu\n")) ||
 		!bytes.Contains(release, []byte("\nVERSION_ID=\"24.04\"\n")) || !bytes.HasPrefix(kernel, []byte("6.8.")) {
 		t.Fatalf("requires pinned Ubuntu 24.04 / 6.8 target: %v", errors.Join(err, kernelErr))
 	}
-	if cfg.Action == "crash" {
+	if format {
 		guestCommand(t, "/usr/sbin/mkfs.ext4", "-q", "-F", "-b", "4096", "-m", "0",
 			"-E", "lazy_itable_init=0,lazy_journal_init=0", "/dev/vdb")
 	}
@@ -125,24 +149,10 @@ func TestVMCampaignGuest(t *testing.T) {
 			t.Fatalf("unsupported mount option %s", flag)
 		}
 	}
-	fmt.Printf("Go=%s GOMAXPROCS=%d case=%s seed=%d\n%s", runtime.Version(), runtime.GOMAXPROCS(0), cfg.Name, cfg.Seed, mount)
+	fmt.Printf("Go=%s GOMAXPROCS=%d case=%s seed=%d\n%s", runtime.Version(), runtime.GOMAXPROCS(0), name, seed, mount)
 	guestCommand(t, "/usr/bin/uname", "-a")
 	guestCommand(t, "/usr/sbin/tune2fs", "-l", "/dev/vdb")
 	fmt.Println("TARP_ENVIRONMENT_PASS")
-	dir, output := "/mnt/tarp-data/db", "/mnt/tarp-data/output"
-	if cfg.Action == "crash" {
-		for key, value := range map[string]string{
-			"TARP_POWERCUT_CONFIRM": "disposable-vm-only", "TARP_POWERCUT_DIR": dir,
-			"TARP_POWERCUT_POINT": cfg.Phase, "TARP_POWERCUT_MODE": cfg.Mode,
-			"TARP_POWERCUT_OUTPUT": output, "TARP_POWERCUT_N": strconv.Itoa(cfg.Occurrence),
-			"TARP_POWERCUT_SEED": strconv.FormatUint(cfg.Seed, 10),
-		} {
-			t.Setenv(key, value)
-		}
-		TestPowerCutGuest(t)
-		t.Fatal("external phase barrier returned")
-	}
-	verifyVMCampaign(t, cfg, dir, output)
 }
 
 func guestCommand(t *testing.T, name string, args ...string) {
@@ -177,7 +187,7 @@ func verifyVMDatabase(t *testing.T, db *DB, oracle *qualification.Oracle) string
 	if seq := db.store.Current.Sequence; seq < lo || seq > hi {
 		t.Fatalf("recovered sequence %d outside acknowledged/pending interval [%d,%d]", seq, lo, hi)
 	}
-	digest, err := oracle.Verify(func(key []byte) ([]byte, bool, error) {
+	digest, err := oracle.VerifyAt(db.store.Current.Sequence, len(db.index), func(key []byte) ([]byte, bool, error) {
 		value, err := db.Get(key)
 		if errors.Is(err, ErrNotFound) {
 			return nil, false, nil
@@ -199,7 +209,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 		t.Fatalf("committed source frontier is absent: %v", currentErr)
 	}
 	// No oracle is read until recovery has returned; it cannot reconstruct data.
-	db, err := Open(dir, testOptions())
+	db, err := Open(dir, vmCaseOptions(cfg.Mode))
 	if err != nil {
 		if cfg.Mode == "init" && !required && missingCurrent && errors.Is(err, ErrCorrupt) {
 			reportVMRecovery(t, qualification.RecoveryVerdict{Source: "explicit_uninitialized", Output: "not_applicable"})
@@ -210,6 +220,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 	oracle := guestOracle(t, "oracle.jsonl", cfg.Mode == "init")
 	digest := verifyVMDatabase(t, db, oracle)
 	sequence := db.store.Current.Sequence
+	liveKeys := len(db.index)
 	if cfg.Mode == "init" && len(db.index) != 0 {
 		t.Fatal("initialization invented a logical history")
 	}
@@ -217,10 +228,10 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 		t.Fatal(err)
 	}
 	outputState := "not_applicable"
-	if cfg.Mode == "backup" || cfg.Mode == "restore" || cfg.Mode == "overlap" {
+	if cfg.Mode == "backup" || cfg.Mode == "restore" || cfg.Mode == "overlap" || cfg.Mode == "exhaustion" {
 		capture := guestOracle(t, "capture-oracle.jsonl", false)
 		check := func(path string) {
-			db, err := Open(path, testOptions())
+			db, err := Open(path, vmCaseOptions(cfg.Mode))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,7 +259,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 			path := output
 			if cfg.Mode != "restore" {
 				path = filepath.Join(filepath.Dir(dir), "output-validated")
-				if err := Restore(context.Background(), output, path, testOptions()); err != nil {
+				if err := Restore(context.Background(), output, path, vmCaseOptions(cfg.Mode)); err != nil {
 					t.Fatalf("published incomplete backup: %v", err)
 				}
 			}
@@ -257,7 +268,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 		}
 	}
 	reportVMRecovery(t, qualification.RecoveryVerdict{
-		Source: "file_only", SourceSequence: sequence, StateSHA256: digest,
+		Source: "file_only", SourceSequence: sequence, SourceLiveKeys: liveKeys, StateSHA256: digest,
 		Output: outputState, CaptureSequence: cfg.CaptureSequence,
 	})
 }

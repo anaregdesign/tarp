@@ -12,7 +12,7 @@ on:
         required: true
         default: probe
         type: choice
-        options: [probe, controls, campaign]
+        options: [probe, controls, campaign, runtime]
       go-version:
         description: Explicit qualification toolchain; ordinary CI remains stable only
         required: true
@@ -24,7 +24,7 @@ on:
         required: true
         default: smoke
         type: choice
-        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, all]
+        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, all]
       case:
         description: Optional exact case name for a focused reproduction
         required: false
@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: vm-qualification-${{ github.ref }}-${{ inputs.go-version }}-${{ inputs.group }}
+  group: vm-qualification-${{ github.ref }}-${{ inputs.mode }}-${{ inputs.go-version }}-${{ inputs.group }}
   cancel-in-progress: false
 
 jobs:

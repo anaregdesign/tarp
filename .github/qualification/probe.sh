@@ -8,7 +8,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux ||
   exit 1
 fi
 mode="${TARP_QUAL_MODE:-probe}"
-[[ "$mode" == probe || "$mode" == controls || "$mode" == campaign ]]
+[[ "$mode" == probe || "$mode" == controls || "$mode" == campaign || "$mode" == runtime ]]
 [[ "$RUNNER_TEMP" == /* && "$GITHUB_RUN_ID" =~ ^[0-9]+$ &&
    "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
 test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 8388608
@@ -67,13 +67,40 @@ sha256sum "$work/vmlinuz" "$work/ubuntu-initrd" "$work/initrd" "$work/tarp-init"
   >"$work/evidence/boot.sha256"
 # Bound generated files in both probe and controller modes.
 ulimit -f 4194304
-if [[ "$mode" == controls || "$mode" == campaign ]]; then
+if [[ "$mode" == controls || "$mode" == campaign || "$mode" == runtime ]]; then
   cp .github/qualification/controls-guest.sh "$work/input/guest.sh"
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$work/input/tarp.test" .
   sha256sum "$work/input/tarp.test" >"$work/evidence/guest-binary.sha256"
   "$work/tarpqual" -block-controls "$work" -confirm disposable-vm-only \
     >"$work/evidence/control-verdict.json"
   cat "$work/evidence/control-verdict.json"
+  if [[ "$mode" == runtime ]]; then
+    go vet ./...
+    go list -m all >"$work/evidence/modules.txt"
+    test "$(wc -l <"$work/evidence/modules.txt")" -eq 1
+    test "$(go list -f '{{.Name}}' .)" = tarp
+    go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... \
+      >"$work/evidence/runtime-packages.txt"
+    index=0
+    while IFS= read -r package; do
+      test -n "$package" || continue
+      binary="runtime-$index.test"
+      if [[ "$package" == github.com/anaregdesign/tarp/internal/format ]]; then
+        go test -c -race -fuzz '^FuzzDecoders$' -o "$work/input/$binary" "$package"
+      else
+        go test -c -race -o "$work/input/$binary" "$package"
+      fi
+      printf '%s\t%s\t%s\n' "$package" "$binary" \
+        "$(sha256sum "$work/input/$binary" | awk '{ print $1 }')" >>"$work/input/runtime.tsv"
+      go version -m "$work/input/$binary" >>"$work/evidence/runtime-builds.txt"
+      index=$((index+1))
+    done <"$work/evidence/runtime-packages.txt"
+    cp "$work/input/runtime.tsv" "$work/evidence/runtime.tsv"
+    cp .github/qualification/runtime-guest.sh "$work/input/guest.sh"
+    "$work/tarpqual" -runtime-suite "$work" -confirm disposable-vm-only \
+      >"$work/evidence/runtime-verdict.json"
+    cat "$work/evidence/runtime-verdict.json"
+  fi
   if [[ "$mode" == campaign ]]; then
     cp .github/qualification/campaign-guest.sh "$work/input/guest.sh"
     "$work/tarpqual" -campaign "$work" -confirm disposable-vm-only \

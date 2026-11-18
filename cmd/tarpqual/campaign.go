@@ -64,8 +64,14 @@ func campaign(work, confirm, group, selected string, output io.Writer) (result e
 			return errors.Join(fmt.Errorf("qualification: case %s: %w", cfg.Name, err), preserveErr)
 		}
 	}
+	exhaustion := "not_run"
+	for _, cfg := range cases {
+		if cfg.Mode == "exhaustion" {
+			exhaustion = "pass"
+		}
+	}
 	verdict := map[string]any{"event": "campaign_pass", "group": group, "go": runtime.Version(),
-		"passed_cases": len(cases), "power_cuts": len(cases), "device_exhaustion": "not_run",
+		"passed_cases": len(cases), "power_cuts": len(cases), "device_exhaustion": exhaustion,
 		"qualified_measurements": "not_run"}
 	if err := log.record(verdict); err != nil {
 		return err
@@ -101,6 +107,8 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 	}
 	var events []qualification.OracleEvent
 	var sequenceMin, sequenceMax uint64
+	var witnessed *qualification.Oracle
+	exhausted := false
 	environment, phase, readerSeen := false, false, false
 	observe := func(payload string) (bool, error) {
 		if payload == "TARP_ENVIRONMENT_PASS" {
@@ -112,6 +120,20 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 		}
 		if !environment {
 			return false, errors.New("oracle event preceded the validated target environment")
+		}
+		if strings.HasPrefix(payload, "TARP_EXHAUSTION_PASS ") {
+			var verdict qualification.ExhaustionVerdict
+			if cfg.Mode != "exhaustion" || exhausted {
+				return false, errors.New("unexpected or repeated exhaustion verdict")
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(payload, "TARP_EXHAUSTION_PASS ")), &verdict); err != nil {
+				return false, err
+			}
+			if err := verdict.Validate(); err != nil {
+				return false, err
+			}
+			exhausted, cfg.RequireOutput = true, true
+			return false, log.record(map[string]any{"event": "exhaustion_verdict", "case": cfg.Name, "verdict": verdict})
 		}
 		event, recognized, err := qualification.ParseOracle(payload)
 		if err != nil || !recognized {
@@ -157,7 +179,7 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 		if event.Type != "phase" {
 			return false, nil
 		}
-		if event.Phase != cfg.Phase || cfg.Mode == "overlap" && !readerSeen {
+		if event.Phase != cfg.Phase || cfg.Mode == "overlap" && !readerSeen || cfg.Mode == "exhaustion" && !exhausted {
 			return false, errors.New("phase or concurrent-reader coverage does not match the selected case")
 		}
 		model, err := qualification.ReplayOracle(events, cfg.Mode == "init")
@@ -165,6 +187,7 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 			return false, err
 		}
 		sequenceMin, sequenceMax = model.SequenceRange()
+		witnessed = model
 		if cfg.Mode == "init" && (sequenceMin != 0 || sequenceMax != 0) {
 			return false, errors.New("initialization emitted unexpected logical mutations")
 		}
@@ -221,6 +244,10 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 			digest, err := hex.DecodeString(verdict.StateSHA256)
 			if err != nil || len(digest) != 32 || verdict.SourceSequence < sequenceMin || verdict.SourceSequence > sequenceMax {
 				return false, errors.New("invalid file-only recovery digest/sequence verdict")
+			}
+			expected, count, err := witnessed.DigestAt(verdict.SourceSequence)
+			if err != nil || expected != verdict.StateSHA256 || count != verdict.SourceLiveKeys {
+				return false, errors.New("recovery content/cardinality is not the witnessed state at its actual sequence")
 			}
 		case "explicit_uninitialized":
 			if cfg.Mode != "init" || cfg.Phase == "current.dirsync:after" || cfg.Phase == "operation.ack:after" ||
