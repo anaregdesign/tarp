@@ -3,26 +3,37 @@
 A standalone, file-backed, hash-indexed Go key-value library. The published module,
 tests, and measurement tools use the Go standard library only.
 
-**Every successful `Open` starts automatic incremental compaction.** Both new
-and reopened stores use one unversioned storage and backup format. A database
-or backup from the previous implementation returns `ErrUnsupportedFormat`.
-Opening it leaves the files untouched and restoring it leaves the destination
-unpublished. There is no migration path in this package.
+## Quick start
 
-The historical Linux/ext4 power-cut results and performance measurements cover
-the earlier storage implementation. Evidence for the current format and cleaner
-must be collected on their own revision. See the [durability contract](docs/durability.md),
-[qualification record](docs/qualification.md) and [historical baseline](docs/measurement-baseline.md).
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.0.1
+in a new module, run the commands below. In an existing module, run just
+the `go get` command.
+
+```sh
+mkdir tarp-example
+cd tarp-example
+go mod init example.com/tarp-example
+go get github.com/anaregdesign/tarp@v0.0.1
+```
+
+Save this as `main.go` to write a key to the local `store` directory and read it back.
 
 ```go
-package example
+package main
 
 import (
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/anaregdesign/tarp"
 )
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
 func run() (err error) {
 	db, err := tarp.Open("store", tarp.Options{})
@@ -43,9 +54,28 @@ func run() (err error) {
 }
 ```
 
+Run the example. It prints `value` and closes the database.
+
+```sh
+go run .
+```
+
+## Storage and compatibility
+
 The parent directory must exist. One process exclusively owns a directory, while
 its `DB` supports concurrent goroutines without caller locks. Individual key
 operations are atomic and linearizable; separate calls are not a transaction.
+
+**Every successful `Open` starts automatic incremental compaction.** Both new
+and reopened stores use one unversioned storage and backup format. A database
+or backup from the previous implementation returns `ErrUnsupportedFormat`.
+Opening it leaves the files untouched and restoring it leaves the destination
+unpublished. There is no migration path in this package.
+
+The historical Linux/ext4 power-cut results and performance measurements cover
+the earlier storage implementation. Evidence for the current format and cleaner
+must be collected on their own revision. See the [durability contract](docs/durability.md),
+[qualification record](docs/qualification.md) and [historical baseline](docs/measurement-baseline.md).
 
 ## Typed keys and values
 
