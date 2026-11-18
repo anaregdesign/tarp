@@ -147,11 +147,7 @@ func Scan(f io.ReaderAt, end int64, visit func(int64, Record, string) error) err
 	}
 	buffer := make([]byte, streamChunk)
 	for offset := int64(SegmentHeaderBytes); offset < end; {
-		var key string
-		record, err := SelectRecord(context.Background(), f, offset, end-offset, buffer, func(_ Record, k string) (io.Writer, error) {
-			key = k
-			return nil, nil
-		})
+		record, key, err := ReadRecordKey(context.Background(), f, offset, end-offset, buffer)
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("%w: truncated record: %w", ErrCorrupt, err)
 		}
