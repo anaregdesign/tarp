@@ -158,8 +158,7 @@ func (db *DB) Put(key, value []byte) error {
 	if err := db.opts.checkSize(uint64(len(key)), uint64(len(value))); err != nil {
 		return err
 	}
-	k, v := string(key), bytes.Clone(value)
-	return db.mutate(format.Put, k, v)
+	return db.mutate(format.Put, key, value)
 }
 
 // Delete durably removes one key. Missing keys return ErrNotFound without a write.
@@ -171,10 +170,10 @@ func (db *DB) Delete(key []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
-	return db.mutate(format.Delete, string(key), nil)
+	return db.mutate(format.Delete, key, nil)
 }
 
-func (db *DB) mutate(kind uint8, key string, value []byte) error {
+func (db *DB) mutate(kind uint8, key, value []byte) error {
 	op := "put"
 	if kind == format.Delete {
 		op = "delete"
@@ -198,13 +197,13 @@ func (db *DB) mutate(kind uint8, key string, value []byte) error {
 	}
 	if kind == format.Delete {
 		db.state.Lock()
-		_, exists := db.index[key]
+		_, exists := db.index[string(key)]
 		db.state.Unlock()
 		if !exists {
 			return ErrNotFound
 		}
 	}
-	loc, err := db.store.Append(kind, []byte(key), value, db.health)
+	loc, err := db.store.Append(kind, key, value, db.health)
 	if err != nil {
 		var fault *storage.Fault
 		if errors.As(err, &fault) && fault.Unsafe {
@@ -212,25 +211,34 @@ func (db *DB) mutate(kind uint8, key string, value []byte) error {
 		}
 		return operationError(op, "commit", err)
 	}
+	// The caller keeps inputs stable through return. Own retained data only
+	// after the append succeeds, outside the state lock used by readers.
+	k := string(key)
+	if kind == format.Put {
+		value = bytes.Clone(value)
+		if fs := db.store.IO; fs != nil && fs.PutCopied != nil {
+			fs.PutCopied(len(k), len(value))
+		}
+	}
 	db.state.Lock()
 	defer db.state.Unlock()
 	if err := db.health(); err != nil {
 		return &OpError{Operation: op, Phase: "memory-publication", Outcome: Committed, Err: err}
 	}
-	if old, exists := db.index[key]; exists {
+	if old, exists := db.index[k]; exists {
 		invalidatedSealed = old.File != loc.File
 		old.File.LiveBytes.Add(-old.Bytes)
 		old.File.Unpin()
 	}
 	if kind == format.Delete {
 		loc.File.DeleteBytes.Add(loc.Bytes)
-		delete(db.index, key)
-		db.cache.Delete(key)
+		delete(db.index, k)
+		db.cache.Delete(k)
 	} else {
 		loc.File.Pin()
 		loc.File.LiveBytes.Add(loc.Bytes)
-		db.index[key] = loc
-		db.cache.Put(key, value)
+		db.index[k] = loc
+		db.cache.Put(k, value)
 	}
 	return nil
 }

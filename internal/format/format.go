@@ -11,6 +11,7 @@ import (
 	"hash/crc32"
 	"io"
 	"math"
+	"sync"
 )
 
 const (
@@ -165,26 +166,50 @@ func Scan(f io.ReaderAt, end int64, visit func(int64, Record, string) error) err
 	return nil
 }
 
+// Read small indexed records in one I/O. Only a value-sized copy enters the
+// cache. Larger reads validate the header before allocating the payload.
+const indexedReadBufferBytes = 8 << 10
+
+var indexedReadBuffers = sync.Pool{
+	New: func() any { return new([indexedReadBufferBytes]byte) },
+}
+
 func ReadValue(f io.ReaderAt, offset, size int64, key string, sequence uint64) ([]byte, error) {
-	var h [RecordHeaderBytes]byte
-	if _, err := f.ReadAt(h[:], offset); err != nil {
+	if size <= RecordHeaderBytes || size > math.MaxInt || offset < 0 || offset > math.MaxInt64-size {
+		return nil, bad("indexed record bounds")
+	}
+	var first []byte
+	if size <= indexedReadBufferBytes {
+		buf := indexedReadBuffers.Get().(*[indexedReadBufferBytes]byte)
+		defer indexedReadBuffers.Put(buf)
+		first = buf[:size]
+	} else {
+		first = make([]byte, RecordHeaderBytes)
+	}
+	if err := readChunk(context.Background(), f, first, offset); err != nil {
 		return nil, err
 	}
-	r, err := DecodeRecord(h[:], size)
+	r, err := DecodeRecord(first[:RecordHeaderBytes], size)
 	if err != nil {
 		return nil, err
 	}
-	if r.Bytes() != size || r.Sequence != sequence || r.Kind != Put || r.KeyBytes != int64(len(key)) ||
-		uint64(size) > uint64(int(^uint(0)>>1)) {
+	if r.Bytes() != size || r.Sequence != sequence || r.Kind != Put || r.KeyBytes != int64(len(key)) {
 		return nil, bad("indexed record identity")
 	}
+	if int64(len(first)) == size {
+		payload := first[RecordHeaderBytes:]
+		if !bytes.Equal(payload[:len(key)], []byte(key)) || crc32.Checksum(payload, table) != r.PayloadCRC {
+			return nil, bad("indexed record payload")
+		}
+		return bytes.Clone(payload[len(key):]), nil
+	}
 	k := make([]byte, len(key))
-	if _, err := f.ReadAt(k, offset+RecordHeaderBytes); err != nil {
+	if err := readChunk(context.Background(), f, k, offset+RecordHeaderBytes); err != nil {
 		return nil, err
 	}
 	value := make([]byte, int(r.ValueBytes))
 	if len(value) != 0 {
-		if _, err := f.ReadAt(value, offset+RecordHeaderBytes+r.KeyBytes); err != nil {
+		if err := readChunk(context.Background(), f, value, offset+RecordHeaderBytes+r.KeyBytes); err != nil {
 			return nil, err
 		}
 	}

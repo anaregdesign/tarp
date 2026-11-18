@@ -174,14 +174,15 @@ func TestRepeatedCompactionDoesNotRetainOldFileRegistry(t *testing.T) {
 func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(fmt.Sprint(rotate), func(t *testing.T) {
-			db := newTestDB(t, testOptions(), nil)
+			db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{})})
 			mustPut(t, db, "k", "old")
 			if rotate {
 				mustPut(t, db, "pad", string(make([]byte, 60)))
 			}
+			activeID := db.store.Current.ActiveID
 			db.store.Current.Generation = math.MaxUint64 - 1
 			err := db.Put([]byte("k"), []byte("new"))
-			if rotate && err == nil || !rotate && err != nil {
+			if err != nil {
 				t.Fatalf("rotation=%t: %v", rotate, err)
 			}
 			current, readErr := os.ReadFile(filepath.Join(db.store.Dir, "CURRENT"))
@@ -189,17 +190,13 @@ func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 				t.Fatal(readErr)
 			}
 			frontier, decodeErr := format.DecodeFrontier(current)
-			if decodeErr != nil || frontier.Generation != math.MaxUint64 {
+			if decodeErr != nil || frontier.Generation != math.MaxUint64 || (frontier.ActiveID != activeID) != rotate {
 				t.Fatalf("invalid last publication: %+v %v", frontier, decodeErr)
 			}
 			if err := db.Put([]byte("k"), []byte("never")); err == nil {
 				t.Fatal("exhausted generation accepted")
 			}
-			expected := "new"
-			if rotate {
-				expected = "old"
-			}
-			wantValue(t, db, "k", expected)
+			wantValue(t, db, "k", "new")
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +204,7 @@ func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantValue(t, reopened, "k", expected)
+			wantValue(t, reopened, "k", "new")
 			if err := reopened.Close(); err != nil {
 				t.Fatal(err)
 			}

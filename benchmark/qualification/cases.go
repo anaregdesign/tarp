@@ -53,9 +53,8 @@ func CampaignCases(group string) ([]PowerCase, error) {
 		pair("mutate", mode, 1, "current.rename", "current.dirsync")
 		add("mutate", mode, "operation.ack:after", 1)
 	}
-	pair("mutate", "rotate", 1, "segment.write", "segment.sync", "catalog.write", "catalog.sync", "catalog.dirsync",
+	pair("mutate", "rotate", 1, "segment.write", "data.write", "segment.sync", "catalog.write", "catalog.sync", "catalog.dirsync",
 		"current.write", "current.sync", "current.rename", "current.dirsync")
-	pair("mutate", "rotate", 2, "current.write", "current.sync", "current.rename", "current.dirsync")
 	add("mutate", "rotate", "operation.ack:after", 1)
 	pair("checkpoint", "compact", 1, "compact.segment.write", "compact.segment.sync", "compact.write", "compact.sync", "cleanup.unlink")
 	pair("checkpoint", "compact", 2, "compact.write")
