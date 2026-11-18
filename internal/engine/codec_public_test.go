@@ -16,17 +16,19 @@ func fixedCodecCase[T comparable](codec tarp.Codec[T], value T, wire string) fun
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := codec.Encode(value)
-		if err != nil || !bytes.Equal(got, want) {
-			t.Fatalf("Encode(%v) = %x, %v; want %x", value, got, err, want)
-		}
-		decoded, err := codec.Decode(want)
-		if err != nil || decoded != value {
-			t.Fatalf("Decode(%x) = %v, %v; want %v", want, decoded, err, value)
-		}
-		for _, malformed := range [][]byte{want[:len(want)-1], append(bytes.Clone(want), 0)} {
-			if _, err := codec.Decode(malformed); err == nil {
-				t.Errorf("Decode(%x) accepted %d bytes; want %d", malformed, len(malformed), len(want))
+		for _, c := range []tarp.Codec[T]{codec, mustDerive[T](t)} {
+			got, err := c.Encode(value)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("%T.Encode(%v) = %x, %v; want %x", c, value, got, err, want)
+			}
+			decoded, err := c.Decode(want)
+			if err != nil || decoded != value {
+				t.Fatalf("%T.Decode(%x) = %v, %v; want %v", c, want, decoded, err, value)
+			}
+			for _, malformed := range [][]byte{want[:len(want)-1], append(bytes.Clone(want), 0)} {
+				if _, err := c.Decode(malformed); err == nil {
+					t.Errorf("%T.Decode(%x) accepted %d bytes; want %d", c, malformed, len(malformed), len(want))
+				}
 			}
 		}
 	}
