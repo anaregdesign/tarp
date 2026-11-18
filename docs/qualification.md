@@ -108,6 +108,58 @@ This tests the actual virtual-device path, not merely a QEMU cache-mode label.
 Its `block-controls.jsonl` and `block-serial.log` are retained alongside the
 verdict; it is still not the complete tarp qualification campaign.
 
+Recorded controls:
+
+| Run | Evidence | Limit |
+| --- | --- | --- |
+| [44279373672](https://github.com/anaregdesign/tarp/actions/runs/44279373672) | Offline Ubuntu 24.04.5 / amd64 6.8.0-147 / ext4 ordered probe passed, with pass **and** successful-exit markers | Environment availability only |
+| [44281246556](https://github.com/anaregdesign/tarp/actions/runs/44281246556) | Actual raw-device path: synced pattern survived, acknowledged unsynced pattern was discarded after whole-QEMU SIGKILL and NBD quiescence | One FLUSH, two 512-byte writes, 4096 overlay-page bytes discarded; frontend FUA count zero, not an observed guest FUA test |
+
+### Bounded engine phase groups
+
+`tarpqual -list-cases all` prints the named matrix without starting a guest.
+The optional `campaign` mode first reruns the independent device controls,
+then executes a selected group (`smoke`, `initialize`, `mutate`, `checkpoint`,
+`snapshots`, `recovery`, or `all`). A single exact case name can be selected
+for reproduction. Each case has a disclosed seed and occurrence, a fresh
+256 MiB data disk, and separate cut/recovery guests. Initial formatting uses
+4 KiB ext4 blocks, an internal journal, zero reserved-block percentage, and
+non-lazy inode/journal initialization; the actual features and ordered mount
+are recorded. The recovery guest never reformats.
+
+```sh
+gh workflow run qualification.yml --ref REVIEWED_REF \
+  -f confirmation=disposable-vm-only -f mode=campaign \
+  -f go-version=stable -f group=smoke
+```
+
+The manual qualification selector also permits `1.26.x` to resolve that
+supported family's latest patch. This is **not** a PR/push CI matrix. Each
+manual job is limited to 60 minutes, its controller to 50 minutes/192 cases,
+and each guest to four minutes; only one guest runs at a time in a job.
+Same-ref jobs serialize per selected family. Ordinary CI remains one
+Linux/latest-stable job.
+
+The external controller syncs every Put/Delete intent, nil acknowledgment and
+terminal phase to its own newly created journal before a cut. Acknowledged
+deletes remain explicit absent states, so older values cannot resurrect;
+one pending mutation permits only its whole old/new state. Capture markers
+bind a backup's separate acknowledged prefix and sequence before later writes.
+Reboot verification calls Open using files alone **before reading the oracle**,
+then checks values, absence, commit-sequence bounds and any published backup or
+restore. An acknowledged publication must be present. Early initialization
+without CURRENT may instead be explicitly uninitialized; this is never
+permitted after the initial frontier's successful directory sync or API return.
+Overlapping cases hold a slow backup while reads, updates/deletes and
+checkpoint/remapping/reclamation run.
+
+`campaign.jsonl`, immutable per-case oracle/capture files and both console logs
+retain the actual phase, seed, device counters, SIGKILL/EOF outcome and recovered
+state digest. Successful private raw disks are removed only after validation;
+the first failed disk is preserved in the bounded evidence directory. A missing
+phase or malformed/partial verdict fails the run. Implementing this matrix does
+not itself establish that all its cases have passed.
+
 The initial environment probe is **not qualification**: QEMU writeback alone
 does not model loss of the host page cache. Flushed-survives/unflushed-is-lost
 controls on a verified volatile block backend and the full external-witness
@@ -144,8 +196,10 @@ ssh disposable-tarp-guest env \
 ```
 
 The guest requires a fresh, nonexistent directory in an existing test parent.
-It durably seeds a known value, emits hexadecimal `TARP_ACK` records, emits at
-most one pending `TARP_INTENT`, and pauses indefinitely at `TARP_PHASE`.
+It durably seeds known values and update/delete history, emits hexadecimal
+`TARP_ACK`/`TARP_ACK_DELETE` records, emits at most one pending
+`TARP_INTENT`/`TARP_INTENT_DELETE`, and pauses indefinitely at `TARP_PHASE`.
+`TARP_CAPTURE`, reader/pin counters and API-return markers are typed metadata.
 `tarporacle` creates a new 0600 JSONL log, syncs its file and parent before use,
 then syncs every event **before** printing `durable ...`. It never overwrites
 an oracle or invokes a hypervisor/power command.
@@ -189,10 +243,10 @@ present it must independently restore/open and match the journal's seeded state.
 Validate backups with the public Restore API into another new destination,
 then use tarporacle against that restored database.
 
-Initialization, tail-truncation, acknowledged deletes/reinsertion histories,
-concurrent readers/writers/slow backups, and every filesystem/storage boundary
-still require composed VM campaign cases. The deterministic/subprocess harness
-is a starting matrix, not evidence that these external campaigns happened.
+The bounded groups additionally compose initialization, tail-truncation,
+acknowledged deletes/reinsertion histories and overlapping readers/writers/slow
+backups. Their actual execution and the separate filesystem-exhaustion campaign
+remain release gates; a deterministic/subprocess pass does not replace them.
 
 ## Bounded-device exhaustion campaign
 

@@ -1,0 +1,214 @@
+package qualification
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+type OracleEvent struct {
+	Type     string `json:"type"`
+	Key      []byte `json:"key,omitempty"`
+	Value    []byte `json:"value,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+	Sequence uint64 `json:"sequence,omitempty"`
+	Count    uint64 `json:"count,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+}
+
+func ParseOracle(line string) (OracleEvent, bool, error) {
+	line, recognized := ConsolePayload(line)
+	if !recognized {
+		return OracleEvent{}, false, nil
+	}
+	parts := strings.Fields(line)
+	if len(parts) == 2 && parts[0] == "TARP_PHASE" {
+		return OracleEvent{Type: "phase", Phase: parts[1]}, true, nil
+	}
+	if len(parts) == 2 {
+		switch parts[0] {
+		case "TARP_CAPTURE", "TARP_READS", "TARP_PINNED":
+			value, err := strconv.ParseUint(parts[1], 10, 64)
+			if err != nil {
+				return OracleEvent{}, false, err
+			}
+			if parts[0] == "TARP_CAPTURE" {
+				return OracleEvent{Type: "capture", Sequence: value}, true, nil
+			}
+			return OracleEvent{Type: strings.ToLower(strings.TrimPrefix(parts[0], "TARP_")), Count: value}, true, nil
+		case "TARP_OPERATION_ACK":
+			return OracleEvent{Type: "operation_ack", Mode: parts[1]}, true, nil
+		}
+	}
+	kind := map[string]string{
+		"TARP_ACK": "ack", "TARP_INTENT": "intent",
+		"TARP_ACK_DELETE": "ack_delete", "TARP_INTENT_DELETE": "intent_delete",
+	}[parts[0]]
+	deleting := kind == "ack_delete" || kind == "intent_delete"
+	if kind == "" || deleting && len(parts) != 2 || !deleting && len(parts) != 3 {
+		return OracleEvent{}, false, fmt.Errorf("invalid guest oracle event: %q", line)
+	}
+	key, err := hex.DecodeString(parts[1])
+	if err != nil || len(key) == 0 {
+		return OracleEvent{}, false, errors.New("oracle keys must be nonempty hexadecimal")
+	}
+	value := []byte{}
+	if !deleting && parts[2] != "-" {
+		value, err = hex.DecodeString(parts[2])
+		if err != nil {
+			return OracleEvent{}, false, err
+		}
+	}
+	return OracleEvent{Type: kind, Key: key, Value: value}, true, nil
+}
+
+func ReadOracle(input io.Reader) ([]OracleEvent, error) {
+	reader := bufio.NewReaderSize(io.LimitReader(input, (8<<20)+1), 64<<10)
+	var events []OracleEvent
+	total := 0
+	for {
+		line, err := reader.ReadSlice('\n')
+		if err == io.EOF && len(line) == 0 {
+			return events, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("incomplete or oversized oracle line: %w", err)
+		}
+		total += len(line)
+		if total > 8<<20 || len(events) == 8192 {
+			return nil, errors.New("qualification: oracle history exceeds its bound")
+		}
+		var event OracleEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+}
+
+type oracleValue struct {
+	Key     []byte `json:"key"`
+	Value   []byte `json:"value,omitempty"`
+	Present bool   `json:"present"`
+}
+
+type Oracle struct {
+	values  map[string]oracleValue
+	pending *OracleEvent
+	Phase   string
+	acks    uint64
+}
+
+func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle, error) {
+	oracle := &Oracle{values: make(map[string]oracleValue)}
+	for _, event := range events {
+		if oracle.Phase != "" {
+			return nil, errors.New("oracle events after the terminal phase barrier")
+		}
+		deleting := event.Type == "ack_delete" || event.Type == "intent_delete"
+		switch event.Type {
+		case "ack", "ack_delete":
+			if len(event.Key) == 0 || deleting && len(event.Value) != 0 {
+				return nil, errors.New("invalid acknowledged mutation")
+			}
+			if pending := oracle.pending; pending != nil {
+				want := "intent"
+				if deleting {
+					want = "intent_delete"
+				}
+				if pending.Type != want || !bytes.Equal(pending.Key, event.Key) || !bytes.Equal(pending.Value, event.Value) {
+					return nil, errors.New("ack does not match pending intent")
+				}
+				oracle.pending = nil
+			}
+			oracle.values[string(event.Key)] = oracleValue{
+				Key: bytes.Clone(event.Key), Value: bytes.Clone(event.Value), Present: !deleting,
+			}
+			oracle.acks++
+		case "intent", "intent_delete":
+			if oracle.pending != nil || len(event.Key) == 0 || deleting && len(event.Value) != 0 {
+				return nil, errors.New("one nonempty-key pending mutation at a time is required")
+			}
+			pending := event
+			pending.Key, pending.Value = bytes.Clone(event.Key), bytes.Clone(event.Value)
+			oracle.pending = &pending
+		case "phase":
+			if event.Phase == "" {
+				return nil, errors.New("empty phase barrier")
+			}
+			oracle.Phase = event.Phase
+		case "capture":
+			if oracle.pending != nil || event.Sequence != oracle.acks {
+				return nil, errors.New("capture sequence does not match the complete acknowledged prefix")
+			}
+		case "reads", "pinned":
+		case "operation_ack":
+			if event.Mode == "" || oracle.pending != nil {
+				return nil, errors.New("invalid operation acknowledgment")
+			}
+		default:
+			return nil, fmt.Errorf("unknown oracle event: %q", event.Type)
+		}
+	}
+	if oracle.Phase == "" || !allowEmptyInitialization && len(oracle.values) == 0 {
+		return nil, errors.New("a durably observed acknowledgment and terminal phase barrier are required")
+	}
+	return oracle, nil
+}
+
+func (o *Oracle) SequenceRange() (uint64, uint64) {
+	upper := o.acks
+	if o.pending != nil {
+		upper++
+	}
+	return o.acks, upper
+}
+
+// Verify runs only after file-only recovery; the oracle never repairs files.
+// A pending mutation may be entirely absent or applied, never a partial value.
+func (o *Oracle) Verify(lookup func([]byte) ([]byte, bool, error)) (string, error) {
+	keys := make([]string, 0, len(o.values)+1)
+	for key := range o.values {
+		keys = append(keys, key)
+	}
+	if o.pending != nil {
+		if _, exists := o.values[string(o.pending.Key)]; !exists {
+			keys = append(keys, string(o.pending.Key))
+		}
+	}
+	sort.Strings(keys)
+	actual := make([]oracleValue, 0, len(keys))
+	for _, key := range keys {
+		value, present, err := lookup([]byte(key))
+		if err != nil {
+			return "", fmt.Errorf("oracle read %x: %w", key, err)
+		}
+		old := o.values[key]
+		allowed := present == old.Present && (!present || bytes.Equal(value, old.Value))
+		if pending := o.pending; pending != nil && key == string(pending.Key) {
+			newPresent := pending.Type == "intent"
+			allowed = allowed || present == newPresent && (!present || bytes.Equal(value, pending.Value))
+		}
+		if !allowed {
+			return "", fmt.Errorf("acknowledged/pending key %x has a forbidden recovered state: present=%t value=%x", key, present, value)
+		}
+		if !present {
+			value = nil
+		}
+		actual = append(actual, oracleValue{Key: []byte(key), Value: value, Present: present})
+	}
+	data, err := json.Marshal(actual)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
+}

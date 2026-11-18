@@ -27,6 +27,10 @@ func run(args []string, output io.Writer) error {
 	init := flags.String("init", "", "static disposable-guest PID 1 binary")
 	target := flags.String("output", "", "new output initramfs filename")
 	controls := flags.String("block-controls", "", "prepared disposable hosted-runner work directory")
+	campaignDir := flags.String("campaign", "", "prepared disposable hosted-runner work directory")
+	group := flags.String("group", "", "bounded campaign group (default smoke)")
+	selected := flags.String("case", "", "one exact case name within the selected group")
+	list := flags.String("list-cases", "", "print the bounded phase matrix without running a VM")
 	confirm := flags.String("confirm", "", "explicit disposable-vm-only confirmation")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -34,7 +38,24 @@ func run(args []string, output io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("qualification: unexpected arguments")
 	}
-	if *controls != "" && *probe == "" && *initrd == "" && *init == "" && *target == "" {
+	idle := *probe == "" && *initrd == "" && *init == "" && *target == ""
+	if *list != "" && idle && *controls == "" && *campaignDir == "" && *group == "" && *selected == "" && *confirm == "" {
+		cases, err := qualification.CampaignCases(*list)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(cases)
+	}
+	if *campaignDir != "" && idle && *controls == "" && *list == "" {
+		if *group == "" {
+			*group = "smoke"
+		}
+		return campaign(*campaignDir, *confirm, *group, *selected, output)
+	}
+	if *campaignDir != "" || *group != "" || *selected != "" || *list != "" {
+		return errors.New("campaign-only arguments used with another mode")
+	}
+	if *controls != "" && idle {
 		return blockControls(*controls, *confirm, output)
 	}
 	if *controls == "" && *confirm == "" && *probe != "" && *initrd == "" && *init == "" && *target == "" {
@@ -53,5 +74,5 @@ func run(args []string, output io.Writer) error {
 	if *controls == "" && *confirm == "" && *probe == "" && *initrd != "" && *init != "" && *target != "" {
 		return qualification.AppendInitramfs(*initrd, *init, *target)
 	}
-	return errors.New("use -verify-probe FILE, -append-initrd FILE -init BINARY -output NEW_FILE, or -block-controls WORK -confirm disposable-vm-only")
+	return errors.New("use -verify-probe FILE, -append-initrd FILE -init BINARY -output NEW_FILE, -list-cases GROUP, or guarded -block-controls/-campaign WORK")
 }

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -117,6 +118,9 @@ func linearizable(calls []observedCall) bool {
 			next, exists := value, present
 			switch op.kind {
 			case "put":
+				if op.missing {
+					continue
+				}
 				next, exists = op.value, true
 			case "delete":
 				if op.missing == present {
@@ -127,6 +131,8 @@ func linearizable(calls []observedCall) bool {
 				if op.missing == present || present && op.got != value {
 					continue
 				}
+			default:
+				continue
 			}
 			if search(done|bit, next, exists) {
 				return true
@@ -168,7 +174,7 @@ func TestSeededHistoriesArePerKeyLinearizable(t *testing.T) {
 					}
 					op.end = clock.Add(1)
 					op.missing = errors.Is(err, ErrNotFound)
-					if err != nil && !op.missing {
+					if err != nil && (!op.missing || op.kind == "put") {
 						t.Error(err)
 					}
 					history[i] = op
@@ -188,6 +194,13 @@ func TestSeededHistoriesArePerKeyLinearizable(t *testing.T) {
 				t.Fatalf("seed %d key %s non-linearizable: %+v", seed, key, calls)
 			}
 		}
+	}
+}
+
+func TestLinearizabilityOracleRejectsImpossiblePutResult(t *testing.T) {
+	calls := []observedCall{{kind: "put", value: "v", missing: true, start: 1, end: 2}}
+	if linearizable(calls) {
+		t.Fatal("an impossible Put ErrNotFound response was accepted")
 	}
 }
 
@@ -340,12 +353,12 @@ func TestPowerCutGuest(t *testing.T) {
 		mode = "put"
 	}
 	switch mode {
-	case "put", "rotate", "compact", "backup", "restore":
+	case "init", "put", "insert", "delete", "reinsert", "rotate", "compact", "backup", "restore", "recover", "overlap":
 	default:
-		t.Fatal("mode must be put, rotate, compact, backup or restore")
+		t.Fatal("unknown phase-controlled power-cut mode")
 	}
 	output := os.Getenv("TARP_POWERCUT_OUTPUT")
-	if (mode == "backup" || mode == "restore") && output == "" {
+	if (mode == "backup" || mode == "restore" || mode == "overlap") && output == "" {
 		t.Fatal("backup/restore requires an explicit new output directory")
 	}
 	occurrence := 1
@@ -356,36 +369,86 @@ func TestPowerCutGuest(t *testing.T) {
 		}
 		occurrence = n
 	}
-	count := 0
-	armed := false
-	faults := &storage.IO{Hook: func(p string) error {
-		if armed && p == point {
-			count++
-			if count == occurrence {
-				fmt.Printf("TARP_PHASE %s\n", p)
-				for {
-					time.Sleep(time.Hour)
-				}
+	var count, reads atomic.Int64
+	var armed, captured atomic.Bool
+	armed.Store(mode == "init")
+	captureReady, releaseBackup := make(chan struct{}), make(chan struct{})
+	var db *DB
+	pause := func(p string) {
+		if armed.Load() && p == point && count.Add(1) == int64(occurrence) {
+			if mode == "overlap" {
+				fmt.Printf("TARP_READS %d\n", reads.Load())
+			}
+			fmt.Printf("TARP_PHASE %s\n", p)
+			for {
+				time.Sleep(time.Hour)
 			}
 		}
+	}
+	faults := &storage.IO{Hook: func(p string) error {
+		if mode == "overlap" && p == "backup.copy:before" && captured.CompareAndSwap(false, true) {
+			fmt.Printf("TARP_CAPTURE %d\n", db.store.Current.Sequence)
+			close(captureReady)
+			<-releaseBackup
+		}
+		pause(p)
 		return nil
 	}}
-	db, err := openWithIO(dir, testOptions(), faults)
+	var err error
+	db, err = openWithIO(dir, testOptions(), faults)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode == "compact" {
-		mustPut(t, db, "oracle", "obsolete")
+	if mode == "init" {
+		fmt.Println("TARP_OPERATION_ACK init")
+		pause("operation.ack:after")
+		t.Fatal("initialization phase was not reached")
 	}
-	mustPut(t, db, "oracle", "acknowledged")
-	fmt.Printf("TARP_ACK %x %x\n", []byte("oracle"), []byte("acknowledged"))
+	put := func(key, value string) {
+		token := fmt.Sprintf("%x", value)
+		if value == "" {
+			token = "-"
+		}
+		fmt.Printf("TARP_INTENT %x %s\n", key, token)
+		mustPut(t, db, key, value)
+		fmt.Printf("TARP_ACK %x %s\n", key, token)
+	}
+	remove := func(key string) {
+		fmt.Printf("TARP_INTENT_DELETE %x\n", key)
+		if err := db.Delete([]byte(key)); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("TARP_ACK_DELETE %x\n", key)
+	}
+	seed := uint64(1)
+	if text := os.Getenv("TARP_POWERCUT_SEED"); text != "" {
+		seed, err = strconv.ParseUint(text, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rng := rand.New(rand.NewPCG(seed, 0x100))
+	for i := 0; i < 8; i++ {
+		put(fmt.Sprintf("k%d", i), fmt.Sprintf("%016x", rng.Uint64()))
+	}
+	for i := 0; i < 8; i++ {
+		put("history", fmt.Sprintf("%016x", rng.Uint64()))
+	}
+	put("deleted", "must-not-resurrect")
+	remove("deleted")
+	put("oracle", "acknowledged")
 	if mode == "rotate" {
-		padding := make([]byte, 60)
-		mustPut(t, db, "padding", string(padding))
-		fmt.Printf("TARP_ACK %x %x\n", []byte("padding"), padding)
+		pendingBytes := int64(format.RecordHeaderBytes + len("oracle") + len("possible"))
+		for db.store.Current.ActiveEnd+pendingBytes <= db.opts.MaxDataFileBytes {
+			put("p", "")
+		}
+	}
+	if mode == "reinsert" {
+		remove("oracle")
 	}
 	backup := filepath.Join(filepath.Dir(dir), filepath.Base(dir)+"-restore-source")
 	if mode == "restore" {
+		fmt.Printf("TARP_CAPTURE %d\n", db.store.Current.Sequence)
 		if err := db.Backup(context.Background(), backup); err != nil {
 			t.Fatal(err)
 		}
@@ -393,20 +456,76 @@ func TestPowerCutGuest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	armed = true
+	if mode == "recover" {
+		active := db.store.Files[db.store.Current.ActiveID].Path
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		fd, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := fd.Write([]byte("uncommitted-tail"))
+		if err := errors.Join(writeErr, fd.Sync(), fd.Close()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	armed.Store(true)
 	switch mode {
 	case "put", "rotate":
-		fmt.Printf("TARP_INTENT %x %x\n", []byte("pending"), []byte("possible"))
-		mustPut(t, db, "pending", "possible")
+		put("oracle", "possible")
+	case "insert":
+		put("pending", "possible")
+	case "delete":
+		remove("oracle")
+	case "reinsert":
+		put("oracle", "reinserted")
 	case "compact":
 		_, err = db.Compact(context.Background())
 	case "backup":
+		fmt.Printf("TARP_CAPTURE %d\n", db.store.Current.Sequence)
 		err = db.Backup(context.Background(), output)
 	case "restore":
 		err = restoreWithIO(context.Background(), backup, output, testOptions(), faults)
+	case "recover":
+		db, err = openWithIO(dir, testOptions(), faults)
+	case "overlap":
+		done := make(chan error, 1)
+		go func() { done <- db.Backup(context.Background(), output) }()
+		<-captureReady
+		readerReady := make(chan struct{})
+		go func() {
+			for {
+				value, err := db.Get([]byte("oracle"))
+				if err != nil || string(value) != "acknowledged" && string(value) != "possible" {
+					fmt.Printf("TARP_READ_FAILURE %x %v\n", value, err)
+					return
+				}
+				if _, err := db.Get([]byte("deleted")); !errors.Is(err, ErrNotFound) {
+					fmt.Printf("TARP_READ_FAILURE deleted %v\n", err)
+					return
+				}
+				if reads.Add(1) == 1 {
+					close(readerReady)
+				}
+				time.Sleep(100 * time.Microsecond)
+			}
+		}()
+		<-readerReady
+		put("oracle", "possible")
+		remove("k0")
+		result, compactErr := db.Compact(context.Background())
+		if compactErr != nil || result.PinnedBytes == 0 {
+			t.Fatalf("overlap did not preserve pinned generations: %+v %v", result, compactErr)
+		}
+		fmt.Printf("TARP_PINNED %d\n", result.PinnedBytes)
+		close(releaseBackup)
+		err = <-done
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
+	fmt.Printf("TARP_OPERATION_ACK %s\n", mode)
+	pause("operation.ack:after")
 	t.Fatal("phase was not reached")
 }

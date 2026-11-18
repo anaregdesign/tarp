@@ -293,3 +293,93 @@ func TestCleanupAfterFaultDoesNotRetainUnlinkedMetadata(t *testing.T) {
 		t.Fatal("deferred cleanup retained file metadata")
 	}
 }
+
+func TestRecoveryBoundaryFailureReleasesOwnershipAndPreservesAcknowledgment(t *testing.T) {
+	for _, point := range []string{"recover.truncate:before", "recover.truncate:after", "recover.sync:before", "recover.sync:after"} {
+		for _, cause := range []error{syscall.EIO, syscall.ENOSPC, syscall.EDQUOT} {
+			t.Run(point+"/"+cause.Error(), func(t *testing.T) {
+				db := newTestDB(t, testOptions(), nil)
+				mustPut(t, db, "k", "acknowledged")
+				dir, path, end := db.store.Dir, db.index["k"].File.Path, db.store.Current.ActiveEnd
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				fd, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tail := []byte("incomplete-tail")
+				n, writeErr := fd.Write(tail)
+				if err := errors.Join(writeErr, fd.Sync(), fd.Close()); err != nil || n != len(tail) {
+					t.Fatalf("seed tail: %d %v", n, err)
+				}
+				reached := 0
+				failed, err := openWithIO(dir, testOptions(), &storage.IO{Hook: func(p string) error {
+					if p == point {
+						reached++
+						return cause
+					}
+					return nil
+				}})
+				if failed != nil || reached != 1 || !errors.Is(err, cause) {
+					t.Fatalf("failed recovery did not preserve its cause/phase: db=%v reached=%d err=%v", failed, reached, err)
+				}
+				stat, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected := end
+				if point == "recover.truncate:before" {
+					expected += int64(len(tail))
+				}
+				if stat.Size() != expected {
+					t.Fatalf("truncation at %s: size=%d want=%d", point, stat.Size(), expected)
+				}
+				reopened, err := Open(dir, testOptions())
+				if err != nil {
+					t.Fatalf("failed Open retained ownership or prevented safe retry: %v", err)
+				}
+				wantValue(t, reopened, "k", "acknowledged")
+				if err := reopened.Close(); err != nil {
+					t.Fatal(err)
+				}
+				stat, err = os.Stat(path)
+				if err != nil || stat.Size() != end {
+					t.Fatalf("retry did not finish safe suffix cleanup: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestPartialPayloadWritePreservesAcknowledgedValue(t *testing.T) {
+	db := newTestDB(t, testOptions(), nil)
+	mustPut(t, db, "k", "acknowledged")
+	reached := false
+	db.store.IO = &storage.IO{WriteAt: func(fd *os.File, data []byte, offset int64) (int, error) {
+		if !reached {
+			reached = true
+			count := format.RecordHeaderBytes + len("k") + 3
+			if count >= len(data) {
+				t.Fatal("fixture must tear within the value payload")
+			}
+			n, err := fd.WriteAt(data[:count], offset)
+			return n, errors.Join(err, fd.Sync(), syscall.EIO)
+		}
+		return fd.WriteAt(data, offset)
+	}}
+	if err := db.Put([]byte("k"), []byte("partially-written-payload")); !reached || !errors.Is(err, syscall.EIO) {
+		t.Fatalf("partial-payload failure not reached: %v", err)
+	}
+	if err := db.Close(); !errors.Is(err, syscall.EIO) {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantValue(t, reopened, "k", "acknowledged")
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

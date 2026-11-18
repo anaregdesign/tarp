@@ -8,7 +8,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux ||
   exit 1
 fi
 mode="${TARP_QUAL_MODE:-probe}"
-[[ "$mode" == probe || "$mode" == controls ]]
+[[ "$mode" == probe || "$mode" == controls || "$mode" == campaign ]]
 [[ "$RUNNER_TEMP" == /* && "$GITHUB_RUN_ID" =~ ^[0-9]+$ &&
    "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
 test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 8388608
@@ -60,13 +60,20 @@ sha256sum "$work/vmlinuz" "$work/ubuntu-initrd" "$work/initrd" "$work/tarp-init"
   >"$work/evidence/boot.sha256"
 # Bound generated files in both probe and controller modes.
 ulimit -f 4194304
-if [[ "$mode" == controls ]]; then
+if [[ "$mode" == controls || "$mode" == campaign ]]; then
   cp .github/qualification/controls-guest.sh "$work/input/guest.sh"
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$work/input/tarp.test" .
   sha256sum "$work/input/tarp.test" >"$work/evidence/guest-binary.sha256"
   "$work/tarpqual" -block-controls "$work" -confirm disposable-vm-only \
     >"$work/evidence/control-verdict.json"
   cat "$work/evidence/control-verdict.json"
+  if [[ "$mode" == campaign ]]; then
+    cp .github/qualification/campaign-guest.sh "$work/input/guest.sh"
+    "$work/tarpqual" -campaign "$work" -confirm disposable-vm-only \
+      -group "${TARP_QUAL_GROUP:-smoke}" -case "${TARP_QUAL_CASE:-}" \
+      >"$work/evidence/campaign-verdict.json"
+    cat "$work/evidence/campaign-verdict.json"
+  fi
   exit 0
 fi
 cp .github/qualification/probe-guest.sh "$work/input/guest.sh"

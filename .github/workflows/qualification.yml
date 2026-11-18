@@ -12,20 +12,36 @@ on:
         required: true
         default: probe
         type: choice
-        options: [probe, controls]
+        options: [probe, controls, campaign]
+      go-version:
+        description: Explicit qualification toolchain; ordinary CI remains stable only
+        required: true
+        default: stable
+        type: choice
+        options: [stable, 1.26.x]
+      group:
+        description: Bounded phase group; all is limited to 192 cases and 50 minutes
+        required: true
+        default: smoke
+        type: choice
+        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, all]
+      case:
+        description: Optional exact case name for a focused reproduction
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: vm-qualification-${{ github.ref }}
+  group: vm-qualification-${{ github.ref }}-${{ inputs.go-version }}
   cancel-in-progress: false
 
 jobs:
   probe:
     if: inputs.confirmation == 'disposable-vm-only'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,13 +50,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: stable
+          go-version: ${{ inputs.go-version }}
           check-latest: true
           cache: false
       - name: Run bounded disposable Ubuntu guest
         env:
           TARP_QUAL_CONFIRM: ${{ inputs.confirmation }}
           TARP_QUAL_MODE: ${{ inputs.mode }}
+          TARP_QUAL_GROUP: ${{ inputs.group }}
+          TARP_QUAL_CASE: ${{ inputs.case }}
         run: bash .github/qualification/probe.sh
       - name: Retain isolated guest evidence
         if: always()
