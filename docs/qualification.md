@@ -76,6 +76,18 @@ overlayfs is useful functional coverage, **not** Linux amd64/ext4 qualification.
 
 ## External disposable-VM phase-barrier harness
 
+An opt-in `VM qualification` Actions workflow first probes a disposable QEMU
+guest using a SHA-256-pinned Ubuntu 24.04 image, its 6.8-series kernel, and a
+256 MiB ext4 `data=ordered` device. It is manual-only, requires the exact
+`disposable-vm-only` confirmation, is time/file bounded, uses TCG without host
+device access, and retains host/image/guest configuration and a verdict.
+Its scripts refuse local execution. It does not change ordinary Linux/stable CI.
+
+The initial environment probe is **not qualification**: QEMU writeback alone
+does not model loss of the host page cache. Flushed-survives/unflushed-is-lost
+controls on a verified volatile block backend and the full external-witness
+campaign must pass before any power-loss acceptance criterion is completed.
+
 Only a dedicated disposable Linux VM/block device and an independent durable
 controller are suitable. Record the exact selected amd64 Ubuntu 24.04 6.8-series
 kernel/ext4 `data=ordered` stack, mount/features, controller/device flush policy,

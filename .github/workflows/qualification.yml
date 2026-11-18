@@ -1,0 +1,39 @@
+name: VM qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type disposable-vm-only to run the bounded guest environment probe
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: inputs.confirmation == 'disposable-vm-only'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Probe disposable Ubuntu guest
+        env:
+          TARP_QUAL_CONFIRM: ${{ inputs.confirmation }}
+        run: bash .github/qualification/probe.sh
+      - name: Retain probe evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tarp-qualification-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
