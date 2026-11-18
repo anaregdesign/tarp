@@ -137,7 +137,8 @@ The manual qualification selector also permits `1.26.x` to resolve that
 supported family's latest patch. This is **not** a PR/push CI matrix. Each
 manual job is limited to 60 minutes, its controller to 50 minutes/192 cases,
 and each guest to four minutes; only one guest runs at a time in a job.
-Same-ref jobs serialize per selected family. Ordinary CI remains one
+Same-ref jobs serialize per selected family/group. Independent bounded groups
+can run on separate disposable hosted runners. Ordinary CI remains one
 Linux/latest-stable job.
 
 The external controller syncs every Put/Delete intent, nil acknowledgment and
@@ -159,6 +160,13 @@ state digest. Successful private raw disks are removed only after validation;
 the first failed disk is preserved in the bounded evidence directory. A missing
 phase or malformed/partial verdict fails the run. Implementing this matrix does
 not itself establish that all its cases have passed.
+
+The diagnostic-only `tarpprofile` build tag records bounded acquired-lock to
+Unlock-entry spans and queued-writer counts for resource characterization.
+Probe recording extends actual holds and is excluded from that measured span.
+Do not treat instrumented timings as the primary latency baseline. The ordinary
+build aliases these mutexes directly to `sync.Mutex`, with no timing/counter
+instructions or extra mutex state.
 
 The initial environment probe is **not qualification**: QEMU writeback alone
 does not model loss of the host page cache. Flushed-survives/unflushed-is-lost

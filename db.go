@@ -20,13 +20,13 @@ type failure struct{ err error }
 type DB struct {
 	opts   Options
 	store  *storage.Store
-	writer sync.Mutex
-	state  sync.Mutex
+	writer engineMutex
+	state  engineMutex
 	index  map[string]storage.Location
 	cache  *cache.Cache
 	failed atomic.Pointer[failure]
 
-	life     sync.Mutex
+	life     engineMutex
 	cond     *sync.Cond
 	active   int
 	closing  bool

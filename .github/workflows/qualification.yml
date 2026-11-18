@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: vm-qualification-${{ github.ref }}-${{ inputs.go-version }}
+  group: vm-qualification-${{ github.ref }}-${{ inputs.go-version }}-${{ inputs.group }}
   cancel-in-progress: false
 
 jobs:

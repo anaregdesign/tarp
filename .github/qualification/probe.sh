@@ -28,6 +28,13 @@ fi
   dpkg-query -W qemu-system-x86 qemu-utils
   df -Pk "$RUNNER_TEMP"
 } >"$work/evidence/host.txt"
+git ls-files -- '*.go' go.mod | while IFS= read -r source; do
+  case "$source" in
+    *_test.go|cmd/*|internal/qualification/*) continue ;;
+  esac
+  sha256sum "$source"
+done >"$work/evidence/library-sources.sha256"
+sha256sum "$work/evidence/library-sources.sha256" >"$work/evidence/library-tree.sha256"
 
 image=https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img
 curl --fail --location --retry 2 --max-time 600 "$image" -o "$work/base.qcow2"

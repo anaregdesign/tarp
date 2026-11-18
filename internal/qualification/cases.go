@@ -57,6 +57,7 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	pair("mutate", "rotate", 2, "current.write", "current.sync", "current.rename", "current.dirsync")
 	add("mutate", "rotate", "operation.ack:after", 1)
 	pair("checkpoint", "compact", 1, "compact.segment.write", "compact.segment.sync", "compact.write", "compact.sync", "cleanup.unlink")
+	pair("checkpoint", "compact", 2, "compact.write")
 	for _, point := range []string{"catalog.write", "catalog.sync", "catalog.dirsync", "current.write", "current.sync", "current.rename", "current.dirsync"} {
 		pair("checkpoint", "compact", 2, point)
 	}
@@ -64,6 +65,8 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	add("checkpoint", "compact", "operation.ack:after", 1)
 	pair("snapshots", "backup", 1, "backup.metadata.write", "backup.metadata.sync", "backup.copy", "backup.file.sync",
 		"backup.manifest.write", "backup.manifest.sync", "backup.stage.sync", "backup.rename", "backup.parent.sync")
+	pair("snapshots", "backup", 2, "backup.copy")
+	pair("snapshots", "backup", 3, "backup.copy")
 	add("snapshots", "backup", "operation.ack:after", 1)
 	pair("snapshots", "restore", 1, "restore.copy", "restore.file.sync", "restore.stage.sync", "restore.rename", "restore.parent.sync")
 	add("snapshots", "restore", "operation.ack:after", 1)
