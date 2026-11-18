@@ -137,8 +137,8 @@ go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=15s -parall
 ```
 
 The [CI workflow](.github/workflows/ci.yml) runs full tests, race detection, vet,
-and module dependency isolation on Linux amd64 and native macOS with the latest
-patches of both supported Go families. It runs for pull requests to `main`,
+and module dependency isolation in one Linux amd64 job using the latest stable
+Go release. It runs for pull requests to `main`,
 pushes to `main`, and manual dispatch. Hosted-runner checks are functional
 evidence, not power-loss or bounded-device qualification.
 

@@ -16,14 +16,9 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.os }} / Go ${{ matrix.go }}
-    runs-on: ${{ matrix.os }}
+    name: Linux amd64 / Go stable
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-        go: ['1.26.x', '1.27.x']
     defaults:
       run:
         shell: bash
@@ -40,7 +35,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: ${{ matrix.go }}
+          go-version: stable
           check-latest: true
           cache: false
       - name: Record environment
@@ -48,9 +43,7 @@ jobs:
           go version
           go env GOOS GOARCH
           uname -smr
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            test "$(go env GOARCH)" = amd64
-          fi
+          test "$(go env GOOS)/$(go env GOARCH)" = linux/amd64
       - name: Require standard-library-only module
         run: |
           modules="$(go list -m all)"

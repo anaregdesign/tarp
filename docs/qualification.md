@@ -41,8 +41,8 @@ removal after successful unlink even if an after-hook reports failure.
 ## GitHub Actions
 
 The [CI workflow](../.github/workflows/ci.yml) runs the full tests, race detector,
-vet, and a single-module dependency audit on `ubuntu-24.04` (amd64) and
-`macos-15`, using the latest Go 1.26 and 1.27 patches. It covers pull requests to
+vet, and a single-module dependency audit in one `ubuntu-24.04` (amd64) job using
+setup-go's `stable` selector for the latest stable Go release. It covers pull requests to
 `main`, pushes to `main`, and manual dispatch. Official checkout/setup-go actions
 are pinned to verified release commits; job permissions are read-only, jobs have
 finite timeouts, module downloads are disabled, and no credentials persist in
@@ -51,7 +51,9 @@ the checkout. No privileged, disk-filling, cache-dropping, or power-cut steps ru
 Retain the run URL, checked commit, resolved Go patches, and runner details when
 reporting results. Hosted Linux amd64 runtime coverage closes an architecture
 coverage gap; it does not qualify the selected ext4/storage stack against power
-loss or real device exhaustion. macOS remains development-only.
+loss or real device exhaustion. Older supported Go families and macOS are not
+part of automated CI; their manual development checks do not change the module
+minimum or the production support boundary.
 
 ## Safe isolated Linux functional testing
 

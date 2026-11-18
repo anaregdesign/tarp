@@ -18,10 +18,11 @@ Device failure/loss and lying flush implementations are excluded. Checksums
 detect accidental corruption; they do not repair lost hardware or authenticate
 data. Files alone are the engine's recovery source.
 
-The initial Go matrix is the latest officially supported patches of Go 1.26 and
+The initial Go support policy is the latest officially supported patches of Go 1.26 and
 1.27, with a `go 1.26.0` module minimum and no forced `toolchain` directive.
 Observed validation patches are 1.26.11 and 1.27.4. Advance the policy with Go
 support rather than interpreting those patches as permanently supported.
+Automated CI intentionally covers only Linux amd64 with the latest stable Go.
 
 ## Package and lock ownership
 
