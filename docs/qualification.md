@@ -1,7 +1,9 @@
 # Safe qualification procedure
 
-**Production durability qualification remains open.** Passing deterministic
-fault tests, process exits, macOS tests, or Docker overlayfs tests is not proof
+**The selected virtual Linux/ext4 crash and exhaustion campaigns passed.**
+The exact model and actual results are recorded below; this is not physical-device
+certification or a generic Linux guarantee. Passing deterministic fault tests,
+process exits, macOS tests, or Docker overlayfs tests alone is not proof
 of OS-crash/power-loss persistence. Do not execute privileged, disk-filling,
 cache-dropping, block-device, or host-power experiments on a shared machine.
 
@@ -176,6 +178,73 @@ their raw journals/digests and explicitly distinguish retrospective
 sequence/digest reconciliation from a live-index cardinality observation.
 They are not, alone, completion of the full qualification matrix.
 
+### Final selected-target execution matrix
+
+The final homogeneous matrix at
+[`347a1a1f53be13100a8c83da7378b9af26e4657c`](https://github.com/anaregdesign/tarp/commit/347a1a1f53be13100a8c83da7378b9af26e4657c)
+passed **164 phase-cut cases per Go family**, with the strict live verifier in
+every case. A separate actual-exhaustion case adds one cut/reboot per family.
+These are real whole-QEMU SIGKILLs followed by independently discarded volatile
+NBD state, not engine-only process exits. Each job reran the actual flushed/
+unflushed device controls before testing the engine.
+
+| Group | Cases/family | Go 1.27.4 | Go 1.26.11 |
+| --- | ---: | --- | --- |
+| Initialization/publication | 25 | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44295992231) | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44295999801) |
+| Put/Delete/reinsert/rotation | 63 | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296007208) | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296017571) |
+| Checkpoint/copy/remap/retirement | 28 | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296024514) | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296031858) |
+| Backup/restore/slow overlap | 34 | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296042505) | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296049558) |
+| Recovery/tail cleanup | 14 | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296055896) | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44296063691) |
+| Actual ENOSPC/headroom/pins/reopen | 1 | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44294167628) | [PASS](https://github.com/anaregdesign/tarp/actions/runs/44294180860) |
+| Full eight-package race + guided fuzz | — | [PASS: 3,044 fuzz executions](https://github.com/anaregdesign/tarp/actions/runs/44294173336) | [PASS: 7,588 fuzz executions](https://github.com/anaregdesign/tarp/actions/runs/44294188153) |
+
+The frozen ordinary-library fingerprint is
+`52f6ccde9bd3ca02be8e98465994a7130ab50b9fca763e5963b5e9d50c5bf8c8`.
+Each artifact contains its relative-path source manifest, the manifest's hash,
+exact test-binary and boot hashes, and the checked Git revision. Later measurement/
+documentation changes do not alter this tested library.
+
+Exact target: Ubuntu 24.04.5, amd64 `6.8.0-147-generic`
+(`#147-Ubuntu`, package `6.8.0-147.147-generic`, underlying 6.8.12),
+QEMU 8.2.2 (`1:8.2.2+ds-0ubuntu1.18`), q35/TCG/CPU max, two virtual CPUs,
+1 GiB guest RAM, no NIC/KVM/host block devices, 256 MiB data disk, 4 KiB
+ext4 blocks, internal journal and `rw,relatime,data=ordered`; barriers are not
+disabled and DAX/quotas are not enabled. Features include `has_journal`,
+`ext_attr`, `resize_inode`, `dir_index`, `filetype`, `extent`, `64bit`,
+`flex_bg`, `sparse_super`, `large_file`, `huge_file`, `dir_nlink`,
+`extra_isize`, and `metadata_csum`. Mounted `needs_recovery` is the normal
+journal state. Lazy inode/journal initialization is disabled. SHA-pinned Ubuntu
+image/kernel/initramfs URLs and hashes, actual superblock parameters, and mounts
+are retained in every raw artifact. The host kernel is not the guest kernel.
+
+The honest block model is part of this qualification boundary. It retains
+ordinary writes only in externally controlled RAM, syncs completed pre-FLUSH
+writes before replying, and loses the remaining overlay after quiescence.
+Actual guest traffic used FLUSH; no guest FUA traffic is claimed. Independent
+backing-file and wire tests cover FUA-only persistence across pages, within
+one page, and overlapping cached bytes without an implicit unrelated flush.
+This models the stated honest-device assumptions; it does not certify any
+particular physical SSD/controller's cache or firmware.
+
+Both exhaustion runs observed zero available bytes, a real errno-28 filler
+failure, constrained 128 KiB checkpoint headroom with a healthy/NotApplied
+failure, and successful retry after releasing 2 MiB. A slow backup retained
+1,048,384 obsolete file bytes; completion/cleanup reclaimed exactly those
+logical lengths. A subsequent actual admitted-write ENOSPC uniformly fail-stopped
+hits/misses/missing reads, preserved the cause across repeated Close, released
+ownership, and reopened after removing only the filler. The final cold reboot
+verified sequence 256, 128 live keys and capture/restore sequence 128, digest
+`d0abd8addaf476805e3cd7a8d6c67cdf2b4459514aea9d7f7b4c0600f21922d1`.
+EDQUOT and sync/close/unlink failure semantics have deterministic injected
+coverage; no quota-enabled physical device was tested or is implied.
+
+Retained `qualification-RUN_ID-1` artifacts contain `campaign.jsonl`,
+per-case `NNN-oracle.jsonl`, cut/recovery console logs, device controls and
+verdicts. The runtime artifacts additionally retain race-binary manifests and
+the actual baseline/exec fuzz output. Download artifacts while available;
+the manual workflow retains them for 30 days. Preserve raw archives, not just
+this summary, for any subsequent release qualification record.
+
 ### Selected-target full runtime and fuzz suite
 
 The separate manual `runtime` mode builds every package's race test binary on
@@ -284,7 +353,8 @@ then use tarporacle against that restored database.
 The bounded groups additionally compose initialization, tail-truncation,
 acknowledged deletes/reinsertion histories and overlapping readers/writers/slow
 backups. Their actual execution and the separate filesystem-exhaustion campaign
-remain release gates; a deterministic/subprocess pass does not replace them.
+are recorded in the final execution matrix above; a deterministic/subprocess
+pass does not replace them.
 
 ## Bounded-device exhaustion campaign
 
@@ -303,8 +373,10 @@ separate cold reboot validate all acknowledgments and the captured backup.
 The structured exhaustion verdict is mandatory before that phase can pass.
 
 Use only a dedicated disposable bounded filesystem in that VM. Injected space
-errors are already ordinary tests; actual delayed allocation/quota/writeback
-behavior must also be qualified there. Exercise writes and syncs, checkpoint
+errors are ordinary tests, not actual exhaustion. The selected no-quota mount's
+real allocation/writeback/headroom behavior is recorded above; quota-enabled
+filesystems require separate qualification before making such a claim.
+Exercise writes and syncs, checkpoint
 headroom, pinned backup generations, cleanup failure/retry, and recovery after
 adding space. Record observed causes/outcomes, source health, selected files,
 and recovered acknowledged state. Never fill the shared host or delete live
@@ -324,7 +396,9 @@ and reopened/restore verdicts. Distinguish:
 | Actual modeled VM power cuts | Only the precisely tested durability configuration |
 | Actual bounded-device exhaustion | Only the recorded allocation/writeback/headroom behavior |
 
-No selected production power-cut campaign or real bounded-device exhaustion
-has been performed by the ordinary development checks. Keep
-[#8](https://github.com/anaregdesign/tarp/issues/8) and dependent release
-qualification criteria open until real, reviewable evidence exists.
+The selected modeled-power-cut and actual bounded-filesystem execution evidence
+now exists above; ordinary development checks alone did not establish it.
+Dependent [measurement/release acceptance](https://github.com/anaregdesign/tarp/issues/5)
+still requires the complete separately guarded workload matrix and its reviewed
+baseline. Physical-device certification, arbitrary kernels/filesystems and
+unbounded capacity/performance claims remain outside the tested scope.
