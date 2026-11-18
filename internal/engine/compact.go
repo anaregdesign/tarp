@@ -58,7 +58,11 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		if err := db.store.Rotate(); err != nil {
 			db.storageFailure(err)
 			db.writer.Unlock()
-			return result, operationError("compact", "rotation", err)
+			// Sealing can publish a new active log at the old cutoff.
+			// The requested checkpoint has not reached publication.
+			op := operationError("compact", "rotation", err)
+			op.Outcome = NotApplied
+			return result, op
 		}
 	}
 	capture, err := db.store.Capture()

@@ -1,9 +1,10 @@
-package engine_test
+package tarp_test
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,4 +225,58 @@ func TestTypedDBRequiresCoreAndCodecs(t *testing.T) {
 	if db, err := tarp.NewTypedDB(raw, tarp.StringCodec{}, (*tarp.StringCodec)(nil)); db != nil || err == nil {
 		t.Fatalf("NewTypedDB with nil value codec = %v, %v", db, err)
 	}
+}
+
+func TestOpenTypedPreservesOpenErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts tarp.Options
+		want error
+	}{
+		{"directory owned", tarp.Options{}, tarp.ErrLocked},
+		{"invalid options", tarp.Options{ReadFileHandles: -1}, tarp.ErrInvalidOptions},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			owner := openPublicDB(t, dir, tarp.Options{})
+			db, err := tarp.OpenTyped(dir, tc.opts, tarp.StringCodec{}, tarp.BytesCodec{})
+			if db != nil || !errors.Is(err, tc.want) {
+				t.Fatalf("OpenTyped = %v, %v; want nil, %v", db, err, tc.want)
+			}
+			if err := owner.Put([]byte("k"), nil); err != nil {
+				t.Fatalf("owner Put after failed OpenTyped: %v", err)
+			}
+		})
+	}
+}
+
+func Example_typedDB() {
+	if err := storeScore(); err != nil {
+		panic(err)
+	}
+	// Output: 42
+}
+
+func storeScore() (err error) {
+	dir, err := os.MkdirTemp("", "tarp-scores-")
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+
+	db, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.StringCodec{}, tarp.Int64Codec{})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, db.Close()) }()
+
+	if err := db.Put("alice", 42); err != nil {
+		return err
+	}
+	score, err := db.Get("alice")
+	if err != nil {
+		return err
+	}
+	fmt.Println(score)
+	return nil
 }

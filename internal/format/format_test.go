@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"hash/crc32"
 	"io"
+	"math"
 	"reflect"
 	"testing"
 )
@@ -84,6 +86,48 @@ func TestWireImages(t *testing.T) {
 				t.Fatalf("accepted truncated image at %d", i)
 			}
 		}
+	}
+}
+
+func TestDecodeRecordValidatesFieldsWithAnIntactChecksum(t *testing.T) {
+	wire := EncodeRecord(Put, 1, []byte("k"), []byte("v"))
+	const exactSize = RecordHeaderBytes + 2
+	for _, tc := range []struct {
+		name      string
+		change    func([]byte)
+		available int64
+	}{
+		{"unknown kind", func(b []byte) { b[10] = 3 }, exactSize},
+		{"zero sequence", func(b []byte) { order.PutUint64(b[16:], 0) }, exactSize},
+		{"empty key", func(b []byte) { order.PutUint64(b[24:], 0) }, exactSize},
+		{"delete carrying a value", func(b []byte) { b[10] = Delete }, exactSize},
+		{"reserved signature field", func(b []byte) { b[8] = 1 }, exactSize},
+		{"unknown flags", func(b []byte) { b[11] = 1 }, exactSize},
+		{"reserved trailing field", func(b []byte) { b[47] = 1 }, exactSize},
+		{"key overflows record size", func(b []byte) { order.PutUint64(b[24:], math.MaxUint64) }, math.MaxInt64},
+		{"value overflows record size", func(b []byte) { order.PutUint64(b[32:], math.MaxInt64-RecordHeaderBytes) }, math.MaxInt64},
+		{"value past committed end", func(b []byte) { order.PutUint64(b[32:], 2) }, exactSize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := bytes.Clone(wire[:RecordHeaderBytes])
+			tc.change(header)
+			clear(header[12:16])
+			order.PutUint32(header[12:], crc32.Checksum(header, table))
+			if _, err := DecodeRecord(header, tc.available); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("DecodeRecord returned %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+func TestDecodeRecordAcceptsLargestRepresentableRecord(t *testing.T) {
+	header := EncodeRecord(Put, math.MaxUint64, []byte("k"), nil)[:RecordHeaderBytes]
+	order.PutUint64(header[32:], math.MaxInt64-RecordHeaderBytes-1)
+	clear(header[12:16])
+	order.PutUint32(header[12:], crc32.Checksum(header, table))
+	record, err := DecodeRecord(header, math.MaxInt64)
+	if err != nil || record.Bytes() != math.MaxInt64 || record.Sequence != math.MaxUint64 {
+		t.Fatalf("maximum legal size and sequence: %+v, %v", record, err)
 	}
 }
 
@@ -218,4 +262,140 @@ func FuzzDecoders(f *testing.F) {
 			_, _ = DecodeRecord(b[:RecordHeaderBytes], int64(len(b)))
 		}
 	})
+}
+
+func TestCatalogRejectsAmbiguousCoverage(t *testing.T) {
+	const size = SegmentHeaderBytes + RecordHeaderBytes + 1
+	raw := File{ID: 2, Bytes: size, Kind: Log, First: 4, Last: 4}
+	snapshot := File{ID: 3, Bytes: size, Kind: Snapshot}
+	valid := Catalog{Cutoff: 3, PrunedThrough: 6, ActiveID: 7}
+	for _, tc := range []struct {
+		name  string
+		files []File
+	}{
+		{"start gap", []File{{ID: 2, Bytes: size, Kind: Log, First: 5, Last: 5}}},
+		{"start overlap", []File{{ID: 2, Bytes: size, Kind: Log, First: 3, Last: 4}}},
+		{"duplicate ID", []File{raw, {ID: 2, Bytes: size, Kind: Cleaned, First: 5, Last: 6}}},
+		{"overlapping intervals", []File{raw, {Kind: Cleaned, First: 4, Last: 6}}},
+		{"reversed interval", []File{raw, {Kind: Cleaned, First: 5, Last: 4}}},
+		{"empty raw interval", []File{{Kind: Log, First: 4, Last: 4}}},
+		{"missing physical length", []File{{ID: 2, Kind: Cleaned, First: 4, Last: 4}}},
+		{"empty interval has bytes", []File{{Bytes: size, Kind: Cleaned, First: 4, Last: 4}}},
+		{"past prune boundary", []File{{Kind: Cleaned, First: 4, Last: 7}}},
+		{"snapshot after log", []File{raw, snapshot}},
+		{"snapshot with interval", []File{{ID: 3, Bytes: size, Kind: Snapshot, First: 1, Last: 2}}},
+		{"active ID reused", []File{{ID: 7, Bytes: size, Kind: Snapshot}}},
+		{"raw records exceed physical length", []File{{ID: 2, Bytes: size, Kind: Log, First: 4, Last: 5}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid
+			c.Files = tc.files
+			if _, err := DecodeCatalog(EncodeCatalog(c)); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("accepted invalid coverage: %v", err)
+			}
+		})
+	}
+	for _, c := range []Catalog{
+		{ActiveID: 7, Cutoff: 2, PrunedThrough: 1},
+		{ActiveID: 7, Cutoff: 0, Files: []File{snapshot}},
+		{ActiveID: 7, Cutoff: math.MaxUint64, PrunedThrough: math.MaxUint64, Files: []File{{Kind: Cleaned, First: 0, Last: 0}}},
+	} {
+		if _, err := DecodeCatalog(EncodeCatalog(c)); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("accepted invalid catalog %+v", c)
+		}
+	}
+}
+
+func TestOnlyUnknownOuterSignaturesAreUnsupported(t *testing.T) {
+	outer := []func([]byte) error{
+		func(b []byte) error { _, err := DecodeFrontier(b); return err },
+		func(b []byte) error { _, err := DecodeBackup(b); return err },
+	}
+	for _, decode := range outer {
+		if err := decode([]byte("unknown!")); !errors.Is(err, ErrUnsupported) {
+			t.Fatal(err)
+		}
+		if err := decode([]byte("short")); !errors.Is(err, ErrCorrupt) {
+			t.Fatal(err)
+		}
+	}
+	for _, fn := range []func([]byte) error{
+		func(b []byte) error { _, err := DecodeSegment(b[:SegmentHeaderBytes]); return err },
+		func(b []byte) error { _, err := DecodeCatalog(b); return err },
+		func(b []byte) error { _, err := DecodeRecord(b[:RecordHeaderBytes], RecordHeaderBytes); return err },
+	} {
+		if err := fn(make([]byte, 128)); !errors.Is(err, ErrCorrupt) {
+			t.Fatal(err)
+		}
+	}
+}
+
+type countedReaderAt struct {
+	io.ReaderAt
+	calls      int
+	shortCount bool
+}
+
+func (r *countedReaderAt) ReadAt(b []byte, off int64) (int, error) {
+	r.calls++
+	n, err := r.ReaderAt.ReadAt(b, off)
+	if r.shortCount && n > 0 {
+		n--
+	}
+	return n, err
+}
+
+func TestIndexedReadBoundariesAndValidation(t *testing.T) {
+	const key = "a\x00b"
+	for _, tc := range []struct {
+		name  string
+		size  int
+		reads int
+	}{
+		{"empty value", RecordHeaderBytes + len(key), 1},
+		{"exact buffer", indexedReadBufferBytes, 1},
+		{"above buffer", indexedReadBufferBytes + 1, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := bytes.Repeat([]byte{0x71}, tc.size-RecordHeaderBytes-len(key))
+			record := EncodeRecord(Put, 42, []byte(key), value)
+			file := append([]byte{0xff}, record...)
+			reader := &countedReaderAt{ReaderAt: bytes.NewReader(file)}
+			got, err := ReadValue(reader, 1, int64(tc.size), key, 42)
+			if err != nil || got == nil || !bytes.Equal(got, value) || reader.calls != tc.reads {
+				t.Fatalf("decoded %d bytes in %d reads, err=%v", len(got), reader.calls, err)
+			}
+			for _, wrong := range []struct {
+				key string
+				seq uint64
+			}{{"b\x00a", 42}, {key, 41}} {
+				if _, err := ReadValue(reader, 1, int64(tc.size), wrong.key, wrong.seq); !errors.Is(err, ErrCorrupt) {
+					t.Fatalf("accepted mismatched identity: %v", err)
+				}
+			}
+			file[len(file)-1] ^= 1
+			if _, err := ReadValue(reader, 1, int64(tc.size), key, 42); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("accepted modified payload: %v", err)
+			}
+			if !bytes.Equal(got, value) {
+				t.Fatal("a later indexed read changed the previously returned value")
+			}
+			reader.shortCount = true
+			if _, err := ReadValue(reader, 1, int64(tc.size), key, 42); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("short read: %v", err)
+			}
+		})
+	}
+}
+
+func TestIndexedReadRejectsInvalidBoundsBeforeIO(t *testing.T) {
+	reader := &countedReaderAt{ReaderAt: bytes.NewReader(nil)}
+	for _, tc := range []struct{ off, size int64 }{{0, -1}, {-1, 64}, {math.MaxInt64 - 32, 64}, {0, RecordHeaderBytes}} {
+		if _, err := ReadValue(reader, tc.off, tc.size, "k", 1); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("bounds %+v: %v", tc, err)
+		}
+	}
+	if reader.calls != 0 {
+		t.Fatalf("read %d times for invalid indexed locations", reader.calls)
+	}
 }

@@ -1,7 +1,8 @@
-package engine_test
+package tarp_test
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -134,6 +135,61 @@ func TestCompositeCodecMapKeyCollisions(t *testing.T) {
 	checkBitRoundTrip(t, floats, want)
 }
 
+func TestCompositeCodecRejectsNestedDuplicateNaNKeysBeforePut(t *testing.T) {
+	type Reading struct {
+		Series []map[float32]bool
+	}
+	key := math.Float32frombits(0x7fc00001)
+	another := math.Float32frombits(0x7fc00002)
+	codec := mustDerive[Reading](t)
+	raw := openPublicDB(t, t.TempDir(), tarp.Options{})
+	db, err := tarp.NewTypedDB(raw, tarp.StringCodec{}, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[float32]bool{key: true, another: false}
+	reading := Reading{Series: []map[float32]bool{values}}
+	if err := db.Put("sensor", reading); err != nil {
+		t.Fatal(err)
+	}
+	before, err := raw.Get([]byte("sensor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// NaN is unequal to itself. This inserts a third Go key whose
+	// encoded bytes match those of an existing key.
+	values[key] = false
+	if err := db.Put("sensor", reading); err == nil {
+		t.Fatal("Put accepted two identical encoded map keys")
+	}
+	after, err := raw.Get([]byte("sensor"))
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("failed Put changed the stored reading: %x, %v; want %x", after, err, before)
+	}
+}
+
+func TestCompositeCodecKeepsNilAndEmptyByteKeysDistinct(t *testing.T) {
+	db, err := tarp.OpenTyped(t.TempDir(), tarp.Options{}, mustDerive[[]byte](t), tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cases := []struct {
+		key   []byte
+		value string
+	}{{nil, "nil"}, {[]byte{}, "empty"}, {[]byte{0}, "zero"}}
+	for _, tc := range cases {
+		if err := db.Put(tc.key, tc.value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range cases {
+		if got, err := db.Get(tc.key); got != tc.value || err != nil {
+			t.Errorf("Get(%#v) = %q, %v; want %q", tc.key, got, err, tc.value)
+		}
+	}
+}
+
 func TestCompositeCodecPreservesNamedComplex64Bits(t *testing.T) {
 	type sample complex64
 	// A conversion through complex128 would quiet the signaling NaN.
@@ -194,4 +250,30 @@ func FuzzCompositeCodec(f *testing.F) {
 			t.Fatalf("accepted %x, encoded back as %x, %v", data, got, err)
 		}
 	})
+}
+
+func Example_compositeCodec() {
+	type Run struct {
+		Started  time.Time
+		Attempts []time.Duration
+		Labels   map[string]string
+	}
+	codec, err := tarp.NewCodec[Run]()
+	if err != nil {
+		panic(err)
+	}
+	data, err := codec.Encode(Run{
+		Started:  time.Date(2026, 11, 19, 9, 30, 0, 0, time.UTC),
+		Attempts: []time.Duration{200 * time.Millisecond, 150 * time.Millisecond},
+		Labels:   map[string]string{"job": "backup"},
+	})
+	if err != nil {
+		panic(err)
+	}
+	run, err := codec.Decode(data)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(run.Labels["job"], run.Started.Format(time.RFC3339), run.Attempts)
+	// Output: backup 2026-11-19T09:30:00Z [200ms 150ms]
 }

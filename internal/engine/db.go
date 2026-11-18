@@ -308,7 +308,7 @@ func publicCause(err error) error {
 	}
 }
 
-func operationError(op, phase string, err error) error {
+func operationError(op, phase string, err error) *OpError {
 	outcome := NotApplied
 	var fault *storage.Fault
 	if errors.As(err, &fault) {

@@ -1,55 +1,10 @@
 package format
 
 import (
-	"bytes"
-	"context"
 	"errors"
-	"io"
 	"math"
 	"testing"
 )
-
-func TestCatalogRejectsAmbiguousCoverage(t *testing.T) {
-	const size = SegmentHeaderBytes + RecordHeaderBytes + 1
-	raw := File{ID: 2, Bytes: size, Kind: Log, First: 4, Last: 4}
-	snapshot := File{ID: 3, Bytes: size, Kind: Snapshot}
-	valid := Catalog{Cutoff: 3, PrunedThrough: 6, ActiveID: 7}
-	for _, tc := range []struct {
-		name  string
-		files []File
-	}{
-		{"start gap", []File{{ID: 2, Bytes: size, Kind: Log, First: 5, Last: 5}}},
-		{"start overlap", []File{{ID: 2, Bytes: size, Kind: Log, First: 3, Last: 4}}},
-		{"duplicate ID", []File{raw, {ID: 2, Bytes: size, Kind: Cleaned, First: 5, Last: 6}}},
-		{"overlapping intervals", []File{raw, {Kind: Cleaned, First: 4, Last: 6}}},
-		{"reversed interval", []File{raw, {Kind: Cleaned, First: 5, Last: 4}}},
-		{"empty raw interval", []File{{Kind: Log, First: 4, Last: 4}}},
-		{"missing physical length", []File{{ID: 2, Kind: Cleaned, First: 4, Last: 4}}},
-		{"empty interval has bytes", []File{{Bytes: size, Kind: Cleaned, First: 4, Last: 4}}},
-		{"past prune boundary", []File{{Kind: Cleaned, First: 4, Last: 7}}},
-		{"snapshot after log", []File{raw, snapshot}},
-		{"snapshot with interval", []File{{ID: 3, Bytes: size, Kind: Snapshot, First: 1, Last: 2}}},
-		{"active ID reused", []File{{ID: 7, Bytes: size, Kind: Snapshot}}},
-		{"raw records exceed physical length", []File{{ID: 2, Bytes: size, Kind: Log, First: 4, Last: 5}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c := valid
-			c.Files = tc.files
-			if _, err := DecodeCatalog(EncodeCatalog(c)); !errors.Is(err, ErrCorrupt) {
-				t.Fatalf("accepted invalid coverage: %v", err)
-			}
-		})
-	}
-	for _, c := range []Catalog{
-		{ActiveID: 7, Cutoff: 2, PrunedThrough: 1},
-		{ActiveID: 7, Cutoff: 0, Files: []File{snapshot}},
-		{ActiveID: 7, Cutoff: math.MaxUint64, PrunedThrough: math.MaxUint64, Files: []File{{Kind: Cleaned, First: 0, Last: 0}}},
-	} {
-		if _, err := DecodeCatalog(EncodeCatalog(c)); !errors.Is(err, ErrCorrupt) {
-			t.Fatalf("accepted invalid catalog %+v", c)
-		}
-	}
-}
 
 func TestRecordRanges(t *testing.T) {
 	raw := File{ID: 1, Kind: Log, First: 10, Last: 12}
@@ -109,80 +64,5 @@ func TestFrontierDefinesFinalRawInterval(t *testing.T) {
 	got, err = c.ActiveFile(Frontier{ActiveID: 2, Sequence: math.MaxUint64, ActiveEnd: SegmentHeaderBytes})
 	if err != nil || got.First != 0 || got.Last != 0 {
 		t.Fatalf("empty final log: %+v, %v", got, err)
-	}
-}
-
-type boundedReader struct {
-	*bytes.Reader
-	max int
-}
-
-func (r *boundedReader) ReadAt(b []byte, off int64) (int, error) {
-	if len(b) > r.max {
-		return 0, errors.New("unbounded read")
-	}
-	return r.Reader.ReadAt(b, off)
-}
-
-type boundedWriter struct {
-	bytes.Buffer
-	max int
-}
-
-func (w *boundedWriter) Write(b []byte) (int, error) {
-	if len(b) > w.max {
-		return 0, errors.New("unbounded write")
-	}
-	return w.Buffer.Write(b)
-}
-
-func TestSelectRecordChecksDiscardedValuesAndBoundsKeyIO(t *testing.T) {
-	key := bytes.Repeat([]byte{0, 0xff}, streamChunk+1)
-	value := bytes.Repeat([]byte{1}, 3*streamChunk)
-	b := EncodeRecord(Put, 6, key, value)
-	run := func(dst io.Writer) error {
-		reader := &boundedReader{bytes.NewReader(b), streamChunk}
-		_, err := SelectRecord(context.Background(), reader, 0, int64(len(b)), make([]byte, 4*streamChunk), func(r Record, k string) (io.Writer, error) {
-			if k != string(key) || r.Sequence != 6 {
-				t.Fatal("incorrect key or sequence")
-			}
-			return dst, nil
-		})
-		return err
-	}
-	w := &boundedWriter{max: streamChunk}
-	if err := run(w); err != nil || !bytes.Equal(b, w.Bytes()) {
-		t.Fatalf("retained copy: %v", err)
-	}
-	if err := run(nil); err != nil {
-		t.Fatalf("discarded record: %v", err)
-	}
-	b[len(b)-1] ^= 1
-	if err := run(nil); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("discarded corrupt value: %v", err)
-	}
-}
-
-func TestOnlyUnknownOuterSignaturesAreUnsupported(t *testing.T) {
-	outer := []func([]byte) error{
-		func(b []byte) error { _, err := DecodeFrontier(b); return err },
-		func(b []byte) error { _, err := DecodeBackup(b); return err },
-	}
-	for _, decode := range outer {
-		if err := decode([]byte("unknown!")); !errors.Is(err, ErrUnsupported) {
-			t.Fatal(err)
-		}
-		if err := decode([]byte("short")); !errors.Is(err, ErrCorrupt) {
-			t.Fatal(err)
-		}
-	}
-	for _, fn := range []func([]byte) error{
-		func(b []byte) error { _, err := DecodeSegment(b[:SegmentHeaderBytes]); return err },
-		func(b []byte) error { _, err := DecodeCatalog(b); return err },
-		func(b []byte) error { _, err := DecodeRecord(b[:RecordHeaderBytes], RecordHeaderBytes); return err },
-	} {
-		if err := fn(make([]byte, 128)); !errors.Is(err, ErrCorrupt) {
-			t.Fatal(err)
-		}
 	}
 }

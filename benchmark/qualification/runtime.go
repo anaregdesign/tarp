@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -25,6 +26,7 @@ type RuntimeVerdict struct {
 }
 
 func RuntimeManifest(input io.Reader) ([]RuntimePackage, error) {
+	const module = "github.com/anaregdesign/tarp"
 	scanner := bufio.NewScanner(io.LimitReader(input, 65537))
 	var packages []RuntimePackage
 	seen := map[string]bool{}
@@ -36,7 +38,7 @@ func RuntimeManifest(input io.Reader) ([]RuntimePackage, error) {
 		sum, err := hex.DecodeString(fields[2])
 		if err != nil || len(sum) != 32 || seen[fields[0]] ||
 			fields[1] != "runtime-"+strconv.Itoa(len(packages))+".test" ||
-			fields[0] != "github.com/anaregdesign/tarp" && !strings.HasPrefix(fields[0], "github.com/anaregdesign/tarp/") {
+			fields[0] != module && !strings.HasPrefix(fields[0], module+"/") {
 			return nil, errors.New("qualification: invalid runtime package/hash/binary")
 		}
 		seen[fields[0]] = true
@@ -46,11 +48,12 @@ func RuntimeManifest(input io.Reader) ([]RuntimePackage, error) {
 		return nil, err
 	}
 	for _, suite := range []string{
-		"benchmark", "benchmark/cmd/tarporacle", "benchmark/cmd/tarpqual", "benchmark/qualification",
-		"examples", "internal/cache", "internal/engine", "internal/format", "internal/platform", "internal/storage",
+		".", "benchmark", "benchmark/cmd/tarporacle", "benchmark/cmd/tarpqual", "benchmark/qualification",
+		"internal/cache", "internal/composite", "internal/engine", "internal/format", "internal/platform", "internal/storage",
 	} {
-		if !seen["github.com/anaregdesign/tarp/"+suite] {
-			return nil, errors.New("qualification: runtime manifest missing " + suite)
+		pkg := path.Join(module, suite)
+		if !seen[pkg] {
+			return nil, errors.New("qualification: runtime manifest missing " + pkg)
 		}
 	}
 	return packages, nil

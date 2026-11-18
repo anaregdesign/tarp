@@ -350,7 +350,9 @@ func (s *Store) inspectNames() error {
 }
 
 func (s *Store) ownedTemp(name string) bool {
-	return strings.HasPrefix(name, ".tarp-current-"+hex.EncodeToString(s.Current.UUID[:])+"-") && strings.HasSuffix(name, ".tmp")
+	prefix := ".tarp-current-" + hex.EncodeToString(s.Current.UUID[:]) + "-"
+	suffix, ok := strings.CutPrefix(name, prefix)
+	return ok && len(suffix) > len(".tmp") && strings.HasSuffix(suffix, ".tmp")
 }
 
 // Cleanup only runs under the writer gate; release pins never performs I/O.
@@ -366,7 +368,6 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	changed := false
 	for _, e := range entries {
 		name := e.Name()
 		remove := s.ownedTemp(name)
@@ -405,7 +406,7 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 			})
 			if unlinked {
 				removed += st.Size()
-				changed = true
+				s.retireSyncPending = true
 				if removedID != 0 {
 					delete(s.Files, removedID)
 					delete(s.retired, removedID)
@@ -419,10 +420,7 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 			}
 		}
 	}
-	if changed {
-		result = s.IO.SyncDir(s.Dir, "cleanup.dirsync")
-	}
-	return
+	return removed, pinned, s.syncRetirements("cleanup.dirsync")
 }
 
 func (s *Store) Close() error {

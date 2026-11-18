@@ -1,4 +1,4 @@
-package examples_test
+package tarp_test
 
 import (
 	"context"
