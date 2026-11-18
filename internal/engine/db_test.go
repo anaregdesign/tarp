@@ -2,9 +2,15 @@ package engine
 
 import (
 	"bytes"
+	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
+	"math"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -257,47 +264,68 @@ func TestExactCacheIntegration(t *testing.T) {
 }
 
 func TestCommitFaultOutcomesAndFailStop(t *testing.T) {
-	for _, point := range []string{"data.write:before", "data.write:after", "data.sync:before", "data.sync:after", "current.write:after", "current.sync:after", "current.rename:before", "current.rename:after", "current.dirsync:before", "current.dirsync:after"} {
-		t.Run(point, func(t *testing.T) {
-			var armed atomic.Bool
-			fs := &storage.IO{Hook: func(p string) error {
-				if p == point && armed.Load() {
-					return syscall.ENOSPC
+	for _, tc := range []struct {
+		point   string
+		outcome Outcome
+		applied bool // The hook tells us which frontier this process can reopen.
+	}{
+		{"data.write:before", NotApplied, false}, {"data.write:after", NotApplied, false},
+		{"data.sync:before", NotApplied, false}, {"data.sync:after", NotApplied, false},
+		{"current.write:before", NotApplied, false}, {"current.write:after", NotApplied, false},
+		{"current.sync:before", NotApplied, false}, {"current.sync:after", NotApplied, false},
+		{"current.rename:before", Unknown, false}, {"current.rename:after", Unknown, true},
+		{"current.dirsync:before", Unknown, true}, {"current.dirsync:after", Unknown, true},
+	} {
+		for _, operation := range []string{"put", "delete"} {
+			t.Run(operation+"/"+tc.point, func(t *testing.T) {
+				var armed atomic.Bool
+				db := newTestDB(t, testOptions(), &storage.IO{Hook: func(p string) error {
+					if p == tc.point && armed.CompareAndSwap(true, false) {
+						return syscall.ENOSPC
+					}
+					return nil
+				}})
+				mustPut(t, db, "k", "old")
+				armed.Store(true)
+				var err error
+				if operation == "put" {
+					err = db.Put([]byte("k"), []byte("new"))
+				} else {
+					err = db.Delete([]byte("k"))
 				}
-				return nil
-			}}
-			db := newTestDB(t, testOptions(), fs)
-			mustPut(t, db, "k", "old")
-			armed.Store(true)
-			err := db.Put([]byte("k"), []byte("new"))
-			var op *OpError
-			if !errors.As(err, &op) || !errors.Is(err, ErrNoSpace) {
-				t.Fatalf("error: %v", err)
-			}
-			uncertain := strings.HasPrefix(point, "current.rename") || strings.HasPrefix(point, "current.dirsync")
-			if errors.Is(err, ErrCommitUncertain) != uncertain || op.Outcome == NotApplied && uncertain {
-				t.Fatalf("wrong outcome: %+v", op)
-			}
-			if _, err := db.Get([]byte("k")); !errors.Is(err, ErrUnhealthy) {
-				t.Fatalf("cached read escaped fail-stop: %v", err)
-			}
-			armed.Store(false)
-			if err := db.Close(); !errors.Is(err, syscall.ENOSPC) {
-				t.Fatalf("close lost cause: %v", err)
-			}
-			reopened, err := Open(db.store.Dir, testOptions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := "old"
-			if point == "current.rename:after" || strings.HasPrefix(point, "current.dirsync") {
-				want = "new"
-			}
-			wantValue(t, reopened, "k", want)
-			if err := reopened.Close(); err != nil {
-				t.Fatal(err)
-			}
-		})
+				var op *OpError
+				phase, _, _ := strings.Cut(tc.point, ":")
+				if !errors.As(err, &op) || op.Operation != operation || op.Phase != phase || op.Outcome != tc.outcome ||
+					!errors.Is(err, ErrNoSpace) || !errors.Is(err, syscall.ENOSPC) || errors.Is(err, ErrCommitUncertain) != (tc.outcome == Unknown) {
+					t.Fatalf("got %v, want %s at %s with outcome %s and ENOSPC", err, operation, phase, tc.outcome)
+				}
+				if _, err := db.Get([]byte("k")); !errors.Is(err, ErrUnhealthy) || !errors.Is(err, syscall.ENOSPC) {
+					t.Fatalf("cached read after failure: %v", err)
+				}
+				if err := db.Close(); !errors.Is(err, syscall.ENOSPC) {
+					t.Fatalf("close lost cause: %v", err)
+				}
+				reopened, err := Open(db.store.Dir, testOptions())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := reopened.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
+				switch {
+				case !tc.applied:
+					wantValue(t, reopened, "k", "old")
+				case operation == "put":
+					wantValue(t, reopened, "k", "new")
+				default:
+					if _, err := reopened.Get([]byte("k")); !errors.Is(err, ErrNotFound) {
+						t.Fatalf("Get after committed Delete: %v", err)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -468,5 +496,858 @@ func TestUnsupportedAndMissingFrontier(t *testing.T) {
 	}
 	if _, err := Open(db.store.Dir, testOptions()); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("missing frontier: %v", err)
+	}
+}
+
+func TestConcurrentReadFailureBeforeFrontierLeavesPutUnapplied(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target int64
+		point  string
+	}{
+		{"append", 256, "data.sync:after"},
+		{"rotation", 192, "segment.sync:after"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synced, release := make(chan struct{}), make(chan struct{})
+			armed := false
+			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+				if armed && p == tc.point {
+					close(synced)
+					<-release
+				}
+				if p == "read:before" {
+					return syscall.EIO
+				}
+				return nil
+			}}
+			opts := Options{CacheBytes: 140, MaxRecordBytes: 64, TargetSegmentBytes: tc.target}
+			db := newTestDB(t, opts, fs)
+			mustPut(t, db, "cold", "old")
+			mustPut(t, db, "key", "old") // Evicts "cold", forcing Get to read the segment.
+			before := db.store.Current
+			armed = true
+			done := make(chan error, 1)
+			go func() { done <- db.Put([]byte("key"), []byte("new")) }()
+			select {
+			case <-synced:
+			case err := <-done:
+				t.Fatalf("Put returned before %s was reached: %v", tc.point, err)
+			}
+			_, readErr := db.Get([]byte("cold"))
+			close(release)
+			writeErr := <-done
+			if !errors.Is(readErr, syscall.EIO) {
+				t.Fatalf("cold Get returned %v, want EIO", readErr)
+			}
+			var op *OpError
+			if !errors.As(writeErr, &op) || op.Operation != "put" || op.Phase != "commit.health" || op.Outcome != NotApplied ||
+				!errors.Is(writeErr, ErrUnhealthy) || !errors.Is(writeErr, syscall.EIO) || errors.Is(writeErr, ErrCommitUncertain) {
+				t.Fatalf("Put after failed Get: %v", writeErr)
+			}
+			if err := db.Close(); !errors.Is(err, syscall.EIO) {
+				t.Fatal(err)
+			}
+			reopened, err := OpenWithIO(db.store.Dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if after := reopened.store.Current; after != before {
+				t.Fatalf("unapplied Put changed frontier: %+v -> %+v", before, after)
+			}
+			wantValue(t, reopened, "key", "old")
+			wantValue(t, reopened, "cold", "old")
+		})
+	}
+}
+
+func TestCloseRetainsBothReadAndCloseFailures(t *testing.T) {
+	opts := Options{CacheBytes: 140}
+	db := newTestDB(t, opts, &storage.IO{Hook: func(p string) error {
+		switch p {
+		case "read:before":
+			return syscall.EIO
+		case "close.active:before":
+			return syscall.ENOSPC
+		}
+		return nil
+	}})
+	mustPut(t, db, "cold", "old")
+	mustPut(t, db, "key", "old")
+	if _, err := db.Get([]byte("cold")); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("cold Get: %v", err)
+	}
+	const callers = 4
+	start, results := make(chan struct{}), make(chan error, callers)
+	for range callers {
+		go func() {
+			<-start
+			results <- db.Close()
+		}()
+	}
+	close(start)
+	first := <-results
+	if !errors.Is(first, syscall.EIO) || !errors.Is(first, syscall.ENOSPC) || !errors.Is(first, ErrNoSpace) {
+		t.Fatalf("Close lost cause: %v", first)
+	}
+	for i := 1; i < callers; i++ {
+		if got := <-results; got != first {
+			t.Fatalf("Close returned a different result: %v", got)
+		}
+	}
+	if _, err := db.Get([]byte("key")); !errors.Is(err, ErrClosed) || errors.Is(err, ErrUnhealthy) {
+		t.Fatalf("Get after Close: %v", err)
+	}
+	reopened, err := Open(db.store.Dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	wantValue(t, reopened, "key", "old")
+	wantValue(t, reopened, "cold", "old")
+}
+
+func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
+	opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128}
+	fs := &storage.IO{CleanerStart: make(chan struct{})}
+	db := newTestDB(t, opts, fs)
+	mustPut(t, db, "sealed", "first")
+	mustPut(t, db, "active", "second")
+	frontier := db.store.Current
+	sealed := filepath.Base(db.index["sealed"].File.Path)
+	active := storage.DataName(frontier.UUID, frontier.ActiveID)
+	if sealed == active {
+		t.Fatal("fixture did not seal the first segment")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original := directoryBytes(t, db.store.Dir)
+	orphan := storage.DataName(frontier.UUID, frontier.ManifestID+100)
+	tail := format.EncodeRecord(format.Put, frontier.Sequence+1, []byte("future"), []byte("uncommitted"))
+
+	for _, damage := range []string{"missing sealed file", "short sealed file", "extended sealed file", "sealed checksum", "unknown file"} {
+		t.Run(damage, func(t *testing.T) {
+			files := maps.Clone(original)
+			files[active] += string(tail)
+			files[orphan] = "unselected staging"
+			switch damage {
+			case "missing sealed file":
+				delete(files, sealed)
+			case "short sealed file":
+				files[sealed] = files[sealed][:len(files[sealed])-1]
+			case "extended sealed file":
+				files[sealed] += "x"
+			case "sealed checksum":
+				b := []byte(files[sealed])
+				b[len(b)-1] ^= 1
+				files[sealed] = string(b)
+			case "unknown file":
+				files["unexpected"] = "preserve"
+			}
+			dir := t.TempDir()
+			writeFixtureFile(t, filepath.Join(dir, "LOCK"), nil)
+			for name, b := range files {
+				writeFixtureFile(t, filepath.Join(dir, name), []byte(b))
+			}
+			rejected, err := OpenWithIO(dir, opts, fs)
+			if rejected != nil {
+				rejected.Close()
+				t.Fatal("opened corrupt fixture")
+			}
+			if !errors.Is(err, ErrCorrupt) || !maps.Equal(directoryBytes(t, dir), files) {
+				t.Fatalf("Open must preserve all files on corruption: %v", err)
+			}
+
+			// Repair only the defect. The next Open should now perform both
+			// cleanup operations without admitting the valid but uncommitted record.
+			if damage == "unknown file" {
+				if err := os.Remove(filepath.Join(dir, "unexpected")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeFixtureFile(t, filepath.Join(dir, sealed), []byte(original[sealed]))
+			}
+			reopened, err := OpenWithIO(dir, opts, fs)
+			if err != nil {
+				t.Fatalf("retry after repair: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := reopened.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			wantValue(t, reopened, "sealed", "first")
+			wantValue(t, reopened, "active", "second")
+			if _, err := reopened.Get([]byte("future")); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("uncommitted key after recovery: %v", err)
+			}
+			after := directoryBytes(t, dir)
+			if _, exists := after[orphan]; exists || after[active] != original[active] || reopened.store.Current != frontier {
+				t.Fatal("successful recovery did not remove only the uncommitted suffix and orphaned files")
+			}
+		})
+	}
+}
+
+func TestWriteAndSyncErrorFamilies(t *testing.T) {
+	for _, cause := range []error{syscall.EIO, syscall.ENOSPC, syscall.EDQUOT} {
+		for _, point := range []string{"data.write:before", "data.sync:before"} {
+			t.Run(cause.Error()+"/"+point, func(t *testing.T) {
+				var armed atomic.Bool
+				db := newTestDB(t, testOptions(), &storage.IO{Hook: func(p string) error {
+					if p == point && armed.CompareAndSwap(true, false) {
+						return cause
+					}
+					return nil
+				}})
+				mustPut(t, db, "old", "acknowledged")
+				armed.Store(true)
+				err := db.Put([]byte("next"), []byte("value"))
+				if !errors.Is(err, cause) || errors.Is(err, ErrNoSpace) != (cause != syscall.EIO) {
+					t.Fatalf("error classification: %v", err)
+				}
+				if _, err := db.Get([]byte("old")); !errors.Is(err, ErrUnhealthy) {
+					t.Fatal(err)
+				}
+				if err := db.Close(); !errors.Is(err, cause) {
+					t.Fatal(err)
+				}
+				reopened, err := Open(db.store.Dir, testOptions())
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantValue(t, reopened, "old", "acknowledged")
+				if _, err := reopened.Get([]byte("next")); !errors.Is(err, ErrNotFound) {
+					t.Fatal(err)
+				}
+				if err := reopened.Close(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestInitializationFailureNeverInventsAHistory(t *testing.T) {
+	for _, point := range []string{"init.parent.sync:after", "lock.sync:after", "segment.write:before", "segment.sync:after", "catalog.write:after", "catalog.sync:after", "catalog.dirsync:after", "current.write:after", "current.sync:after", "current.rename:after", "current.dirsync:after"} {
+		t.Run(point, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "db")
+			_, err := OpenWithIO(dir, testOptions(), &storage.IO{Hook: func(p string) error {
+				if p == point {
+					return syscall.EIO
+				}
+				return nil
+			}})
+			if !errors.Is(err, syscall.EIO) {
+				t.Fatalf("initialization phase not exercised: %v", err)
+			}
+			db, err := Open(dir, testOptions())
+			if err != nil {
+				if !errors.Is(err, ErrCorrupt) {
+					t.Fatal(err)
+				}
+				return
+			}
+			if len(db.index) != 0 {
+				t.Fatal("invented initial state")
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestExistingEmptyDirectoryStillRequiresParentSync(t *testing.T) {
+	var synced bool
+	db, err := OpenWithIO(t.TempDir(), testOptions(), &storage.IO{Hook: func(point string) error {
+		if point == "init.parent.sync:after" {
+			synced = true
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !synced {
+		t.Fatal("successful initialization omitted durability of the existing empty directory entry")
+	}
+}
+
+func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
+	for _, rotate := range []bool{false, true} {
+		t.Run(fmt.Sprint(rotate), func(t *testing.T) {
+			db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{})})
+			mustPut(t, db, "k", "old")
+			if rotate {
+				mustPut(t, db, "pad", string(make([]byte, 60)))
+			}
+			activeID := db.store.Current.ActiveID
+			db.store.Current.Generation = math.MaxUint64 - 1
+			err := db.Put([]byte("k"), []byte("new"))
+			if err != nil {
+				t.Fatalf("rotation=%t: %v", rotate, err)
+			}
+			current, readErr := os.ReadFile(filepath.Join(db.store.Dir, "CURRENT"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			frontier, decodeErr := format.DecodeFrontier(current)
+			if decodeErr != nil || frontier.Generation != math.MaxUint64 || (frontier.ActiveID != activeID) != rotate {
+				t.Fatalf("invalid last publication: %+v %v", frontier, decodeErr)
+			}
+			if err := db.Put([]byte("k"), []byte("never")); err == nil {
+				t.Fatal("exhausted generation accepted")
+			}
+			wantValue(t, db, "k", "new")
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(db.store.Dir, testOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantValue(t, reopened, "k", "new")
+			if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRecoveryBoundaryFailureReleasesOwnershipAndPreservesAcknowledgment(t *testing.T) {
+	for _, point := range []string{"recover.truncate:before", "recover.truncate:after", "recover.sync:before", "recover.sync:after"} {
+		for _, cause := range []error{syscall.EIO, syscall.ENOSPC, syscall.EDQUOT} {
+			t.Run(point+"/"+cause.Error(), func(t *testing.T) {
+				db := newTestDB(t, testOptions(), nil)
+				mustPut(t, db, "k", "acknowledged")
+				dir, path, end := db.store.Dir, db.index["k"].File.Path, db.store.Current.ActiveEnd
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				fd, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tail := []byte("incomplete-tail")
+				n, writeErr := fd.Write(tail)
+				if err := errors.Join(writeErr, fd.Sync(), fd.Close()); err != nil || n != len(tail) {
+					t.Fatalf("seed tail: %d %v", n, err)
+				}
+				reached := 0
+				failed, err := OpenWithIO(dir, testOptions(), &storage.IO{Hook: func(p string) error {
+					if p == point {
+						reached++
+						return cause
+					}
+					return nil
+				}})
+				if failed != nil || reached != 1 || !errors.Is(err, cause) {
+					t.Fatalf("failed recovery did not preserve its cause/phase: db=%v reached=%d err=%v", failed, reached, err)
+				}
+				stat, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected := end
+				if point == "recover.truncate:before" {
+					expected += int64(len(tail))
+				}
+				if stat.Size() != expected {
+					t.Fatalf("truncation at %s: size=%d want=%d", point, stat.Size(), expected)
+				}
+				reopened, err := Open(dir, testOptions())
+				if err != nil {
+					t.Fatalf("failed Open retained ownership or prevented safe retry: %v", err)
+				}
+				wantValue(t, reopened, "k", "acknowledged")
+				if err := reopened.Close(); err != nil {
+					t.Fatal(err)
+				}
+				stat, err = os.Stat(path)
+				if err != nil || stat.Size() != end {
+					t.Fatalf("retry did not finish safe suffix cleanup: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestPartialPayloadWritePreservesAcknowledgedValue(t *testing.T) {
+	db := newTestDB(t, testOptions(), nil)
+	mustPut(t, db, "k", "acknowledged")
+	reached := false
+	db.store.IO = &storage.IO{WriteAt: func(fd *os.File, data []byte, offset int64) (int, error) {
+		if !reached {
+			reached = true
+			count := format.RecordHeaderBytes + len("k") + 3
+			if count >= len(data) {
+				t.Fatal("fixture must tear within the value payload")
+			}
+			n, err := fd.WriteAt(data[:count], offset)
+			return n, errors.Join(err, fd.Sync(), syscall.EIO)
+		}
+		return fd.WriteAt(data, offset)
+	}}
+	if err := db.Put([]byte("k"), []byte("partially-written-payload")); !reached || !errors.Is(err, syscall.EIO) {
+		t.Fatalf("partial-payload failure not reached: %v", err)
+	}
+	if err := db.Close(); !errors.Is(err, syscall.EIO) {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantValue(t, reopened, "k", "acknowledged")
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This opaque backup was produced by commit 1eb703808a595d15df603553bb2f873dedb39396.
+// The new engine treats the unsupported outer signatures as opaque as well.
+//
+//go:embed testdata/previous-release/*
+var previousReleaseFS embed.FS
+
+func TestPreviousReleaseRejectionPreservesInput(t *testing.T) {
+	// The full suite also runs as a standalone binary inside qualification guests.
+	fixture, err := fs.Sub(previousReleaseFS, "testdata/previous-release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(t.TempDir(), "backup")
+	if err := os.CopyFS(previous, fixture); err != nil {
+		t.Fatal(err)
+	}
+	for _, lock := range []bool{false, true} {
+		dir := filepath.Join(t.TempDir(), "old-db")
+		if err := os.CopyFS(dir, os.DirFS(previous)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(dir, "BACKUP")); err != nil {
+			t.Fatal(err)
+		}
+		if lock {
+			if err := os.WriteFile(filepath.Join(dir, "LOCK"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		files, err := filepath.Glob(filepath.Join(dir, "DATA-*"))
+		if err != nil || len(files) != 1 {
+			t.Fatalf("opaque fixture: %v, %v", files, err)
+		}
+		f, err := os.OpenFile(files[0], os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteString("uncommitted suffix")
+		if err := errors.Join(err, f.Close()); err != nil {
+			t.Fatal(err)
+		}
+		before := directoryBytes(t, dir)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A second rejection also checks release of ownership on failure.
+		for i := 0; i < 2; i++ {
+			if _, err := Open(dir, Options{}); !errors.Is(err, ErrUnsupportedFormat) {
+				t.Fatalf("lock=%t open=%d: %v", lock, i, err)
+			}
+		}
+		after, err := os.ReadDir(dir)
+		if err != nil || len(after) != len(entries) || !reflect.DeepEqual(directoryBytes(t, dir), before) {
+			t.Fatalf("opening a foreign directory changed it: %v", err)
+		}
+	}
+	before := directoryBytes(t, previous)
+	target := filepath.Join(t.TempDir(), "restored")
+	if err := Restore(context.Background(), previous, target, Options{}); !errors.Is(err, ErrUnsupportedFormat) {
+		t.Fatalf("old backup: %v", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) || !reflect.DeepEqual(directoryBytes(t, previous), before) {
+		t.Fatalf("restore changed its source or published a directory: %v", err)
+	}
+}
+
+func TestMissSurvivesRelocationAndRetirement(t *testing.T) {
+	var armed atomic.Bool
+	started, release := make(chan struct{}), make(chan struct{})
+	opts := testOptions()
+	opts.CacheBytes = 140
+	db := newTestDB(t, opts, &storage.IO{Hook: func(p string) error {
+		if p == "read:after" && armed.CompareAndSwap(true, false) {
+			close(started)
+			<-release
+		}
+		return nil
+	}})
+	mustPut(t, db, "a", "old")
+	mustPut(t, db, "x", "evict")
+	armed.Store(true)
+	done := make(chan error, 1)
+	go func() {
+		v, err := db.Get([]byte("a"))
+		if err == nil && string(v) != "old" {
+			err = fmt.Errorf("relocated read: %q", v)
+		}
+		done <- err
+	}()
+	<-started
+	if _, err := db.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	wantValue(t, db, "a", "old")
+	if _, err := db.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSoftRotationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		secondBytes int
+		rotate      bool
+	}{{"exact fit", 0, false}, {"one byte over", 1, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t, Options{MaxRecordBytes: 100, TargetSegmentBytes: 200}, nil)
+			db.writer.Lock()
+			startID, startGeneration := db.store.Current.ActiveID, db.store.Current.Generation
+			err := db.store.Rotate() // A header-only active log must stay selected.
+			noRotation := db.store.Current.ActiveID == startID && db.store.Current.Generation == startGeneration
+			db.writer.Unlock()
+			if err != nil || !noRotation {
+				t.Fatalf("empty rotation: %v", err)
+			}
+			// 64-byte header, 87-byte first record, 49- or 50-byte second record.
+			mustPut(t, db, "a", strings.Repeat("x", 38))
+			mustPut(t, db, "b", strings.Repeat("y", tc.secondBytes))
+			db.writer.Lock()
+			end := db.store.Current
+			db.writer.Unlock()
+			if (end.ActiveID != startID) != tc.rotate || end.Sequence != 2 {
+				t.Fatalf("active %d -> %d, sequence %d", startID, end.ActiveID, end.Sequence)
+			}
+		})
+	}
+}
+
+func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
+	smaller := Options{TargetSegmentBytes: 128, MaxRecordBytes: 64}
+	db := newTestDB(t, Options{TargetSegmentBytes: 260, MaxRecordBytes: 64}, nil)
+	value := strings.Repeat("x", 11)
+	for i := range 6 {
+		mustPut(t, db, fmt.Sprint(i), value)
+	}
+	dir := db.store.Dir
+	db.writer.Lock()
+	files := db.store.Catalog.Files
+	current := db.store.Current
+	db.writer.Unlock()
+	if len(files) != 1 || files[0].Bytes <= smaller.TargetSegmentBytes || current.ActiveEnd <= smaller.TargetSegmentBytes {
+		t.Fatalf("fixture: %v, active %d", files, current.ActiveEnd)
+	}
+	backup := filepath.Join(t.TempDir(), "backup")
+	if err := db.Backup(context.Background(), backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "restored")
+	if err := Restore(context.Background(), backup, target, smaller); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, target} {
+		image, err := Open(path, smaller)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { image.Close() })
+		image.writer.Lock()
+		before := image.store.Current
+		image.writer.Unlock()
+		if before != current {
+			t.Fatal("changing target rewrote the original selection")
+		}
+		for i := range 6 {
+			wantValue(t, image, fmt.Sprint(i), value)
+		}
+		mustPut(t, image, "next", "one")
+		image.writer.Lock()
+		after := image.store.Current
+		image.writer.Unlock()
+		if after.ActiveID == before.ActiveID || after.Sequence != before.Sequence+1 {
+			t.Fatalf("append failed to rotate oversized active log: %#v", after)
+		}
+	}
+}
+
+// Inject failures at each publication boundary. Once the CURRENT rename is
+// attempted the user operation has an unknown outcome, even when our test hook
+// tells us which image this process will see on reopen.
+func TestRotatingAppendFaultOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		point    string
+		outcome  Outcome
+		newImage bool
+	}{
+		{"segment.write:after", NotApplied, false},
+		{"data.write:after", NotApplied, false},
+		{"segment.sync:after", NotApplied, false},
+		{"catalog.sync:after", NotApplied, false},
+		{"catalog.dirsync:after", NotApplied, false},
+		{"current.sync:after", NotApplied, false},
+		{"current.rename:before", Unknown, false},
+		{"current.rename:after", Unknown, true},
+		{"current.dirsync:before", Unknown, true},
+		{"current.dirsync:after", Unknown, true},
+		{"rotation.close:after", Committed, true},
+	} {
+		t.Run(tc.point, func(t *testing.T) {
+			armed := false
+			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+				if armed && p == tc.point {
+					return syscall.EIO
+				}
+				return nil
+			}}
+			opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128}
+			db := newTestDB(t, opts, fs)
+			mustPut(t, db, "k", "old")
+			before := db.store.Current
+			armed = true
+			err := db.Put([]byte("k"), []byte("new"))
+			var op *OpError
+			if !errors.As(err, &op) || op.Outcome != tc.outcome || !errors.Is(err, syscall.EIO) ||
+				errors.Is(err, ErrCommitUncertain) != (tc.outcome == Unknown) {
+				t.Fatalf("rotation returned %v; want %s with EIO", err, tc.outcome)
+			}
+			if err := db.Put([]byte("k"), []byte("next")); !errors.Is(err, ErrUnhealthy) {
+				t.Fatalf("failed rotation allowed another write: %v", err)
+			}
+			dir := db.store.Dir
+			if err := db.Close(); !errors.Is(err, syscall.EIO) {
+				t.Fatal(err)
+			}
+			image, err := OpenWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer image.Close()
+			frontier := image.store.Current
+			if tc.newImage {
+				wantValue(t, image, "k", "new")
+				if frontier.ActiveID == before.ActiveID || frontier.Generation != before.Generation+1 || frontier.Sequence != before.Sequence+1 {
+					t.Fatalf("rotating record and catalog published separately: %+v -> %+v", before, frontier)
+				}
+			} else {
+				wantValue(t, image, "k", "old")
+				if frontier != before {
+					t.Fatalf("previous frontier changed: %+v -> %+v", before, frontier)
+				}
+			}
+			entries, err := os.ReadDir(dir)
+			// CURRENT, LOCK, one manifest, the active log and all selected sealed logs.
+			if err != nil || len(entries) != 4+len(image.store.Catalog.Files) {
+				t.Fatalf("unexpected objects after recovery: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestConcurrentReadFailureAfterDurablePublication(t *testing.T) {
+	var pause, failRead atomic.Bool
+	published, release := make(chan struct{}), make(chan struct{})
+	fs := &storage.IO{Hook: func(p string) error {
+		if p == "current.dirsync:after" && pause.CompareAndSwap(true, false) {
+			close(published)
+			<-release
+		}
+		if p == "read:before" && failRead.Load() {
+			return syscall.EIO
+		}
+		return nil
+	}}
+	opts := testOptions()
+	opts.CacheBytes = 140
+	db := newTestDB(t, opts, fs)
+	mustPut(t, db, "k", "old")
+	mustPut(t, db, "x", "old")
+	pause.Store(true)
+	done := make(chan error, 1)
+	go func() { done <- db.Put([]byte("x"), []byte("new")) }()
+	<-published
+	failRead.Store(true)
+	if _, err := db.Get([]byte("k")); !errors.Is(err, syscall.EIO) {
+		t.Fatal(err)
+	}
+	close(release)
+	err := <-done
+	var op *OpError
+	if !errors.As(err, &op) || op.Outcome != Committed || !errors.Is(err, ErrUnhealthy) {
+		t.Fatalf("durable writer reported rollback: %v", err)
+	}
+	if err := db.Close(); !errors.Is(err, syscall.EIO) {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantValue(t, reopened, "x", "new")
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloseFailureStillReleasesOwnership(t *testing.T) {
+	db, err := OpenWithIO(filepath.Join(t.TempDir(), "db"), testOptions(), &storage.IO{Hook: func(p string) error {
+		if p == "close.active:before" {
+			return syscall.EIO
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, db, "k", "v")
+	first := db.Close()
+	if !errors.Is(first, syscall.EIO) || db.Close() != first {
+		t.Fatalf("close result not retained: %v", first)
+	}
+	db2, err := Open(db.store.Dir, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type observedCall struct {
+	start, end            uint64
+	key, kind, value, got string
+	missing               bool
+}
+
+func linearizable(calls []observedCall) bool {
+	var search func(uint64, string, bool) bool
+	search = func(done uint64, value string, present bool) bool {
+		if done == uint64(1)<<len(calls)-1 {
+			return true
+		}
+		for i, op := range calls {
+			bit := uint64(1) << i
+			if done&bit != 0 {
+				continue
+			}
+			eligible := true
+			for j, before := range calls {
+				if before.end < op.start && done&(uint64(1)<<j) == 0 {
+					eligible = false
+					break
+				}
+			}
+			if !eligible {
+				continue
+			}
+			next, exists := value, present
+			switch op.kind {
+			case "put":
+				if op.missing {
+					continue
+				}
+				next, exists = op.value, true
+			case "delete":
+				if op.missing == present {
+					continue
+				}
+				next, exists = "", false
+			case "get":
+				if op.missing == present || present && op.got != value {
+					continue
+				}
+			default:
+				continue
+			}
+			if search(done|bit, next, exists) {
+				return true
+			}
+		}
+		return false
+	}
+	return search(0, "", false)
+}
+
+func TestSeededHistoriesArePerKeyLinearizable(t *testing.T) {
+	for seed := uint64(1); seed <= 8; seed++ {
+		db := newTestDB(t, testOptions(), nil)
+		var clock atomic.Uint64
+		history := make([]observedCall, 12)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for worker := 0; worker < 3; worker++ {
+			wg.Go(func() {
+				rng := rand.New(rand.NewPCG(seed, uint64(worker)))
+				<-start
+				for n := 0; n < 4; n++ {
+					i := worker*4 + n
+					op := observedCall{key: fmt.Sprint(rng.IntN(2)), value: fmt.Sprintf("%d:%d", worker, n)}
+					op.start = clock.Add(1)
+					var err error
+					switch rng.IntN(3) {
+					case 0:
+						op.kind = "put"
+						err = db.Put([]byte(op.key), []byte(op.value))
+					case 1:
+						op.kind = "delete"
+						err = db.Delete([]byte(op.key))
+					case 2:
+						op.kind = "get"
+						var got []byte
+						got, err = db.Get([]byte(op.key))
+						op.got = string(got)
+					}
+					op.end = clock.Add(1)
+					op.missing = errors.Is(err, ErrNotFound)
+					if err != nil && (!op.missing || op.kind == "put") {
+						t.Error(err)
+					}
+					history[i] = op
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		for _, key := range []string{"0", "1"} {
+			var calls []observedCall
+			for _, op := range history {
+				if op.key == key {
+					calls = append(calls, op)
+				}
+			}
+			if !linearizable(calls) {
+				t.Fatalf("seed %d key %s non-linearizable: %+v", seed, key, calls)
+			}
+		}
+	}
+}
+
+func TestLinearizabilityOracleRejectsImpossiblePutResult(t *testing.T) {
+	calls := []observedCall{{kind: "put", value: "v", missing: true, start: 1, end: 2}}
+	if linearizable(calls) {
+		t.Fatal("an impossible Put ErrNotFound response was accepted")
 	}
 }

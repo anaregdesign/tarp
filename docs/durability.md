@@ -143,6 +143,7 @@ Use `errors.Is` for category/underlying causes and `errors.As` for `*OpError`,
 | All commit syncs finish but another read detects source failure before memory publication | Known `Committed`, unhealthy error | Fail-stop |
 | Source read/checksum failure | Explicit original error, no cache fallback | Fail-stop |
 | Backup destination failure | Output publication status only; not source rollback | Source may remain healthy |
+| Preliminary log rotation fails during `Compact` | `NotApplied` for the checkpoint, even if the rotation selected a new active log | An I/O failure during publication requires close/reopen |
 | Unpublished checkpoint ENOSPC/EDQUOT | Selected sources retained; cleanup errors joined | May remain healthy |
 | Cleanup after a durable checkpoint | Committed maintenance error | Valid logical image; retry cleanup |
 
@@ -207,6 +208,8 @@ index location under short state locks. Later Put/Delete wins.
 Old paths remain until they are unselected, have no index references, and have
 no reader/backup/compaction pins. The compaction releases its own capture pins
 before cleanup; successful unlinks also remove retired registry objects.
+After an unlink, a failed directory sync stays pending. The next manual cleanup
+or worker retirement pass retries it, even if there are no more files to remove.
 Leased read descriptors close after their final release. Pin release performs
 no disk I/O. The worker revisits its pending retirements, and full checkpoint
 and validated reopen can also clean eligible files. `DB.MaintenanceStatus`

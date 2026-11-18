@@ -119,8 +119,8 @@ types and structs with unexported fields when it constructs the codec.
 
 For a custom representation, implement `Codec[T]` with `Encode(T) ([]byte, error)`
 and `Decode([]byte) (T, error)`. Use compatible codecs on reopen and after
-`Restore`. See the runnable [TypedDB example](examples/typed_db_test.go) and
-[composite codec example](examples/composite_codec_test.go).
+`Restore`. See the runnable [TypedDB example](typed_db_test.go) and
+[composite codec example](composite_codec_test.go).
 
 ## Contract
 
@@ -233,8 +233,8 @@ Supply cancellable contexts for manual maintenance and backup.
 
 ## Development
 
-The root package exposes the public API. The implementation and its functional
-tests live in `internal/engine/`. The [runnable example](examples/example_test.go)
+Run `go test .` for the public API tests and examples. Each source file's unit
+tests are in the matching `_test.go` file beside it. The [package example](doc_test.go)
 covers backup, compaction and restore. The [benchmark directory](benchmark/)
 contains the Go benchmarks, measurement drivers, guest scripts and controller tools.
 

@@ -17,6 +17,17 @@ func (s *Store) retireManifest(id uint64) {
 	}
 }
 
+// Manual cleanup and the automatic worker can finish each other's pending sync.
+// Both callers hold the writer gate.
+func (s *Store) syncRetirements(point string) error {
+	if !s.retireSyncPending {
+		return nil
+	}
+	err := s.IO.SyncDir(s.Dir, point)
+	s.retireSyncPending = err != nil
+	return err
+}
+
 // RetireCleaned removes only known obsolete objects. The caller holds the
 // writer gate and checks health. Pin release itself never performs file I/O.
 func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result error) {
@@ -89,10 +100,6 @@ func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result er
 		}
 		result = err
 	}
-	if s.retireSyncPending {
-		err := s.IO.SyncDir(s.Dir, "clean.retire.dirsync")
-		s.retireSyncPending = err != nil
-		result = errors.Join(result, err)
-	}
+	result = errors.Join(result, s.syncRetirements("clean.retire.dirsync"))
 	return unlinked, pinned, len(s.retired)+len(s.retiredCatalogs) != 0 || s.retireSyncPending, result
 }

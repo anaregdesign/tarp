@@ -2,9 +2,9 @@
 
 ## Project Structure
 
-Keep root Go files limited to the public `tarp` API and its package documentation. Put database operations, compaction and their tests in `internal/engine/`. Under `internal/`, `format` defines on-disk encodings, `storage` handles file I/O and recovery, `cache` implements the LRU, and `platform` isolates OS-specific operations.
+Keep the public `tarp` API, its package documentation, and its public API tests at the module root. Place the unit tests for each `<filename>.go` in `<filename>_test.go` in the same directory. Root public API tests use `package tarp_test` and import `github.com/anaregdesign/tarp`. Put database operations and compaction in `internal/engine/`. Under `internal/`, `format` defines on-disk encodings, `storage` handles file I/O and recovery, `cache` implements the LRU, and `platform` isolates OS-specific operations.
 
-Keep runnable public API examples in `examples/`. Place measurement drivers in `benchmark/`, qualification commands in `benchmark/cmd/`, and guest scripts in `benchmark/scripts/`. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
+Keep runnable Go examples with their public API tests. Place measurement drivers in `benchmark/`, qualification commands in `benchmark/cmd/`, and guest scripts in `benchmark/scripts/`. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
 
 ## Build, Test, and Development Commands
 
@@ -13,7 +13,8 @@ Run from the repository root with Go 1.26.0 or newer.
 | Command | Purpose |
 | --- | --- |
 | `go build ./...` | Compile packages and tools for the current platform. |
-| `go test -run '^Example$' -v ./examples` | Run the public API example through backup, compaction, and restore. |
+| `go test -count=1 .` | Run the public API tests and examples. |
+| `go test -run '^Example$' -v .` | Run the public API example through backup, compaction, and restore. |
 | `go test -count=1 -timeout=5m ./...` | Run the full functional suite without cached results. |
 | `go test -race -count=1 -timeout=5m ./...` | Check for data races. |
 | `go vet ./...` | Run static checks. |

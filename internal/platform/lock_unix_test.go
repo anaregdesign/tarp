@@ -37,25 +37,28 @@ func TestLockAndAlias(t *testing.T) {
 	}
 }
 
-func TestRenameNoReplace(t *testing.T) {
-	parent := t.TempDir()
-	a, b := filepath.Join(parent, "a"), filepath.Join(parent, "b")
-	if err := os.Mkdir(a, 0700); err != nil {
+func TestLockRejectsNonRegularLockFileAndCanRetry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "LOCK")
+	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(b, 0700); err != nil {
+	lock, err := Lock(dir)
+	if err == nil || lock != nil || errors.Is(err, ErrLocked) {
+		t.Fatalf("Lock with directory in place of LOCK: %v, %v", lock, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("invalid LOCK was replaced or removed: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := RenameNoReplace(a, b); !errors.Is(err, os.ErrExist) {
-		t.Fatalf("replaced existing empty destination: %v", err)
+	lock, err = Lock(dir)
+	if err != nil {
+		t.Fatalf("retry after removing invalid LOCK: %v", err)
 	}
-	if err := os.Remove(b); err != nil {
-		t.Fatal(err)
-	}
-	if err := RenameNoReplace(a, b); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(b); err != nil {
+	if err := lock.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
