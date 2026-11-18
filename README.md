@@ -76,10 +76,51 @@ encodings are fixed-width and big-endian, with eight bytes for `int`, `uint`
 and `uintptr`. String and byte-slice codecs store their bytes verbatim, so an
 empty string or slice used as a key returns `ErrEmptyKey`.
 
-To store an application type, implement `Codec[T]` with `Encode(T) ([]byte, error)`
-and `Decode([]byte) (T, error)`. Key identity is the encoded byte sequence.
-Reuse compatible codecs on reopen and after `Restore`. See the
-[runnable typed example](examples/typed_db_test.go).
+`TimeCodec` stores a `time.Time` instant with nanosecond precision and decodes
+it in UTC. The original location and the process-local monotonic reading are
+discarded. `DurationCodec` stores a `time.Duration` as signed 64-bit nanoseconds.
+
+### Deriving a codec from a Go type
+
+`NewCodec[T]()` composes the scalar codecs for slices, arrays, maps and structs
+with exported fields. For example, this opens a DB of jobs keyed by name.
+
+```go
+type Job struct {
+	Started time.Time
+	Retries []time.Duration
+	Labels  map[string]string
+}
+
+func openJobs(dir string) (*tarp.TypedDB[string, Job], error) {
+	jobs, err := tarp.NewCodec[Job]()
+	if err != nil {
+		return nil, err
+	}
+	return tarp.OpenTyped(dir, tarp.Options{}, tarp.StringCodec{}, jobs)
+}
+```
+
+Map entries are ordered by encoded key bytes. Encoding fails if distinct keys
+would collide on disk or after decoding. Slices and maps preserve the difference
+between nil and empty. This includes `NewCodec[[]byte]()`, which adds a presence
+byte. Use `BytesCodec{}` when reading or writing verbatim byte slices.
+
+Each struct field, array or slice element, and map key or value is framed by
+its byte length as a minimal unsigned varint. A slice or map starts with a
+presence byte (0 for nil, 1 for present). Byte slices carry their raw bytes
+immediately after that marker.
+
+The struct schema is positional. Fields are encoded in declaration order, and
+field names and tags are omitted. Changing field order, adding a field or
+changing its encoding requires migrating existing records or supplying a codec
+that reads the older schema. `NewCodec` rejects pointers, interfaces, recursive
+types and structs with unexported fields when it constructs the codec.
+
+For a custom representation, implement `Codec[T]` with `Encode(T) ([]byte, error)`
+and `Decode([]byte) (T, error)`. Use compatible codecs on reopen and after
+`Restore`. See the runnable [TypedDB example](examples/typed_db_test.go) and
+[composite codec example](examples/composite_codec_test.go).
 
 ## Contract
 

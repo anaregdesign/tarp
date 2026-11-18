@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"time"
 )
 
 // Codec converts between Go values and the bytes stored in a DB. The DB
@@ -205,6 +206,42 @@ func (Complex128Codec) Decode(data []byte) (complex128, error) {
 	re := math.Float64frombits(binary.BigEndian.Uint64(data))
 	im := math.Float64frombits(binary.BigEndian.Uint64(data[8:]))
 	return complex(re, im), nil
+}
+
+// DurationCodec stores a time.Duration as an Int64Codec count of nanoseconds.
+type DurationCodec struct{}
+
+func (DurationCodec) Encode(value time.Duration) ([]byte, error) {
+	return Int64Codec{}.Encode(int64(value))
+}
+
+func (DurationCodec) Decode(data []byte) (time.Duration, error) {
+	nanos, err := (Int64Codec{}).Decode(data)
+	return time.Duration(nanos), err
+}
+
+// TimeCodec stores an instant as eight bytes of signed Unix seconds followed
+// by four bytes for the unsigned nanosecond within the second, both big-endian.
+// Its encoding depends only on the wall-clock instant. Decode returns UTC.
+type TimeCodec struct{}
+
+func (TimeCodec) Encode(value time.Time) ([]byte, error) {
+	data := make([]byte, 12)
+	binary.BigEndian.PutUint64(data, uint64(value.Unix()))
+	binary.BigEndian.PutUint32(data[8:], uint32(value.Nanosecond()))
+	return data, nil
+}
+
+func (TimeCodec) Decode(data []byte) (time.Time, error) {
+	if err := checkCodecSize[time.Time](data, 12); err != nil {
+		return time.Time{}, err
+	}
+	seconds := int64(binary.BigEndian.Uint64(data))
+	nanos := binary.BigEndian.Uint32(data[8:])
+	if nanos >= 1_000_000_000 {
+		return time.Time{}, fmt.Errorf("tarp: invalid nanosecond within second: %d", nanos)
+	}
+	return time.Unix(seconds, int64(nanos)).UTC(), nil
 }
 
 func checkCodecSize[T any](data []byte, want int) error {
