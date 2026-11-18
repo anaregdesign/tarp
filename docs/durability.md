@@ -177,11 +177,14 @@ its inputs one at a time, including obsolete records, and yields in bounded
 chunks for queued writers and backup. Input selection and copying use the
 sealed catalog, leaving the active log available for appends.
 
-After copying, the worker takes the writer gate and rebases one replacement on
-the latest catalog and frontier. A repacked log covers the full sequence
-interval of its inputs and retains their Delete records. Replacement data
-and catalog reach stable storage before the temporary CURRENT is synced,
-renamed and directory-synced.
+After copying, the worker reserves a manifest ID and builds the replacement
+catalog under the writer gate. It releases the gate while writing and syncing
+the unselected manifest. Under the gate again, it publishes against the latest
+committed frontier. If a foreground rotation selected a different manifest,
+the worker discards its staging manifest and rebuilds it once under the gate.
+A repacked log covers its inputs' full sequence interval and retains their
+Delete records. Replacement data and catalog reach stable storage before the
+temporary CURRENT is synced, renamed and directory-synced.
 An uncertain publication fail-stops while the writer gate is still held and
 retains both layouts for validated reopen. After durable publication, remapping
 checks file, offset and sequence so later changes win. Reclamation waits for all

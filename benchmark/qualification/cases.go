@@ -56,7 +56,7 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	pair("mutate", "rotate", 1, "segment.write", "data.write", "segment.sync", "catalog.write", "catalog.sync", "catalog.dirsync",
 		"current.write", "current.sync", "current.rename", "current.dirsync")
 	add("mutate", "rotate", "operation.ack:after", 1)
-	pair("checkpoint", "compact", 1, "compact.segment.write", "compact.segment.sync", "compact.write", "compact.sync", "cleanup.unlink")
+	pair("checkpoint", "compact", 1, "compact.segment.write", "compact.write", "compact.sync", "cleanup.unlink")
 	pair("checkpoint", "compact", 2, "compact.write")
 	for _, point := range []string{"catalog.write", "catalog.sync", "catalog.dirsync", "current.write", "current.sync", "current.rename", "current.dirsync"} {
 		pair("checkpoint", "compact", 2, point)

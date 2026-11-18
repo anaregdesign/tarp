@@ -179,7 +179,14 @@ func (db *DB) mutate(kind uint8, key, value []byte) error {
 		op = "delete"
 	}
 	db.cleaner.writers.Add(1)
+	fs := db.store.IO
+	if fs != nil && fs.WriterWait != nil {
+		fs.WriterWait(false)
+	}
 	db.writer.Lock()
+	if fs != nil && fs.WriterWait != nil {
+		fs.WriterWait(true)
+	}
 	previousActive := db.store.Current.ActiveID
 	invalidatedSealed := false
 	defer func() {

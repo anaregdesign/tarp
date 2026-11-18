@@ -49,25 +49,34 @@ operations are atomic and linearizable; separate calls are not a transaction.
 
 ## Contract
 
-`Open`, `Get`, upserting `Put`, `Delete`, `Close`, online `Backup`, offline
+`Open`, `Get`, `Scan`, upserting `Put`, `Delete`, `Close`, online `Backup`, offline
 `Restore`, explicit online `Compact`, and `DB.MaintenanceStatus` form the public API.
 
 - Keys and values are `[]byte`. Empty keys are rejected; empty values are valid.
   Missing `Get` and `Delete` return `ErrNotFound`.
 - Retained inputs and returned values are copied. Do not mutate input backing
   arrays until every call using them has returned, including failed writes.
-- Reads use an exact global LRU first. Misses read a checked indexed file record
+- `Get` uses an exact global LRU first. Misses read a checked indexed file record
   and cache it; updates/deletes cannot race a stale miss into visibility.
 - Successful writes include data, commit-frontier, and directory syncs before
   memory publication. An error need not mean rollback: use `errors.Is` and
   inspect `*OpError` with `errors.As` to distinguish `NotApplied`, `Committed`, and `Unknown`.
   `ErrCommitUncertain` or `ErrUnhealthy` requires close/reopen before further use.
 - Oversized single `Put` inputs return `ErrTooLarge` before changing files,
-  values, or cache order. There is no cache bypass. Ordinary fullness evicts LRU.
+  values, or cache order. Ordinary fullness evicts LRU.
 - `Close` rejects new calls, cancels and joins the worker, and waits for admitted calls. Repeated/concurrent
   closes return the same retained result. It is not the first durability barrier.
 
-No initial enumeration, ordered scans, TTL, multi-key transactions, cross-file
+`for entry, err := range db.Scan(ctx)` reads a point-in-time snapshot in
+unspecified order. Each new iteration captures the live index and reads one
+value at a time, preserving LRU recency. The caller owns each key and value.
+Capturing the index takes O(live keys) time and memory. During capture,
+`Get` and the final stage of `Put` can wait for the state lock. A slow consumer can delay retirement of old files.
+Break to release the snapshot early. When using `iter.Pull2`, defer `stop()`.
+After an error, prior entries remain valid. Calling `Close` in the loop is
+supported. A subsequent read yields `ErrClosed`.
+
+No ordered scans, TTL, multi-key transactions, cross-file
 records, or total disk quota is provided.
 
 ## Limits

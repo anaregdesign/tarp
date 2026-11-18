@@ -1,10 +1,12 @@
 package storage
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +63,7 @@ func cleanStage(fs *IO, stage, point string) error {
 	return fs.Do(point+".cleanup", func() error { return os.RemoveAll(stage) })
 }
 
-func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string) (returned error) {
+func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error) (returned error) {
 	target, err := destinationPath(filepath.Dir(capture.Files[0].File.Path), destination)
 	if err != nil {
 		return err
@@ -92,12 +94,13 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 		return err
 	}
 	buffer := make([]byte, 32<<10)
+	stream := &backupStream{reader: bufio.NewReaderSize(nil, len(buffer)), source: backupReaderAt{fs: fs, yield: yield}}
 	liveKeys := make(map[string]struct{})
 	for _, captured := range capture.Files {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		entry, err := copySegment(ctx, capture, captured, liveKeys, stage, fs, buffer)
+		entry, err := copySegment(ctx, capture, captured, liveKeys, stage, fs, stream, buffer)
 		if err != nil {
 			return err
 		}
@@ -111,7 +114,54 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 	return err
 }
 
-func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, liveKeys map[string]struct{}, stage string, fs *IO, buffer []byte) (entry format.BackupFile, returned error) {
+// backupReaderAt observes physical payload reads after the segment header.
+type backupReaderAt struct {
+	io.ReaderAt
+	fs         *IO
+	yield      func() error
+	batchBytes int
+}
+
+func (r *backupReaderAt) ReadAt(b []byte, off int64) (int, error) {
+	if r.batchBytes >= 128<<10 {
+		r.batchBytes = 0
+		if r.yield != nil {
+			if err := r.yield(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	n, err := r.ReaderAt.ReadAt(b, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, err
+	}
+	if n > 0 {
+		r.batchBytes += n
+		if hookErr := r.fs.Check("backup.read:after"); hookErr != nil {
+			return 0, hookErr
+		}
+	}
+	return n, err
+}
+
+// backupStream supplies the record decoder's forward-only ReadAt calls from
+// the same bounded stream that is copied and hashed for the staged backup.
+type backupStream struct {
+	reader *bufio.Reader
+	source backupReaderAt
+	offset int64
+}
+
+func (s *backupStream) ReadAt(dst []byte, off int64) (int, error) {
+	if off != s.offset {
+		return 0, errors.New("storage: nonsequential backup record read")
+	}
+	n, err := io.ReadFull(s.reader, dst)
+	s.offset += int64(n)
+	return n, err
+}
+
+func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, liveKeys map[string]struct{}, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
 	src, header, _, err := openSelected(captured.File.Path, capture.Current.UUID, captured.Entry, captured.File.ID == capture.Current.ActiveID)
 	if err != nil {
 		return entry, &SourceError{Err: err}
@@ -128,12 +178,20 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, l
 	if _, err := writer.Write(header); err != nil {
 		return entry, err
 	}
+	// Bound readahead to the captured prefix, including when a writer grows
+	// the active file. Copy and hash each contiguous block once; publication
+	// still requires successful validation of every record in those blocks.
+	const start = int64(format.SegmentHeaderBytes)
+	stream.source.ReaderAt = src
+	source := io.NewSectionReader(&stream.source, start, captured.Entry.Bytes-start)
+	stream.reader.Reset(io.TeeReader(source, writer))
+	stream.offset = start
 	span := format.NewRecordRange(captured.Entry, capture.Catalog.Cutoff)
-	for offset := int64(format.SegmentHeaderBytes); offset < captured.Entry.Bytes; {
+	for offset := start; offset < captured.Entry.Bytes; {
 		if err := ctx.Err(); err != nil {
 			return entry, err
 		}
-		r, key, err := format.CopyRecordKey(ctx, sourceReader{src}, writer, offset, captured.Entry.Bytes-offset, buffer)
+		r, key, err := format.ReadRecordKey(ctx, stream, offset, captured.Entry.Bytes-offset, buffer)
 		if err != nil {
 			var destination *destinationError
 			if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {

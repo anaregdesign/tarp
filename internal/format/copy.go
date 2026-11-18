@@ -118,12 +118,12 @@ func CopyRecord(ctx context.Context, src io.ReaderAt, dst io.Writer, offset, ava
 	})
 }
 
-// CopyRecordKey exposes the key from the same bytes validated and copied for backup.
-func CopyRecordKey(ctx context.Context, src io.ReaderAt, dst io.Writer, offset, available int64, buffer []byte) (Record, string, error) {
+// ReadRecordKey validates one complete record and returns its key without retaining its value.
+func ReadRecordKey(ctx context.Context, src io.ReaderAt, offset, available int64, buffer []byte) (Record, string, error) {
 	var key string
 	r, err := SelectRecord(ctx, src, offset, available, buffer, func(_ Record, k string) (io.Writer, error) {
 		key = k
-		return dst, nil
+		return nil, nil
 	})
 	return r, key, err
 }

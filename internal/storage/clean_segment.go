@@ -214,7 +214,7 @@ func (c *CleanSegment) Discard(fs *IO) error {
 
 // InstallCleaned splices the replacement into the latest catalog under the
 // writer gate. Every tail rotation and append since BeginClean survives.
-func (s *Store) InstallCleaned(c *CleanSegment) error {
+func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error) error {
 	start, end := c.position, c.position+len(c.entries)
 	if end > len(s.Catalog.Files) || !slices.Equal(s.Catalog.Files[start:end], c.entries) {
 		return fmt.Errorf("%w: cleaner source selection changed", ErrCorrupt)
@@ -241,7 +241,12 @@ func (s *Store) InstallCleaned(c *CleanSegment) error {
 	}
 	candidate := s.Current
 	candidate.Generation++
-	if err := s.publishCatalogFor(catalog, candidate, "clean."); err != nil {
+	if err := s.publishCatalogFor(catalog, candidate, "clean.", offGate); err != nil {
+		if err == errCatalogChanged {
+			// A rotation changed the catalog during preparation. Publish the
+			// rebased catalog once under the gate to guarantee progress.
+			return s.InstallCleaned(c, nil)
+		}
 		return err
 	}
 	if c.created {

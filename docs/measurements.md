@@ -111,8 +111,12 @@ The interference profiles add one separately identified writer key.
   timings use 2.
 - Cyclic warm-OS application misses assert 8,192 actual Get file reads. A
   reproducible 4,096-operation, four-worker uniform-key workload records both
-  combined and separate read/durable-write distributions at approximately
-  95%/5%. Sixty-four fully durable Put/Delete samples cover ordinary and
+  combined and separate read/durable-write distributions. Its 3,891 Gets and
+  205 durable Puts use the same keys as the historical single-writer
+  `mixed_95r_5w` row. The new `mixed_multi_writer` schedule assigns 51–52
+  Puts to each worker and reports each worker’s counts and the number of
+  Puts whose API calls overlapped another Put. Run both schedules on matched
+  1 KiB clones with `go test -run '^$' -bench '^BenchmarkMixedWriters$' -benchtime=1x -v ./benchmark`. Sixty-four fully durable Put/Delete samples cover ordinary and
   record-by-record-rotation configurations without disabling any sync. One
   fully synced Put prefills the segment outside timing; all measured Put
   active IDs must match their declared rotating/nonrotating mode. Each
@@ -187,6 +191,17 @@ counter intervals are retained. The host cache and physical media are **not**
 purged: report guest-OS-cold virtual-device latency, never physical-media-cold
 latency or a general physical-device performance result. No numeric SLO was
 agreed, and these smaller fixture limits do not tune the published defaults.
+
+## Focused foreground diagnostics
+
+Use the following macOS commands to isolate a maintenance path with real durable writes. Both use the ordinary engine with observation hooks and report timings separately from the plain VM profile.
+
+```sh
+GOMAXPROCS=2 TARP_MAINTENANCE_BENCH=1 go test -run '^TestMaintenanceForeground$' -count=1 -v ./benchmark
+GOMAXPROCS=4 TARP_REPACK_TRACE=/tmp/repack-new.jsonl go test -run '^TestRepackStageTrace$' -count=1 ./benchmark
+```
+
+The first command uses the same 4 KiB fixture and 128 foreground Puts per arm. Its JSON records align individual requests with maintenance, writer-gate waits and foreground syncs. It verifies the checkpoint or restored backup against the captured data. The second command needs a new output filename. It runs five paired 64 B repacks and records timestamps for writer waits, syncs, catalog publication, index updates and file retirement. Compare the slowest overlapping Put against an equal-size prefix of the parked control.
 
 ## Native development smoke driver
 

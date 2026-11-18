@@ -196,7 +196,7 @@ func latency(samples []int64, operations int64, elapsed time.Duration) sampledLa
 		P50NS: q(50), P95NS: q(95), P99NS: q(99), SamplesNS: samples}
 }
 
-func measureCalls(t *testing.T, samples, workers int, call func(int) error) sampledLatency {
+func measureCalls(t testing.TB, samples, workers int, call func(int) error) sampledLatency {
 	t.Helper()
 	raw := make([]int64, samples)
 	errors := make(chan error, workers)

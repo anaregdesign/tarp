@@ -30,7 +30,7 @@ Use Go’s `testing` package, behavioral test names, and `t.TempDir()` for datab
 
 ## Commits and Pull Requests
 
-Scope work through GitHub Issues, starting with the [implementation tracker](https://github.com/anaregdesign/tarp/issues/1). Do not use or reinstall `spec-driven-workflow`.
+Scope work through GitHub Issues, starting with the [implementation tracker](https://github.com/anaregdesign/tarp/issues/1). Write Issue titles and descriptions in English. Do not use or reinstall `spec-driven-workflow`.
 
 Write short imperative commit subjects such as `Correct measured host-kernel provenance`. Target `main` in pull requests, link the relevant Issue, describe the behavior change, and list the checks run. For durability claims, identify the tested storage configuration and link the qualification evidence.
 

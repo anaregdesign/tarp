@@ -21,6 +21,8 @@ type IO struct {
 	Wrote func(point string, bytes int)
 	// PutCopied observes the key/value bytes copied for the index and cache.
 	PutCopied func(keyBytes, valueBytes int)
+	// WriterWait observes a mutation immediately before and after acquiring the writer gate.
+	WriterWait func(acquired bool)
 }
 
 func (i *IO) Check(point string) error {

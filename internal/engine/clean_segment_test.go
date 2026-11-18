@@ -85,7 +85,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 		t.Fatalf("capture lost its old file: pinned %d err %v", pinned, err)
 	}
 	backupDir := filepath.Join(t.TempDir(), "backup")
-	if err := storage.Backup(ctx, capture, db.store.Config, db.store.IO, backupDir); err != nil {
+	if err := storage.Backup(ctx, capture, db.store.Config, db.store.IO, backupDir, nil); err != nil {
 		t.Fatal(err)
 	}
 	capture.Release()
@@ -347,5 +347,96 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 	mustPut(t, got, "next", "")
 	if got.store.Current.Sequence != 9 {
 		t.Fatal("incorrect committed sequence", got.store.Current.Sequence)
+	}
+}
+
+// A failed foreground commit may have changed CURRENT while the unselected
+// cleaner manifest was syncing. Discard only the cleaner's private output.
+func TestCleanCatalogPreparationPreservesForegroundOutcome(t *testing.T) {
+	for _, mode := range []string{"append", "cancel", "uncertain foreground"} {
+		t.Run(mode, func(t *testing.T) {
+			ready, release := make(chan struct{}), make(chan struct{})
+			var armed, published atomic.Bool
+			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+				switch point {
+				case "clean.catalog.dirsync:after":
+					close(ready)
+					<-release
+				case "current.rename:after":
+					if armed.CompareAndSwap(true, false) {
+						return syscall.EIO
+					}
+				case "clean.current.write:before":
+					published.Store(true)
+				}
+				return nil
+			}}
+			db := newTestDB(t, Options{}, fs)
+			mustPut(t, db, "key", "old")
+			source := sealForCleaning(t, db)
+			dir := db.store.Dir
+			before := directoryBytes(t, dir)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- db.cleanSegment(ctx, source) }()
+			select {
+			case <-ready:
+			case err := <-done:
+				t.Fatalf("catalog not staged: %v", err)
+			}
+			armed.Store(mode == "uncertain foreground")
+			put := make(chan error, 1)
+			go func() { put <- db.Put([]byte("key"), []byte("new")) }()
+			select {
+			case err := <-put:
+				if errors.Is(err, ErrCommitUncertain) != (mode == "uncertain foreground") ||
+					err != nil && mode != "uncertain foreground" {
+					close(release)
+					<-done
+					t.Fatalf("foreground Put: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				close(release)
+				<-done
+				t.Fatal("catalog staging held the writer gate")
+			}
+			if mode == "cancel" {
+				cancel()
+			}
+			close(release)
+			err := <-done
+			if mode == "append" {
+				if err != nil || !published.Load() {
+					t.Fatalf("clean publication: %v", err)
+				}
+			} else {
+				want := error(context.Canceled)
+				if mode == "uncertain foreground" {
+					want = ErrUnhealthy
+				}
+				if !errors.Is(err, want) || published.Load() {
+					t.Fatalf("unexpected cleaner publication: %v", err)
+				}
+				for name := range directoryBytes(t, dir) {
+					if _, existed := before[name]; !existed {
+						t.Fatalf("unpublished staging file retained: %s", name)
+					}
+				}
+			}
+			if err := db.Close(); err != nil && !errors.Is(err, syscall.EIO) {
+				t.Fatal(err)
+			}
+			reopened, err := OpenWithIO(dir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			// The injected after-rename failure completed the rename on this filesystem.
+			wantValue(t, reopened, "key", "new")
+			if reopened.store.Current.Sequence != 2 {
+				t.Fatalf("reopened sequence %d", reopened.store.Current.Sequence)
+			}
+		})
 	}
 }

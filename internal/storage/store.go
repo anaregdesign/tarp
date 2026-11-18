@@ -212,7 +212,9 @@ func (s *Store) newSegment(kind uint32, point string, firstRecord []byte) (*File
 	if err == nil && len(firstRecord) > 0 {
 		err = s.IO.Write(fd, firstRecord, format.SegmentHeaderBytes, "data.write")
 	}
-	if err == nil {
+	// A snapshot is private staging. Compact syncs the complete header and
+	// records at finishFile before any manifest may select this DATA file.
+	if err == nil && kind != format.Snapshot {
 		err = s.IO.Sync(fd, point+".sync")
 	}
 	if err != nil {

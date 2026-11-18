@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/storage"
 )
@@ -41,7 +42,22 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	}
 	db.writer.Unlock()
 	defer capture.Release()
-	if err := storage.Backup(ctx, capture, db.store.Config, db.store.IO, destination); err != nil {
+	// Yield briefly between bounded copy batches only while durable mutations
+	// are queued or committing. A continuously busy writer cannot starve Backup.
+	yield := func() error {
+		if db.cleaner.writers.Load() == 0 {
+			return nil
+		}
+		timer := time.NewTimer(2 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return db.store.IO.Check("backup.paced:after")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := storage.Backup(ctx, capture, db.store.Config, db.store.IO, destination, yield); err != nil {
 		var source *storage.SourceError
 		if errors.As(err, &source) {
 			db.poison(err)

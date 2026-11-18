@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"slices"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -12,17 +13,19 @@ import (
 
 func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 	for _, tc := range []struct {
-		name, fault string
-		published   bool
+		name, barrier, fault string
+		published            bool
 	}{
-		{"success", "", true},
-		{"before rename", "clean.current.rename:before", false},
-		{"after rename", "clean.current.rename:after", true},
+		{"success", "clean.output.sync:after", "", true},
+		{"rotation during catalog preparation", "clean.catalog.dirsync:after", "", true},
+		{"before rename", "clean.output.sync:after", "clean.current.rename:before", false},
+		{"after rename", "clean.output.sync:after", "clean.current.rename:after", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var staged atomic.Bool
 			copied, resume := make(chan struct{}), make(chan struct{})
 			db := newTestDB(t, Options{}, &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
-				if point == "clean.output.sync:after" {
+				if point == tc.barrier && staged.CompareAndSwap(false, true) {
 					close(copied)
 					<-resume
 				}
