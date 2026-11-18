@@ -4,9 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type disposable-vm-only to run the bounded guest environment probe
+        description: Type disposable-vm-only to allow the bounded disposable guest
         required: true
         type: string
+      mode:
+        description: Bounded environment probe or independent volatile-cache controls
+        required: true
+        default: probe
+        type: choice
+        options: [probe, controls]
 
 permissions:
   contents: read
@@ -31,11 +37,12 @@ jobs:
           go-version: stable
           check-latest: true
           cache: false
-      - name: Probe disposable Ubuntu guest
+      - name: Run bounded disposable Ubuntu guest
         env:
           TARP_QUAL_CONFIRM: ${{ inputs.confirmation }}
+          TARP_QUAL_MODE: ${{ inputs.mode }}
         run: bash .github/qualification/probe.sh
-      - name: Retain probe evidence
+      - name: Retain isolated guest evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

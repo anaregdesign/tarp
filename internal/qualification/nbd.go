@@ -127,6 +127,7 @@ func ServeNBD(ctx context.Context, conn net.Conn, disk *Disk) error {
 		valid := offset <= uint64(disk.Size()) && uint64(length) <= uint64(disk.Size())-offset
 		var result []byte
 		var err error
+		invalid := false
 		switch {
 		case command == 0 && flags == 0 && valid:
 			result = make([]byte, length)
@@ -138,13 +139,18 @@ func ServeNBD(ctx context.Context, conn net.Conn, disk *Disk) error {
 		case command == 3 && flags == 0 && offset == 0 && length == 0:
 			err = disk.Flush()
 		default:
+			invalid = true
 			err = fmt.Errorf("qualification: invalid NBD command=%d flags=%d offset=%d length=%d", command, flags, offset, length)
 		}
 		var reply [16]byte
 		binary.BigEndian.PutUint32(reply[:4], replyMagic)
 		copy(reply[8:], request[8:16])
 		if err != nil {
-			binary.BigEndian.PutUint32(reply[4:8], errorInvalid)
+			code := uint32(5) // NBD_EIO for a backing-store error.
+			if invalid {
+				code = errorInvalid
+			}
+			binary.BigEndian.PutUint32(reply[4:8], code)
 		}
 		if writeErr := writeFull(conn, reply[:]); writeErr != nil {
 			return errors.Join(err, writeErr)

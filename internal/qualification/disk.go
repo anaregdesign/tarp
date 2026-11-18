@@ -18,17 +18,21 @@ const (
 )
 
 type Stats struct {
+	Reads          uint64 `json:"reads"`
+	ReadBytes      uint64 `json:"read_bytes"`
 	Writes         uint64 `json:"writes"`
 	WrittenBytes   uint64 `json:"written_bytes"`
 	Flushes        uint64 `json:"flushes"`
 	FUAWrites      uint64 `json:"fua_writes"`
 	PersistedBytes uint64 `json:"persisted_bytes"`
-	DirtyBytes     uint64 `json:"dirty_bytes"`
-	DiscardedBytes uint64 `json:"discarded_bytes"`
+	DirtyBytes     uint64 `json:"dirty_page_bytes"`
+	DiscardedBytes uint64 `json:"discarded_page_bytes"`
 }
 
 // Disk acknowledges ordinary writes into RAM only. Flush and FUA complete only
-// after the backing file is synced. Close deliberately does not flush.
+// after the backing file is synced. FUA persists only its own request range;
+// unrelated ordinary writes remain in RAM, even within the same cached page.
+// Close deliberately does not flush.
 type Disk struct {
 	mu    sync.Mutex
 	file  *os.File
@@ -76,6 +80,7 @@ func (d *Disk) ReadAt(data []byte, offset int64) error {
 	if err := d.bounds(offset, len(data)); err != nil {
 		return err
 	}
+	length := len(data)
 	for len(data) != 0 {
 		page := offset / pageBytes * pageBytes
 		within := int(offset - page)
@@ -87,6 +92,8 @@ func (d *Disk) ReadAt(data []byte, offset int64) error {
 		}
 		data, offset = data[n:], offset+int64(n)
 	}
+	d.stats.Reads++
+	d.stats.ReadBytes += uint64(length)
 	return nil
 }
 
@@ -97,6 +104,30 @@ func (d *Disk) WriteAt(data []byte, offset int64, fua bool) error {
 		return err
 	}
 	length := len(data)
+	if fua {
+		n, err := d.file.WriteAt(data, offset)
+		if err != nil {
+			return err
+		}
+		if n != length {
+			return io.ErrShortWrite
+		}
+		end := offset + int64(length)
+		for page := offset / pageBytes * pageBytes; page < end; page += pageBytes {
+			if cached, ok := d.dirty[page]; ok {
+				begin, limit := max(offset, page), min(end, page+pageBytes)
+				copy(cached[begin-page:limit-page], data[begin-offset:limit-offset])
+			}
+		}
+		if err := d.file.Sync(); err != nil {
+			return err
+		}
+		d.stats.Writes++
+		d.stats.WrittenBytes += uint64(length)
+		d.stats.PersistedBytes += uint64(length)
+		d.stats.FUAWrites++
+		return nil
+	}
 	for len(data) != 0 {
 		page := offset / pageBytes * pageBytes
 		cached, ok := d.dirty[page]
@@ -114,12 +145,6 @@ func (d *Disk) WriteAt(data []byte, offset int64, fua bool) error {
 	}
 	d.stats.Writes++
 	d.stats.WrittenBytes += uint64(length)
-	if fua {
-		if err := d.flush(); err != nil {
-			return err
-		}
-		d.stats.FUAWrites++
-	}
 	return nil
 }
 

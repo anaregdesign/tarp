@@ -98,6 +98,7 @@ func TestNBDFlushFUAAndDisconnectControls(t *testing.T) {
 			flags := uint16(0)
 			if mode == "fua" {
 				flags = 1
+				nbdRequest(t, conn, 1, 0, 1024, bytes.Repeat([]byte{0xa3}, 512))
 			}
 			nbdRequest(t, conn, 1, flags, 0, payload)
 			if mode == "flush" {

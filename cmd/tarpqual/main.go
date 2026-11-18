@@ -1,5 +1,5 @@
-// Command tarpqual verifies disposable-guest evidence and prepares a bounded
-// offline boot image. It never powers off the host.
+// Command tarpqual verifies evidence, prepares an offline boot image and runs
+// explicitly guarded bounded guests. It never powers off the host.
 package main
 
 import (
@@ -26,13 +26,18 @@ func run(args []string, output io.Writer) error {
 	initrd := flags.String("append-initrd", "", "pinned original Ubuntu initramfs")
 	init := flags.String("init", "", "static disposable-guest PID 1 binary")
 	target := flags.String("output", "", "new output initramfs filename")
+	controls := flags.String("block-controls", "", "prepared disposable hosted-runner work directory")
+	confirm := flags.String("confirm", "", "explicit disposable-vm-only confirmation")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
 		return errors.New("qualification: unexpected arguments")
 	}
-	if *probe != "" && *initrd == "" && *init == "" && *target == "" {
+	if *controls != "" && *probe == "" && *initrd == "" && *init == "" && *target == "" {
+		return blockControls(*controls, *confirm, output)
+	}
+	if *controls == "" && *confirm == "" && *probe != "" && *initrd == "" && *init == "" && *target == "" {
 		fd, err := os.Open(*probe)
 		if err != nil {
 			return err
@@ -45,8 +50,8 @@ func run(args []string, output io.Writer) error {
 			"volatile_cache_controls": "not_run", "device_exhaustion": "not_run",
 		})
 	}
-	if *probe == "" && *initrd != "" && *init != "" && *target != "" {
+	if *controls == "" && *confirm == "" && *probe == "" && *initrd != "" && *init != "" && *target != "" {
 		return qualification.AppendInitramfs(*initrd, *init, *target)
 	}
-	return errors.New("use -verify-probe FILE or -append-initrd FILE -init BINARY -output NEW_FILE")
+	return errors.New("use -verify-probe FILE, -append-initrd FILE -init BINARY -output NEW_FILE, or -block-controls WORK -confirm disposable-vm-only")
 }

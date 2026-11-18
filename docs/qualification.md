@@ -89,6 +89,25 @@ The verdict parser accepts complete raw or cloud-init-framed protocol lines
 and requires both an explicit pass and a subsequent successful exit; shell
 traces, embedded marker text, missing exits and failed exits are not passes.
 
+The optional `controls` mode boots a raw, unmounted 256 MiB data disk behind
+the standard-library NBD test backend. Ordinary block writes live only in its
+RAM overlay. A successful FLUSH syncs all earlier writes; a successful FUA
+syncs only its own range, without persisting unrelated dirty bytes even on the
+same 4096-byte cached page. A subsequent FLUSH cannot restore stale bytes over
+that FUA range. Unit controls independently read the backing file to cover
+these distinctions;
+page-cache accounting reports allocated overlay pages, not exact dirty-byte
+counts. The guest uses an aligned O_DIRECT write followed by fsync, then a
+different O_DIRECT write without sync while retaining the raw descriptor.
+After durably recording its ready marker outside the guest, the controller
+SIGKILLs the **whole QEMU guest**, waits for NBD quiescence and discards the RAM
+overlay. It independently checks the backing file for the surviving flushed
+pattern and absent unflushed pattern. The guest-only helper additionally
+requires the guarded PID 1 and exact disposable device size before opening it.
+This tests the actual virtual-device path, not merely a QEMU cache-mode label.
+Its `block-controls.jsonl` and `block-serial.log` are retained alongside the
+verdict; it is still not the complete tarp qualification campaign.
+
 The initial environment probe is **not qualification**: QEMU writeback alone
 does not model loss of the host page cache. Flushed-survives/unflushed-is-lost
 controls on a verified volatile block backend and the full external-witness
