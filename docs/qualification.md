@@ -82,6 +82,12 @@ guest using a SHA-256-pinned Ubuntu 24.04 image, its 6.8-series kernel, and a
 `disposable-vm-only` confirmation, is time/file bounded, uses TCG without host
 device access, and retains host/image/guest configuration and a verdict.
 Its scripts refuse local execution. It does not change ordinary Linux/stable CI.
+The pinned Ubuntu kernel/initramfs boot a small guarded static PID 1 and mount
+the matching Ubuntu root read-only, without systemd, cloud-init or networking.
+This avoids network-wait delays and records the exact minimal guest setup.
+The verdict parser accepts complete raw or cloud-init-framed protocol lines
+and requires both an explicit pass and a subsequent successful exit; shell
+traces, embedded marker text, missing exits and failed exits are not passes.
 
 The initial environment probe is **not qualification**: QEMU writeback alone
 does not model loss of the host page cache. Flushed-survives/unflushed-is-lost
