@@ -295,3 +295,7 @@ See the [storage and backup format](docs/format.md), [durability and failure rul
 [safe qualification harness](docs/qualification.md), and
 [measurement protocol and limitations](docs/measurements.md).
 [Issue #14](https://github.com/anaregdesign/tarp/issues/14) tracks automatic compaction and the format cutover.
+
+## License
+
+tarp is licensed under the [MIT License](LICENSE).
