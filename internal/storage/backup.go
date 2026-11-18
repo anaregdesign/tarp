@@ -144,21 +144,9 @@ func (r *backupReaderAt) ReadAt(b []byte, off int64) (int, error) {
 	return n, err
 }
 
-// backupStream supplies the record decoder's forward-only ReadAt calls from
-// the same bounded stream that is copied and hashed for the staged backup.
 type backupStream struct {
 	reader *bufio.Reader
 	source backupReaderAt
-	offset int64
-}
-
-func (s *backupStream) ReadAt(dst []byte, off int64) (int, error) {
-	if off != s.offset {
-		return 0, errors.New("storage: nonsequential backup record read")
-	}
-	n, err := io.ReadFull(s.reader, dst)
-	s.offset += int64(n)
-	return n, err
 }
 
 func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, liveKeys map[string]struct{}, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
@@ -185,13 +173,12 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, l
 	stream.source.ReaderAt = src
 	source := io.NewSectionReader(&stream.source, start, captured.Entry.Bytes-start)
 	stream.reader.Reset(io.TeeReader(source, writer))
-	stream.offset = start
 	span := format.NewRecordRange(captured.Entry, capture.Catalog.Cutoff)
 	for offset := start; offset < captured.Entry.Bytes; {
 		if err := ctx.Err(); err != nil {
 			return entry, err
 		}
-		r, key, err := format.ReadRecordKey(ctx, stream, offset, captured.Entry.Bytes-offset, buffer)
+		r, key, err := format.ReadRecordKey(ctx, stream.reader, offset, captured.Entry.Bytes-offset, buffer)
 		if err != nil {
 			var destination *destinationError
 			if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {

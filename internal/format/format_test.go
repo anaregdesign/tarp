@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"io"
 	"reflect"
 	"testing"
 )
@@ -110,6 +111,86 @@ func TestScanCommittedRanges(t *testing.T) {
 		if err := Scan(bytes.NewReader(all), int64(len(all)), func(int64, Record, string) error { return nil }); !errors.Is(err, ErrCorrupt) {
 			t.Fatalf("payload corruption: %v", err)
 		}
+	}
+}
+
+type readerAtFunc func([]byte, int64) (int, error)
+
+func (f readerAtFunc) ReadAt(b []byte, off int64) (int, error) { return f(b, off) }
+
+func TestScanBatchesOnlyCommittedBytes(t *testing.T) {
+	data := EncodeSegment(Segment{ID: 1, Kind: Log})
+	const smallRecords = 400
+	for i := range smallRecords {
+		data = append(data, EncodeRecord(Put, uint64(i+1), []byte("k"), []byte("v"))...)
+	}
+	largeKey := bytes.Repeat([]byte{0xff}, streamChunk+1)
+	largeValue := bytes.Repeat([]byte{0xee}, 2*streamChunk+1)
+	data = append(data, EncodeRecord(Put, smallRecords+1, largeKey, largeValue)...)
+	end := int64(len(data))
+	data = append(data, 0xff) // An active log can have an uncommitted tail.
+	source := bytes.NewReader(data)
+	pos, calls := int64(SegmentHeaderBytes), 0
+	input := readerAtFunc(func(b []byte, off int64) (int, error) {
+		if off != pos || off+int64(len(b)) > end || len(b) > streamChunk {
+			t.Fatalf("out-of-range or repeated read at %d, length %d", off, len(b))
+		}
+		calls++
+		pos += int64(len(b))
+		return source.ReadAt(b, off)
+	})
+	seen, next := 0, int64(SegmentHeaderBytes)
+	err := Scan(input, end, func(off int64, r Record, key string) error {
+		seen++
+		if off != next || r.Sequence != uint64(seen) {
+			t.Fatalf("unexpected record %d at %d", r.Sequence, off)
+		}
+		next += r.Bytes()
+		if seen <= smallRecords && key != "k" || seen > smallRecords && key != string(largeKey) {
+			t.Fatal("key mismatch crossing the read buffer")
+		}
+		return nil
+	})
+	if err != nil || next != end || pos != end || seen != smallRecords+1 || calls > 8 {
+		t.Fatalf("scan saw %d records in %d reads ending at %d/%d, want %d: %v", seen, calls, pos, next, end, err)
+	}
+	data[end-1] ^= 1
+	err = Scan(bytes.NewReader(data), end, func(int64, Record, string) error { return nil })
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("corrupt last byte of streamed value: %v", err)
+	}
+}
+
+func TestScanHandlesReadAtResults(t *testing.T) {
+	record := EncodeRecord(Put, 1, []byte("k"), nil)
+	end := int64(SegmentHeaderBytes + len(record))
+	failure := errors.New("data file read failed")
+	for _, tc := range []struct {
+		name       string
+		n          int
+		err        error
+		expect     error
+		wantVisits int
+	}{
+		{"full final buffer with EOF", len(record), io.EOF, nil, 1},
+		{"full buffer with error", len(record), failure, failure, 0},
+		{"short read without error", len(record) - 1, nil, ErrCorrupt, 0},
+		{"truncated data", len(record) - 1, io.EOF, ErrCorrupt, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := readerAtFunc(func(dst []byte, _ int64) (int, error) {
+				copy(dst, record[:tc.n])
+				return tc.n, tc.err
+			})
+			var visits int
+			err := Scan(src, end, func(int64, Record, string) error {
+				visits++
+				return nil
+			})
+			if !errors.Is(err, tc.expect) || visits != tc.wantVisits {
+				t.Fatalf("visited %d records, got %v, want %v", visits, err, tc.expect)
+			}
+		})
 	}
 }
 

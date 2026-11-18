@@ -110,6 +110,11 @@ files must exist. See the [replay rules](format.md#catalog-payload).
 Only after that validation may recovery truncate/sync the active suffix
 strictly beyond the committed frontier or delete recognized unselected objects.
 
+`Open`, `Restore`, and the validation pass of a manual checkpoint read each
+selected file sequentially in blocks of up to 32 KiB. The committed end bounds
+read-ahead, including when the active log has a longer physical tail. The
+decoder verifies each record's checksum before applying it to the rebuilt index.
+
 An incomplete or checksum-invalid final **committed** record is corruption, not
 a torn tail to skip. Never select an older catalog, promote temporary metadata,
 or infer commitment from a plausible final CRC. Missing/truncated/extended
