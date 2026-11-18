@@ -70,6 +70,26 @@ The native and primary VM measurement drivers include the same scenario for
 64 B, 1 KiB and 4 KiB values. Each repetition emits one `repack_parked` and
 one `repack_concurrent` row. The drivers alternate which arm runs first.
 
+## Scan workloads
+
+The primary VM profile runs an untimed traversal to warm the OS file cache,
+then measures `scan_full_warm` over all 4,096 live keys. Time to the first
+entry includes capturing the live index and loading the first record. Total
+traversal time includes the consumer checking every key and value. Reported
+bytes count value payloads.
+
+In `scan_paused_checkpoint`, a consumer reads one of 65 entries and pauses.
+The benchmark overwrites and deletes unread keys, adds a new key and completes
+a manual checkpoint before resuming the iterator. It verifies both the old
+snapshot and the updated DB, checks which source files are retained, and waits
+for the worker to unlink retired files. The three mutation times describe
+progress while the snapshot is held. The workload reports checkpoint time
+and file reclamation separately.
+
+To sample both scenarios locally at 4 KiB, run
+`go test ./benchmark -run '^$' -bench '^BenchmarkScan/4096/' -benchtime=1x`.
+The local warm traversal uses 128 keys.
+
 ## Selected-target bounded driver
 
 All six 64 B/1 KiB/4 KiB and Go 1.26.11/1.27.4 profiles completed on the
@@ -122,10 +142,10 @@ The interference profiles add one separately identified writer key.
   active IDs must match their declared rotating/nonrotating mode. Each
   rotating Delete follows a fully synced full-segment Put outside its timer,
   and the driver verifies all 64 Delete rotations.
-- Each of baseline, backup, manual checkpoint, their overlap and slow-copy overlap
+- Each of baseline, backup, manual checkpoint, their overlap and pinned-backup overlap
   starts from a fresh private copy of the **same closed fixture** and runs for
   at least 500 ms and until maintenance completes. The worker is parked during
-  fixture preparation and in these five controls so its writes do not enter the comparison. The plain fixture has 4,096
+  fixture preparation and throughout all five timed windows. The plain fixture has 4,096
   seed keys plus 1,024 updates and 256 deletes/reinsertions; the diagnostic
   fixture has 512 keys plus 512 updates and 128 deletes/reinsertions. Preparation,
   complete-state digesting and hot-key warmup occur outside the timed window;
@@ -140,8 +160,15 @@ The interference profiles add one separately identified writer key.
   and `compact_records_copied` count source opens and successfully copied live
   records during the copy phase. The preceding validation scan is excluded.
   The driver records the overlap between the two API calls.
-  Overlap modes pause the first backup copy until the first checkpoint record
-  write, with that controlled coordination included in reported API time.
+  Both overlap modes park the first backup DATA write after capturing its frontier.
+  `backup-compact` releases it at the first checkpoint record write.
+  `pinned-backup-compact` holds it until the checkpoint returns and records which
+  retired source files its backup still pins. The `pinned_backup` object reports
+  coordination time, retained logical bytes and file count. After the timed window
+  and restore, the fixture releases the automatic worker and verifies the exact
+  source files disappear at a successful retirement directory sync. It records
+  their unlinked byte and file counts and the worker's separate reclamation time.
+  The diagnostic writer-lock row includes the same witness.
   Copy bytes divided by the respective API time give reproducible effective
   copy throughput, not a physical copy-engine utilization claim. Each produced
   backup is restored, reopened at its independently observed staging-CURRENT
@@ -244,9 +271,9 @@ Each repetition records:
   timings before and after checkpointing. These are bounded histories, not a
   production-scale startup qualification.
 - Read plus synced-writer interference on identical private fixtures during baseline, backup, manual checkpoint,
-  backup+compaction, and deliberately slow backup+compaction. Each lasts at least
-  30 ms and through maintenance completion. These controls park the automatic worker. Slow copies sleep 1 ms per copy
-  write. Per-worker Algorithm R reservoirs retain at most 2,048 durations.
+  backup+compaction, and a backup held through checkpoint completion. Each lasts at least
+  30 ms and through maintenance completion. The automatic worker stays parked during timing.
+  The pinned-backup workload releases it after restore to verify retirement. Per-worker Algorithm R reservoirs retain at most 2,048 durations.
 - Maintenance time, actual operation counts, sampled heap/disk peaks and
   retired pinned bytes, and CompactResult. Outputs are restored/validated.
 - Thirty-two fully synced Put samples with and without forced record-by-record

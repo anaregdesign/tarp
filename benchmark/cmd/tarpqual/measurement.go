@@ -198,15 +198,16 @@ func measurementVM(parent context.Context, work string, cfg qualification.Measur
 				"durable_put_rotate_false", "durable_put_rotate_true",
 				"durable_delete_rotate_false", "durable_delete_rotate_true", "resources", "guest_os_cold_virtual_device_get",
 				"compaction_automatic-incremental", "compaction_manual-full-checkpoint", "repack_parked", "repack_concurrent",
+				"scan_full_warm", "scan_paused_checkpoint",
 				"startup_default_history", "startup_manual_checkpoint",
 				"startup_cold_default_history", "startup_cold_manual_checkpoint",
 				"complete_index_default_history", "complete_index_manual_checkpoint"}
-			for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
+			for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "pinned-backup-compact"} {
 				required = append(required, "interference_"+mode, "interference_"+mode+"_read", "interference_"+mode+"_durable_put")
 			}
 			if cfg.Profile {
 				required = nil
-				for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
+				for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "pinned-backup-compact"} {
 					for _, lock := range []string{"writer", "state", "lifecycle"} {
 						required = append(required, "lock_hold_"+mode+"_"+lock)
 					}

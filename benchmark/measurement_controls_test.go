@@ -60,9 +60,16 @@ func TestMeasurementFixtureCopiesRemainPrivate(t *testing.T) {
 }
 
 func TestMeasurementMaintenanceCopyAndOverlap(t *testing.T) {
-	for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
+	for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", pinnedBackupMode} {
 		t.Run(mode, func(t *testing.T) {
-			keys, value, opts := measurementInput(64, 8)
+			size := 8
+			if mode == pinnedBackupMode {
+				size = 20 // More than one 16-object cleaner retirement batch.
+			}
+			keys, value, opts := measurementInput(64, size)
+			if mode == pinnedBackupMode {
+				opts = measurementWriteOptions(opts, len(keys[0]), len(value), true)
+			}
 			hooks := &measurementHooks{}
 			db := newTestDB(t, opts, hooks.interferenceIO())
 			for _, key := range keys {
@@ -76,8 +83,8 @@ func TestMeasurementMaintenanceCopyAndOverlap(t *testing.T) {
 				}
 			}
 			result := measureInterferenceFor(t, db, hooks, keys[:4], value, mode, 20*time.Millisecond)
-			backup := mode == "backup" || mode == "backup-compact" || mode == "slow-backup-compact"
-			compact := mode == "compact" || mode == "backup-compact" || mode == "slow-backup-compact"
+			backup := mode == "backup" || mode == "backup-compact" || mode == pinnedBackupMode
+			compact := mode == "compact" || mode == "backup-compact" || mode == pinnedBackupMode
 			if (result["backup_copy_bytes"].(int64) > 0) != backup ||
 				(result["backup_elapsed_ns"].(int64) > 0) != backup ||
 				(result["compact_copy_bytes"].(int64) > 0) != compact ||
@@ -87,9 +94,18 @@ func TestMeasurementMaintenanceCopyAndOverlap(t *testing.T) {
 			if (result["observed_maintenance_api_overlap_ns"].(int64) > 0) != (backup && compact) {
 				t.Fatalf("missing or invented maintenance overlap: %#v", result)
 			}
+			if mode == pinnedBackupMode {
+				pins := result["pinned_backup"].(pinnedBackupMeasurement)
+				t.Logf("backup pin verification: %+v", pins)
+				if pins.RetiredFilesHeld <= 16 || pins.RetiredBytesHeld != result["compact"].(engine.CompactResult).PinnedBytes ||
+					pins.ReleasedFilesUnlinked != pins.RetiredFilesHeld || pins.ReleasedBytesUnlinked != pins.RetiredBytesHeld ||
+					pins.BackupGateWaitNS <= 0 || pins.WorkerReclaimNS <= 0 {
+					t.Fatalf("incomplete backup pin witness: %+v", pins)
+				}
+			}
 			if backup && (result["backup_reopen_verified"] != true ||
 				result["backup_capture_sequence"] != result["restored_sequence"] ||
-				result["restored_live_keys"] != 9 || result["restored_state_sha256"] != result["fixture_state_sha256"]) {
+				result["restored_live_keys"] != len(keys)+1 || result["restored_state_sha256"] != result["fixture_state_sha256"]) {
 				t.Fatalf("backup capture/full-state validation was incomplete: %#v", result)
 			}
 		})
