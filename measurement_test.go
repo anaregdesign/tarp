@@ -20,6 +20,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -189,7 +190,12 @@ func measureCalls(t *testing.T, samples, workers int, call func(int) error) samp
 }
 
 func diskBytes(paths ...string) (int64, error) {
-	var total int64
+	total, _, err := measurementDiskUsage(paths...)
+	return total, err
+}
+
+func measurementDiskUsage(paths ...string) (int64, int64, error) {
+	var total, allocated int64
 	for _, root := range paths {
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if errors.Is(err, os.ErrNotExist) {
@@ -207,14 +213,19 @@ func diskBytes(paths ...string) (int64, error) {
 					return err
 				}
 				total += st.Size()
+				raw, ok := st.Sys().(*syscall.Stat_t)
+				if !ok {
+					return fmt.Errorf("unavailable allocated-file accounting for %s", path)
+				}
+				allocated += raw.Blocks * 512
 			}
 			return nil
 		})
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
-	return total, nil
+	return total, allocated, nil
 }
 
 func resourceSample(t *testing.T, db *DB) map[string]any {
@@ -279,18 +290,40 @@ func resourceSample(t *testing.T, db *DB) map[string]any {
 }
 
 type measurementHooks struct {
-	reads   atomic.Int64
-	slow    atomic.Bool
-	started atomic.Pointer[chan struct{}]
+	windowStart func()
+	windowEnd   func()
+	reads       atomic.Int64
+	slow        atomic.Bool
+	started     atomic.Pointer[chan struct{}]
+	overlap     atomic.Pointer[chan struct{}]
+	capture     atomic.Pointer[measurementCapture]
+}
+
+func (h *measurementHooks) releaseOverlap() {
+	if signal := h.overlap.Swap(nil); signal != nil {
+		close(*signal)
+	}
 }
 
 func (h *measurementHooks) hook(point string) error {
 	if point == "read:before" {
 		h.reads.Add(1)
 	}
+	if point == "compact.write:before" {
+		h.releaseOverlap()
+	}
 	if point == "backup.copy:before" {
+		gate := h.overlap.Load()
+		if capture := h.capture.Swap(nil); capture != nil {
+			if err := capture.observe(); err != nil {
+				return err
+			}
+		}
 		if signal := h.started.Swap(nil); signal != nil {
 			close(*signal)
+		}
+		if gate != nil {
+			<-*gate
 		}
 		if h.slow.Load() {
 			time.Sleep(time.Millisecond)
@@ -300,9 +333,24 @@ func (h *measurementHooks) hook(point string) error {
 }
 
 func measureInterference(t *testing.T, db *DB, hooks *measurementHooks, keys [][]byte, value []byte, mode string) map[string]any {
+	return measureInterferenceFor(t, db, hooks, keys, value, mode, 30*time.Millisecond)
+}
+
+func measureInterferenceFor(t *testing.T, db *DB, hooks *measurementHooks, keys [][]byte, value []byte, mode string, minimum time.Duration) map[string]any {
 	t.Helper()
 	root := t.TempDir()
 	target := filepath.Join(root, "backup")
+	if err := db.Put([]byte("writer-key-00000"), value); err != nil {
+		t.Fatal(err)
+	}
+	expectedDigest, expectedKeys := measurementState(t, db)
+	for _, key := range keys {
+		if _, err := db.Get(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	captured := &measurementCapture{parent: root, uuid: db.store.Current.UUID}
+	fixtureSequence := db.store.Current.Sequence
 	start, stop := make(chan struct{}), make(chan struct{})
 	type workerResult struct {
 		latency sampledLatency
@@ -313,11 +361,17 @@ func measureInterference(t *testing.T, db *DB, hooks *measurementHooks, keys [][
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	peakHeap := memory.HeapAlloc
-	initialDisk, err := diskBytes(db.store.Dir, root)
+	initialDisk, initialAllocated, err := measurementDiskUsage(db.store.Dir, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	peakDisk := initialDisk
+	peakAllocated := initialAllocated
+	var filesystem syscall.Statfs_t
+	if err := syscall.Statfs(db.store.Dir, &filesystem); err != nil {
+		t.Fatal(err)
+	}
+	minimumAvailable := filesystem.Bavail * uint64(filesystem.Bsize)
 	var peakPinned int64
 	begin := time.Now()
 	for worker := 0; worker < 2; worker++ {
@@ -367,12 +421,18 @@ func measureInterference(t *testing.T, db *DB, hooks *measurementHooks, keys [][
 		for {
 			runtime.ReadMemStats(&memory)
 			peakHeap = max(peakHeap, memory.HeapAlloc)
-			current, err := diskBytes(db.store.Dir, root)
+			current, allocated, err := measurementDiskUsage(db.store.Dir, root)
 			if err != nil {
 				monitorDone <- err
 				return
 			}
 			peakDisk = max(peakDisk, current)
+			peakAllocated = max(peakAllocated, allocated)
+			if err := syscall.Statfs(db.store.Dir, &filesystem); err != nil {
+				monitorDone <- err
+				return
+			}
+			minimumAvailable = min(minimumAvailable, filesystem.Bavail*uint64(filesystem.Bsize))
 			db.writer.Lock()
 			selected := map[uint64]bool{db.store.Current.ActiveID: true}
 			for _, file := range db.store.Catalog.Files {
@@ -395,47 +455,114 @@ func measureInterference(t *testing.T, db *DB, hooks *measurementHooks, keys [][
 		}
 	}()
 	readStart := hooks.reads.Load()
+	if hooks.windowStart != nil {
+		hooks.windowStart()
+	}
 	close(start)
 	maintenanceStart := time.Now()
 	var compact CompactResult
+	var backupStart, backupEnd, compactStart, compactEnd time.Time
+	compactCall := func() error {
+		compactStart = time.Now()
+		var err error
+		compact, err = db.Compact(context.Background())
+		compactEnd = time.Now()
+		hooks.releaseOverlap()
+		return err
+	}
 	maintenanceErr := func() error {
 		if mode == "backup" || mode == "backup-compact" || mode == "slow-backup-compact" {
 			hooks.slow.Store(mode == "slow-backup-compact")
-			captured := make(chan struct{})
-			hooks.started.Store(&captured)
+			hooks.capture.Store(captured)
+			if mode != "backup" {
+				gate := make(chan struct{})
+				hooks.overlap.Store(&gate)
+			}
+			copyStarted := make(chan struct{})
+			hooks.started.Store(&copyStarted)
 			done := make(chan error, 1)
-			go func() { done <- db.Backup(context.Background(), target) }()
+			go func() {
+				backupStart = time.Now()
+				err := db.Backup(context.Background(), target)
+				backupEnd = time.Now()
+				done <- err
+			}()
 			select {
-			case <-captured:
+			case <-copyStarted:
 			case err := <-done:
-				return fmt.Errorf("backup failed before capture: %w", err)
+				hooks.releaseOverlap()
+				return errors.Join(errors.New("backup returned before copy-start hook"), err)
 			}
 			if mode != "backup" {
-				var err error
-				compact, err = db.Compact(context.Background())
-				if err != nil {
+				if err := compactCall(); err != nil {
 					return errors.Join(err, <-done)
 				}
 			}
 			return <-done
 		}
 		if mode == "compact" {
-			var err error
-			compact, err = db.Compact(context.Background())
-			return err
+			return compactCall()
 		}
 		return nil
 	}()
 	maintenanceNS := time.Since(maintenanceStart).Nanoseconds()
-	if remaining := 30*time.Millisecond - time.Since(begin); remaining > 0 {
+	var backupCopied, compactCopied int64
+	if maintenanceErr == nil && !backupStart.IsZero() {
+		entries, err := os.ReadDir(target)
+		maintenanceErr = err
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "DATA-") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				maintenanceErr = errors.Join(maintenanceErr, err)
+				break
+			}
+			backupCopied += info.Size()
+		}
+	}
+	if maintenanceErr == nil && !compactStart.IsZero() {
+		db.writer.Lock()
+		for _, file := range db.store.Catalog.Files {
+			if file.Kind == format.Snapshot {
+				compactCopied += file.Bytes
+			}
+		}
+		db.writer.Unlock()
+	}
+	overlapNS := int64(0)
+	if !backupStart.IsZero() && !compactStart.IsZero() {
+		left, right := backupStart, backupEnd
+		if compactStart.After(left) {
+			left = compactStart
+		}
+		if compactEnd.Before(right) {
+			right = compactEnd
+		}
+		overlapNS = max(int64(0), right.Sub(left).Nanoseconds())
+	}
+	if !backupStart.IsZero() && backupCopied <= 0 ||
+		!compactStart.IsZero() && compactCopied <= 0 ||
+		(mode == "backup-compact" || mode == "slow-backup-compact") && overlapNS <= 0 {
+		maintenanceErr = errors.Join(maintenanceErr, errors.New("maintenance copy/overlap observation was empty"))
+	}
+	if remaining := minimum - time.Since(begin); remaining > 0 {
 		time.Sleep(remaining)
 	}
 	close(stop)
 	hooks.slow.Store(false)
 	output := map[string]any{
 		"maintenance_ns": maintenanceNS, "compact": compact,
-		"get_file_reads": hooks.reads.Load() - readStart,
-		"writer_callers": 1, "caller_value_bytes": len(value), "sample_reservoir_limit_per_worker": 2048,
+		"fixture_sequence_before_workers": fixtureSequence, "fixture_live_keys": expectedKeys,
+		"fixture_state_sha256": expectedDigest,
+		"backup_copy_bytes":    backupCopied, "backup_elapsed_ns": backupEnd.Sub(backupStart).Nanoseconds(),
+		"compact_copy_bytes": compactCopied, "compact_elapsed_ns": compactEnd.Sub(compactStart).Nanoseconds(),
+		"observed_maintenance_api_overlap_ns": overlapNS,
+		"copy_measurement_scope":              "actual selected backup DATA prefixes / published checkpoint Snapshot file lengths, including segment headers but excluding metadata; elapsed is the complete respective API call; overlap is API intervals, not a physical copy-engine utilization claim",
+		"overlap_coordination":                "overlap modes pause the first backup copy until the first checkpoint record write; released on any checkpoint return; this controlled delay is included in API elapsed times",
+		"get_file_reads":                      hooks.reads.Load() - readStart,
+		"writer_callers":                      1, "caller_value_bytes": len(value), "sample_reservoir_limit_per_worker": 2048,
 	}
 	for worker := 0; worker < 2; worker++ {
 		result := <-results
@@ -447,9 +574,17 @@ func measureInterference(t *testing.T, db *DB, hooks *measurementHooks, keys [][
 	if err := <-monitorDone; err != nil {
 		t.Fatal(err)
 	}
+	if hooks.windowEnd != nil {
+		hooks.windowEnd()
+	}
 	output["sampled_peak_heap_bytes"] = peakHeap
 	output["sampled_peak_additional_disk_bytes"] = max(int64(0), peakDisk-initialDisk)
+	output["sampled_peak_additional_allocated_disk_bytes"] = max(int64(0), peakAllocated-initialAllocated)
+	output["sampled_minimum_filesystem_available_bytes"] = minimumAvailable
 	output["sampled_peak_retired_pinned_bytes"] = peakPinned
+	output["minimum_window_ns"] = minimum.Nanoseconds()
+	output["sampler_period_ms"] = 5
+	output["sampler_takes_writer_for_file_inventory"] = true
 	if hooks.reads.Load() != readStart {
 		t.Fatal("declared interference cache hits performed file reads")
 	}
@@ -457,9 +592,27 @@ func measureInterference(t *testing.T, db *DB, hooks *measurementHooks, keys [][
 		t.Fatal(maintenanceErr)
 	}
 	if mode == "backup" || mode == "backup-compact" || mode == "slow-backup-compact" {
-		if err := Restore(context.Background(), target, filepath.Join(root, "restored"), db.opts); err != nil {
+		restoredPath := filepath.Join(root, "restored")
+		if err := Restore(context.Background(), target, restoredPath, db.opts); err != nil {
 			t.Fatal(err)
 		}
+		restored, err := Open(restoredPath, db.opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := restored.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		digest, count := measurementState(t, restored)
+		if !captured.reached || restored.store.Current.Sequence != captured.sequence ||
+			digest != expectedDigest || count != expectedKeys {
+			t.Fatalf("produced backup did not reopen at its witnessed capture/state: capture=%d restored=%d keys=%d/%d digest=%s/%s",
+				captured.sequence, restored.store.Current.Sequence, count, expectedKeys, digest, expectedDigest)
+		}
+		output["backup_capture_sequence"], output["restored_sequence"] = captured.sequence, restored.store.Current.Sequence
+		output["restored_live_keys"], output["restored_state_sha256"], output["backup_reopen_verified"] = count, digest, true
 	}
 	return output
 }

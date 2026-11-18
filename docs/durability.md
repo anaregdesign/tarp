@@ -2,12 +2,25 @@
 
 ## Support boundary
 
-There is **no completed production power-loss qualification yet**. The first
-target is Linux amd64, a recorded Ubuntu 24.04 LTS 6.8-series kernel, and local
-ext4 with `data=ordered`, normal journaling/flush barriers, no DAX, and an
-honest-flush device/controller stack. Record exact kernel builds, ext4 features,
-mount options, block-device/cache configuration, Go version, and controller
-behavior before claiming that target qualified.
+The [selected Linux/ext4 qualification](qualification.md#final-selected-target-execution-matrix)
+passed on Go 1.26.11/1.27.4: Ubuntu 24.04.5 amd64, kernel 6.8.0-147-generic,
+local guest ext4 `data=ordered` with normal journaling/barriers and no DAX,
+QEMU 8.2.2 and a separately verified honest-flush volatile NBD block model.
+The external controller performed 328 phase cuts and two post-exhaustion cuts,
+waited for NBD EOF, discarded any RAM overlay, and verified file-only recovery/
+captured backups. All 330 engine cuts recorded zero dirty NBD overlay bytes;
+they still abruptly lost the complete guest CPU/RAM, including its page cache.
+The separate raw-device controls actually discarded 4,096 overlay-page bytes:
+flushed A survived and unflushed B was absent. Observed guest FUA traffic was zero.
+The recorded image/kernel hashes, exact features/mounts, storage parameters,
+source fingerprint and raw witnesses define this experimental boundary.
+NBD here backs a guest block device; it is not a network filesystem.
+
+This qualifies the protocol on that precisely tested virtual stack, not any
+particular physical SSD/controller or arbitrary Linux installation. A physical
+deployment must satisfy the same documented filesystem/sync and honest-flush
+assumptions; no firmware/cache certification is inferred from a VM result.
+Additional kernels/filesystems/storage configurations require separate evidence.
 
 Native macOS ordinary tests, hosted Linux amd64 CI, and Linux arm64
 Docker/LinuxKit overlayfs tests are development/functional evidence only.

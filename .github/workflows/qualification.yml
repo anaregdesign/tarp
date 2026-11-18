@@ -4,32 +4,70 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type disposable-vm-only to run the bounded guest environment probe
+        description: Type disposable-vm-only to allow the bounded disposable guest
         required: true
+        type: string
+      mode:
+        description: Bounded disposable environment, power-cut, exhaustion, runtime or measurement campaign
+        required: true
+        default: probe
+        type: choice
+        options: [probe, controls, campaign, runtime, measure]
+      value-bytes:
+        description: One bounded measurement profile; unused by other modes
+        required: true
+        default: '1024'
+        type: choice
+        options: ['64', '1024', '4096']
+      go-version:
+        description: Explicit qualification toolchain; ordinary CI remains stable only
+        required: true
+        default: stable
+        type: choice
+        options: [stable, 1.26.x]
+      group:
+        description: Bounded phase group; all is limited to 192 cases and 50 minutes
+        required: true
+        default: smoke
+        type: choice
+        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, all]
+      case:
+        description: Optional exact case name for a focused reproduction
+        required: false
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: vm-qualification-${{ github.ref }}
+  group: vm-qualification-${{ github.ref }}-${{ inputs.mode }}-${{ inputs.go-version }}-${{ inputs.group }}-${{ inputs.value-bytes }}
   cancel-in-progress: false
 
 jobs:
   probe:
     if: inputs.confirmation == 'disposable-vm-only'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Probe disposable Ubuntu guest
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          check-latest: true
+          cache: false
+      - name: Run bounded disposable Ubuntu guest
         env:
           TARP_QUAL_CONFIRM: ${{ inputs.confirmation }}
+          TARP_QUAL_MODE: ${{ inputs.mode }}
+          TARP_QUAL_GROUP: ${{ inputs.group }}
+          TARP_QUAL_CASE: ${{ inputs.case }}
+          TARP_QUAL_VALUE_BYTES: ${{ inputs.value-bytes }}
         run: bash .github/qualification/probe.sh
-      - name: Retain probe evidence
+      - name: Retain isolated guest evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
