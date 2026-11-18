@@ -196,7 +196,7 @@ func measurementVM(parent context.Context, work string, cfg qualification.Measur
 			required := []string{"cache_hit_1_worker", "cache_hit_4_worker", "cache_hit_batch", "cache_hit_batch_4_worker", "application_miss_os_warm",
 				"mixed_95r_5w", "mixed_reads", "mixed_durable_writes", "durable_put_rotate_false", "durable_put_rotate_true",
 				"durable_delete_rotate_false", "durable_delete_rotate_true", "resources", "guest_os_cold_virtual_device_get",
-				"compaction_automatic-incremental", "compaction_manual-full-checkpoint",
+				"compaction_automatic-incremental", "compaction_manual-full-checkpoint", "repack_parked", "repack_concurrent",
 				"startup_default_history", "startup_manual_checkpoint",
 				"startup_cold_default_history", "startup_cold_manual_checkpoint",
 				"complete_index_default_history", "complete_index_manual_checkpoint"}

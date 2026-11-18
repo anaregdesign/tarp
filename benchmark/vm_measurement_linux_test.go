@@ -515,9 +515,13 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 	// Run the private maintenance fixtures after the workload DB has joined its
 	// cleaner so unrelated background I/O cannot contaminate the control windows.
 	compactionFixture := prepareCompactionFixture(t, size)
+	repack := prepareRepackFixture(t, size)
 	for repetition := 1; repetition <= qualification.MeasurementReps; repetition++ {
 		for _, mode := range compactionModes {
 			write("compaction_"+mode, repetition, compactionFixture.measure(t, mode))
+		}
+		for _, mode := range repackModesFor(repetition) {
+			write("repack_"+mode, repetition, repack.measure(t, mode))
 		}
 		for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
 			t.Run(fmt.Sprintf("interference-%d-%s", repetition, mode), func(t *testing.T) {
