@@ -35,6 +35,8 @@ Scope work through GitHub Issues, starting with the [implementation tracker](htt
 
 Write short imperative commit subjects such as `Correct measured host-kernel provenance`. Target `main` in pull requests, link the relevant Issue, describe the behavior change, and list the checks run. For durability claims, identify the tested storage configuration and link the qualification evidence.
 
+After each task PR merges, sync local `main` with `origin/main` and delete the completed topic branch locally and on `origin`. For squash merges, verify that each branch tip matches the merged PR head and that the merge commit is on `main`. Preserve branches with newer work, branches used by open PRs, and branches checked out in other worktrees. Prune stale remote-tracking refs and verify the remaining local and remote branches before reporting completion.
+
 ## Agent Instructions
 
 In Japanese prose, keep technical terms such as `struct` and `function` in English. If a request conflicts with established best practice, explain the conflict and follow the best practice.
