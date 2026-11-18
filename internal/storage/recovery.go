@@ -58,7 +58,6 @@ func Validate(dir string, cfg Config) (*Image, error) {
 		}
 		file := &File{ID: entry.ID, Kind: entry.Kind, Path: path}
 		file.Size.Store(physical)
-		image.Required.FileBytes = max(image.Required.FileBytes, physical)
 		span := format.NewRecordRange(entry, catalog.Cutoff)
 		scanErr := format.Scan(fd, entry.Bytes, func(offset int64, r format.Record, key string) error {
 			if err := span.Accept(r); err != nil {
@@ -81,7 +80,7 @@ func Validate(dir string, cfg Config) (*Image, error) {
 		image.Required.CacheBytes = max(image.Required.CacheBytes, loc.Bytes+80)
 		image.Required.RecordBytes = max(image.Required.RecordBytes, loc.Bytes)
 	}
-	if image.Required.CacheBytes > cfg.CacheBytes || image.Required.RecordBytes > cfg.RecordBytes || image.Required.FileBytes > cfg.FileBytes {
+	if image.Required.CacheBytes > cfg.CacheBytes || image.Required.RecordBytes > cfg.RecordBytes {
 		return nil, &image.Required
 	}
 	return image, nil

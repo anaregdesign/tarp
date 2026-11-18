@@ -2,9 +2,9 @@
 
 ## Project Structure
 
-The root Go package, `tarp`, exposes the file-backed key-value store. See `db.go` for reads/writes, `backup.go` for backup/restore, and `cleaner.go` and `compact.go` for maintenance. Under `internal/`, `format` defines on-disk encodings, `storage` handles file I/O and recovery, `cache` implements the LRU, and `platform` isolates OS-specific operations.
+Keep root Go files limited to the public `tarp` API and its package documentation. Put database operations, compaction and their tests in `internal/engine/`. Under `internal/`, `format` defines on-disk encodings, `storage` handles file I/O and recovery, `cache` implements the LRU, and `platform` isolates OS-specific operations.
 
-Tests live beside their packages in `*_test.go` files. The tools in `cmd/`, harness in `internal/qualification/`, and guest scripts in `.github/qualification/` support storage qualification. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
+Keep runnable public API examples in `examples/`. Place measurement drivers in `benchmark/`, qualification commands in `benchmark/cmd/`, and guest scripts in `benchmark/scripts/`. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
 
 ## Build, Test, and Development Commands
 
@@ -13,14 +13,14 @@ Run from the repository root with Go 1.26.0 or newer.
 | Command | Purpose |
 | --- | --- |
 | `go build ./...` | Compile packages and tools for the current platform. |
-| `go test -run '^Example$' -v .` | Run the public API example through backup, compaction, and restore. |
+| `go test -run '^Example$' -v ./examples` | Run the public API example through backup, compaction, and restore. |
 | `go test -count=1 -timeout=5m ./...` | Run the full functional suite without cached results. |
 | `go test -race -count=1 -timeout=5m ./...` | Check for data races. |
 | `go vet ./...` | Run static checks. |
 
 ## Coding Style and Naming
 
-Format changed Go files with `gofmt`, which uses tabs for indentation. Follow existing names such as `DB`, `ErrNotFound`, and `openWithIO`. Use OS suffixes such as `_linux.go` for platform-specific code. Keep the library, tools, and tests standard-library-only. Verify that `go list -m all` prints only `github.com/anaregdesign/tarp`.
+Format changed Go files with `gofmt`, which uses tabs for indentation. Follow existing names such as `DB`, `ErrNotFound`, and `OpenWithIO`. Use OS suffixes such as `_linux.go` for platform-specific code. Keep the library, tools, and tests standard-library-only. Verify that `go list -m all` prints only `github.com/anaregdesign/tarp`.
 
 ## Testing Guidelines
 

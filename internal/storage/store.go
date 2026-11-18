@@ -19,17 +19,16 @@ import (
 var ErrCorrupt = format.ErrCorrupt
 
 type Config struct {
-	CacheBytes, RecordBytes, FileBytes int64
-	TargetSegmentBytes                 int64
-	Handles                            int
+	CacheBytes, RecordBytes, TargetSegmentBytes int64
+	Handles                                     int
 }
 
 type CompatibilityError struct {
-	CacheBytes, RecordBytes, FileBytes int64
+	CacheBytes, RecordBytes int64
 }
 
 func (e *CompatibilityError) Error() string {
-	return fmt.Sprintf("storage: incompatible limits: cache=%d record=%d file=%d", e.CacheBytes, e.RecordBytes, e.FileBytes)
+	return fmt.Sprintf("storage: incompatible limits: cache=%d record=%d", e.CacheBytes, e.RecordBytes)
 }
 
 type File struct {

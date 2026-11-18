@@ -45,13 +45,12 @@ Automated CI intentionally covers only Linux amd64 with the latest stable Go.
 
 ## Package and lock ownership
 
-The importable root package owns public contracts, lifecycle admission, the
-visible index/cache, writer coordination, and maintenance orchestration.
-`internal/storage` owns file protocols/replay/leases; `internal/format` owns
-binary codecs; `internal/cache` owns exact global LRU; `internal/platform` owns
-small Linux/Darwin primitives. Root imports those leaves, storage imports only
-format/platform, and the other internal packages import only the standard
-library. No internal package imports the root.
+The root package exposes the public Go API. `internal/engine` coordinates
+lifecycle admission, index and cache access, writers, and maintenance.
+`internal/storage` owns file protocols, replay and leases. `internal/format`
+defines binary codecs, `internal/cache` implements exact global LRU, and
+`internal/platform` provides Linux and Darwin primitives. Measurement drivers
+and qualification tools live under `benchmark/`.
 
 One nonblocking advisory `flock` and an in-process actual-directory identity
 registry reject duplicate and aliased opens. The stable `LOCK` inode is never
@@ -92,8 +91,8 @@ There is no asynchronous acknowledgment, disabled-sync setting, or group commit.
 Rotation first durably creates/syncs a header-only segment and immutable catalog,
 syncs names, and publishes a new frontier with unchanged user sequence, then
 appends the pending record. A normal append rotates a nonempty log before it
-would exceed its soft target (4 MiB by default). The hard default limit is
-128 MiB. Full-checkpoint sealing also rotates a nonempty log. Sequences, generations, and file IDs never wrap.
+would exceed its target (4 MiB by default). Full-checkpoint sealing also rotates
+a nonempty log. Sequences, generations, and file IDs never wrap.
 No record spans files or overwrites previously committed bytes.
 
 An unknown outer signature in an existing `CURRENT` returns
@@ -172,7 +171,8 @@ pins. No incremental publication advances the user sequence.
 
 Manual `Compact(ctx)` durably captures a complete prefix at cutoff C, validates its segment
 headers and records, and rebuilds cutoff state outside root locks. It streams live
-Put records into bounded snapshot files, preserving versions. Tombstones can
+Put records into snapshot files using the same size target as log appends,
+preserving record sequences. Tombstones can
 be dropped only because all earlier history is replaced. Publication combines the
 checkpoint with **all** current tail files after C, then remaps each still-unchanged
 index location under short state locks. Later Put/Delete wins.
