@@ -2,6 +2,7 @@ package tarp
 
 import (
 	"context"
+	"iter"
 
 	"github.com/anaregdesign/tarp/internal/engine"
 )
@@ -26,6 +27,18 @@ func Open(dir string, opts Options) (*DB, error) {
 // Get returns an independently owned value, or ErrNotFound.
 func (db *DB) Get(key []byte) ([]byte, error) {
 	return (*engine.DB)(db).Get(key)
+}
+
+// Entry is a snapshot key and value. Both byte slices belong to the caller.
+type Entry = engine.Entry
+
+// Scan yields every live entry once in unspecified order. Each iteration captures
+// a fresh snapshot when it starts. Writes and compaction can continue during the
+// scan. An error is yielded once with a zero Entry and ends iteration.
+// Breaking out of the loop releases the snapshot. With iter.Pull2, defer stop().
+// The loop body may call any DB method, including Close.
+func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
+	return (*engine.DB)(db).Scan(ctx)
 }
 
 // Put durably inserts or replaces a value. An oversized entry returns ErrTooLarge

@@ -50,10 +50,11 @@ func roundTrip() (result error) {
 		return err
 	}
 	defer func() { result = errors.Join(result, image.Close()) }()
-	value, err := image.Get([]byte("key"))
-	if err != nil {
-		return err
+	for entry, err := range image.Scan(context.Background()) {
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(entry.Value))
 	}
-	fmt.Println(string(value))
 	return nil
 }
