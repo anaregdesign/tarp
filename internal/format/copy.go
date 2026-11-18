@@ -20,12 +20,22 @@ const streamChunk = 32 << 10
 // selects a destination or returns nil to discard the bytes. The caller publishes
 // staged output only after validation succeeds. Even a discarded value is checked.
 func SelectRecord(ctx context.Context, src io.ReaderAt, offset, available int64, buffer []byte, choose func(Record, string) (io.Writer, error)) (Record, error) {
+	at := offset
+	read := func(p []byte) error {
+		err := readChunk(ctx, src, p, at)
+		at += int64(len(p))
+		return err
+	}
+	return selectRecord(ctx, read, offset, available, buffer, choose)
+}
+
+func selectRecord(ctx context.Context, read func([]byte) error, offset, available int64, buffer []byte, choose func(Record, string) (io.Writer, error)) (Record, error) {
 	if len(buffer) == 0 {
 		return Record{}, fmt.Errorf("format: empty copy buffer")
 	}
 	buffer = buffer[:min(len(buffer), streamChunk)]
 	var header [RecordHeaderBytes]byte
-	if err := readChunk(ctx, src, header[:], offset); err != nil {
+	if err := read(header[:]); err != nil {
 		return Record{}, err
 	}
 	r, err := DecodeRecord(header[:], available)
@@ -39,15 +49,13 @@ func SelectRecord(ctx context.Context, src io.ReaderAt, offset, available int64,
 	var key strings.Builder
 	key.Grow(int(min(int64(len(buffer)), r.KeyBytes)))
 	sum := uint32(0)
-	offset += RecordHeaderBytes
 	for left := r.KeyBytes; left > 0; {
 		chunk := buffer[:min(int64(len(buffer)), left)]
-		if err := readChunk(ctx, src, chunk, offset); err != nil {
+		if err := read(chunk); err != nil {
 			return r, err
 		}
 		key.Write(chunk)
 		sum = crc32.Update(sum, table, chunk)
-		offset += int64(len(chunk))
 		left -= int64(len(chunk))
 	}
 	dst, err := choose(r, key.String())
@@ -68,7 +76,7 @@ func SelectRecord(ctx context.Context, src io.ReaderAt, offset, available int64,
 	}
 	for left := r.ValueBytes; left > 0; {
 		chunk := buffer[:min(int64(len(buffer)), left)]
-		if err := readChunk(ctx, src, chunk, offset); err != nil {
+		if err := read(chunk); err != nil {
 			return r, err
 		}
 		sum = crc32.Update(sum, table, chunk)
@@ -77,7 +85,6 @@ func SelectRecord(ctx context.Context, src io.ReaderAt, offset, available int64,
 				return r, err
 			}
 		}
-		offset += int64(len(chunk))
 		left -= int64(len(chunk))
 	}
 	if sum != r.PayloadCRC {
@@ -118,10 +125,18 @@ func CopyRecord(ctx context.Context, src io.ReaderAt, dst io.Writer, offset, ava
 	})
 }
 
-// ReadRecordKey validates one complete record and returns its key without retaining its value.
-func ReadRecordKey(ctx context.Context, src io.ReaderAt, offset, available int64, buffer []byte) (Record, string, error) {
+// ReadRecordKey consumes one complete record from a forward-only stream,
+// validates it, and returns the key without retaining its value.
+func ReadRecordKey(ctx context.Context, src io.Reader, offset, available int64, buffer []byte) (Record, string, error) {
+	read := func(p []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err := io.ReadFull(src, p)
+		return err
+	}
 	var key string
-	r, err := SelectRecord(ctx, src, offset, available, buffer, func(_ Record, k string) (io.Writer, error) {
+	r, err := selectRecord(ctx, read, offset, available, buffer, func(_ Record, k string) (io.Writer, error) {
 		key = k
 		return nil, nil
 	})

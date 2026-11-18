@@ -2,6 +2,7 @@
 package format
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -145,9 +146,15 @@ func Scan(f io.ReaderAt, end int64, visit func(int64, Record, string) error) err
 	if end < SegmentHeaderBytes {
 		return bad("segment end")
 	}
-	buffer := make([]byte, streamChunk)
-	for offset := int64(SegmentHeaderBytes); offset < end; {
-		record, key, err := ReadRecordKey(context.Background(), f, offset, end-offset, buffer)
+	const start = int64(SegmentHeaderBytes)
+	if end == start {
+		return nil
+	}
+	size := int(min(int64(streamChunk), end-start))
+	stream := bufio.NewReaderSize(io.NewSectionReader(exactReadAt{f}, start, end-start), size)
+	buffer := make([]byte, size)
+	for offset := start; offset < end; {
+		record, key, err := ReadRecordKey(context.Background(), stream, offset, end-offset, buffer)
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("%w: truncated record: %w", ErrCorrupt, err)
 		}
@@ -160,6 +167,21 @@ func Scan(f io.ReaderAt, end int64, visit func(int64, Record, string) error) err
 		offset += record.Bytes()
 	}
 	return nil
+}
+
+// A buffered reader can defer an I/O error beyond the selected end. Pass
+// a block to the decoder only when the underlying read completed successfully.
+type exactReadAt struct{ io.ReaderAt }
+
+func (r exactReadAt) ReadAt(b []byte, off int64) (int, error) {
+	n, err := r.ReaderAt.ReadAt(b, off)
+	if n == len(b) && (err == nil || err == io.EOF) {
+		return n, nil
+	}
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	return 0, err
 }
 
 // Read small indexed records in one I/O. Only a value-sized copy enters the
