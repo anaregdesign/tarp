@@ -42,6 +42,13 @@ func measurementInput(size, count int) ([][]byte, []byte, engine.Options) {
 	}
 }
 
+func repackModesFor(repetition int) [2]string {
+	if repetition%2 == 0 {
+		return [2]string{repackConcurrent, repackParked}
+	}
+	return [2]string{repackParked, repackConcurrent}
+}
+
 func benchmarkDB(b *testing.B, size int, miss bool) (*tarp.DB, [][]byte, []byte) {
 	b.Helper()
 	keys, value, opts := measurementInput(size, 128)
@@ -691,6 +698,7 @@ func TestMeasurementProfiles(t *testing.T) {
 	defer runtime.SetMutexProfileFraction(previous)
 	for _, size := range []int{64, 1024, 4096} {
 		compactionFixture := prepareCompactionFixture(t, size)
+		repack := prepareRepackFixture(t, size)
 		startupFixtures := t.TempDir()
 		for repetition := 1; repetition <= 5; repetition++ {
 			func() {
@@ -807,6 +815,9 @@ func TestMeasurementProfiles(t *testing.T) {
 				}
 				for _, mode := range compactionModes {
 					write("compaction_"+mode, size, repetition, compactionFixture.measure(t, mode))
+				}
+				for _, mode := range repackModesFor(repetition) {
+					write("repack_"+mode, size, repetition, repack.measure(t, mode))
 				}
 				for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
 					t.Run(fmt.Sprintf("interference-%d-%d-%s", size, repetition, mode), func(t *testing.T) {

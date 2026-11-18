@@ -10,8 +10,8 @@
 // failed writes. See the durability contract for storage assumptions.
 //
 // Open starts one incremental compaction worker on each new or reopened DB.
-// It reclaims eligible sealed files and yields for writers and backup. Compact
-// explicitly builds a full checkpoint. MaintenanceStatus reports worker
+// It reclaims obsolete records, repacks small files and yields for writers
+// and backup. Compact explicitly builds a full checkpoint. MaintenanceStatus reports worker
 // activity, deferred retirement and logical bytes unlinked. Provide temporary
 // space for both maintenance and backup. Close joins the worker.
 //

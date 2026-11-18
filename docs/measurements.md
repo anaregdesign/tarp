@@ -35,6 +35,41 @@ filesystem allocation are recorded separately where sampled. The JSONL rows
 include effective options, checkpoint cutoff, pruning boundary and the state
 digest. The two modes perform different amounts of work.
 
+## Foreground writes and reads during automatic repacking
+
+`BenchmarkRepackForeground` uses two private copies of the same closed database.
+The fixture has eight sealed logs containing eight live keys each and one
+existing writer key in the active log. Reopening at the default 4 MiB target
+makes all eight sealed logs eligible to be packed together. Both arms read the
+same warm key and durably overwrite the same active key.
+
+Each arm performs 128 synced Puts and 1,024 Gets, with eight reads per write.
+The writer waits 1 ms between calls in both arms so the cleaner can run between
+writes. The gap is included in wall time and excluded from individual latencies.
+The `parked` arm holds the worker for the whole window. In the `concurrent`
+arm the first copy and foreground operations start together. After syncing its
+output the worker waits for the first Get and Put if either is still pending.
+`coordination_wait_ns` reports that deliberate wait. The repack interval
+ends when retirement of the source files has been directory-synced.
+
+Both rows report foreground latency samples and p50/p99, including calls that
+finish after the repack. The concurrent row also reports counts and p50/p99
+for only the Gets and Puts overlapping the repack interval. With fewer than
+100 overlapping calls, the nearest-rank p99 is the largest observation.
+Each arm checks the physical DATA count, active log, committed sequence and
+complete contents after reopen. The expected DATA count is nine
+with the worker parked and two after repacking (one combined log and the active log).
+
+This command runs one iteration per arm at 4 KiB.
+
+```sh
+GOMAXPROCS=4 go test -run '^$' -bench '^BenchmarkRepackForeground$/^4096$' -benchtime=1x -count=1 ./benchmark
+```
+
+The native and primary VM measurement drivers include the same scenario for
+64 B, 1 KiB and 4 KiB values. Each repetition emits one `repack_parked` and
+one `repack_concurrent` row. The drivers alternate which arm runs first.
+
 ## Selected-target bounded driver
 
 All six 64 B/1 KiB/4 KiB and Go 1.26.11/1.27.4 profiles completed on the

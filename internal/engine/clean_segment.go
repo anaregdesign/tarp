@@ -8,15 +8,15 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-// cleanSegment is serialized with manual checkpoints. Foreground mutations
+// Clean one immutable file or repack a contiguous group. Foreground mutations
 // may continue during the scan and during conditional index relocation.
-func (db *DB) cleanSegment(ctx context.Context, entry format.File) (result error) {
+func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result error) {
 	db.writer.Lock()
 	if err := db.health(); err != nil {
 		db.writer.Unlock()
 		return err
 	}
-	work, err := db.store.BeginClean(entry)
+	work, err := db.store.BeginClean(entries)
 	db.writer.Unlock()
 	if err != nil {
 		db.compactFailure(err)
@@ -25,7 +25,7 @@ func (db *DB) cleanSegment(ctx context.Context, entry format.File) (result error
 	if work == nil {
 		return nil
 	}
-	defer work.Source.Unpin()
+	defer work.Release()
 	keepOutput := false
 	defer func() {
 		if !keepOutput {

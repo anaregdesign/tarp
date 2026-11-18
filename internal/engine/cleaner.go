@@ -157,7 +157,45 @@ func nextCandidate(s *storage.Store) (best format.File, staging uint64) {
 	return best, staging
 }
 
-// Each pass yields the slot to manual maintenance before considering another file.
+// repackGroup picks the oldest eligible run from the immutable catalog. Try at
+// most eight physical files per start. Empty log intervals contribute coverage
+// without requiring a file read. Snapshots and logs have different replay rules.
+func repackGroup(files []format.File, target int64) ([]format.File, int64) {
+	const minFiles, maxFiles = 4, 8
+	for start, first := range files {
+		if first.ID == 0 || first.Bytes > target/4 {
+			continue
+		}
+		var group []format.File
+		var total, largest, groupBytes int64
+		count := 0
+		for i := start; i < len(files) && count < maxFiles; i++ {
+			entry := files[i]
+			if (entry.Kind == format.Snapshot) != (first.Kind == format.Snapshot) {
+				break
+			}
+			if entry.ID == 0 {
+				continue
+			}
+			if entry.Bytes > target/4 || entry.Bytes > target-total {
+				break
+			}
+			count++
+			total += entry.Bytes
+			largest = max(largest, entry.Bytes)
+			// Avoid copying a previously packed file for a few small additions.
+			if count >= minFiles && largest <= total-largest {
+				group, groupBytes = files[start:i+1], total
+			}
+		}
+		if len(group) != 0 {
+			return group, groupBytes
+		}
+	}
+	return nil, 0
+}
+
+// Each pass yields the slot to manual maintenance before selecting more work.
 func (db *DB) runCleaner(ctx context.Context) {
 	delay := time.Duration(0)
 	for {
@@ -225,6 +263,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 	if err == nil {
 		victim, staging = nextCandidate(db.store)
 	}
+	files, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)
 	db.writer.Unlock()
 	w.mu.Lock()
 	w.status.PinnedBytes = pinned
@@ -239,7 +278,17 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		db.deferCleaning("retirement", compactCleanupError(err))
 		return false, true
 	}
-	if victim.ID == 0 {
+	var inputs []format.File
+	if victim.ID != 0 {
+		inputs = []format.File{victim}
+	} else {
+		// Foreground rotations publish a new catalog slice. Inspect this one
+		// outside the writer gate; BeginClean rechecks the selection.
+		var inputBytes int64
+		inputs, inputBytes = repackGroup(files, db.opts.TargetSegmentBytes)
+		staging = uint64(inputBytes) + uint64(manifestBytes) + format.FrontierBytes
+	}
+	if len(inputs) == 0 {
 		if pinned != 0 {
 			db.deferCleaning("pinned", nil)
 		} else {
@@ -257,7 +306,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		}
 	}
 	if err == nil {
-		err = db.cleanSegment(ctx, victim)
+		err = db.cleanSegment(ctx, inputs...)
 	}
 	switch {
 	case err == nil:
