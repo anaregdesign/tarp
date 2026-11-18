@@ -1,7 +1,6 @@
 package benchmark
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -318,6 +317,12 @@ func resourceSample(t *testing.T, db *engine.DB) map[string]any {
 	}
 }
 
+type measurementOverlap struct {
+	resume              chan struct{}
+	untilCompactReturns bool
+	waitNS              int64 // written by the backup goroutine, read after Backup returns
+}
+
 type measurementHooks struct {
 	backupBytes       atomic.Int64
 	manualBytes       atomic.Int64
@@ -326,16 +331,18 @@ type measurementHooks struct {
 	windowStart       func()
 	windowEnd         func()
 	reads             atomic.Int64
-	slow              atomic.Bool
+	cleanerStart      chan struct{}
+	afterRetirement   func()
 	started           atomic.Pointer[chan struct{}]
-	overlap           atomic.Pointer[chan struct{}]
+	overlap           atomic.Pointer[measurementOverlap]
 	capture           atomic.Pointer[measurementCapture]
 }
 
-// The worker is held from Open through Close for the controlled interference
+// The worker is held from Open through the timed window for controlled interference
 // comparisons. All foreground calls and the manual checkpoint use the normal engine.
 func (h *measurementHooks) interferenceIO() *storage.IO {
-	return &storage.IO{CleanerStart: make(chan struct{}), Hook: h.hook, Wrote: h.wrote}
+	h.cleanerStart = make(chan struct{})
+	return &storage.IO{CleanerStart: h.cleanerStart, Hook: h.hook, Wrote: h.wrote}
 }
 
 func (h *measurementHooks) wrote(point string, n int) {
@@ -348,8 +355,8 @@ func (h *measurementHooks) wrote(point string, n int) {
 }
 
 func (h *measurementHooks) releaseOverlap() {
-	if signal := h.overlap.Swap(nil); signal != nil {
-		close(*signal)
+	if gate := h.overlap.Swap(nil); gate != nil {
+		close(gate.resume)
 	}
 }
 
@@ -358,7 +365,13 @@ func (h *measurementHooks) hook(point string) error {
 	case "read:before":
 		h.reads.Add(1)
 	case "compact.write:before":
-		h.releaseOverlap()
+		if gate := h.overlap.Load(); gate != nil && !gate.untilCompactReturns {
+			h.releaseOverlap()
+		}
+	case "clean.retire.dirsync:after":
+		if h.afterRetirement != nil {
+			h.afterRetirement()
+		}
 	case "compact.source.open:after":
 		h.manualSourceOpens.Add(1)
 	case "compact.record:after":
@@ -375,10 +388,9 @@ func (h *measurementHooks) hook(point string) error {
 			close(*signal)
 		}
 		if gate != nil {
-			<-*gate
-		}
-		if h.slow.Load() {
-			time.Sleep(time.Millisecond)
+			start := time.Now()
+			<-gate.resume
+			gate.waitNS = time.Since(start).Nanoseconds()
 		}
 	}
 	return nil
@@ -391,6 +403,8 @@ func measureInterference(t *testing.T, db *engine.DB, hooks *measurementHooks, k
 func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks, keys [][]byte, value []byte, mode string, minimum time.Duration) map[string]any {
 	t.Helper()
 	probe := engine.Observe(db)
+	overlapping := mode == "backup-compact" || mode == pinnedBackupMode
+	backingUp := mode == "backup" || overlapping
 	probe.Store(func(s *storage.Store) {
 		if s.IO == nil || s.IO.CleanerStart == nil || s.IO.Wrote == nil {
 			t.Fatal("interference control requires its gated worker and per-actor byte observer")
@@ -493,17 +507,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 			}
 			minimumAvailable = min(minimumAvailable, filesystem.Bavail*uint64(filesystem.Bsize))
 			probe.Store(func(s *storage.Store) {
-				selected := map[uint64]bool{s.Current.ActiveID: true}
-				for _, file := range s.Catalog.Files {
-					selected[file.ID] = true
-				}
-				var pinned int64
-				for id, file := range s.Files {
-					if !selected[id] && file.References() != 0 {
-						pinned += file.Size.Load()
-					}
-				}
-				peakPinned = max(peakPinned, pinned)
+				peakPinned = max(peakPinned, retiredPinnedBytes(s, nil))
 			})
 			select {
 			case <-stop:
@@ -523,29 +527,33 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	close(start)
 	maintenanceStart := time.Now()
 	var compact engine.CompactResult
+	var gate *measurementOverlap
+	var pinnedFiles map[uint64]int64
 	var backupStart, backupEnd, compactStart, compactEnd time.Time
 	compactCall := func() error {
+		defer hooks.releaseOverlap()
 		compactStart = time.Now()
 		var err error
-		compact, err = db.Compact(context.Background())
+		compact, err = db.Compact(t.Context())
 		compactEnd = time.Now()
-		hooks.releaseOverlap()
+		if err == nil && mode == pinnedBackupMode {
+			pinnedFiles, err = witnessBackupPins(probe, compact.PinnedBytes)
+		}
 		return err
 	}
 	maintenanceErr := func() error {
-		if mode == "backup" || mode == "backup-compact" || mode == "slow-backup-compact" {
-			hooks.slow.Store(mode == "slow-backup-compact")
+		if backingUp {
 			hooks.capture.Store(captured)
-			if mode != "backup" {
-				gate := make(chan struct{})
-				hooks.overlap.Store(&gate)
+			if overlapping {
+				gate = &measurementOverlap{resume: make(chan struct{}), untilCompactReturns: mode == pinnedBackupMode}
+				hooks.overlap.Store(gate)
 			}
 			copyStarted := make(chan struct{})
 			hooks.started.Store(&copyStarted)
 			done := make(chan error, 1)
 			go func() {
 				backupStart = time.Now()
-				err := db.Backup(context.Background(), target)
+				err := db.Backup(t.Context(), target)
 				backupEnd = time.Now()
 				done <- err
 			}()
@@ -555,7 +563,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 				hooks.releaseOverlap()
 				return errors.Join(errors.New("backup returned before copy-start hook"), err)
 			}
-			if mode != "backup" {
+			if overlapping {
 				if err := compactCall(); err != nil {
 					return errors.Join(err, <-done)
 				}
@@ -586,26 +594,25 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}
 	if (backupCopied > 0) != !backupStart.IsZero() ||
 		(compactCopied > 0) != !compactStart.IsZero() ||
-		(mode == "backup-compact" || mode == "slow-backup-compact") && overlapNS <= 0 {
+		overlapping && overlapNS <= 0 {
 		maintenanceErr = errors.Join(maintenanceErr, errors.New("maintenance copy or overlap does not match the requested operation"))
 	}
 	if remaining := minimum - time.Since(begin); remaining > 0 {
 		time.Sleep(remaining)
 	}
 	close(stop)
-	hooks.slow.Store(false)
 	output := map[string]any{
 		"maintenance_ns": maintenanceNS, "compact": compact,
 		"fixture_sequence_before_workers": fixtureSequence, "fixture_live_keys": expectedKeys,
 		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestHash),
-		"automatic_cleaner": "held from Open through Close for controlled foreground and manual-checkpoint comparisons",
+		"automatic_cleaner": "held from Open through the measured foreground and manual-checkpoint window",
 		"backup_copy_bytes": backupCopied, "backup_elapsed_ns": backupEnd.Sub(backupStart).Nanoseconds(),
 		"compact_copy_bytes": compactCopied, "compact_elapsed_ns": compactEnd.Sub(compactStart).Nanoseconds(),
 		"compact_copy_source_opens":           hooks.manualSourceOpens.Load() - opensBefore,
 		"compact_records_copied":              hooks.manualRecords.Load() - recordsBefore,
 		"observed_maintenance_api_overlap_ns": overlapNS,
 		"copy_measurement_scope":              "bytes accepted by backup DATA writes and manual checkpoint DATA writes, including segment headers; metadata and foreground writes are excluded; elapsed and overlap cover complete API calls",
-		"overlap_coordination":                "overlap modes pause the first backup copy until the first checkpoint record write; released on any checkpoint return; this controlled delay is included in API elapsed times",
+		"overlap_coordination":                "backup-compact releases the first backup DATA write at the first checkpoint record write; pinned-backup-compact holds it through checkpoint return and retired source observation; API elapsed times include the hold",
 		"get_file_reads":                      hooks.reads.Load() - readStart,
 		"writer_callers":                      1, "caller_value_bytes": len(value), "sample_reservoir_limit_per_worker": 2048,
 	}
@@ -636,9 +643,9 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	if maintenanceErr != nil {
 		t.Fatal(maintenanceErr)
 	}
-	if mode == "backup" || mode == "backup-compact" || mode == "slow-backup-compact" {
+	if backingUp {
 		restoredPath := filepath.Join(root, "restored")
-		if err := engine.Restore(context.Background(), target, restoredPath, probe.Options()); err != nil {
+		if err := engine.Restore(t.Context(), target, restoredPath, probe.Options()); err != nil {
 			t.Fatal(err)
 		}
 		restored, err := engine.Open(restoredPath, probe.Options())
@@ -659,6 +666,17 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 		}
 		output["backup_capture_sequence"], output["restored_sequence"] = captured.sequence, restoredSequence
 		output["restored_live_keys"], output["restored_state_sha256"], output["backup_reopen_verified"] = count, digest, true
+		if mode == pinnedBackupMode {
+			pins, err := verifyBackupReclamation(t.Context(), probe, hooks, target, pinnedFiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pins.BackupGateWaitNS = gate.waitNS
+			output["pinned_backup"] = pins
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	return output
 }
@@ -819,7 +837,7 @@ func TestMeasurementProfiles(t *testing.T) {
 				for _, mode := range repackModesFor(repetition) {
 					write("repack_"+mode, size, repetition, repack.measure(t, mode))
 				}
-				for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
+				for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", pinnedBackupMode} {
 					t.Run(fmt.Sprintf("interference-%d-%d-%s", size, repetition, mode), func(t *testing.T) {
 						clone, observers := measurementOpenClone(t, interferenceFixture, opts)
 						write("interference_"+mode, size, repetition, measureInterference(t, clone, observers, keys[:8], value, mode))

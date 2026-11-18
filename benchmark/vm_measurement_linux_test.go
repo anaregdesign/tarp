@@ -344,6 +344,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		runtime.KeepAlive(got)
 		return err
 	}
+	scanWork := newScanWorkload(keys, value)
 	interval := 0
 	for repetition := 1; repetition <= qualification.MeasurementReps; repetition++ {
 		for _, key := range hot {
@@ -479,6 +480,8 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 			})
 		}
 		vmMeasureLatency(write, "guest_os_cold_virtual_device_get", repetition, latency(cold, int64(len(cold)), 0))
+		scanWork.traverse(t, db) // Warm the full working set outside the measured traversal.
+		write("scan_full_warm", repetition, scanWork.traverse(t, db))
 	}
 	for i := 0; i < 8192; i++ {
 		if err := db.Put(keys[i%1024], value); err != nil {
@@ -507,10 +510,11 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		for _, mode := range compactionModes {
 			write("compaction_"+mode, repetition, compactionFixture.measure(t, mode))
 		}
+		write("scan_paused_checkpoint", repetition, measurePausedScan(t, repack))
 		for _, mode := range repackModesFor(repetition) {
 			write("repack_"+mode, repetition, repack.measure(t, mode))
 		}
-		for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
+		for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", pinnedBackupMode} {
 			t.Run(fmt.Sprintf("interference-%d-%s", repetition, mode), func(t *testing.T) {
 				db, hooks := measurementOpenClone(t, fixture, opts)
 				data := measureInterferenceFor(t, db, hooks, hot, value, mode, 500*time.Millisecond)

@@ -50,7 +50,7 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		"fixture":         "fresh private closed-fixture copy per mode/window; 512 seeded keys plus 512 updates and 128 deletes/reinserts",
 	})
 	for repetition := 1; repetition <= 5; repetition++ {
-		for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "slow-backup-compact"} {
+		for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", pinnedBackupMode} {
 			t.Run(fmt.Sprintf("holds-%d-%s", repetition, mode), func(t *testing.T) {
 				db, hooks := measurementOpenClone(t, fixture, opts)
 				defer engine.ProfileLocks(false)
@@ -58,7 +58,7 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 				hooks.windowEnd = func() { engine.ProfileLocks(false) }
 				probe := engine.Observe(db)
 				probe.ResetLockProfile()
-				measureInterferenceFor(t, db, hooks, keys[:8], value, mode, 500*time.Millisecond)
+				data := measureInterferenceFor(t, db, hooks, keys[:8], value, mode, 500*time.Millisecond)
 				for name, stats := range probe.LockProfile() {
 					var raw []int64
 					step := max(1, (len(stats.Samples)+1023)/1024)
@@ -70,11 +70,18 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 					if count != 0 {
 						mean = float64(total) / float64(count)
 					}
-					write("lock_hold_"+mode+"_"+name, repetition, map[string]any{
+					row := map[string]any{
 						"observations": count, "total_hold_ns": total, "mean_hold_ns": mean,
 						"maximum_hold_ns": maximum, "retained_prefix_count": retained,
 						"sample": latency(raw, int64(count), 0), "diagnostic_only": true,
-					})
+					}
+					if mode == pinnedBackupMode && name == "writer" {
+						row["pinned_backup"] = data["pinned_backup"]
+						row["backup_capture_sequence"] = data["backup_capture_sequence"]
+						row["restored_sequence"] = data["restored_sequence"]
+						row["restored_state_sha256"] = data["restored_state_sha256"]
+					}
+					write("lock_hold_"+mode+"_"+name, repetition, row)
 				}
 			})
 		}
