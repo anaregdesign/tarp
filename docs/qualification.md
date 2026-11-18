@@ -273,6 +273,11 @@ Do not treat instrumented timings as the primary latency baseline. The ordinary
 build aliases these mutexes directly to `sync.Mutex`, with no timing/counter
 instructions or extra mutex state.
 
+The [selected-target measurement baseline](measurement-baseline.md) records the
+completed six-profile, five-window workload matrix on this same stack, including
+guest-cold reads/reopens, resource/index/pending-memory probes and maintenance
+interference. Those timing results do not broaden the durability boundary.
+
 The initial environment probe is **not qualification**: QEMU writeback alone
 does not model loss of the host page cache. Flushed-survives/unflushed-is-lost
 controls on a verified volatile block backend and the full external-witness

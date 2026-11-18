@@ -7,9 +7,12 @@ physical storage reads.
 
 ## Selected-target bounded driver
 
-The separately guarded manual VM workflow implements the release-target driver;
-its implementation alone is not a measurement result. Run each size with each
-supported family's latest patch after establishing the qualification target:
+All six 64 B/1 KiB/4 KiB and Go 1.26.11/1.27.4 profiles completed on the
+qualified virtual stack. The [recorded baseline](measurement-baseline.md)
+contains actual run links, results, environment differences and interpretation.
+The separately guarded manual workflow implements the reproducible driver;
+its implementation alone is not evidence that a different run passed.
+Run each size with each supported family's latest patch:
 
 ```sh
 gh workflow run qualification.yml --ref REVIEWED_REF \
@@ -204,9 +207,9 @@ The sampler itself adds descriptors, I/O, and short writer-gate acquisition.
 Small datasets do not establish large-index or long-history scaling.
 
 Keep application misses distinct from OS page-cache misses. No shared-host cache
-dropping, disk exhaustion, or power cutting is allowed. OS-cold storage profiles,
-production-scale histories/working sets, detailed lock-hold instrumentation, and
-release-quality repetition on the qualified amd64/ext4 target remain separate
-external work. Preserve these limits in
-[#5](https://github.com/anaregdesign/tarp/issues/5), rather than treating smoke
-numbers as completed release acceptance.
+dropping, disk exhaustion, or power cutting is allowed. The selected-target
+driver and [baseline](measurement-baseline.md), not these smoke numbers, supply
+the separately executed guest-cold profiles, larger disclosed histories/working
+sets, actual lock spans, queued buffers and repeated release-target results for
+[#5](https://github.com/anaregdesign/tarp/issues/5). Neither driver establishes
+unbounded scale, physical-media-cold performance, or a numeric SLO.

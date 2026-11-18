@@ -3,10 +3,12 @@
 A standalone, file-backed, hash-indexed Go key-value library. The published module,
 tests, and measurement tools use the Go standard library only.
 
-**Implementation is available; production power-loss qualification is not complete.**
-Native macOS and isolated Linux functional results are not a production durability
-certification. See [the support and durability contract](docs/durability.md) and
-[qualification procedure](docs/qualification.md).
+**The selected virtual Linux/ext4 qualification and measurement baseline passed.**
+The evidence covers an exact Ubuntu/kernel/ext4/honest-flush virtual-device
+configuration, not arbitrary Linux installations or physical-device firmware.
+See [the support and durability contract](docs/durability.md),
+[qualification evidence](docs/qualification.md), and
+[measured baseline and limits](docs/measurement-baseline.md).
 
 ```go
 package example
@@ -125,8 +127,9 @@ as a fictitious rollback. Long maintenance can delay `Close`.
 
 Use the latest supported patches of Go 1.26 and 1.27 initially; advance this
 matrix with Go's supported-release policy. The module minimum is Go 1.26.0.
-Linux amd64/ext4 is the first **qualification target**, not a blanket Linux
-guarantee. macOS amd64/arm64 is development-only; Windows is not required.
+The [recorded virtual Linux amd64/ext4 stack](docs/durability.md#support-boundary)
+is the first qualified configuration, not a blanket Linux guarantee.
+macOS amd64/arm64 is development-only; Windows is not required.
 
 ```sh
 go test ./...
