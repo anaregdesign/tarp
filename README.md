@@ -80,7 +80,7 @@ the commit sync protocol.
 | --- | ---: | --- |
 | `CacheBytes` | 64 MiB | Total logical charge of entries in this DB's LRU cache. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
-| `TargetSegmentBytes` | 4 MiB | Target size for new log and checkpoint snapshot files, including the 64-byte file header. |
+| `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Also bounds the total DATA bytes read in one automatic repack. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
 
 For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
@@ -92,8 +92,8 @@ runtime overhead, in-flight operations and OS page cache use additional memory.
 
 The effective target is at least `64 + MaxRecordBytes` so a whole record fits.
 An exact fit stays in the current file. If the next append would exceed the
-target, tarp seals the log and writes the record to a new file. Sealed logs
-become candidates for automatic compaction when cleaning would save enough space.
+target, tarp seals the log and writes the record to a new file. The background
+worker can reclaim obsolete records or combine small sealed files.
 Manual `Compact` uses the same target to split its snapshot output.
 
 For example, 32 files of 4 MiB total 128 MiB. The next write can create a
@@ -121,12 +121,17 @@ limits, then publishes a new closed database. Existing destinations, even empty
 directories, are never replaced. Parents must be caller-controlled; destinations
 must be outside the source. Backups must be immutable during restore.
 
-The worker estimates how much disk space each immutable file can yield. It
-cleans one sealed log or snapshot at a time, copying live Puts and required
-Deletes. Its initial threshold requires estimated net savings of at least a
-third of the I/O bytes to read and write. It yields for foreground writers and
-backup, and defers when temporary space is scarce. Cache-hit `Get` takes its
-usual path. A reclaimable file can remain on disk while a reader or backup uses it.
+The worker first reclaims obsolete records from individual files when the
+estimated replacement, including metadata, fits in half the source size.
+When no file meets that threshold, the worker looks for 4–8 adjacent small
+files to combine. At the default target each input may be at most 1 MiB and
+their total at most 4 MiB. The other inputs together must be at least as large
+as the largest. For example, four adjacent 40 KiB sealed logs qualify even if
+every record is live. Snapshots are grouped with snapshots and logs with logs.
+
+Both operations run in the background, yield for foreground writers and backup,
+and defer when temporary space is scarce. A replaced file can remain on disk
+while a reader or backup uses it.
 
 `db.MaintenanceStatus()` reports the worker's deferral reason, most recent
 maintenance error, pinned retired bytes, and cumulative logical bytes actually

@@ -49,6 +49,40 @@ func TestCleanerRanksNetSavings(t *testing.T) {
 	}
 }
 
+func TestRepackGroupLimits(t *testing.T) {
+	const target = 4096
+	for _, tc := range []struct {
+		name         string
+		sizes        []int64
+		first, count int
+	}{
+		{"too few", []int64{128, 128, 128}, 0, 0},
+		{"exact target", []int64{1024, 1024, 1024, 1024, 128}, 1, 4},
+		{"large separator", []int64{128, 128, 1025, 128, 128, 128}, 0, 0},
+		{"skip dominant file", []int64{1024, 128, 128, 128, 128}, 2, 4},
+		{"balanced at equality", []int64{768, 256, 256, 256}, 1, 4},
+		{"eight file limit", []int64{128, 128, 128, 128, 128, 128, 128, 128, 128}, 1, 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var files []format.File
+			for i, size := range tc.sizes {
+				files = append(files, format.File{ID: uint64(i + 1), Kind: format.Log, Bytes: size})
+			}
+			group, bytes := repackGroup(files, target)
+			if len(group) != tc.count || len(group) > 0 && group[0].ID != uint64(tc.first) {
+				t.Fatalf("selected %+v, want %d files starting at ID %d", group, tc.count, tc.first)
+			}
+			var wantBytes int64
+			for _, f := range group {
+				wantBytes += f.Bytes
+			}
+			if bytes != wantBytes {
+				t.Fatalf("estimated input bytes %d, want %d", bytes, wantBytes)
+			}
+		})
+	}
+}
+
 // The public entry point has no scheduling hooks. Observe actual unlink rather
 // than assuming a number of scheduler turns or a disk-space delta.
 func waitForUnlink(t *testing.T, db *DB, file string) {

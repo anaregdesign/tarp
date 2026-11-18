@@ -12,7 +12,8 @@ type DB engine.DB
 // Options configures one database. A zero field selects its default.
 // CacheBytes bounds the logical LRU charge (64 MiB), MaxRecordBytes bounds
 // one encoded record (1 MiB), TargetSegmentBytes sizes new log and checkpoint
-// files (4 MiB), and ReadFileHandles sizes the cache-miss read pool (64).
+// files and bounds repack inputs (4 MiB), and ReadFileHandles sizes the cache-miss
+// read pool (64).
 type Options = engine.Options
 
 // Open creates or reopens a database and starts automatic incremental compaction.

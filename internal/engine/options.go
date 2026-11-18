@@ -13,7 +13,7 @@ import (
 type Options struct {
 	CacheBytes     int64
 	MaxRecordBytes int64
-	// TargetSegmentBytes sets the target size for new logs and checkpoint files.
+	// TargetSegmentBytes sizes new logs and checkpoints and caps repack input bytes.
 	// Zero selects 4 MiB. The target grows to fit a header and one maximum record.
 	TargetSegmentBytes int64
 	ReadFileHandles    int

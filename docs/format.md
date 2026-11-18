@@ -106,7 +106,7 @@ fields giving the file ID, exact length, kind, first sequence and last sequence.
 | --- | --- |
 | Snapshot | Nonzero unique ID. First and last are zero. Appears before all log intervals. Only allowed for C > 0. |
 | Raw log | Nonzero unique ID. Contains every record from first through last, in order. |
-| Cleaned log | Retains its original [first,last] even on repeated cleaning. A physical file contains at least one record, in strictly increasing sequence order within that interval. |
+| Cleaned log | Covers the original [first,last] of one log interval or the combined coverage of adjacent repacked intervals. A physical file contains at least one record, in strictly increasing sequence order within that interval. |
 | Empty cleaned interval | Kind=cleaned log, ID=0 and length=0. A catalog entry alone represents the covered interval. |
 
 All nonzero DATA IDs are distinct and exclude the active ID and selected catalog ID. A physical sealed

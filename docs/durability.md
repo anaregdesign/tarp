@@ -160,13 +160,28 @@ Per-file live Put and required Delete byte counts estimate replacement size.
 For a candidate with source bytes S and estimated bytes to write W (including
 metadata), the initial eligibility rule is `W <= S/2`. This gives estimated
 net savings of at least one third of read-plus-write bytes. The worker ranks
-eligible files by highest savings per I/O byte, with stable tie breaks. It
-yields in bounded chunks for queued writers and backup. It validates all bytes
-of its chosen source, including obsolete records, independently of cache-hit reads.
+eligible files by highest savings per I/O byte, with stable tie breaks.
+
+When no single file qualifies, the worker looks in catalog order for 4–8
+adjacent physical files of the same family (snapshots or sealed logs). Each
+may occupy up to one quarter of the effective segment target. Their combined
+size including headers must fit within one target, and the largest must be
+no larger than all the others combined. This avoids repeatedly rewriting a
+larger file as a few tiny ones accumulate. An empty log interval between
+inputs contributes its sequence coverage without counting as a physical file.
+Fewer than four small files, or small files separated by a large one, can remain.
+
+The worker checks on Open, after rotation and after writes invalidate sealed
+records. It checks again after each completed pass. It validates and streams
+its inputs one at a time, including obsolete records, and yields in bounded
+chunks for queued writers and backup. Input selection and copying use the
+sealed catalog, leaving the active log available for appends.
 
 After copying, the worker takes the writer gate and rebases one replacement on
-the latest catalog and frontier. Replacement data and catalog reach stable
-storage before the temporary CURRENT is synced, renamed and directory-synced.
+the latest catalog and frontier. A repacked log covers the full sequence
+interval of its inputs and retains their Delete records. Replacement data
+and catalog reach stable storage before the temporary CURRENT is synced,
+renamed and directory-synced.
 An uncertain publication fail-stops while the writer gate is still held and
 retains both layouts for validated reopen. After durable publication, remapping
 checks file, offset and sequence so later changes win. Reclamation waits for all
