@@ -34,9 +34,10 @@ Observed frontend FUA count was zero. The
 [qualification record](qualification.md#final-selected-target-execution-matrix)
 contains the image/kernel hashes and complete storage assumptions.
 
-Hosts ran Linux `7.0.0-1014-aws`, with four CPUs and 15.3-15.6 GiB RAM.
-Go 1.26.11's 64 B/1 KiB jobs used AMD EPYC 9V74 hosts; the other four used Intel
-Xeon 6975P-C hosts. These are shared hosted runners executing emulated guests:
+Hosts had four CPUs and 15.3-15.6 GiB RAM. Go 1.26.11's 64 B/1 KiB jobs used
+AMD EPYC 9V74 hosts running Linux `7.0.0-1017-azure`; the other four used Intel
+Xeon 6975P-C hosts running Linux `7.0.0-1014-aws`.
+These are shared hosted runners executing emulated guests:
 **do not rank Go releases or physical processors using these results**.
 All timings include emulator/runtime/observer effects and preserve outliers.
 
