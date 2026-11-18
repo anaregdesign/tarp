@@ -5,7 +5,96 @@ The initial defaults and contention assumptions are tuning hypotheses.
 Development measurements do not qualify a production filesystem or prove
 physical storage reads.
 
-## Bounded repeated profile driver
+## Selected-target bounded driver
+
+The separately guarded manual VM workflow implements the release-target driver;
+its implementation alone is not a measurement result. Run each size with each
+supported family's latest patch after establishing the qualification target:
+
+```sh
+gh workflow run qualification.yml --ref REVIEWED_REF \
+  -f confirmation=disposable-vm-only -f mode=measure \
+  -f go-version=stable -f value-bytes=1024
+```
+
+Select `64`, `1024`, or `4096`; `1.26.x` selects the other initially supported
+family. This is not a normal CI matrix. Each job reruns actual volatile-device
+controls, then runs one plain measurement guest and a separate diagnostic guest.
+Both use the pinned amd64 Ubuntu 24.04 / 6.8 / ext4 ordered / honest-flush NBD
+stack. Primary/diagnostic guests are bounded to 30/15 minutes, the controller
+to 50 minutes and the whole manual job to 60 minutes. Ordinary CI stays one
+Linux/latest-stable job.
+
+The **plain** build prepares 4,096 16-byte keys once and records five explicitly
+warmed measurement windows. Options are 64 KiB logical cache, 8 KiB records,
+1 MiB files and four read handles: every value fits individually, while every
+complete working set exceeds cache capacity. Eight hot keys fit at all sizes.
+Maintenance adds one separately identified writer key.
+
+- Hit profiles retain all 8,192 individual durations for one/four workers,
+  plus a 10,000-call batch ns/op and allocated-byte sample, allocations/op and
+  an asserted zero Get-storage-read count. Required returned-value copying stays
+  enabled. The allocation probe temporarily uses GOMAXPROCS=1; timings use 2.
+- Cyclic warm-OS application misses assert 8,192 actual Get file reads. A
+  reproducible 4,096-operation, four-worker uniform-key workload records both
+  combined and separate read/durable-write distributions at approximately
+  95%/5%. Sixty-four fully durable Put/Delete samples cover ordinary and
+  record-by-record-rotation configurations without disabling any sync. Each
+  rotating Delete follows a fully synced full-segment Put outside its timer,
+  and the driver verifies all 64 Delete rotations.
+- Each of baseline, backup, compaction, their overlap and slow-copy overlap
+  runs for at least 500 ms and until maintenance completes. Bounded Algorithm R
+  reservoirs retain at most 2,048 samples per worker. Five-millisecond sampled
+  heap, logical/allocated temporary disk, available headroom and retired pins
+  are reported; the sampler's own I/O/writer-lock acquisitions perturb all modes.
+  Backup and compaction each retain actual copied DATA-file bytes (including
+  headers, excluding metadata) and their complete API elapsed time, separately
+  from the combined window. Their observed API-interval intersection is recorded.
+  Overlap modes pause the first backup copy until the first checkpoint record
+  write, with that controlled coordination included in reported API time.
+  Copy bytes divided by the respective API time give reproducible effective
+  copy throughput, not a physical copy-engine utilization claim.
+- Current/peak RSS, Go heap/inuse/idle/released, stacks, Sys and GC metrics are
+  separate from logical cache charges. Actual read/write data descriptors,
+  file-handle configuration and live/obsolete/pinned encoded storage are reported.
+- An additional 8,192 updates, 1,024 deletes and 1,024 reinsertions over 1,024
+  keys form a disclosed 10,240-operation history. Five warm and five guest-cold
+  file-only reopens **each** before and after checkpoint record elapsed startup
+  and committed record-scan bytes (logical scan bytes, not assumed physical I/O).
+  Each cold Open has independently acknowledged external NBD read intervals;
+  cache purge and handshake time are excluded from Open latency.
+- Complete-index retention is measured by retaining then releasing the **actual**
+  rebuilt key map, owned keys, inline locations and shared file registry after
+  closing cache/handles. It is not the old cloned-map proxy. Fixed DB/catalog/
+  frontier state is excluded; raw GC deltas remain noisy, not a process limit.
+- Thirty-two Gets per repetition clear application cache and purge **only this
+  guarded guest's** clean page cache. A start/end acknowledgment through the
+  independent read-only 9p channel brackets the operation against external NBD
+  counters. Each declared cold Get must show actual virtual-block reads.
+  Drop/handshake time is outside Get timing. The 32-sample p99 is effectively
+  a sample maximum, not a precise population-tail estimate.
+
+The **diagnostic-only** `tarpprofile` build separately uses 512 keys (still larger
+than cache for every size), five repetitions and all maintenance modes. It
+records actual acquired-lock-to-Unlock-entry spans for writer/state/lifecycle
+locks, including all-observation count/sum/max and bounded raw-prefix samples.
+Recording extends actual holds but is excluded from that reported span.
+Writer statistics include the disclosed resource/copy inventory, not just mutations.
+These are not wait-time proxies and instrumented timings are not the primary
+latency baseline. The plain library remains a direct `sync.Mutex` alias.
+With 1/8/32 callers held at the post-copy writer queue, logical copied key/value
+bytes and actual heap/stack/RSS/runtime changes characterize pending buffering;
+process deltas include harness/goroutine costs and are not an engine-only cap.
+
+`measurement.jsonl` syncs every bounded raw/summary row outside the guest.
+Per-VM console logs, exact source/library/binary/image hashes, host and guest
+CPU/RAM, mounts, toolchain, options, seeds, sample counts and external device
+counter intervals are retained. The host cache and physical media are **not**
+purged: report guest-OS-cold virtual-device latency, never physical-media-cold
+latency or a general physical-device performance result. No numeric SLO was
+agreed, and these smaller fixture limits do not tune the published defaults.
+
+## Legacy development smoke driver
 
 Choose a **new** output filename on a volume with headroom. It is created
 exclusively; raw JSONL and a sibling `.mutex.pprof` are retained.
@@ -75,7 +164,7 @@ GOMAXPROCS workers. `force-rotation-false` uses a 1 MiB file and may still
 rotate during longer custom benchmark runs; `true` forces one-record files.
 The repeated JSON driver uses 32 normal writes that fit its 1 MiB file.
 
-## Interpretation limits
+## Legacy smoke interpretation limits
 
 Per-operation clock calls, hooks, sampling, GC, scheduler activity, and shared
 host load affect the result. The driver also enables mutex profiling at

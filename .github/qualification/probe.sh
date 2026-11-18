@@ -8,7 +8,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux ||
   exit 1
 fi
 mode="${TARP_QUAL_MODE:-probe}"
-[[ "$mode" == probe || "$mode" == controls || "$mode" == campaign || "$mode" == runtime ]]
+[[ "$mode" == probe || "$mode" == controls || "$mode" == campaign || "$mode" == runtime || "$mode" == measure ]]
 [[ "$RUNNER_TEMP" == /* && "$GITHUB_RUN_ID" =~ ^[0-9]+$ &&
    "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
 test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 8388608
@@ -28,6 +28,8 @@ fi
   dpkg-query -W qemu-system-x86 qemu-utils
   df -Pk "$RUNNER_TEMP"
 } >"$work/evidence/host.txt"
+lscpu >"$work/evidence/host-cpu.txt"
+cat /proc/meminfo >"$work/evidence/host-memory.txt"
 git ls-files -- '*.go' go.mod | while IFS= read -r source; do
   case "$source" in
     *_test.go|cmd/*|internal/qualification/*) continue ;;
@@ -67,13 +69,22 @@ sha256sum "$work/vmlinuz" "$work/ubuntu-initrd" "$work/initrd" "$work/tarp-init"
   >"$work/evidence/boot.sha256"
 # Bound generated files in both probe and controller modes.
 ulimit -f 4194304
-if [[ "$mode" == controls || "$mode" == campaign || "$mode" == runtime ]]; then
+if [[ "$mode" == controls || "$mode" == campaign || "$mode" == runtime || "$mode" == measure ]]; then
   cp .github/qualification/controls-guest.sh "$work/input/guest.sh"
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$work/input/tarp.test" .
   sha256sum "$work/input/tarp.test" >"$work/evidence/guest-binary.sha256"
   "$work/tarpqual" -block-controls "$work" -confirm disposable-vm-only \
     >"$work/evidence/control-verdict.json"
   cat "$work/evidence/control-verdict.json"
+  if [[ "$mode" == measure ]]; then
+    GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -tags=tarpprofile -o "$work/input/tarp.profile.test" .
+    sha256sum "$work/input/tarp.profile.test" >"$work/evidence/profile-binary.sha256"
+    cp .github/qualification/measurement-guest.sh "$work/input/guest.sh"
+    "$work/tarpqual" -measurements "$work" -confirm disposable-vm-only \
+      -value-bytes "${TARP_QUAL_VALUE_BYTES:?explicit bounded value size required}" \
+      >"$work/evidence/measurement-verdict.json"
+    cat "$work/evidence/measurement-verdict.json"
+  fi
   if [[ "$mode" == runtime ]]; then
     go vet ./...
     go list -m all >"$work/evidence/modules.txt"

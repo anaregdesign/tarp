@@ -29,6 +29,8 @@ func run(args []string, output io.Writer) error {
 	controls := flags.String("block-controls", "", "prepared disposable hosted-runner work directory")
 	campaignDir := flags.String("campaign", "", "prepared disposable hosted-runner work directory")
 	runtimeDir := flags.String("runtime-suite", "", "prepared disposable hosted-runner full-suite work directory")
+	measurementDir := flags.String("measurements", "", "prepared disposable hosted-runner measurement work directory")
+	valueBytes := flags.Int("value-bytes", 0, "measurement value size: 64, 1024 or 4096")
 	group := flags.String("group", "", "bounded campaign group (default smoke)")
 	selected := flags.String("case", "", "one exact case name within the selected group")
 	list := flags.String("list-cases", "", "print the bounded phase matrix without running a VM")
@@ -40,6 +42,15 @@ func run(args []string, output io.Writer) error {
 		return errors.New("qualification: unexpected arguments")
 	}
 	idle := *probe == "" && *initrd == "" && *init == "" && *target == ""
+	if *measurementDir != "" {
+		if !idle || *controls != "" || *campaignDir != "" || *runtimeDir != "" || *group != "" || *selected != "" || *list != "" {
+			return errors.New("measurement-only arguments used with another mode")
+		}
+		return measurements(*measurementDir, *confirm, *valueBytes, output)
+	}
+	if *valueBytes != 0 {
+		return errors.New("-value-bytes requires measurement mode")
+	}
 	if *runtimeDir != "" {
 		if !idle || *controls != "" || *campaignDir != "" || *group != "" || *selected != "" || *list != "" {
 			return errors.New("runtime-only arguments used with another mode")

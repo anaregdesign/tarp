@@ -8,11 +8,17 @@ on:
         required: true
         type: string
       mode:
-        description: Bounded environment probe or independent volatile-cache controls
+        description: Bounded disposable environment, power-cut, exhaustion, runtime or measurement campaign
         required: true
         default: probe
         type: choice
-        options: [probe, controls, campaign, runtime]
+        options: [probe, controls, campaign, runtime, measure]
+      value-bytes:
+        description: One bounded measurement profile; unused by other modes
+        required: true
+        default: '1024'
+        type: choice
+        options: ['64', '1024', '4096']
       go-version:
         description: Explicit qualification toolchain; ordinary CI remains stable only
         required: true
@@ -34,7 +40,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: vm-qualification-${{ github.ref }}-${{ inputs.mode }}-${{ inputs.go-version }}-${{ inputs.group }}
+  group: vm-qualification-${{ github.ref }}-${{ inputs.mode }}-${{ inputs.go-version }}-${{ inputs.group }}-${{ inputs.value-bytes }}
   cancel-in-progress: false
 
 jobs:
@@ -59,6 +65,7 @@ jobs:
           TARP_QUAL_MODE: ${{ inputs.mode }}
           TARP_QUAL_GROUP: ${{ inputs.group }}
           TARP_QUAL_CASE: ${{ inputs.case }}
+          TARP_QUAL_VALUE_BYTES: ${{ inputs.value-bytes }}
         run: bash .github/qualification/probe.sh
       - name: Retain isolated guest evidence
         if: always()
