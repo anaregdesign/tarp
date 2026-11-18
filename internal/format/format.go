@@ -1,8 +1,9 @@
-// Package format contains the private version-one wire codecs.
+// Package format contains the storage and backup wire codecs.
 package format
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -13,34 +14,24 @@ import (
 )
 
 const (
-	Version            = 1
 	SegmentHeaderBytes = 64
 	RecordHeaderBytes  = 48
 	FrontierBytes      = 128
 	Log                = 1
 	Snapshot           = 2
+	Cleaned            = 3
 	Put                = 1
 	Delete             = 2
 )
 
 var (
 	ErrCorrupt     = errors.New("format: corrupt data")
-	ErrUnsupported = errors.New("format: unsupported version or flags")
+	ErrUnsupported = errors.New("format: unsupported storage signature")
 	table          = crc32.MakeTable(crc32.Castagnoli)
 	order          = binary.LittleEndian
 )
 
 func bad(message string) error { return fmt.Errorf("%w: %s", ErrCorrupt, message) }
-
-func validVersion(b []byte, magic string, versionOffset int) error {
-	if string(b[:8]) != magic {
-		return bad("magic")
-	}
-	if order.Uint16(b[versionOffset:]) != Version {
-		return ErrUnsupported
-	}
-	return nil
-}
 
 func zero(b []byte) bool {
 	for _, v := range b {
@@ -59,8 +50,7 @@ type Segment struct {
 
 func EncodeSegment(s Segment) []byte {
 	b := make([]byte, SegmentHeaderBytes)
-	copy(b, "TARPSEG1")
-	order.PutUint16(b[8:], Version)
+	copy(b, "TARPSEGM")
 	order.PutUint16(b[10:], SegmentHeaderBytes)
 	order.PutUint32(b[12:], s.Kind)
 	copy(b[16:], s.UUID[:])
@@ -74,16 +64,16 @@ func DecodeSegment(b []byte) (Segment, error) {
 	if len(b) != SegmentHeaderBytes {
 		return s, bad("segment header length")
 	}
-	if err := validVersion(b, "TARPSEG1", 8); err != nil {
-		return s, err
+	if string(b[:8]) != "TARPSEGM" || !zero(b[8:10]) {
+		return s, bad("segment signature or reserved bytes")
 	}
 	if order.Uint16(b[10:]) != SegmentHeaderBytes || !zero(b[40:60]) ||
 		crc32.Checksum(b[:60], table) != order.Uint32(b[60:]) {
 		return s, bad("segment header")
 	}
 	s.Kind = order.Uint32(b[12:])
-	if s.Kind != Log && s.Kind != Snapshot {
-		return s, ErrUnsupported
+	if s.Kind != Log && s.Kind != Snapshot && s.Kind != Cleaned {
+		return s, bad("segment kind")
 	}
 	copy(s.UUID[:], b[16:32])
 	s.ID = order.Uint64(b[32:])
@@ -104,8 +94,7 @@ func (r Record) Bytes() int64 { return RecordHeaderBytes + r.KeyBytes + r.ValueB
 
 func EncodeRecord(kind uint8, sequence uint64, key, value []byte) []byte {
 	b := make([]byte, RecordHeaderBytes+len(key)+len(value))
-	copy(b, "TARPREC1")
-	order.PutUint16(b[8:], Version)
+	copy(b, "TARPRECD")
 	b[10] = kind
 	order.PutUint64(b[16:], sequence)
 	order.PutUint64(b[24:], uint64(len(key)))
@@ -122,8 +111,8 @@ func DecodeRecord(b []byte, available int64) (Record, error) {
 	if len(b) != RecordHeaderBytes || available < RecordHeaderBytes {
 		return r, bad("incomplete committed record header")
 	}
-	if err := validVersion(b, "TARPREC1", 8); err != nil {
-		return r, err
+	if string(b[:8]) != "TARPRECD" || !zero(b[8:10]) {
+		return r, bad("record signature or reserved bytes")
 	}
 	h := [RecordHeaderBytes]byte{}
 	copy(h[:], b)
@@ -132,7 +121,7 @@ func DecodeRecord(b []byte, available int64) (Record, error) {
 		return r, bad("record header checksum")
 	}
 	if b[11] != 0 {
-		return r, ErrUnsupported
+		return r, bad("record flags")
 	}
 	if !zero(b[44:48]) {
 		return r, bad("record reserved bytes")
@@ -155,38 +144,23 @@ func Scan(f io.ReaderAt, end int64, visit func(int64, Record, string) error) err
 	if end < SegmentHeaderBytes {
 		return bad("segment end")
 	}
-	var header [RecordHeaderBytes]byte
-	buf := make([]byte, 32<<10)
+	buffer := make([]byte, streamChunk)
 	for offset := int64(SegmentHeaderBytes); offset < end; {
-		if _, err := f.ReadAt(header[:], offset); err != nil {
-			return fmt.Errorf("%w: record header: %w", ErrCorrupt, err)
+		var key string
+		record, err := SelectRecord(context.Background(), f, offset, end-offset, buffer, func(_ Record, k string) (io.Writer, error) {
+			key = k
+			return nil, nil
+		})
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("%w: truncated record: %w", ErrCorrupt, err)
 		}
-		r, err := DecodeRecord(header[:], end-offset)
 		if err != nil {
 			return err
 		}
-		h := crc32.New(table)
-		n, copyErr := io.CopyBuffer(h, io.NewSectionReader(f, offset+RecordHeaderBytes, r.KeyBytes+r.ValueBytes), buf)
-		if copyErr != nil {
-			return copyErr
-		}
-		if n != r.KeyBytes+r.ValueBytes {
-			return bad("incomplete committed payload")
-		}
-		if h.Sum32() != r.PayloadCRC {
-			return bad("record payload checksum")
-		}
-		if uint64(r.KeyBytes) > uint64(int(^uint(0)>>1)) {
-			return bad("key does not fit native memory")
-		}
-		key := make([]byte, int(r.KeyBytes))
-		if _, err := f.ReadAt(key, offset+RecordHeaderBytes); err != nil {
+		if err := visit(offset, record, key); err != nil {
 			return err
 		}
-		if err := visit(offset, r, string(key)); err != nil {
-			return err
-		}
-		offset += r.Bytes()
+		offset += record.Bytes()
 	}
 	return nil
 }
@@ -231,8 +205,7 @@ type Frontier struct {
 
 func EncodeFrontier(f Frontier) []byte {
 	b := make([]byte, FrontierBytes)
-	copy(b, "TARPCUR1")
-	order.PutUint16(b[8:], Version)
+	copy(b, "TARPCURR")
 	order.PutUint16(b[10:], FrontierBytes)
 	copy(b[16:], f.UUID[:])
 	order.PutUint64(b[32:], f.Generation)
@@ -245,15 +218,27 @@ func EncodeFrontier(f Frontier) []byte {
 	return b
 }
 
+// CheckFrontierSignature identifies the canonical outer envelope without
+// inspecting data files or acquiring a potentially creating directory lock.
+func CheckFrontierSignature(prefix []byte) error {
+	if len(prefix) < 8 {
+		return bad("incomplete frontier signature")
+	}
+	if string(prefix[:8]) != "TARPCURR" {
+		return ErrUnsupported
+	}
+	return nil
+}
+
 func DecodeFrontier(b []byte) (Frontier, error) {
 	var f Frontier
+	if err := CheckFrontierSignature(b); err != nil {
+		return f, err
+	}
 	if len(b) != FrontierBytes {
 		return f, bad("frontier length")
 	}
-	if err := validVersion(b, "TARPCUR1", 8); err != nil {
-		return f, err
-	}
-	if order.Uint16(b[10:]) != FrontierBytes || !zero(b[12:16]) || !zero(b[104:124]) ||
+	if !zero(b[8:10]) || order.Uint16(b[10:]) != FrontierBytes || !zero(b[12:16]) || !zero(b[104:124]) ||
 		crc32.Checksum(b[:124], table) != order.Uint32(b[124:]) {
 		return f, bad("frontier checksum or fields")
 	}
@@ -262,7 +247,7 @@ func DecodeFrontier(b []byte) (Frontier, error) {
 	copy(f.ManifestHash[:], b[48:80])
 	f.ActiveID = order.Uint64(b[80:])
 	end := order.Uint64(b[88:])
-	if end < SegmentHeaderBytes || end > math.MaxInt64 || f.Generation == 0 || f.ManifestID == 0 || f.ActiveID == 0 {
+	if end < SegmentHeaderBytes || end > math.MaxInt64 || f.Generation == 0 || f.ManifestID == 0 || f.ActiveID == 0 || f.ActiveID == f.ManifestID {
 		return f, bad("frontier bounds")
 	}
 	f.ActiveEnd, f.Sequence = int64(end), order.Uint64(b[96:])
@@ -270,22 +255,22 @@ func DecodeFrontier(b []byte) (Frontier, error) {
 }
 
 type File struct {
-	ID    uint64
-	Bytes int64
-	Kind  uint32
+	ID          uint64
+	Bytes       int64
+	Kind        uint32
+	First, Last uint64
 }
 
 type Catalog struct {
-	UUID     [16]byte
-	Cutoff   uint64
-	ActiveID uint64
-	Files    []File
+	UUID                  [16]byte
+	Cutoff, PrunedThrough uint64
+	ActiveID              uint64
+	Files                 []File
 }
 
 func envelope(magic string, payload []byte) []byte {
 	b := make([]byte, 32+len(payload))
 	copy(b, magic)
-	order.PutUint16(b[8:], Version)
 	order.PutUint64(b[12:], uint64(len(payload)))
 	order.PutUint32(b[20:], crc32.Checksum(payload, table))
 	order.PutUint32(b[24:], crc32.Checksum(b[:32], table))
@@ -294,16 +279,22 @@ func envelope(magic string, payload []byte) []byte {
 }
 
 func payload(b []byte, magic string) ([]byte, error) {
+	if len(b) < 8 {
+		return nil, bad("incomplete metadata signature")
+	}
+	if string(b[:8]) != magic {
+		if magic == "TARPBACK" {
+			return nil, ErrUnsupported
+		}
+		return nil, bad("selected metadata signature")
+	}
 	if len(b) < 32 {
 		return nil, bad("metadata header")
-	}
-	if err := validVersion(b, magic, 8); err != nil {
-		return nil, err
 	}
 	h := [32]byte{}
 	copy(h[:], b[:32])
 	clear(h[24:28])
-	if !zero(b[10:12]) || !zero(b[28:32]) || order.Uint64(b[12:]) != uint64(len(b)-32) ||
+	if !zero(b[8:12]) || !zero(b[28:32]) || order.Uint64(b[12:]) != uint64(len(b)-32) ||
 		crc32.Checksum(h[:], table) != order.Uint32(b[24:]) ||
 		crc32.Checksum(b[32:], table) != order.Uint32(b[20:]) {
 		return nil, bad("metadata bounds or checksum")
@@ -311,46 +302,82 @@ func payload(b []byte, magic string) ([]byte, error) {
 	return b[32:], nil
 }
 
+const (
+	catalogHeaderBytes = 48
+	catalogEntryBytes  = 40
+)
+
 func EncodeCatalog(c Catalog) []byte {
-	p := make([]byte, 40+24*len(c.Files))
+	p := make([]byte, catalogHeaderBytes+catalogEntryBytes*len(c.Files))
 	copy(p, c.UUID[:])
 	order.PutUint64(p[16:], c.Cutoff)
-	order.PutUint64(p[24:], c.ActiveID)
-	order.PutUint64(p[32:], uint64(len(c.Files)))
+	order.PutUint64(p[24:], c.PrunedThrough)
+	order.PutUint64(p[32:], c.ActiveID)
+	order.PutUint64(p[40:], uint64(len(c.Files)))
 	for i, f := range c.Files {
-		q := p[40+24*i:]
+		q := p[catalogHeaderBytes+catalogEntryBytes*i:]
 		order.PutUint64(q, f.ID)
 		order.PutUint64(q[8:], uint64(f.Bytes))
 		order.PutUint64(q[16:], uint64(f.Kind))
+		order.PutUint64(q[24:], f.First)
+		order.PutUint64(q[32:], f.Last)
 	}
-	return envelope("TARPCAT1", p)
+	return envelope("TARPCATL", p)
 }
 
 func DecodeCatalog(b []byte) (Catalog, error) {
 	var c Catalog
-	p, err := payload(b, "TARPCAT1")
+	p, err := payload(b, "TARPCATL")
 	if err != nil {
 		return c, err
 	}
-	if len(p) < 40 || (len(p)-40)%24 != 0 || order.Uint64(p[32:]) != uint64((len(p)-40)/24) {
+	if len(p) < catalogHeaderBytes {
+		return c, bad("catalog length")
+	}
+	entries := p[catalogHeaderBytes:]
+	if len(entries)%catalogEntryBytes != 0 || order.Uint64(p[40:]) != uint64(len(entries)/catalogEntryBytes) {
 		return c, bad("catalog count")
 	}
 	copy(c.UUID[:], p[:16])
-	c.Cutoff, c.ActiveID = order.Uint64(p[16:]), order.Uint64(p[24:])
-	if c.ActiveID == 0 {
-		return c, bad("catalog active identity")
+	c.Cutoff, c.PrunedThrough, c.ActiveID = order.Uint64(p[16:]), order.Uint64(p[24:]), order.Uint64(p[32:])
+	if c.ActiveID == 0 || c.Cutoff > c.PrunedThrough {
+		return c, bad("catalog identity or pruning boundary")
 	}
 	seen := map[uint64]bool{c.ActiveID: true}
-	logSeen := false
-	for q := p[40:]; len(q) != 0; q = q[24:] {
+	previous := c.Cutoff
+	for q := entries; len(q) != 0; q = q[catalogEntryBytes:] {
 		id, n, kind := order.Uint64(q), order.Uint64(q[8:]), order.Uint64(q[16:])
-		if id == 0 || seen[id] || n < SegmentHeaderBytes || n > math.MaxInt64 ||
-			kind != Log && kind != Snapshot || kind == Snapshot && logSeen || kind == Snapshot && c.Cutoff == 0 {
-			return c, bad("catalog entry")
+		first, last := order.Uint64(q[24:]), order.Uint64(q[32:])
+		if id == 0 {
+			if kind != Cleaned || n != 0 {
+				return c, bad("empty cleaned interval")
+			}
+		} else {
+			if seen[id] || n < SegmentHeaderBytes+RecordHeaderBytes+1 || n > math.MaxInt64 {
+				return c, bad("catalog duplicate ID or file length")
+			}
+			seen[id] = true
 		}
-		logSeen = logSeen || kind == Log
-		seen[id] = true
-		c.Files = append(c.Files, File{ID: id, Bytes: int64(n), Kind: uint32(kind)})
+		switch kind {
+		case Snapshot:
+			if c.Cutoff == 0 || previous != c.Cutoff || first != 0 || last != 0 {
+				return c, bad("snapshot outside checkpoint prefix")
+			}
+		case Log, Cleaned:
+			if previous == math.MaxUint64 || first != previous+1 || last < first {
+				return c, bad("catalog log coverage")
+			}
+			if kind == Cleaned && last > c.PrunedThrough {
+				return c, bad("cleaned interval beyond pruning boundary")
+			}
+			if kind == Log && last-first+1 > (n-SegmentHeaderBytes)/(RecordHeaderBytes+1) {
+				return c, bad("raw interval cannot fit file")
+			}
+			previous = last
+		default:
+			return c, bad("catalog entry kind")
+		}
+		c.Files = append(c.Files, File{ID: id, Bytes: int64(n), Kind: uint32(kind), First: first, Last: last})
 	}
 	return c, nil
 }
@@ -383,12 +410,12 @@ func EncodeBackup(b Backup) []byte {
 		copy(q[10+len(f.Name):], f.Hash[:])
 		p = append(p, q...)
 	}
-	return envelope("TARPBAK1", p)
+	return envelope("TARPBACK", p)
 }
 
 func DecodeBackup(b []byte) (Backup, error) {
 	var result Backup
-	p, err := payload(b, "TARPBAK1")
+	p, err := payload(b, "TARPBACK")
 	if err != nil {
 		return result, err
 	}

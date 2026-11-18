@@ -110,16 +110,16 @@ func vmPendingMemory(t *testing.T, opts Options, value []byte, callers, repetiti
 		workers.Go(func() { results <- db.Put(key, value) })
 	}
 	deadline := time.Now().Add(15 * time.Second)
-	for db.writer.waiters.Load() != int64(callers) && time.Now().Before(deadline) {
+	for db.cleaner.writers.Load() != int64(callers) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if db.writer.waiters.Load() != int64(callers) {
+	if db.cleaner.writers.Load() != int64(callers) {
 		t.Fatal("not every pending Put reached the post-copy writer queue")
 	}
 	runtime.GC()
 	after := vmProcessMemory(t)
 	write("pending_owned_buffers", repetition, map[string]any{
-		"callers": callers, "writer_waiters": db.writer.waiters.Load(),
+		"callers": callers, "foreground_writer_waiters": db.cleaner.writers.Load(),
 		"owned_key_value_bytes": callers * (16 + len(value)),
 		"before":                before, "all_callers_queued": after, "cache_limit_bytes": opts.CacheBytes,
 		"scope": "exact logical copied key/value bytes after admission; process deltas also include goroutine/closure/stack costs, not solely engine heap and not a hard bound",

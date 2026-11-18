@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/anaregdesign/tarp/internal/cache"
+	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/qualification"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
@@ -99,14 +100,18 @@ func vmPurgeGuestCaches(t *testing.T) {
 
 func vmStartupData(t *testing.T, db *DB, elapsed time.Duration, cold bool) map[string]any {
 	t.Helper()
-	scanned := db.store.Current.ActiveEnd - 64
+	db.writer.Lock()
+	selectedBytes := db.store.Current.ActiveEnd - format.SegmentHeaderBytes
 	for _, file := range db.store.Catalog.Files {
-		scanned += file.Bytes - 64
+		if file.ID != 0 {
+			selectedBytes += file.Bytes - format.SegmentHeaderBytes
+		}
 	}
+	db.writer.Unlock()
 	return map[string]any{
-		"elapsed_ns": elapsed.Nanoseconds(), "selected_record_scan_bytes": scanned,
+		"elapsed_ns": elapsed.Nanoseconds(), "selected_record_bytes_at_sample": selectedBytes,
 		"guest_page_cache_purged_before_open": cold,
-		"note":                                "encoded committed prefix bytes, not a physical I/O counter; cold Opens additionally have independent NBD read intervals; no oracle input",
+		"note":                                "currently selected committed record bytes after Open; the cleaner may already have replaced a segment; cold Opens also have independent NBD read intervals",
 		"resources":                           vmResources(t, db),
 	}
 }
@@ -207,6 +212,9 @@ func vmResources(t *testing.T, db *DB) map[string]any {
 			continue
 		}
 		info, err := os.ReadFile("/proc/self/fdinfo/" + entry.Name())
+		if errors.Is(err, os.ErrNotExist) {
+			continue // An active cleaner or reader can release its descriptor between probes.
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,6 +238,8 @@ func vmResources(t *testing.T, db *DB) map[string]any {
 		t.Fatal(err)
 	}
 	var live, dataBytes, pinned int64
+	db.writer.Lock()
+	db.state.Lock()
 	selected := map[uint64]bool{db.store.Current.ActiveID: true}
 	for _, file := range db.store.Catalog.Files {
 		selected[file.ID] = true
@@ -244,22 +254,29 @@ func vmResources(t *testing.T, db *DB) map[string]any {
 		}
 	}
 	sample["live_keys"], sample["cache_logical_bytes"] = len(db.index), db.cache.Bytes()
+	fileCount := len(db.store.Files)
+	db.state.Unlock()
+	db.writer.Unlock()
 	sample["cache_limit_bytes"], sample["read_handle_limit"] = db.opts.CacheBytes, db.opts.ReadFileHandles
 	sample["process_fds_including_sampler"], sample["read_data_fds"], sample["write_data_fds"] = len(fds), readFDs, writeFDs
 	sample["directory_logical_file_bytes"], sample["directory_allocated_bytes"] = logical, allocated
 	sample["live_encoded_record_bytes"], sample["data_file_bytes"] = live, dataBytes
-	sample["obsolete_encoded_bytes"] = max(int64(0), dataBytes-int64(len(db.store.Files))*64-live)
+	sample["obsolete_encoded_bytes"] = max(int64(0), dataBytes-int64(fileCount)*format.SegmentHeaderBytes-live)
 	sample["retired_pinned_file_bytes"], sample["filesystem_available_bytes"] = pinned, vmAvailable(t)
 	return sample
 }
 
 func vmCompleteIndexRelease(t *testing.T, db *DB) map[string]any {
 	t.Helper()
-	index := db.index // Retain the actual complete rebuilt map, never a clone.
-	keys, files := len(index), len(db.store.Files)
+	// Keep a reference to the actual map. Read it only once Close has joined
+	// the worker, since a running cleaner can relocate entries in place.
+	db.state.Lock()
+	index := db.index
+	db.state.Unlock()
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	keys, files := len(index), len(db.store.Files)
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
@@ -454,14 +471,14 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 				putRaw := make([]int64, 64)
 				var putElapsed time.Duration
 				for i := range putRaw {
-					id := writer.store.Current.ActiveID
+					id := observedFrontier(writer).ActiveID
 					start := time.Now()
 					if err := writer.Put(keys[0], value); err != nil {
 						t.Fatal(err)
 					}
 					putRaw[i] = time.Since(start).Nanoseconds()
 					putElapsed += time.Duration(putRaw[i])
-					if (writer.store.Current.ActiveID != id) != rotate {
+					if (observedFrontier(writer).ActiveID != id) != rotate {
 						t.Fatal("durable Put rotation did not match its declared mode")
 					}
 				}
@@ -477,14 +494,14 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 						if err := writer.Put(keys[0], value); err != nil {
 							t.Fatal(err)
 						}
-						id := writer.store.Current.ActiveID
+						id := observedFrontier(writer).ActiveID
 						start := time.Now()
 						if err := writer.Delete(keys[0]); err != nil {
 							t.Fatal(err)
 						}
 						raw[i] = time.Since(start).Nanoseconds()
 						elapsed += time.Duration(raw[i])
-						if writer.store.Current.ActiveID == id {
+						if observedFrontier(writer).ActiveID == id {
 							t.Fatal("declared rotating Delete did not rotate its full segment")
 						}
 					}
@@ -499,9 +516,9 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 							t.Fatal(err)
 						}
 					}
-					id := writer.store.Current.ActiveID
+					id := observedFrontier(writer).ActiveID
 					deletes := measureCalls(t, 64, 1, func(i int) error { return writer.Delete(keys[i]) })
-					if writer.store.Current.ActiveID != id {
+					if observedFrontier(writer).ActiveID != id {
 						t.Fatal("declared nonrotating Delete sample rotated")
 					}
 					vmMeasureLatency(write, "durable_delete_rotate_false", repetition, deletes)

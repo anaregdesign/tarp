@@ -13,8 +13,10 @@ import (
 // IO is a private testing seam. Hooks must themselves support concurrent calls.
 // Point names end in :before/:after; an after fault may follow completed I/O.
 type IO struct {
-	Hook    func(string) error
-	WriteAt func(*os.File, []byte, int64) (int, error)
+	// CleanerStart optionally gates the worker before its first pass in deterministic tests.
+	CleanerStart <-chan struct{}
+	Hook         func(string) error
+	WriteAt      func(*os.File, []byte, int64) (int, error)
 }
 
 func (i *IO) Check(point string) error {

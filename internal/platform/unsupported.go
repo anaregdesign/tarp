@@ -15,3 +15,5 @@ func Lock(string) (*DirectoryLock, error)  { return nil, ErrUnsupported }
 func (*DirectoryLock) Sync() error         { return ErrUnsupported }
 func (*DirectoryLock) Close() error        { return ErrUnsupported }
 func RenameNoReplace(string, string) error { return ErrUnsupported }
+
+func AvailableBytes(string) (uint64, error) { return 0, ErrUnsupported }

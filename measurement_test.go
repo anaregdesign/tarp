@@ -233,12 +233,16 @@ func resourceSample(t *testing.T, db *DB) map[string]any {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
+	db.state.Lock()
 	copyIndex := make(map[string]storage.Location, len(db.index))
-	var logicalIndex int64
+	var logicalIndex, live int64
 	for key, loc := range db.index {
 		copyIndex[strings.Clone(key)] = loc
+		live += loc.Bytes
 		logicalIndex += int64(len(key)) + int64(unsafe.Sizeof(key)) + int64(unsafe.Sizeof(loc))
 	}
+	liveKeys, cacheBytes := len(db.index), db.cache.Bytes()
+	db.state.Unlock()
 	runtime.GC()
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(copyIndex)
@@ -266,25 +270,24 @@ func resourceSample(t *testing.T, db *DB) map[string]any {
 	if err := syscall.Statfs(db.store.Dir, &filesystem); err != nil {
 		t.Fatal(err)
 	}
-	var live int64
-	for _, loc := range db.index {
-		live += loc.Bytes
-	}
-	count := max(1, len(db.index))
+	count := max(1, liveKeys)
 	var dataBytes int64
+	db.writer.Lock()
+	fileCount := len(db.store.Files)
 	for _, file := range db.store.Files {
 		dataBytes += file.Size.Load()
 	}
+	db.writer.Unlock()
 	return map[string]any{
 		"heap_alloc_bytes": before.HeapAlloc, "runtime_sys_bytes": before.Sys, "process_peak_rss_bytes": peakRSS,
-		"cache_logical_bytes": db.cache.Bytes(), "cache_limit_bytes": db.opts.CacheBytes,
-		"live_keys": len(db.index), "index_logical_bytes_per_key": float64(logicalIndex) / float64(count),
+		"cache_logical_bytes": cacheBytes, "cache_limit_bytes": db.opts.CacheBytes,
+		"live_keys": liveKeys, "index_logical_bytes_per_key": float64(logicalIndex) / float64(count),
 		"index_clone_retained_heap_delta_per_key": float64(int64(after.HeapAlloc)-int64(before.HeapAlloc)) / float64(count),
 		"open_process_fds_including_sampler":      len(fds), "read_handle_limit": db.opts.ReadFileHandles,
 		"physical_directory_bytes": physical, "live_encoded_record_bytes": live,
 		"filesystem_type_number": fmt.Sprintf("0x%x", filesystem.Type), "filesystem_block_bytes": filesystem.Bsize,
 		"filesystem_flags": fmt.Sprintf("0x%x", filesystem.Flags),
-		"data_file_bytes":  dataBytes, "obsolete_record_bytes": max(int64(0), dataBytes-int64(len(db.store.Files))*64-live),
+		"data_file_bytes":  dataBytes, "obsolete_record_bytes": max(int64(0), dataBytes-int64(fileCount)*format.SegmentHeaderBytes-live),
 		"pending_calls": 0, "index_clone_note": "isolated map/key clone; shared file metadata excluded; GC delta is noisy, not a process limit",
 	}
 }
@@ -349,8 +352,9 @@ func measureInterferenceFor(t *testing.T, db *DB, hooks *measurementHooks, keys 
 			t.Fatal(err)
 		}
 	}
-	captured := &measurementCapture{parent: root, uuid: db.store.Current.UUID}
-	fixtureSequence := db.store.Current.Sequence
+	frontier := observedFrontier(db)
+	captured := &measurementCapture{parent: root, uuid: frontier.UUID}
+	fixtureSequence := frontier.Sequence
 	start, stop := make(chan struct{}), make(chan struct{})
 	type workerResult struct {
 		latency sampledLatency
@@ -606,12 +610,13 @@ func measureInterferenceFor(t *testing.T, db *DB, hooks *measurementHooks, keys 
 			}
 		}()
 		digest, count := measurementState(t, restored)
-		if !captured.reached || restored.store.Current.Sequence != captured.sequence ||
+		restoredSequence := observedFrontier(restored).Sequence
+		if !captured.reached || restoredSequence != captured.sequence ||
 			digest != expectedDigest || count != expectedKeys {
 			t.Fatalf("produced backup did not reopen at its witnessed capture/state: capture=%d restored=%d keys=%d/%d digest=%s/%s",
-				captured.sequence, restored.store.Current.Sequence, count, expectedKeys, digest, expectedDigest)
+				captured.sequence, restoredSequence, count, expectedKeys, digest, expectedDigest)
 		}
-		output["backup_capture_sequence"], output["restored_sequence"] = captured.sequence, restored.store.Current.Sequence
+		output["backup_capture_sequence"], output["restored_sequence"] = captured.sequence, restoredSequence
 		output["restored_live_keys"], output["restored_state_sha256"], output["backup_reopen_verified"] = count, digest, true
 	}
 	return output

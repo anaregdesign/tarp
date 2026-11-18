@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -437,7 +436,7 @@ func TestUnsupportedAndMissingFrontier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b[8] = format.Version + 1
+	copy(b, "FOREIGN!")
 	if err := os.WriteFile(current, b, 0600); err != nil {
 		t.Fatal(err)
 	}

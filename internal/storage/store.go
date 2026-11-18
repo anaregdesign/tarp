@@ -2,7 +2,6 @@ package storage
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,6 +20,7 @@ var ErrCorrupt = format.ErrCorrupt
 
 type Config struct {
 	CacheBytes, RecordBytes, FileBytes int64
+	TargetSegmentBytes                 int64
 	Handles                            int
 }
 
@@ -33,11 +33,12 @@ func (e *CompatibilityError) Error() string {
 }
 
 type File struct {
-	ID   uint64
-	Kind uint32
-	Path string
-	Size atomic.Int64
-	refs atomic.Int64
+	ID                     uint64
+	Kind                   uint32
+	Path                   string
+	Size                   atomic.Int64
+	refs                   atomic.Int64
+	LiveBytes, DeleteBytes atomic.Int64
 }
 
 func (f *File) Pin()              { f.refs.Add(1) }
@@ -58,17 +59,20 @@ type Location struct {
 }
 
 type Store struct {
-	Dir      string
-	Config   Config
-	IO       *IO
-	Current  format.Frontier
-	Catalog  format.Catalog
-	Manifest []byte
-	Files    map[uint64]*File
-	active   *os.File
-	lock     *platform.DirectoryLock
-	readers  *handles
-	nextID   uint64
+	Dir               string
+	Config            Config
+	IO                *IO
+	Current           format.Frontier
+	Catalog           format.Catalog
+	Manifest          []byte
+	Files             map[uint64]*File
+	active            *os.File
+	lock              *platform.DirectoryLock
+	readers           *handles
+	nextID            uint64
+	retired           map[uint64]*File
+	retiredCatalogs   map[uint64]struct{}
+	retireSyncPending bool
 }
 
 func DataName(uuid [16]byte, id uint64) string {
@@ -106,6 +110,20 @@ func Open(dir string, cfg Config, fs *IO) (_ *Store, index map[string]Location, 
 	}
 	absolute, err = filepath.EvalSymlinks(absolute)
 	if err != nil {
+		return nil, nil, err
+	}
+	// A restored database has no LOCK inode. Probe CURRENT without creating one
+	// in a foreign store. All authoritative validation is repeated under lock.
+	if _, err := os.Lstat(filepath.Join(absolute, "LOCK")); errors.Is(err, os.ErrNotExist) {
+		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
+		if err == nil {
+			if _, err := format.DecodeFrontier(b); err != nil {
+				return nil, nil, err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, nil, err
+		}
+	} else if err != nil {
 		return nil, nil, err
 	}
 	lock, err := platform.Lock(absolute)
@@ -204,69 +222,10 @@ func (s *Store) newSegment(kind uint32, point string) (*File, *os.File, error) {
 	return f, fd, nil
 }
 
-func (s *Store) publishCatalog(catalog format.Catalog, candidate format.Frontier) error {
-	id, err := s.allocateID()
-	if err != nil {
-		return fault("catalog.identity", "not-applied", false, err)
-	}
-	b := format.EncodeCatalog(catalog)
-	name := filepath.Join(s.Dir, ManifestName(s.Current.UUID, id))
-	if err := s.IO.NewFile(name, b, "catalog"); err != nil {
-		return fault("catalog.prepare", "not-applied", true, err)
-	}
-	if err := s.IO.SyncDir(s.Dir, "catalog.dirsync"); err != nil {
-		return fault("catalog.dirsync", "not-applied", true, err)
-	}
-	candidate.ManifestID, candidate.ManifestHash = id, sha256.Sum256(b)
-	if err := s.publish(candidate); err != nil {
-		return err
-	}
-	s.Catalog, s.Manifest = catalog, b
-	return nil
-}
-
-func (s *Store) publish(candidate format.Frontier) (result error) {
-	pattern := fmt.Sprintf(".tarp-current-%x-*.tmp", s.Current.UUID)
-	f, err := os.CreateTemp(s.Dir, pattern)
-	if err != nil {
-		return fault("current.create", "not-applied", true, err)
-	}
-	name := f.Name()
-	closed := false
-	renamed := false
-	defer func() {
-		if !closed {
-			result = errors.Join(result, f.Close())
-		}
-		if !renamed {
-			if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
-				result = errors.Join(result, err)
-			}
-		}
-	}()
-	if err := s.IO.Write(f, format.EncodeFrontier(candidate), 0, "current.write"); err != nil {
-		return fault("current.write", "not-applied", true, err)
-	}
-	if err := s.IO.Sync(f, "current.sync"); err != nil {
-		return fault("current.sync", "not-applied", true, err)
-	}
-	if err := f.Close(); err != nil {
-		closed = true
-		return fault("current.close", "not-applied", true, err)
-	}
-	closed = true
-	if err := s.IO.Do("current.rename", func() error { return os.Rename(name, filepath.Join(s.Dir, "CURRENT")) }); err != nil {
-		return fault("current.rename", "unknown", true, err)
-	}
-	renamed = true
-	if err := s.IO.SyncDir(s.Dir, "current.dirsync"); err != nil {
-		return fault("current.dirsync", "unknown", true, err)
-	}
-	s.Current = candidate
-	return nil
-}
-
 func (s *Store) Rotate() error {
+	if s.Current.ActiveEnd == format.SegmentHeaderBytes {
+		return nil
+	}
 	if s.Current.Generation == math.MaxUint64 {
 		return fault("rotation.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
 	}
@@ -275,7 +234,10 @@ func (s *Store) Rotate() error {
 		return fault("rotation.segment", "not-applied", true, err)
 	}
 	catalog := s.Catalog
-	catalog.Files = append(append([]format.File(nil), catalog.Files...), format.File{ID: s.Current.ActiveID, Bytes: s.Current.ActiveEnd, Kind: format.Log})
+	catalog.Files = append(append([]format.File(nil), catalog.Files...), format.File{
+		ID: s.Current.ActiveID, Bytes: s.Current.ActiveEnd, Kind: format.Log,
+		First: s.Catalog.SealedEnd() + 1, Last: s.Current.Sequence,
+	})
 	catalog.ActiveID = file.ID
 	candidate := s.Current
 	candidate.Generation++
@@ -296,7 +258,7 @@ func (s *Store) Append(kind uint8, key, value []byte, healthy func() error) (Loc
 		return Location{}, fault("commit.sequence", "not-applied", false, errors.New("storage: sequence or publication generation exhausted"))
 	}
 	n := int64(format.RecordHeaderBytes + len(key) + len(value))
-	if s.Current.ActiveEnd > s.Config.FileBytes-n {
+	if s.Current.ActiveEnd > format.SegmentHeaderBytes && s.Current.ActiveEnd > s.Config.TargetSegmentBytes-n {
 		if err := s.Rotate(); err != nil {
 			var failed *Fault
 			if errors.As(err, &failed) {
@@ -394,12 +356,17 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 	for _, e := range entries {
 		name := e.Name()
 		remove := s.ownedTemp(name)
-		var removedID uint64
+		var removedID, manifestID uint64
 		if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {
 			remove = id != s.Current.ManifestID
+			manifestID = id
 		}
 		if id, ok := parseID(name, "DATA", s.Current.UUID); ok && !selected[id] {
 			if f := s.Files[id]; f != nil && f.refs.Load() != 0 {
+				if s.retired == nil {
+					s.retired = make(map[uint64]*File)
+				}
+				s.retired[id] = f
 				pinned += f.Size.Load()
 				continue
 			}
@@ -427,7 +394,11 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 				changed = true
 				if removedID != 0 {
 					delete(s.Files, removedID)
+					delete(s.retired, removedID)
 				}
+			}
+			if unlinked && manifestID != 0 {
+				delete(s.retiredCatalogs, manifestID)
 			}
 			if unlinkErr != nil {
 				return removed, pinned, unlinkErr

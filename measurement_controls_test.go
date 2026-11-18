@@ -33,7 +33,7 @@ func TestMeasurementFixtureCopiesRemainPrivate(t *testing.T) {
 		t.Fatalf("private clone changed its common fixture: %x %v", got, err)
 	}
 	if current, n := measurementState(t, third); current != digest || n != count ||
-		third.store.Current.Sequence != second.store.Current.Sequence {
+		observedFrontier(third).Sequence != observedFrontier(second).Sequence {
 		t.Fatal("fresh copies did not start with the same contents and history")
 	}
 }

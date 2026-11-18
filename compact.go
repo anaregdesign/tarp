@@ -33,7 +33,17 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if !db.compact.CompareAndSwap(false, true) {
 		return result, ErrBusy
 	}
-	defer db.compact.Store(false)
+	db.resumeCleaner()
+	defer func() {
+		db.compact.Store(false)
+		db.notifyCleaner()
+	}()
+	select {
+	case <-db.cleaner.gate:
+		defer func() { db.cleaner.gate <- struct{}{} }()
+	case <-ctx.Done():
+		return result, operationError("compact", "wait", ctx.Err())
+	}
 	db.writer.Lock()
 	if err := db.health(); err != nil {
 		db.writer.Unlock()
@@ -46,12 +56,17 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	}
 	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
 		if err := db.store.Rotate(); err != nil {
-			db.writer.Unlock()
 			db.storageFailure(err)
+			db.writer.Unlock()
 			return result, operationError("compact", "rotation", err)
 		}
 	}
-	capture := db.store.Capture()
+	capture, err := db.store.Capture()
+	if err != nil {
+		db.poison(err)
+		db.writer.Unlock()
+		return result, operationError("compact", "capture", err)
+	}
 	db.writer.Unlock()
 	released := false
 	defer func() {
@@ -139,9 +154,9 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	}
 	attempted = true
 	err = db.store.InstallCheckpoint(capture, outputs)
+	db.storageFailure(err)
 	db.writer.Unlock()
 	if err != nil {
-		db.storageFailure(err)
 		return result, operationError("compact", "publication", err)
 	}
 	for key, move := range moves {
@@ -149,6 +164,8 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		current, exists := db.index[key]
 		if exists && current.Sequence == move.old.Sequence && current.File == move.old.File && current.Offset == move.old.Offset {
 			move.new.File.Pin()
+			move.new.File.LiveBytes.Add(move.new.Bytes)
+			current.File.LiveBytes.Add(-current.Bytes)
 			db.index[key] = move.new
 			current.File.Unpin()
 		}

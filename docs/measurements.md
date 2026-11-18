@@ -1,14 +1,22 @@
 # Reproducible measurements
 
 No latency, throughput, capacity SLO, or universally-fastest claim is implied.
-The initial defaults and contention assumptions are tuning hypotheses.
+The cleaner's one-third savings threshold and 4 MiB rotation target are tuning
+hypotheses. Smaller active logs can reduce the size of a cleaning step and
+increase foreground catalog publications and syncs. Record the effective
+target, hard limits, worker status and revision for any new comparison.
 Development measurements do not qualify a production filesystem or prove
 physical storage reads.
+
+Benchmarks, smoke measurement profiles, and the VM measurement workflow run only
+on a separate explicit user request. Ordinary functional and race tests provide
+the routine PR checks.
 
 ## Selected-target bounded driver
 
 All six 64 B/1 KiB/4 KiB and Go 1.26.11/1.27.4 profiles completed on the
-qualified virtual stack. The [recorded baseline](measurement-baseline.md)
+historical virtual stack at revisions `e2bb779` and `36d5f40`, before the
+format cutover and automatic compaction. The [recorded baseline](measurement-baseline.md)
 contains actual run links, results, environment differences and interpretation.
 The separately guarded manual workflow implements the reproducible driver;
 its implementation alone is not evidence that a different run passed.

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,19 +92,16 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 		return err
 	}
 	buffer := make([]byte, 32<<10)
-	last := capture.Catalog.Cutoff
+	liveKeys := make(map[string]struct{})
 	for _, captured := range capture.Files {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		entry, err := copySegment(ctx, captured, capture.Current.UUID, captured.File.ID == capture.Current.ActiveID, capture.Catalog.Cutoff, &last, stage, fs, buffer)
+		entry, err := copySegment(ctx, capture, captured, liveKeys, stage, fs, buffer)
 		if err != nil {
 			return err
 		}
 		meta.Files = append(meta.Files, entry)
-	}
-	if last != capture.Current.Sequence {
-		return &SourceError{Err: fmt.Errorf("%w: backup sequence", ErrCorrupt)}
 	}
 	if err := fs.NewFile(filepath.Join(stage, "BACKUP"), format.EncodeBackup(meta), "backup.manifest"); err != nil {
 		return err
@@ -115,46 +111,29 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 	return err
 }
 
-func copySegment(ctx context.Context, captured CapturedFile, uuid [16]byte, mayGrow bool, cutoff uint64, last *uint64, stage string, fs *IO, buffer []byte) (entry format.BackupFile, returned error) {
-	src, err := OpenRegular(captured.File.Path)
+func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, liveKeys map[string]struct{}, stage string, fs *IO, buffer []byte) (entry format.BackupFile, returned error) {
+	src, header, _, err := openSelected(captured.File.Path, capture.Current.UUID, captured.Entry, captured.File.ID == capture.Current.ActiveID)
 	if err != nil {
 		return entry, &SourceError{Err: err}
 	}
 	defer func() { returned = errors.Join(returned, src.Close()) }()
-	st, err := src.Stat()
-	if err != nil {
-		return entry, &SourceError{Err: err}
-	}
-	if st.Size() < captured.Bytes || !mayGrow && st.Size() != captured.Bytes {
-		return entry, &SourceError{Err: fmt.Errorf("%w: backup source file length", ErrCorrupt)}
-	}
-	name := DataName(uuid, captured.File.ID)
+	name := DataName(capture.Current.UUID, captured.File.ID)
 	dst, err := os.OpenFile(filepath.Join(stage, name), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return entry, err
 	}
 	defer func() { returned = errors.Join(returned, dst.Close()) }()
-	header := make([]byte, format.SegmentHeaderBytes)
-	if _, err := src.ReadAt(header, 0); err != nil {
-		return entry, &SourceError{Err: err}
-	}
-	decoded, err := format.DecodeSegment(header)
-	if err != nil {
-		return entry, &SourceError{Err: err}
-	}
-	if decoded.UUID != uuid || decoded.ID != captured.File.ID || decoded.Kind != captured.File.Kind {
-		return entry, &SourceError{Err: fmt.Errorf("%w: backup segment identity", ErrCorrupt)}
-	}
 	h := sha256.New()
 	writer := &outputWriter{fs: fs, fd: dst, hash: h, point: "backup.copy"}
 	if _, err := writer.Write(header); err != nil {
 		return entry, err
 	}
-	for offset := int64(format.SegmentHeaderBytes); offset < captured.Bytes; {
+	span := format.NewRecordRange(captured.Entry, capture.Catalog.Cutoff)
+	for offset := int64(format.SegmentHeaderBytes); offset < captured.Entry.Bytes; {
 		if err := ctx.Err(); err != nil {
 			return entry, err
 		}
-		r, err := format.CopyRecord(ctx, sourceReader{src}, writer, offset, captured.Bytes-offset, nil, buffer)
+		r, key, err := format.CopyRecordKey(ctx, sourceReader{src}, writer, offset, captured.Entry.Bytes-offset, buffer)
 		if err != nil {
 			var destination *destinationError
 			if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -162,22 +141,27 @@ func copySegment(ctx context.Context, captured CapturedFile, uuid [16]byte, mayG
 			}
 			return entry, err
 		}
-		if captured.File.Kind == format.Snapshot {
-			if r.Kind != format.Put || r.Sequence > cutoff {
-				return entry, &SourceError{Err: fmt.Errorf("%w: backup snapshot", ErrCorrupt)}
-			}
+		if err := span.Accept(r); err != nil {
+			return entry, &SourceError{Err: err}
+		}
+		_, present := liveKeys[key]
+		if err := validateKey(captured.File.Kind, r, present, capture.Catalog.PrunedThrough); err != nil {
+			return entry, &SourceError{Err: err}
+		}
+		if r.Kind == format.Delete {
+			delete(liveKeys, key)
 		} else {
-			if *last == math.MaxUint64 || r.Sequence != *last+1 {
-				return entry, &SourceError{Err: fmt.Errorf("%w: backup log sequence", ErrCorrupt)}
-			}
-			*last = r.Sequence
+			liveKeys[key] = struct{}{}
 		}
 		offset += r.Bytes()
+	}
+	if err := span.Finish(); err != nil {
+		return entry, &SourceError{Err: err}
 	}
 	if err := fs.Sync(dst, "backup.file.sync"); err != nil {
 		return entry, err
 	}
-	entry = format.BackupFile{Name: name, Bytes: captured.Bytes}
+	entry = format.BackupFile{Name: name, Bytes: captured.Entry.Bytes}
 	copy(entry.Hash[:], h.Sum(nil))
 	return entry, nil
 }
@@ -235,7 +219,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			return err
 		}
 	}
-	image, err := Validate(source, cfg)
+	image, err := validateBackupImage(source, cfg)
 	if err != nil {
 		return err
 	}
@@ -270,12 +254,22 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			return err
 		}
 	}
-	if _, err := Validate(stage, cfg); err != nil {
+	if _, err := validateBackupImage(stage, cfg); err != nil {
 		return err
 	}
 	err = publishDirectory(ctx, fs, stage, target, "restore")
 	published = err == nil
 	return err
+}
+
+// Once BACKUP is recognized, every selected object must have the canonical
+// signature. An incompatible inner CURRENT is corruption of this backup.
+func validateBackupImage(dir string, cfg Config) (*Image, error) {
+	img, err := Validate(dir, cfg)
+	if errors.Is(err, format.ErrUnsupported) {
+		return nil, fmt.Errorf("%w: backup selected an incompatible CURRENT", ErrCorrupt)
+	}
+	return img, err
 }
 
 func verifyBackupFile(ctx context.Context, dir string, entry format.BackupFile, buffer []byte) (returned error) {

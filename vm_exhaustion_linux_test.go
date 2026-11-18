@@ -97,7 +97,9 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	opts := vmCaseOptions("exhaustion")
 	ready, release := make(chan struct{}), make(chan struct{})
 	var held atomic.Bool
-	db, err := openWithIO(dir, opts, &storage.IO{Hook: func(point string) error {
+	// This fault campaign attributes ENOSPC, retry and reclaimed bytes to three
+	// explicit checkpoints. Isolate those calls from automatic reclamation.
+	db, err := openWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
 		if point == "backup.copy:before" && held.CompareAndSwap(false, true) {
 			close(ready)
 			<-release
@@ -131,7 +133,7 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	case err := <-backupDone:
 		t.Fatalf("backup completed before the pinned-generation barrier: %v", err)
 	}
-	fmt.Printf("TARP_CAPTURE %d\n", db.store.Current.Sequence)
+	fmt.Printf("TARP_CAPTURE %d\n", observedFrontier(db).Sequence)
 	for i := range keys {
 		put(keys[i], current[i])
 	}
