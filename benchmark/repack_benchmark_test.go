@@ -232,6 +232,7 @@ func BenchmarkRepackForeground(b *testing.B) {
 					b.StopTimer()
 					b.ResetTimer()
 					var get50, get99, put50, put99 int64
+					var getDuring, putDuring repackPercentiles
 					var overlapGets, overlapPuts, filesBefore, filesAfter int
 					var elapsedNS int64
 					for i := 0; i < b.N; i++ {
@@ -240,6 +241,10 @@ func BenchmarkRepackForeground(b *testing.B) {
 						get99 += result.Get.P99NS
 						put50 += result.Put.P50NS
 						put99 += result.Put.P99NS
+						getDuring.P50NS += result.GetDuringRepack.P50NS
+						getDuring.P99NS += result.GetDuringRepack.P99NS
+						putDuring.P50NS += result.PutDuringRepack.P50NS
+						putDuring.P99NS += result.PutDuringRepack.P99NS
 						overlapGets += result.OverlappingGets
 						overlapPuts += result.OverlappingPuts
 						elapsedNS += result.RepackElapsedNS
@@ -250,6 +255,12 @@ func BenchmarkRepackForeground(b *testing.B) {
 					b.ReportMetric(float64(get99)/float64(b.N), "ns/get-p99")
 					b.ReportMetric(float64(put50)/float64(b.N), "ns/put-p50")
 					b.ReportMetric(float64(put99)/float64(b.N), "ns/put-p99")
+					if mode == repackConcurrent {
+						b.ReportMetric(float64(getDuring.P50NS)/float64(b.N), "ns/overlap-get-p50")
+						b.ReportMetric(float64(getDuring.P99NS)/float64(b.N), "ns/overlap-get-p99")
+						b.ReportMetric(float64(putDuring.P50NS)/float64(b.N), "ns/overlap-put-p50")
+						b.ReportMetric(float64(putDuring.P99NS)/float64(b.N), "ns/overlap-put-p99")
+					}
 					b.ReportMetric(float64(overlapGets)/float64(b.N), "overlapping-Gets/window")
 					b.ReportMetric(float64(overlapPuts)/float64(b.N), "overlapping-Puts/window")
 					b.ReportMetric(float64(elapsedNS)/1e6/float64(b.N), "repack-ms/window")
