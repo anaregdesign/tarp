@@ -68,6 +68,46 @@ func (e *SizeError) Error() string {
 
 func (e *SizeError) Unwrap() error { return ErrTooLarge }
 
+// BatchLimitKind identifies the admission limit exceeded by a batch.
+type BatchLimitKind string
+
+const (
+	BatchInputCountLimit BatchLimitKind = "input-count"
+	BatchEntrySizeLimit  BatchLimitKind = "entry-size"
+	BatchPayloadLimit    BatchLimitKind = "payload-bytes"
+)
+
+// BatchLimitError reports an oversized batch before publication. Index is the
+// original zero-based input position, or -1 for the whole request's input count.
+type BatchLimitError struct {
+	Kind  BatchLimitKind
+	Index int
+	// Actual and Limit are input counts for BatchInputCountLimit, or encoded
+	// record bytes for BatchPayloadLimit. Actual includes the offending input
+	// and counts each distinct delete key once. Both fields are zero for
+	// BatchEntrySizeLimit, whose Entry reports both record and cache limits.
+	Actual, Limit uint64
+	Entry         *SizeError
+}
+
+func (e *BatchLimitError) Error() string {
+	switch e.Kind {
+	case BatchInputCountLimit:
+		return fmt.Sprintf("%v: batch has %d inputs, limit %d", ErrTooLarge, e.Actual, e.Limit)
+	case BatchEntrySizeLimit:
+		return fmt.Sprintf("tarp: batch input[%d]: %v", e.Index, e.Entry)
+	default:
+		return fmt.Sprintf("%v: batch input[%d] raises the encoded payload to %d bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
+	}
+}
+
+func (e *BatchLimitError) Unwrap() error {
+	if e.Entry != nil {
+		return e.Entry
+	}
+	return ErrTooLarge
+}
+
 // CompatibilityError reports minima derived from the validated existing image.
 type CompatibilityError struct {
 	RequiredCacheBytes, RequiredRecordBytes int64

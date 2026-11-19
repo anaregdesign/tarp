@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -16,6 +17,17 @@ import (
 )
 
 type failure struct{ err error }
+
+// Hooks observes engine events for deterministic tests and measurement drivers.
+// Set hooks before starting the operations that use them.
+type Hooks struct {
+	// CleanerStart gates the worker before its first pass until the channel closes.
+	CleanerStart <-chan struct{}
+	// PutCopied counts key and value bytes copied for the index and cache.
+	PutCopied func(keyBytes, valueBytes int)
+	// WriterWait observes a mutation before (false) and after (true) acquiring the writer gate.
+	WriterWait func(acquired bool)
+}
 
 // DB owns its directory until Close finishes. Do not copy a DB.
 type DB struct {
@@ -43,32 +55,68 @@ type DB struct {
 
 	batchReadSlots      chan struct{} // shared by BatchGet calls on this DB
 	fastSmallBatchReads atomic.Bool   // last sampled small DATA reads completed quickly
+	hooks               *Hooks
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
 // The parent directory must exist.
 // Incompatible smaller limits do not truncate or clean existing data.
-func Open(dir string, opts Options) (*DB, error) { return OpenWithIO(dir, opts, nil) }
+func Open(dir string, opts Options) (*DB, error) {
+	return OpenContext(context.Background(), dir, opts, false)
+}
+
+// OpenContext optionally requires an initialized database.
+func OpenContext(ctx context.Context, dir string, opts Options, existingOnly bool) (*DB, error) {
+	return openDB(ctx, dir, opts, existingOnly, nil, nil)
+}
 
 // OpenWithIO attaches storage event hooks before recovery and worker startup.
 func OpenWithIO(dir string, opts Options, fs *storage.IO) (*DB, error) {
+	return OpenWithHooks(dir, opts, fs, nil)
+}
+
+// OpenWithHooks attaches engine and storage hooks before the first worker pass.
+func OpenWithHooks(dir string, opts Options, fs *storage.IO, hooks *Hooks) (*DB, error) {
+	return openDB(context.Background(), dir, opts, false, fs, hooks)
+}
+
+func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs *storage.IO, hooks *Hooks) (*DB, error) {
+	if ctx == nil {
+		return nil, validContextError("open")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, operationError("open", "context", err)
+	}
 	opts, err := opts.normalized()
 	if err != nil {
 		return nil, err
 	}
-	s, index, err := storage.Open(dir, storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}, fs)
+	cfg := storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
+	s, index, err := storage.OpenContext(ctx, dir, cfg, existingOnly, fs)
 	if err != nil {
 		return nil, operationError("open", "recovery", err)
 	}
-	db := &DB{opts: opts, store: s, index: index, cache: cache.New(opts.CacheBytes), closed: make(chan struct{})}
+	db := &DB{opts: opts, store: s, index: index, cache: cache.New(opts.CacheBytes), closed: make(chan struct{}), hooks: hooks}
 	db.batchReadSlots = make(chan struct{}, opts.BatchReadConcurrency)
 	db.cond = sync.NewCond(&db.life)
+	remaining := len(index)
 	for _, loc := range index {
+		if remaining%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, operationError("open", "recovery", errors.Join(err, s.Close()))
+			}
+		}
+		remaining--
 		loc.File.Pin()
 		loc.File.LiveBytes.Add(loc.Bytes)
 		db.stats.LiveRecordBytes += uint64(loc.Bytes)
 	}
 	db.initDataStats()
+	// Finish opening a fresh, empty database once initialization has published
+	// CURRENT. Only recovery has a cancellable index to hand off to the worker.
+	if err := ctx.Err(); err != nil && !s.Created {
+		return nil, operationError("open", "recovery", errors.Join(err, s.Close()))
+	}
 	db.startCleaner()
 	return db, nil
 }
@@ -204,13 +252,13 @@ func (db *DB) Delete(key []byte) error {
 // active file ID used to detect a rotation when releasing the writer gate.
 func (db *DB) lockMutation() uint64 {
 	db.cleaner.writers.Add(1)
-	fs := db.store.IO
-	if fs != nil && fs.WriterWait != nil {
-		fs.WriterWait(false)
+	hooks := db.hooks
+	if hooks != nil && hooks.WriterWait != nil {
+		hooks.WriterWait(false)
 	}
 	db.writer.Lock()
-	if fs != nil && fs.WriterWait != nil {
-		fs.WriterWait(true)
+	if hooks != nil && hooks.WriterWait != nil {
+		hooks.WriterWait(true)
 	}
 	return db.store.Current.ActiveID
 }
@@ -280,8 +328,8 @@ func (db *DB) ownMutation(kind uint8, key, value []byte) ownedMutation {
 	entry := ownedMutation{key: string(key)}
 	if kind == format.Put {
 		entry.value = bytes.Clone(value)
-		if fs := db.store.IO; fs != nil && fs.PutCopied != nil {
-			fs.PutCopied(len(key), len(value))
+		if hooks := db.hooks; hooks != nil && hooks.PutCopied != nil {
+			hooks.PutCopied(len(key), len(value))
 		}
 	}
 	return entry

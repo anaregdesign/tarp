@@ -82,7 +82,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	// and sizes, including a possible metadata-only cleaned interval.
 	var oldData, newData dataTotals
 	for _, source := range entries {
-		if source.ID != 0 {
+		if source.HasPhysicalFile() {
 			oldData.addFile(source.Bytes, 0)
 		}
 	}

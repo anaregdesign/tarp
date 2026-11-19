@@ -89,7 +89,7 @@ func (f repackFixture) measureTraced(t testing.TB, mode string, puts int, trace 
 	retirement := make(chan time.Time, 1)
 	var sawCopy, published bool // hooks below run on the single cleaner
 	var coordinationWait time.Duration
-	fs := &storage.IO{CleanerStart: workerStart, Hook: func(point string) error {
+	fs := &storage.IO{Hook: func(point string) error {
 		if trace != nil {
 			trace.record(point)
 		}
@@ -124,10 +124,11 @@ func (f repackFixture) measureTraced(t testing.TB, mode string, puts int, trace 
 		}
 		return nil
 	}}
+	engineHooks := &engine.Hooks{CleanerStart: workerStart}
 	if trace != nil {
-		fs.WriterWait = trace.writerWait
+		engineHooks.WriterWait = trace.writerWait
 	}
-	db, cleanup := f.openClone(t, fs)
+	db, cleanup := f.openClone(t, fs, engineHooks)
 	defer cleanup()
 
 	gets := make([]repackCall, puts*repackGetsPerPut)

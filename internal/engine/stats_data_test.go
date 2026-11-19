@@ -41,8 +41,8 @@ func checkStatsAgainstReplay(t *testing.T, db *DB) {
 }
 
 func TestDataStatsTrackCleanerOutputsAndIgnorePins(t *testing.T) {
-	fs := &storage.IO{CleanerStart: make(chan struct{})}
-	db := newTestDB(t, Options{}, fs)
+	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+	db := newTestDBWithHooks(t, Options{}, nil, engineHooks)
 	checkStatsAgainstReplay(t, db)
 	mustPut(t, db, "a", "first")
 	mustPut(t, db, "b", "deleted")
@@ -87,14 +87,15 @@ func TestDataStatsTrackTailDuringCheckpointAndReopen(t *testing.T) {
 		<-resume
 	})
 	dir := filepath.Join(t.TempDir(), "db")
-	fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+	fs := &storage.IO{Hook: func(p string) error {
 		if p == "compact.record:after" {
 			pause()
 		}
 		return nil
 	}}
+	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
 	opts := testOptions()
-	db, err := OpenWithIO(dir, opts, fs)
+	db, err := OpenWithHooks(dir, opts, fs, engineHooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestDataStatsTrackTailDuringCheckpointAndReopen(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := OpenWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+	reopened, err := OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}

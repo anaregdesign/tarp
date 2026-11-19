@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/anaregdesign/tarp/internal/cache"
+	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
 )
 
@@ -41,7 +41,7 @@ func (l RestoreLimits) normalized() (RestoreLimits, error) {
 	if l.MaxRecordBytes == 0 {
 		l.MaxRecordBytes = 1 << 20
 	}
-	if l.CacheBytes < cache.MetadataBytes+1 || l.MaxRecordBytes < format.RecordHeaderBytes+1 ||
+	if l.CacheBytes < entrysize.CacheMetadataBytes+1 || l.MaxRecordBytes < format.RecordHeaderBytes+1 ||
 		l.MaxRecordBytes > math.MaxInt64-format.SegmentHeaderBytes {
 		return l, fmt.Errorf("%w: invalid cache or record size", ErrInvalidOptions)
 	}
@@ -75,12 +75,12 @@ func (o Options) checkSize(key, value uint64) error {
 		return ErrEmptyKey
 	}
 	e := &SizeError{KeyBytes: key, ValueBytes: value, Limits: o}
-	if key > math.MaxUint64-value || key+value > math.MaxUint64-cache.MetadataBytes {
+	if !entrysize.Representable(key, value) {
 		e.Overflow = true
 		return e
 	}
-	e.RecordBytes = format.RecordHeaderBytes + key + value
-	e.CacheCharge = cache.MetadataBytes + key + value
+	e.RecordBytes = entrysize.RecordBytes(key, value)
+	e.CacheCharge = entrysize.CacheCharge(key, value)
 	if e.RecordBytes > uint64(o.MaxRecordBytes) || e.RecordBytes > math.MaxInt || e.CacheCharge > uint64(o.CacheBytes) {
 		return e
 	}

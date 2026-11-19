@@ -37,7 +37,7 @@ func (c *CleanSegment) OutputBytes() int64 { return c.output.Size.Load() }
 // BeginClean runs under the writer gate. The selected catalog is immutable.
 // New log rotations may append to the catalog while these sources are copied.
 func (s *Store) BeginClean(entries []format.File) (*CleanSegment, error) {
-	if len(entries) == 0 || entries[0].ID == 0 || entries[len(entries)-1].ID == 0 {
+	if len(entries) == 0 || !entries[0].HasPhysicalFile() || !entries[len(entries)-1].HasPhysicalFile() {
 		return nil, nil
 	}
 	pos := slices.Index(s.Catalog.Files, entries[0])
@@ -57,7 +57,7 @@ func (s *Store) BeginClean(entries []format.File) (*CleanSegment, error) {
 		if (entry.Kind == format.Snapshot) != (kind == format.Snapshot) {
 			return nil, fmt.Errorf("%w: cleaner crossed checkpoint boundary", ErrCorrupt)
 		}
-		if entry.ID == 0 {
+		if !entry.HasPhysicalFile() {
 			continue // Metadata-only coverage, carried forward by the merged interval.
 		}
 		f := s.Files[entry.ID]

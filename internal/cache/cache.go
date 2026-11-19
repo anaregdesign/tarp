@@ -1,10 +1,14 @@
 // Package cache implements an unsynchronized, exact global LRU.
 package cache
 
-import "math"
+import (
+	"math"
+
+	"github.com/anaregdesign/tarp/internal/entrysize"
+)
 
 // MetadataBytes is a logical policy charge, not the allocator's actual cost.
-const MetadataBytes = 128
+const MetadataBytes = entrysize.CacheMetadataBytes
 
 type entry struct {
 	key        string
@@ -82,7 +86,7 @@ func (c *Cache) Get(key []byte) ([]byte, bool) {
 
 // Put takes ownership of immutable bytes. The caller must preflight the charge.
 func (c *Cache) Put(key string, value []byte) {
-	charge := int64(MetadataBytes) + int64(len(key)) + int64(len(value))
+	charge := entrysize.CacheCharge(int64(len(key)), int64(len(value)))
 	if charge > c.limit {
 		panic("cache: unvalidated admission")
 	}
@@ -103,7 +107,7 @@ func (c *Cache) Delete(key string) {
 	if e, ok := c.items[key]; ok {
 		c.unlink(e)
 		delete(c.items, key)
-		c.used -= int64(MetadataBytes) + int64(len(e.key)) + int64(len(e.value))
+		c.used -= entrysize.CacheCharge(int64(len(e.key)), int64(len(e.value)))
 	}
 }
 

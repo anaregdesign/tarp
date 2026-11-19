@@ -31,14 +31,15 @@ func sealForCleaning(t *testing.T, db *DB) format.File {
 func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 	ctx := context.Background()
 	paused, resume := make(chan struct{}), make(chan struct{})
-	fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+	fs := &storage.IO{Hook: func(p string) error {
 		if p == "clean.scan:after" {
 			close(paused)
 			<-resume
 		}
 		return nil
 	}}
-	db := newTestDB(t, Options{}, fs)
+	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+	db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
 	mustPut(t, db, "raw", "old")
 	mustPut(t, db, "del", "old")
 	if err := db.Delete([]byte("del")); err != nil {
@@ -104,7 +105,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 	if err := Restore(ctx, RestoreRequest{Source: backupDir, Destination: restoreDir}); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := OpenWithIO(restoreDir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+	restored, err := OpenWithHooks(restoreDir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +123,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := OpenWithIO(dir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+	reopened, err := OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestUncertainCleanerStopsQueuedWriterBeforeUnlock(t *testing.T) {
 	for _, point := range []string{"clean.current.rename:before", "clean.current.rename:after", "clean.current.dirsync:before", "clean.current.dirsync:after"} {
 		t.Run(point, func(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+			fs := &storage.IO{Hook: func(p string) error {
 				if p == point {
 					close(entered)
 					<-release
@@ -153,7 +154,8 @@ func TestUncertainCleanerStopsQueuedWriterBeforeUnlock(t *testing.T) {
 				}
 				return nil
 			}}
-			db := newTestDB(t, Options{}, fs)
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
 			mustPut(t, db, "old", "obsolete")
 			mustPut(t, db, "keep", "retained")
 			source := sealForCleaning(t, db)
@@ -191,7 +193,7 @@ func TestUncertainCleanerStopsQueuedWriterBeforeUnlock(t *testing.T) {
 			if err := db.Close(); !errors.Is(err, syscall.EIO) {
 				t.Fatal(err)
 			}
-			recovered, err := OpenWithIO(dir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+			recovered, err := OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,13 +216,14 @@ func TestCleanStagingFailuresLeaveSelectionAndContentsIntact(t *testing.T) {
 		"clean.catalog.sync:after", "clean.catalog.dirsync:after", "clean.current.sync:after"} {
 		t.Run(point, func(t *testing.T) {
 			var armed atomic.Bool
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+			fs := &storage.IO{Hook: func(p string) error {
 				if p == point && armed.CompareAndSwap(true, false) {
 					return syscall.EDQUOT
 				}
 				return nil
 			}}
-			db := newTestDB(t, Options{}, fs)
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
 			mustPut(t, db, "obsoleted", "old")
 			mustPut(t, db, "live", "value")
 			entry := sealForCleaning(t, db)
@@ -242,7 +245,7 @@ func TestCleanStagingFailuresLeaveSelectionAndContentsIntact(t *testing.T) {
 }
 
 func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testing.T) {
-	db := newTestDB(t, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "unrelated", "keep")
 	unrelated := sealForCleaning(t, db)
 	mustPut(t, db, "target", "obsolete")
@@ -284,7 +287,7 @@ func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testin
 
 func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "stable", "checkpoint")
 	mustPut(t, db, "deleted", "checkpoint")
 	if _, err := db.Compact(ctx); err != nil {
@@ -333,7 +336,7 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	got, err := OpenWithIO(dir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+	got, err := OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +361,7 @@ func TestCleanCatalogPreparationPreservesForegroundOutcome(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			ready, release := make(chan struct{}), make(chan struct{})
 			var armed, published atomic.Bool
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+			fs := &storage.IO{Hook: func(point string) error {
 				switch point {
 				case "clean.catalog.dirsync:after":
 					close(ready)
@@ -372,7 +375,8 @@ func TestCleanCatalogPreparationPreservesForegroundOutcome(t *testing.T) {
 				}
 				return nil
 			}}
-			db := newTestDB(t, Options{}, fs)
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
 			mustPut(t, db, "key", "old")
 			source := sealForCleaning(t, db)
 			dir := db.store.Dir
@@ -428,7 +432,7 @@ func TestCleanCatalogPreparationPreservesForegroundOutcome(t *testing.T) {
 			if err := db.Close(); err != nil && !errors.Is(err, syscall.EIO) {
 				t.Fatal(err)
 			}
-			reopened, err := OpenWithIO(dir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+			reopened, err := OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -455,7 +459,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var staged atomic.Bool
 			copied, resume := make(chan struct{}), make(chan struct{})
-			db := newTestDB(t, Options{}, &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+			ioHooks := &storage.IO{Hook: func(point string) error {
 				if point == tc.barrier && staged.CompareAndSwap(false, true) {
 					close(copied)
 					<-resume
@@ -464,7 +468,8 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 					return syscall.EIO
 				}
 				return nil
-			}})
+			}}
+			db := newTestDBWithHooks(t, Options{}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 			mustPut(t, db, "prefix", "earlier")
 			prefix := sealForCleaning(t, db)
 			var group []format.File
@@ -508,7 +513,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 			if err := db.Close(); err != nil && !errors.Is(err, syscall.EIO) {
 				t.Fatal(err)
 			}
-			image, err := OpenWithIO(dir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+			image, err := OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 			if err != nil {
 				t.Fatal(err)
 			}

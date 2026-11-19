@@ -96,7 +96,7 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 func vmPendingMemory(t *testing.T, opts engine.Options, value []byte, callers, repetition int, write vmMeasureWriter) {
 	t.Helper()
 	var copied atomic.Int64
-	db := newTestDB(t, opts, &storage.IO{PutCopied: func(keyBytes, valueBytes int) {
+	db := newTestDBWithHooks(t, opts, nil, &engine.Hooks{PutCopied: func(keyBytes, valueBytes int) {
 		copied.Add(int64(keyBytes + valueBytes))
 	}})
 	inputs := make([][]byte, callers)

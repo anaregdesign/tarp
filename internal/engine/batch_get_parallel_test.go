@@ -47,16 +47,14 @@ func TestBatchGetLimitsConcurrentStorageReads(t *testing.T) {
 				defer release()
 				var started atomic.Int32
 				opts := Options{CacheBytes: 130, BatchReadConcurrency: tc.limit}
-				db := newTestDB(t, opts, &storage.IO{
-					CleanerStart: make(chan struct{}),
-					Hook: func(point string) error {
-						if point == "read:before" {
-							started.Add(1)
-							<-gate
-						}
-						return nil
-					},
-				})
+				ioHooks := &storage.IO{Hook: func(point string) error {
+					if point == "read:before" {
+						started.Add(1)
+						<-gate
+					}
+					return nil
+				}}
+				db := newTestDBWithHooks(t, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 				var keys [][]byte
 				var want []BatchResult
 				for i := range tc.keys {
@@ -140,20 +138,18 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 		release := sync.OnceFunc(func() { close(gate) })
 		defer release()
 		var started atomic.Int32
-		db := newTestDB(t, Options{CacheBytes: 130, BatchReadConcurrency: 2}, &storage.IO{
-			CleanerStart: make(chan struct{}),
-			Hook: func(point string) error {
-				if point == "read:before" {
-					switch started.Add(1) {
-					case 1:
-						<-gate
-					case 2:
-						return format.ErrCorrupt
-					}
+		ioHooks := &storage.IO{Hook: func(point string) error {
+			if point == "read:before" {
+				switch started.Add(1) {
+				case 1:
+					<-gate
+				case 2:
+					return format.ErrCorrupt
 				}
-				return nil
-			},
-		})
+			}
+			return nil
+		}}
+		db := newTestDBWithHooks(t, Options{CacheBytes: 130, BatchReadConcurrency: 2}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 		for _, k := range []string{"a", "b", "c", "z"} {
 			mustPut(t, db, k, k)
 		}
@@ -204,23 +200,21 @@ func TestBatchGetSmallReadsAdaptWithinTheSameBatch(t *testing.T) {
 
 				var trained atomic.Bool
 				var started atomic.Int32
-				db := newTestDB(t, Options{CacheBytes: 130, BatchReadConcurrency: limit}, &storage.IO{
-					CleanerStart: make(chan struct{}),
-					Hook: func(point string) error {
-						if point != "read:before" {
-							return nil
-						}
-						n := int(started.Add(1))
-						if !trained.Load() {
-							<-training
-							return nil
-						}
-						if n == 1 || n == tc.slowAt || n > holdAfter {
-							<-step
-						}
+				ioHooks := &storage.IO{Hook: func(point string) error {
+					if point != "read:before" {
 						return nil
-					},
-				})
+					}
+					n := int(started.Add(1))
+					if !trained.Load() {
+						<-training
+						return nil
+					}
+					if n == 1 || n == tc.slowAt || n > holdAfter {
+						<-step
+					}
+					return nil
+				}}
+				db := newTestDBWithHooks(t, Options{CacheBytes: 130, BatchReadConcurrency: limit}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 				keys := [][]byte{[]byte("?"), []byte("z")}
 				want := []BatchResult{{}, {Value: []byte("Z"), Found: true}}
 				for i := range unique {

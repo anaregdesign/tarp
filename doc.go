@@ -15,6 +15,8 @@
 // commit frontier before acknowledgment. Inspect OpError for the outcome of
 // failed writes. See the durability contract for storage assumptions.
 //
+// OpenExisting requires an initialized directory. OpenContext also creates a
+// new DB if needed. Both accept a context to cancel recovery during startup.
 // Open starts one incremental compaction worker on each new or reopened DB.
 // It reclaims obsolete records, repacks small files and yields for writers
 // and backup. Compact explicitly builds a full checkpoint. MaintenanceStatus reports worker
@@ -24,5 +26,6 @@
 //
 // Open and Restore accept one unversioned format. A database or backup from
 // the previous implementation is unsupported. Use Backup for a consistent
-// image. See README.md and docs/ for limits, recovery and qualification evidence.
+// image. VerifyBackup verifies an immutable backup in place. Restore publishes
+// a new closed DB. See README.md and docs/ for limits, recovery and qualification evidence.
 package tarp

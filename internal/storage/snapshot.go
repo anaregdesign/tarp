@@ -35,7 +35,7 @@ func (s *Store) Capture() (*Capture, error) {
 	c := &Capture{Current: s.Current, Catalog: s.Catalog, Manifest: bytes.Clone(s.Manifest)}
 	c.Catalog.Files = append([]format.File(nil), s.Catalog.Files...)
 	for _, entry := range s.Catalog.Files {
-		if entry.ID != 0 {
+		if entry.HasPhysicalFile() {
 			c.Files = append(c.Files, CapturedFile{File: s.Files[entry.ID], Entry: entry})
 		}
 	}

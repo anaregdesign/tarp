@@ -45,7 +45,7 @@ func roundTrip() (result error) {
 	if err := tarp.Restore(context.Background(), tarp.RestoreRequest{Source: backup, Destination: restored}); err != nil {
 		return err
 	}
-	image, err := tarp.Open(restored, tarp.Options{})
+	image, err := tarp.OpenExisting(context.Background(), restored, tarp.Options{})
 	if err != nil {
 		return err
 	}

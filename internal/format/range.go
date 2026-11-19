@@ -14,7 +14,7 @@ func (c Catalog) ActiveFile(current Frontier) (File, error) {
 		return File{}, bad("catalog/frontier identity or pruning boundary")
 	}
 	for _, file := range c.Files {
-		if file.ID != 0 && file.ID == current.ManifestID {
+		if file.HasPhysicalFile() && file.ID == current.ManifestID {
 			return File{}, bad("catalog and data file share an ID")
 		}
 	}
@@ -58,7 +58,7 @@ func (r *RecordRange) Accept(record Record) error {
 		}
 		return nil
 	}
-	if r.file.ID == 0 || record.Sequence <= r.last || record.Sequence > r.file.Last {
+	if !r.file.HasPhysicalFile() || record.Sequence <= r.last || record.Sequence > r.file.Last {
 		return bad("record outside selected interval")
 	}
 	if r.file.Kind == Log && record.Sequence != r.last+1 {
@@ -72,7 +72,7 @@ func (r *RecordRange) Finish() error {
 	if r.file.Kind == Log && r.last != r.file.Last {
 		return bad("incomplete raw log")
 	}
-	if r.file.Kind == Cleaned && r.file.ID != 0 && r.last < r.file.First {
+	if r.file.Kind == Cleaned && r.file.HasPhysicalFile() && r.last < r.file.First {
 		return bad("empty physical cleaned file")
 	}
 	return nil

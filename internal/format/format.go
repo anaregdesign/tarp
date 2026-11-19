@@ -13,11 +13,13 @@ import (
 	"io"
 	"math"
 	"sync"
+
+	"github.com/anaregdesign/tarp/internal/entrysize"
 )
 
 const (
 	SegmentHeaderBytes = 64
-	RecordHeaderBytes  = 48
+	RecordHeaderBytes  = entrysize.RecordHeaderBytes
 	FrontierBytes      = 128
 	Log                = 1
 	Snapshot           = 2
@@ -92,7 +94,7 @@ type Record struct {
 	PayloadCRC           uint32
 }
 
-func (r Record) Bytes() int64 { return RecordHeaderBytes + r.KeyBytes + r.ValueBytes }
+func (r Record) Bytes() int64 { return entrysize.RecordBytes(r.KeyBytes, r.ValueBytes) }
 
 // EncodeRecordHeader computes the wire header over caller-owned key and value bytes.
 func EncodeRecordHeader(b *[RecordHeaderBytes]byte, kind uint8, sequence uint64, key, value []byte) {
@@ -108,7 +110,7 @@ func EncodeRecordHeader(b *[RecordHeaderBytes]byte, kind uint8, sequence uint64,
 }
 
 func EncodeRecord(kind uint8, sequence uint64, key, value []byte) []byte {
-	b := make([]byte, RecordHeaderBytes+len(key)+len(value))
+	b := make([]byte, entrysize.RecordBytes(len(key), len(value)))
 	keyEnd := RecordHeaderBytes + len(key)
 	copy(b[RecordHeaderBytes:keyEnd], key)
 	copy(b[keyEnd:], value)
@@ -311,6 +313,10 @@ type File struct {
 	Kind        uint32
 	First, Last uint64
 }
+
+// HasPhysicalFile reports whether this catalog entry names a DATA file.
+// A cleaned interval with no retained records still contributes sequence coverage.
+func (f File) HasPhysicalFile() bool { return f.ID != 0 }
 
 type Catalog struct {
 	UUID                  [16]byte

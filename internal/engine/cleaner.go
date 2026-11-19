@@ -54,8 +54,8 @@ func (db *DB) startCleaner() {
 	w.cancel = cancel
 	w.done = make(chan struct{})
 	var start <-chan struct{}
-	if db.store.IO != nil {
-		start = db.store.IO.CleanerStart
+	if db.hooks != nil {
+		start = db.hooks.CleanerStart
 	}
 	go func() {
 		defer close(w.done)
@@ -128,7 +128,7 @@ func (db *DB) cleanYield(ctx context.Context) error {
 func nextCandidate(s *storage.Store) (best format.File, staging uint64) {
 	metadata := uint64(len(s.Manifest)) + format.FrontierBytes
 	for _, entry := range s.Catalog.Files {
-		if entry.ID == 0 {
+		if !entry.HasPhysicalFile() {
 			continue
 		}
 		f := s.Files[entry.ID]
@@ -145,7 +145,7 @@ func nextCandidate(s *storage.Store) (best format.File, staging uint64) {
 			continue
 		}
 		output += metadata
-		if best.ID != 0 {
+		if best.HasPhysicalFile() {
 			a, b := bits.Mul64(output, uint64(best.Bytes))
 			c, d := bits.Mul64(staging, uint64(entry.Bytes))
 			if a > c || a == c && (b > d || b == d && (entry.First > best.First || entry.First == best.First && entry.ID >= best.ID)) {
@@ -163,7 +163,7 @@ func nextCandidate(s *storage.Store) (best format.File, staging uint64) {
 func repackGroup(files []format.File, target int64) ([]format.File, int64) {
 	const minFiles, maxFiles = 4, 8
 	for start, first := range files {
-		if first.ID == 0 || first.Bytes > target/4 {
+		if !first.HasPhysicalFile() || first.Bytes > target/4 {
 			continue
 		}
 		var group []format.File
@@ -174,7 +174,7 @@ func repackGroup(files []format.File, target int64) ([]format.File, int64) {
 			if (entry.Kind == format.Snapshot) != (first.Kind == format.Snapshot) {
 				break
 			}
-			if entry.ID == 0 {
+			if !entry.HasPhysicalFile() {
 				continue
 			}
 			if entry.Bytes > target/4 || entry.Bytes > target-total {
@@ -279,7 +279,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		return false, true
 	}
 	var inputs []format.File
-	if victim.ID != 0 {
+	if victim.HasPhysicalFile() {
 		inputs = []format.File{victim}
 	} else {
 		// Foreground rotations publish a new catalog slice. Inspect this one

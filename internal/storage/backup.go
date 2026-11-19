@@ -211,12 +211,16 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, l
 	return entry, nil
 }
 
-func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) (returned error) {
-	source, err := filepath.Abs(source)
+func backupSourcePath(source string) (string, error) {
+	absolute, err := filepath.Abs(source)
 	if err != nil {
-		return err
+		return "", err
 	}
-	source, err = filepath.EvalSymlinks(source)
+	return filepath.EvalSymlinks(absolute)
+}
+
+func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) (returned error) {
+	source, err := backupSourcePath(source)
 	if err != nil {
 		return err
 	}
@@ -224,65 +228,10 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	b, err := ReadRegular(filepath.Join(source, "BACKUP"))
-	if err != nil {
-		return fmt.Errorf("%w: backup manifest: %w", ErrCorrupt, err)
-	}
-	meta, err := format.DecodeBackup(b)
-	if err != nil {
-		return err
-	}
-	files := make(map[string]format.BackupFile, len(meta.Files))
-	for _, f := range meta.Files {
-		_, data := parseID(f.Name, "DATA", meta.UUID)
-		_, manifest := parseID(f.Name, "MANIFEST", meta.UUID)
-		if f.Name != "CURRENT" && !data && !manifest {
-			return fmt.Errorf("%w: unsafe backup entry", ErrCorrupt)
-		}
-		files[f.Name] = f
-	}
-	entries, err := os.ReadDir(source)
-	if err != nil {
-		return err
-	}
-	if len(entries) != len(files)+1 {
-		return fmt.Errorf("%w: unexpected/missing backup objects", ErrCorrupt)
-	}
 	buffer := make([]byte, 32<<10)
-	for _, entry := range entries {
-		if entry.Name() == "BACKUP" {
-			continue
-		}
-		f, listed := files[entry.Name()]
-		if !listed {
-			return fmt.Errorf("%w: unlisted backup object", ErrCorrupt)
-		}
-		if err := verifyBackupFile(ctx, source, f, buffer); err != nil {
-			return err
-		}
-	}
-	image, err := validateBackupImage(ctx, source, cfg)
+	files, err := verifyBackup(ctx, source, cfg, buffer)
 	if err != nil {
 		return err
-	}
-	if image.Current.UUID != meta.UUID || image.Current.Sequence != meta.Sequence || image.Catalog.Cutoff != meta.Cutoff ||
-		image.Files[image.Current.ActiveID].Size.Load() != image.Current.ActiveEnd ||
-		len(files) != len(image.Files)+2 {
-		return fmt.Errorf("%w: backup image identity or committed length", ErrCorrupt)
-	}
-	if _, ok := files["CURRENT"]; !ok {
-		return fmt.Errorf("%w: missing backup frontier", ErrCorrupt)
-	}
-	if _, ok := files[ManifestName(image.Current.UUID, image.Current.ManifestID)]; !ok {
-		return fmt.Errorf("%w: missing backup catalog", ErrCorrupt)
-	}
-	for id := range image.Files {
-		if _, ok := files[DataName(meta.UUID, id)]; !ok {
-			return fmt.Errorf("%w: missing selected backup segment", ErrCorrupt)
-		}
 	}
 	stage, err := os.MkdirTemp(filepath.Dir(target), ".tarp-restore-")
 	if err != nil {
@@ -294,7 +243,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			returned = errors.Join(returned, cleanStage(fs, stage, "restore"))
 		}
 	}()
-	for _, f := range meta.Files {
+	for _, f := range files {
 		if err := copyBackupFile(ctx, source, stage, f, fs, buffer); err != nil {
 			return err
 		}
@@ -305,6 +254,83 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	err = publishDirectory(ctx, fs, stage, target, "restore")
 	published = err == nil
 	return err
+}
+
+// VerifyBackup checks an immutable backup without creating a destination or acquiring a lock.
+func VerifyBackup(ctx context.Context, dir string, cfg Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source, err := backupSourcePath(dir)
+	if err != nil {
+		return err
+	}
+	_, err = verifyBackup(ctx, source, cfg, make([]byte, 32<<10))
+	return err
+}
+
+// verifyBackup returns only the files selected by the verified snapshot.
+func verifyBackup(ctx context.Context, source string, cfg Config, buffer []byte) ([]format.BackupFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	b, err := ReadRegular(filepath.Join(source, "BACKUP"))
+	if err != nil {
+		return nil, fmt.Errorf("%w: backup manifest: %w", ErrCorrupt, err)
+	}
+	meta, err := format.DecodeBackup(b)
+	if err != nil {
+		return nil, err
+	}
+	files := make(map[string]format.BackupFile, len(meta.Files))
+	for _, f := range meta.Files {
+		_, data := parseID(f.Name, "DATA", meta.UUID)
+		_, manifest := parseID(f.Name, "MANIFEST", meta.UUID)
+		if f.Name != "CURRENT" && !data && !manifest {
+			return nil, fmt.Errorf("%w: unsafe backup entry", ErrCorrupt)
+		}
+		files[f.Name] = f
+	}
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) != len(files)+1 {
+		return nil, fmt.Errorf("%w: unexpected/missing backup objects", ErrCorrupt)
+	}
+	for _, entry := range entries {
+		if entry.Name() == "BACKUP" {
+			continue
+		}
+		f, listed := files[entry.Name()]
+		if !listed {
+			return nil, fmt.Errorf("%w: unlisted backup object", ErrCorrupt)
+		}
+		if err := verifyBackupFile(ctx, source, f, buffer); err != nil {
+			return nil, err
+		}
+	}
+	image, err := validateBackupImage(ctx, source, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if image.Current.UUID != meta.UUID || image.Current.Sequence != meta.Sequence || image.Catalog.Cutoff != meta.Cutoff ||
+		image.Files[image.Current.ActiveID].Size.Load() != image.Current.ActiveEnd ||
+		len(files) != len(image.Files)+2 {
+		return nil, fmt.Errorf("%w: backup image identity or committed length", ErrCorrupt)
+	}
+	if _, ok := files["CURRENT"]; !ok {
+		return nil, fmt.Errorf("%w: missing backup frontier", ErrCorrupt)
+	}
+	if _, ok := files[ManifestName(image.Current.UUID, image.Current.ManifestID)]; !ok {
+		return nil, fmt.Errorf("%w: missing backup catalog", ErrCorrupt)
+	}
+	for id := range image.Files {
+		if _, ok := files[DataName(meta.UUID, id)]; !ok {
+			return nil, fmt.Errorf("%w: missing selected backup segment", ErrCorrupt)
+		}
+	}
+	return meta.Files, nil
 }
 
 // Once BACKUP is recognized, every selected object must have the canonical

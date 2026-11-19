@@ -26,6 +26,40 @@ func TestOptionsAdmission(t *testing.T) {
 	}
 }
 
+func TestAdmissionCacheAndRecoveryUseSameEntrySizes(t *testing.T) {
+	opts := Options{MaxRecordBytes: 51, CacheBytes: 131}
+	db := newTestDB(t, opts, nil)
+	mustPut(t, db, "ab", "x")
+	stats := db.Stats()
+	if stats.LiveRecordBytes != 51 || stats.Cache.UsedBytes != 131 {
+		t.Fatalf("record bytes = %d, cache bytes = %d", stats.LiveRecordBytes, stats.Cache.UsedBytes)
+	}
+	var size *SizeError
+	if err := db.Put([]byte("ab"), []byte("xx")); !errors.As(err, &size) || size.RecordBytes != 52 || size.CacheCharge != 132 {
+		t.Fatalf("size error = %+v, err = %v", size, err)
+	}
+	dir := db.store.Dir
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, smaller := range []Options{{MaxRecordBytes: 50, CacheBytes: 131}, {MaxRecordBytes: 51, CacheBytes: 130}} {
+		var required *CompatibilityError
+		opened, err := Open(dir, smaller)
+		if opened != nil {
+			opened.Close()
+		}
+		if !errors.As(err, &required) || required.RequiredRecordBytes != 51 || required.RequiredCacheBytes != 131 {
+			t.Fatalf("reopen with %+v: required = %+v, err = %v", smaller, required, err)
+		}
+	}
+	reopened, err := Open(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	wantValue(t, reopened, "ab", "x")
+}
+
 func TestTargetSegmentBytesNormalization(t *testing.T) {
 	for _, tc := range []struct {
 		name string
