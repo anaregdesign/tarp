@@ -31,19 +31,32 @@ bytes held by pins, use `MaintenanceStatus().PinnedBytes`.
 
 | Field | Suggested Prometheus metric | Counts since Open |
 | --- | --- | --- |
-| `Cache.Hits` | `tarp_cache_hits_total` | Requested key positions found in the LRU |
-| `Cache.Misses` | `tarp_cache_misses_total` | Requested key positions found only in the live index |
-| `MissingKeys` | `tarp_missing_keys_total` | Requested key positions absent from the live index |
+| `Cache.Hits` | `tarp_cache_hits_total` | Distinct keys per read call found in the LRU |
+| `Cache.Misses` | `tarp_cache_misses_total` | Distinct keys per read call found only in the live index |
+| `MissingKeys` | `tarp_missing_keys_total` | Distinct keys per read call absent from the live index |
+| `BatchGetDuplicateInputs` | `tarp_batch_get_duplicate_inputs_total` | Input positions beyond the first for each encoded key in a captured BatchGet |
 | `Cache.Evictions` | `tarp_cache_evictions_total` | LRU entries evicted to meet the byte limit |
 | `WriteCommits` | `tarp_write_commits_total` | Nonempty foreground write calls published to the in-memory index |
 | `WrittenRecords` | `tarp_written_records_total` | Put and Delete records published by those calls |
 
-Get counts its first lookup once, including when a later record read fails or
-a concurrent update requires a retry. BatchGet counts every input position at
-snapshot capture. A cold `[A, A, missing]` with a live A counts two misses and
-one missing key and reads A's record once. An invalid batch, Scan, Backup and
-Compact contribute zero read lookups. Typed codec failures before a lookup
-have no effect. Decode failures after a lookup retain its counts.
+Get counts its first lookup once, including when a concurrent update requires
+a retry. At snapshot capture, BatchGet classifies each distinct key once as a
+hit, miss or missing key. Every additional occurrence in the same call adds
+one to `BatchGetDuplicateInputs`. Keys are compared by their encoded bytes,
+including when a TypedDB key codec maps different inputs to the same bytes.
+
+For `BatchGet([A, B, A, C, C])`, suppose A is cached, B is live but cold and
+C is absent. The call adds one hit, one miss, one missing key and two duplicate
+inputs. It reads B's record once. BatchGet preserves LRU contents and recency,
+so a second identical call adds the same counts if the DB is otherwise idle.
+For a cold live A, `BatchGet([A, A, A])` adds one miss and two duplicate
+inputs. Three separate `Get(A)` calls add one miss and two hits if the first
+call caches A and it stays cached.
+
+An empty or invalid batch, a failure before snapshot capture, Scan, Backup
+and Compact contribute zero to these four counters. A subsequent DATA read
+or typed value decode error retains the captured counts. The duplicate
+counter also covers cached and absent keys, both of which require no DATA read.
 
 BatchPut counts one commit and every input record, including repeated keys.
 BatchDelete counts one commit and one record per distinct deleted key.
@@ -87,9 +100,25 @@ Record request latency with a server-side histogram around the operation.
 Use `rate(tarp_written_records_total[5m]) / rate(tarp_write_commits_total[5m])`
 for records per commit over a five-minute window with writes. For cache hit
 ratio, divide the hit rate by the sum of hit and miss rates over a window
-with lookups of live keys. Missing keys have their own counter. A growing
+with lookups of live keys. Missing keys and duplicate inputs each have their
+own counter and contribute to neither side of this ratio. The mixed batch
+above has a hit ratio of 50%. A growing
 obsolete-byte gauge alongside stable live bytes indicates retained history
 from overwrites and deletes.
+
+### Migrating lookup metrics from v0.2.x
+
+In v0.2.x each input position contributed to hits, misses or missing keys.
+Starting in v0.3.0, a batch with duplicates contributes fewer lookups, and
+hit ratios can change for the same workload. For a rolling upgrade, add a
+constant `lookup_unit="distinct_key"` label to the three lookup metrics in
+the upgraded collector. Select that label in dashboards, recording rules and
+alerts so each aggregation uses the same counting unit. If retaining the
+unlabelled metric names, compare rates only within windows in which every
+included instance used the same definition. Adding the duplicate count to
+the sum of the three lookup counts recovers the total number of classified
+input positions. The individual v0.2.x hit, miss and missing totals cannot
+be reconstructed from that sum.
 
 See the [runnable Stats example](../stats_test.go) and
 [Prometheus custom collector documentation](https://pkg.go.dev/github.com/prometheus/client_golang/prometheus#Collector).

@@ -10,6 +10,7 @@ type entry struct {
 	key        string
 	value      []byte
 	prev, next *entry
+	lastBatch  uint64
 }
 
 // Cache requires external serialization. Stored bytes must remain immutable.
@@ -18,6 +19,7 @@ type Cache struct {
 	head, tail  *entry
 	used, limit int64
 	evictions   uint64
+	batch       uint64
 }
 
 func New(limit int64) *Cache {
@@ -34,13 +36,29 @@ func (c *Cache) Clear() {
 	*c = Cache{items: make(map[string]*entry), limit: c.limit, evictions: c.evictions}
 }
 
-// Peek returns immutable cached bytes without changing recency.
-func (c *Cache) Peek(key []byte) ([]byte, bool) {
+// BeginBatch starts a group of peeks under the caller's lock.
+func (c *Cache) BeginBatch() {
+	c.batch++
+	if c.batch == 0 {
+		for _, e := range c.items {
+			e.lastBatch = 0
+		}
+		c.batch = 1
+	}
+}
+
+// PeekBatch returns the immutable value, its presence, and whether this key
+// already occurred in this batch. Peeking preserves recency.
+func (c *Cache) PeekBatch(key []byte) (value []byte, found, duplicate bool) {
 	e, ok := c.items[string(key)]
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
-	return e.value, true
+	if e.lastBatch == c.batch {
+		return e.value, true, true
+	}
+	e.lastBatch = c.batch
+	return e.value, true, false
 }
 
 func (c *Cache) Get(key []byte) ([]byte, bool) {

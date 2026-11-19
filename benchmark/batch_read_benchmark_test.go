@@ -3,9 +3,11 @@ package benchmark
 import (
 	"bytes"
 	"errors"
+	"math/rand/v2"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/anaregdesign/tarp"
@@ -25,6 +27,14 @@ func BenchmarkBatchGet(b *testing.B) {
 	for i := range unique {
 		unique[i] = i
 	}
+	shuffled := slices.Clone(unique)
+	rng := rand.New(rand.NewPCG(66, 1))
+	rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+	repeatedHot := make([]int, slots)
+	repeatedAbsent := make([]int, slots)
+	for i := range repeatedAbsent {
+		repeatedAbsent[i] = -1
+	}
 	for _, tc := range []struct {
 		name string
 		ids  []int // -1 requests an absent key.
@@ -32,6 +42,9 @@ func BenchmarkBatchGet(b *testing.B) {
 	}{
 		{"hot-1", unique[:1], false},
 		{"hot-32", unique, false},
+		{"hot-shuffled-32", shuffled, false},
+		{"repeated-hot-32", repeatedHot, false},
+		{"repeated-absent-32", repeatedAbsent, false},
 		{"miss-os-warm-32", unique, true},
 		{"duplicate-missing-os-warm-32", mixed, true},
 	} {
@@ -76,7 +89,7 @@ func BenchmarkBatchGet(b *testing.B) {
 					}
 					b.SetBytes(int64(found * len(baseValue)))
 					if api == "raw" {
-						measureBatchReads(b, method, db, request, want, db.Get, db.BatchGet, tc.cold, found)
+						measureBatchReads(b, method, db, request, want, db.Get, db.BatchGet, tc.cold, tc.ids)
 						return
 					}
 					typed, err := tarp.NewTypedDB(db, tarp.StringCodec{}, tarp.StringCodec{})
@@ -89,7 +102,7 @@ func BenchmarkBatchGet(b *testing.B) {
 						strings[i] = string(key)
 						expected[i] = tarp.TypedBatchResult[string]{Value: string(want[i].Value), Found: want[i].Found}
 					}
-					measureBatchReads(b, method, db, strings, expected, typed.Get, typed.BatchGet, tc.cold, found)
+					measureBatchReads(b, method, db, strings, expected, typed.Get, typed.BatchGet, tc.cold, tc.ids)
 				})
 			}
 		}
@@ -99,7 +112,7 @@ func BenchmarkBatchGet(b *testing.B) {
 func measureBatchReads[K, V any, R ~struct {
 	Value V
 	Found bool
-}](b *testing.B, method string, db *tarp.DB, keys []K, want []R, get func(K) (V, error), batch func([]K) ([]R, error), cold bool, found int) {
+}](b *testing.B, method string, db *tarp.DB, keys []K, want []R, get func(K) (V, error), batch func([]K) ([]R, error), cold bool, ids []int) {
 	b.Helper()
 	read := batch
 	if method == "Get-loop" {
@@ -138,13 +151,28 @@ func measureBatchReads[K, V any, R ~struct {
 		b.Fatal("incorrect ordered read results")
 	}
 	after := db.Stats()
-	hits, misses := found, 0
-	if cold {
-		hits, misses = 0, found
+	var hits, misses, missing, duplicates uint64
+	seen := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		if method == "BatchGet" && seen[id] {
+			duplicates++
+			continue
+		}
+		seen[id] = true
+		switch {
+		case id < 0:
+			missing++
+		case cold:
+			misses++
+		default:
+			hits++
+		}
 	}
-	if after.Cache.Hits-before.Cache.Hits != uint64(hits)*uint64(b.N) ||
-		after.Cache.Misses-before.Cache.Misses != uint64(misses)*uint64(b.N) ||
-		after.MissingKeys-before.MissingKeys != uint64(len(keys)-found)*uint64(b.N) {
+	n := uint64(b.N)
+	if after.Cache.Hits-before.Cache.Hits != hits*n ||
+		after.Cache.Misses-before.Cache.Misses != misses*n ||
+		after.MissingKeys-before.MissingKeys != missing*n ||
+		after.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != duplicates*n {
 		b.Fatalf("unexpected cache classification: before %+v, after %+v", before, after)
 	}
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(len(keys)), "ns/slot")
