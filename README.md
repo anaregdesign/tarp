@@ -5,7 +5,7 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.1.0
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.2.0
 in a new module, run the commands below. In an existing module, run just
 the `go get` command.
 
@@ -13,7 +13,7 @@ the `go get` command.
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.1.0
+go get github.com/anaregdesign/tarp@v0.2.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -304,6 +304,13 @@ tail writes. It serializes with the worker and can overlap one online backup.
 Duplicate manual checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult` reports bytes reclaimed or still pinned by that operation.
 Supply cancellable contexts for manual maintenance and backup.
+
+## Metrics
+
+Use `db.Stats()` on a raw or typed DB to collect storage size, cache activity
+and write counters in one constant-time snapshot. A server can expose the
+gauges and cumulative counters at `/metrics`. See the [field definitions
+and Prometheus collector example](docs/stats.md).
 
 ## Development
 

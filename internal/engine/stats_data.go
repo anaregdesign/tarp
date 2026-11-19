@@ -1,0 +1,70 @@
+package engine
+
+import (
+	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/storage"
+)
+
+// dataTotals describes a set of physical DATA files selected by a frontier.
+type dataTotals struct {
+	segments   uint64
+	bytes      uint64
+	tombstones uint64
+}
+
+func (d *dataTotals) addFile(size, tombstones int64) {
+	d.segments++
+	d.bytes += uint64(size)
+	d.tombstones += uint64(tombstones)
+}
+
+// initDataStats runs once before this DB admits callers.
+func (db *DB) initDataStats() {
+	var selected dataTotals
+	for _, entry := range db.store.Catalog.Files {
+		if entry.ID != 0 {
+			selected.addFile(entry.Bytes, db.store.Files[entry.ID].DeleteBytes.Load())
+		}
+	}
+	active := db.store.Files[db.store.Current.ActiveID]
+	selected.addFile(db.store.Current.ActiveEnd, active.DeleteBytes.Load())
+	db.stats.SelectedSegments = selected.segments
+	db.stats.SelectedDataBytes = selected.bytes
+	db.stats.TombstoneBytes = selected.tombstones
+}
+
+// replaceDataStats applies a published catalog change while the writer gate
+// is held. Unchanged files, including a concurrently written tail, retain
+// their accounting. The state lock covers only the constant-time update.
+func (db *DB) replaceDataStats(old, next dataTotals) {
+	db.state.Lock()
+	db.stats.SelectedSegments = db.stats.SelectedSegments - old.segments + next.segments
+	db.stats.SelectedDataBytes = db.stats.SelectedDataBytes - old.bytes + next.bytes
+	db.stats.TombstoneBytes = db.stats.TombstoneBytes - old.tombstones + next.tombstones
+	db.state.Unlock()
+}
+
+// sealActive seals the nonempty active prefix for a full checkpoint. The
+// log being sealed remains selected; only the new empty header is added.
+func (db *DB) sealActive() error {
+	previous := db.store.Current.ActiveID
+	err := db.store.Rotate()
+	if db.store.Current.ActiveID != previous {
+		db.replaceDataStats(dataTotals{}, dataTotals{segments: 1, bytes: format.SegmentHeaderBytes})
+	}
+	return err
+}
+
+// checkpointDataTotals counts only the immutable prefix being replaced. The
+// active file captured alongside it belongs to the tail of the new catalog.
+func checkpointDataTotals(capture *storage.Capture, outputs []format.File) (old, next dataTotals) {
+	for _, source := range capture.Files {
+		if source.Entry.ID != capture.Current.ActiveID {
+			old.addFile(source.Entry.Bytes, source.File.DeleteBytes.Load())
+		}
+	}
+	for _, file := range outputs {
+		next.addFile(file.Bytes, 0)
+	}
+	return old, next
+}

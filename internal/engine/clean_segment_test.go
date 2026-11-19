@@ -22,7 +22,7 @@ func sealForCleaning(t *testing.T, db *DB) format.File {
 	t.Helper()
 	db.writer.Lock()
 	defer db.writer.Unlock()
-	if err := db.store.Rotate(); err != nil {
+	if err := db.sealActive(); err != nil {
 		t.Fatal(err)
 	}
 	return db.store.Catalog.Files[len(db.store.Catalog.Files)-1]

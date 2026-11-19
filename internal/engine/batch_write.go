@@ -132,5 +132,6 @@ func (db *DB) mutateBatch(op string, kind uint8, records []storage.Entry) error 
 			invalidatedSealed = true
 		}
 	}
+	db.countWriteCommit(previousActive)
 	return nil
 }

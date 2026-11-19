@@ -225,6 +225,10 @@ func TestMissCannotRefillStaleVersion(t *testing.T) {
 			if deleted && !errors.Is(got.err, ErrNotFound) || !deleted && (got.err != nil || string(got.value) != "new") {
 				t.Fatalf("racing miss: %q %v", got.value, got.err)
 			}
+			s := db.Stats()
+			if s.Cache.Hits != 0 || s.Cache.Misses != 1 || s.MissingKeys != 0 {
+				t.Fatalf("retry should count only the initial miss: %+v", s)
+			}
 		})
 	}
 }
@@ -260,6 +264,10 @@ func TestExactCacheIntegration(t *testing.T) {
 	wantValue(t, db, "b", "B")
 	if reads.Load() != 1 {
 		t.Fatal("wrong LRU victim")
+	}
+	s := db.Stats()
+	if s.Cache.Hits != 2 || s.Cache.Misses != 1 || s.MissingKeys != 1 || s.Cache.Evictions != 2 {
+		t.Fatalf("unexpected lookup/eviction counts: %+v", s)
 	}
 }
 

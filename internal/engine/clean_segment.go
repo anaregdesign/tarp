@@ -78,6 +78,18 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 		return publicErr
 	}
 	keepOutput = true
+	// Cleaning retains every tombstone. Replace only the physical file counts
+	// and sizes, including a possible metadata-only cleaned interval.
+	var oldData, newData dataTotals
+	for _, source := range entries {
+		if source.ID != 0 {
+			oldData.addFile(source.Bytes, 0)
+		}
+	}
+	if n := work.OutputBytes(); n > 0 {
+		newData.addFile(n, 0)
+	}
+	db.replaceDataStats(oldData, newData)
 	db.writer.Unlock()
 
 	for _, m := range moves {

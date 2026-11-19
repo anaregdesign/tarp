@@ -55,7 +55,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		return CompactResult{ReclaimedBytes: n, PinnedBytes: pinned}, compactCleanupError(err)
 	}
 	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
-		if err := db.store.Rotate(); err != nil {
+		if err := db.sealActive(); err != nil {
 			db.storageFailure(err)
 			db.writer.Unlock()
 			// Sealing can publish a new active log at the old cutoff.
@@ -160,6 +160,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		db.compactFailure(err)
 		return result, operationError("compact", "output-sync", err)
 	}
+	oldData, newData := checkpointDataTotals(capture, outputs)
 	db.writer.Lock()
 	if err := errors.Join(ctx.Err(), db.health()); err != nil {
 		db.writer.Unlock()
@@ -167,6 +168,9 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	}
 	attempted = true
 	err = db.store.InstallCheckpoint(capture, outputs)
+	if err == nil {
+		db.replaceDataStats(oldData, newData)
+	}
 	db.storageFailure(err)
 	db.writer.Unlock()
 	if err != nil {

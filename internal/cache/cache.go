@@ -1,6 +1,8 @@
 // Package cache implements an unsynchronized, exact global LRU.
 package cache
 
+import "math"
+
 // MetadataBytes is a logical policy charge, not the allocator's actual cost.
 const MetadataBytes = 128
 
@@ -15,6 +17,7 @@ type Cache struct {
 	items       map[string]*entry
 	head, tail  *entry
 	used, limit int64
+	evictions   uint64
 }
 
 func New(limit int64) *Cache {
@@ -22,6 +25,14 @@ func New(limit int64) *Cache {
 }
 
 func (c *Cache) Bytes() int64 { return c.used }
+
+// Evictions counts entries removed to admit another entry within the byte limit.
+func (c *Cache) Evictions() uint64 { return c.evictions }
+
+// Clear releases all entries while retaining the capacity-eviction counter.
+func (c *Cache) Clear() {
+	*c = Cache{items: make(map[string]*entry), limit: c.limit, evictions: c.evictions}
+}
 
 // Peek returns immutable cached bytes without changing recency.
 func (c *Cache) Peek(key []byte) ([]byte, bool) {
@@ -51,6 +62,9 @@ func (c *Cache) Put(key string, value []byte) {
 	c.Delete(key)
 	for c.used > c.limit-charge {
 		c.Delete(c.tail.key)
+		if c.evictions < math.MaxUint64 {
+			c.evictions++
+		}
 	}
 	e := &entry{key: key, value: value}
 	c.items[key] = e

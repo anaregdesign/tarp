@@ -50,7 +50,7 @@ func (o Observer) State(inspect func(map[string]storage.Location, *cache.Cache))
 func (o Observer) ClearCache() {
 	o.db.state.Lock()
 	defer o.db.state.Unlock()
-	o.db.cache = cache.New(o.db.opts.CacheBytes)
+	o.db.cache.Clear()
 }
 
 // CloseAndRetainIndex transfers ownership of the actual index and file
