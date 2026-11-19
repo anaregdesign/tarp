@@ -12,6 +12,14 @@ Benchmarks, smoke measurement profiles, and the VM measurement workflow run only
 on a separate explicit user request. Ordinary functional and race tests provide
 the routine PR checks.
 
+## Public batch APIs and Stats
+
+Run `benchmark/scripts/api-benchmarks.sh` to compare grouped and single reads,
+durable puts/deletes, exact-fit writes with and without rotation, and Stats
+collection at idle or alongside foreground Gets. The [v0.2.0 native
+results](benchmarks/v0.2.0-native.md) include workload definitions, per-key
+and per-group units, all five rounds and follow-up diagnostics.
+
 ## Compaction comparison
 
 `BenchmarkCompaction` and the opt-in JSONL drivers compare two operations on private

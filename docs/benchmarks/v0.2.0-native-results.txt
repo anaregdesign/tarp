@@ -1,0 +1,331 @@
+# tarp v0.2.0 native benchmark records, 2026-11-19
+# darwin/arm64, Apple M3 Max, Go 1.27.3, GOMAXPROCS=4
+# Protocol and medians: v0.2.0-native.md
+
+# Primary API benchmarks
+# Round 1
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3344184 67.65 ns/op 946.09 MB/s 67.65 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/BatchGet-4 2345272 100.7 ns/op 635.86 MB/s 100.7 ns/slot 248 B/op 6 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 241844 912.5 ns/op 2244.44 MB/s 28.51 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/BatchGet-4 138009 1728 ns/op 1185.02 MB/s 54.01 ns/slot 8960 B/op 100 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 15429 15372 ns/op 133.23 MB/s 480.4 ns/slot 14575 B/op 73 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/BatchGet-4 14832 16059 ns/op 127.53 MB/s 501.8 ns/slot 18928 B/op 139 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 28645 8268 ns/op 185.79 MB/s 258.4 ns/slot 8403 B/op 47 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/BatchGet-4 25460 9339 ns/op 164.48 MB/s 291.8 ns/slot 12247 B/op 105 allocs/op
+BenchmarkBatchGet/hot-1/raw/Get-loop-4 4773289 45.52 ns/op 1406.12 MB/s 45.52 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/Get-loop-4 3575806 66.06 ns/op 968.88 MB/s 66.06 ns/slot 168 B/op 4 allocs/op
+BenchmarkBatchGet/hot-32/raw/Get-loop-4 183363 1151 ns/op 1779.01 MB/s 35.98 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/Get-loop-4 118429 1895 ns/op 1080.91 MB/s 59.21 ns/slot 5504 B/op 97 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/Get-loop-4 14137 16925 ns/op 121.01 MB/s 528.9 ns/slot 9349 B/op 161 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/Get-loop-4 13720 17484 ns/op 117.14 MB/s 546.4 ns/slot 11660 B/op 225 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/Get-loop-4 17307 13490 ns/op 113.86 MB/s 421.6 ns/slot 7300 B/op 121 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/Get-loop-4 17403 13672 ns/op 112.35 MB/s 427.2 ns/slot 9093 B/op 177 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/batch-4 3 15400764 ns/op 1.000 commits/op 15400764 ns/key 5053 B/op 41 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/batch-4 3 13627222 ns/op 1.000 commits/op 13627222 ns/key 2584 B/op 38 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/batch-4 3 14844736 ns/op 1.000 commits/op 927796 ns/key 43712 B/op 107 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/batch-4 3 14710167 ns/op 1.000 commits/op 919385 ns/key 7045 B/op 70 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/batch-4 3 13914472 ns/op 1.000 commits/op 869655 ns/key 62416 B/op 155 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/batch-4 3 13893528 ns/op 1.000 commits/op 868346 ns/key 8829 B/op 105 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/serial-4 3 15347778 ns/op 1.000 commits/op 15347778 ns/key 4984 B/op 39 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/serial-4 3 15025042 ns/op 1.000 commits/op 15025042 ns/key 2573 B/op 35 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/serial-4 3 277183444 ns/op 16.00 commits/op 17323965 ns/key 73106 B/op 568 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/serial-4 3 260435639 ns/op 16.00 commits/op 16277227 ns/key 36501 B/op 515 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/serial-4 3 276385556 ns/op 16.00 commits/op 17274097 ns/key 90397 B/op 600 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/serial-4 3 265288445 ns/op 16.00 commits/op 16580528 ns/key 36709 B/op 531 allocs/op
+BenchmarkStatsSnapshot/1-keys-4 32139559 10.98 ns/op 1.000 segments 0 B/op 0 allocs/op
+BenchmarkStatsSnapshot/4096-keys-4 30539349 11.35 ns/op 16.00 segments 0 B/op 0 allocs/op
+BenchmarkStatsDuringGet/baseline-4 66999150 33.32 ns/op 0 scrapes 0 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/1Hz-4 66006528 32.85 ns/op 2.000 scrapes 0.9222 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/continuous-4 5606056 444.8 ns/op 41364749 scrapes 16587598 scrapes/s 64 B/op 1 allocs/op
+# Round 2
+BenchmarkBatchGet/hot-1/raw/Get-loop-4 4704490 46.61 ns/op 1373.19 MB/s 46.61 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/Get-loop-4 3398554 67.25 ns/op 951.69 MB/s 67.25 ns/slot 168 B/op 4 allocs/op
+BenchmarkBatchGet/hot-32/raw/Get-loop-4 187468 1180 ns/op 1735.77 MB/s 36.87 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/Get-loop-4 115579 1921 ns/op 1065.92 MB/s 60.04 ns/slot 5504 B/op 97 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/Get-loop-4 14148 16830 ns/op 121.69 MB/s 525.9 ns/slot 9351 B/op 161 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/Get-loop-4 13569 17607 ns/op 116.32 MB/s 550.2 ns/slot 11655 B/op 225 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/Get-loop-4 17822 13392 ns/op 114.69 MB/s 418.5 ns/slot 7300 B/op 121 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/Get-loop-4 17318 13773 ns/op 111.52 MB/s 430.4 ns/slot 9093 B/op 177 allocs/op
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3496216 68.52 ns/op 934.09 MB/s 68.52 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/BatchGet-4 2344248 101.1 ns/op 632.93 MB/s 101.1 ns/slot 248 B/op 6 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 237067 920.6 ns/op 2224.72 MB/s 28.77 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/BatchGet-4 129223 1701 ns/op 1203.65 MB/s 53.17 ns/slot 8960 B/op 100 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 15478 15426 ns/op 132.76 MB/s 482.1 ns/slot 14577 B/op 73 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/BatchGet-4 14626 16381 ns/op 125.02 MB/s 511.9 ns/slot 18934 B/op 139 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 27811 8473 ns/op 181.29 MB/s 264.8 ns/slot 8397 B/op 47 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/BatchGet-4 25813 9314 ns/op 164.91 MB/s 291.1 ns/slot 12243 B/op 105 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/serial-4 3 15469777 ns/op 1.000 commits/op 15469777 ns/key 4893 B/op 38 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/serial-4 3 15772194 ns/op 1.000 commits/op 15772194 ns/key 2376 B/op 33 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/serial-4 3 265182167 ns/op 16.00 commits/op 16573885 ns/key 73096 B/op 568 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/serial-4 3 250378708 ns/op 16.00 commits/op 15648669 ns/key 36368 B/op 514 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/serial-4 3 254404722 ns/op 16.00 commits/op 15900295 ns/key 90008 B/op 600 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/serial-4 3 254326166 ns/op 16.00 commits/op 15895385 ns/key 36688 B/op 530 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/batch-4 3 15469764 ns/op 1.000 commits/op 15469764 ns/key 5016 B/op 41 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/batch-4 3 14880222 ns/op 1.000 commits/op 14880222 ns/key 2450 B/op 36 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/batch-4 3 14458319 ns/op 1.000 commits/op 903645 ns/key 43450 B/op 104 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/batch-4 3 15123083 ns/op 1.000 commits/op 945193 ns/key 7045 B/op 70 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/batch-4 3 15189389 ns/op 1.000 commits/op 949337 ns/key 62560 B/op 156 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/batch-4 3 13650722 ns/op 1.000 commits/op 853170 ns/key 9149 B/op 108 allocs/op
+BenchmarkStatsSnapshot/1-keys-4 32063703 10.97 ns/op 1.000 segments 0 B/op 0 allocs/op
+BenchmarkStatsSnapshot/4096-keys-4 31143441 11.22 ns/op 16.00 segments 0 B/op 0 allocs/op
+BenchmarkStatsDuringGet/continuous-4 7845924 291.2 ns/op 31131874 scrapes 13628192 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/1Hz-4 69860278 33.17 ns/op 2.000 scrapes 0.8631 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/baseline-4 63561525 34.75 ns/op 0 scrapes 0 scrapes/s 64 B/op 1 allocs/op
+# Round 3
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3499340 67.01 ns/op 955.07 MB/s 67.01 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/BatchGet-4 2312956 102.6 ns/op 623.69 MB/s 102.6 ns/slot 248 B/op 6 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 229161 933.0 ns/op 2195.11 MB/s 29.16 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/BatchGet-4 133336 1694 ns/op 1209.11 MB/s 52.93 ns/slot 8960 B/op 100 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 14377 16418 ns/op 124.74 MB/s 513.1 ns/slot 14575 B/op 73 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/BatchGet-4 14626 16328 ns/op 125.43 MB/s 510.3 ns/slot 18931 B/op 139 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 28028 8424 ns/op 182.34 MB/s 263.2 ns/slot 8401 B/op 47 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/BatchGet-4 26007 9103 ns/op 168.74 MB/s 284.5 ns/slot 12246 B/op 105 allocs/op
+BenchmarkBatchGet/hot-1/raw/Get-loop-4 4675578 47.36 ns/op 1351.34 MB/s 47.36 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/Get-loop-4 3303094 70.12 ns/op 912.72 MB/s 70.12 ns/slot 168 B/op 4 allocs/op
+BenchmarkBatchGet/hot-32/raw/Get-loop-4 178624 1215 ns/op 1685.66 MB/s 37.97 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/Get-loop-4 118224 1905 ns/op 1075.13 MB/s 59.53 ns/slot 5504 B/op 97 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/Get-loop-4 14034 17009 ns/op 120.41 MB/s 531.5 ns/slot 9347 B/op 161 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/Get-loop-4 13491 17720 ns/op 115.58 MB/s 553.7 ns/slot 11659 B/op 225 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/Get-loop-4 18108 13155 ns/op 116.76 MB/s 411.1 ns/slot 7299 B/op 121 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/Get-loop-4 17055 14205 ns/op 108.13 MB/s 443.9 ns/slot 9094 B/op 177 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/batch-4 3 19280097 ns/op 1.000 commits/op 19280097 ns/key 4978 B/op 40 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/batch-4 3 14470500 ns/op 1.000 commits/op 14470500 ns/key 2658 B/op 39 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/batch-4 3 16455222 ns/op 1.000 commits/op 1028451 ns/key 43674 B/op 106 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/batch-4 3 15804667 ns/op 1.000 commits/op 987792 ns/key 7018 B/op 69 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/batch-4 3 16408431 ns/op 1.000 commits/op 1025527 ns/key 62336 B/op 154 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/batch-4 3 16517680 ns/op 1.000 commits/op 1032355 ns/key 9074 B/op 108 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/serial-4 3 14861167 ns/op 1.000 commits/op 14861167 ns/key 4834 B/op 37 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/serial-4 3 15952792 ns/op 1.000 commits/op 15952792 ns/key 2434 B/op 33 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/serial-4 3 249452083 ns/op 16.00 commits/op 15590755 ns/key 73064 B/op 567 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/serial-4 3 253217820 ns/op 16.00 commits/op 15826114 ns/key 36378 B/op 514 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/serial-4 3 282107431 ns/op 16.00 commits/op 17631714 ns/key 90621 B/op 603 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/serial-4 3 245263750 ns/op 16.00 commits/op 15328984 ns/key 36640 B/op 530 allocs/op
+BenchmarkStatsSnapshot/1-keys-4 32133060 11.15 ns/op 1.000 segments 0 B/op 0 allocs/op
+BenchmarkStatsSnapshot/4096-keys-4 30360847 11.34 ns/op 16.00 segments 0 B/op 0 allocs/op
+BenchmarkStatsDuringGet/baseline-4 69644281 33.04 ns/op 0 scrapes 0 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/1Hz-4 69101047 33.48 ns/op 2.000 scrapes 0.8645 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/continuous-4 8464694 307.7 ns/op 34762456 scrapes 13347522 scrapes/s 64 B/op 1 allocs/op
+# Round 4
+BenchmarkBatchGet/hot-1/raw/Get-loop-4 4859799 47.79 ns/op 1339.14 MB/s 47.79 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/Get-loop-4 3318483 69.01 ns/op 927.36 MB/s 69.01 ns/slot 168 B/op 4 allocs/op
+BenchmarkBatchGet/hot-32/raw/Get-loop-4 201800 1189 ns/op 1722.94 MB/s 37.15 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/Get-loop-4 116278 1912 ns/op 1071.21 MB/s 59.75 ns/slot 5504 B/op 97 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/Get-loop-4 14052 16950 ns/op 120.83 MB/s 529.7 ns/slot 9348 B/op 161 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/Get-loop-4 13689 17491 ns/op 117.09 MB/s 546.6 ns/slot 11656 B/op 225 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/Get-loop-4 18272 13048 ns/op 117.72 MB/s 407.8 ns/slot 7300 B/op 121 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/Get-loop-4 17235 13800 ns/op 111.30 MB/s 431.3 ns/slot 9092 B/op 177 allocs/op
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3459691 67.90 ns/op 942.50 MB/s 67.90 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/BatchGet-4 2091771 111.3 ns/op 575.16 MB/s 111.3 ns/slot 248 B/op 6 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 247604 900.8 ns/op 2273.49 MB/s 28.15 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/BatchGet-4 129267 1743 ns/op 1174.87 MB/s 54.47 ns/slot 8960 B/op 100 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 15273 15621 ns/op 131.10 MB/s 488.2 ns/slot 14575 B/op 73 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/BatchGet-4 13748 17328 ns/op 118.19 MB/s 541.5 ns/slot 18938 B/op 139 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 27448 8803 ns/op 174.48 MB/s 275.1 ns/slot 8399 B/op 47 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/BatchGet-4 24954 9348 ns/op 164.32 MB/s 292.1 ns/slot 12243 B/op 105 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/serial-4 3 15404097 ns/op 1.000 commits/op 15404097 ns/key 4984 B/op 39 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/serial-4 3 14990264 ns/op 1.000 commits/op 14990264 ns/key 2445 B/op 34 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/serial-4 3 272754389 ns/op 16.00 commits/op 17047149 ns/key 73000 B/op 567 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/serial-4 3 265025777 ns/op 16.00 commits/op 16564111 ns/key 36256 B/op 514 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/serial-4 3 284643472 ns/op 16.00 commits/op 17790217 ns/key 90408 B/op 600 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/serial-4 3 273137249 ns/op 16.00 commits/op 17071078 ns/key 36554 B/op 528 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/batch-4 3 15741944 ns/op 1.000 commits/op 15741944 ns/key 5128 B/op 42 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/batch-4 3 16353236 ns/op 1.000 commits/op 16353236 ns/key 2509 B/op 37 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/batch-4 3 18090542 ns/op 1.000 commits/op 1130659 ns/key 43488 B/op 105 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/batch-4 3 14288236 ns/op 1.000 commits/op 893015 ns/key 7034 B/op 70 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/batch-4 3 16072930 ns/op 1.000 commits/op 1004558 ns/key 62368 B/op 154 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/batch-4 3 15283459 ns/op 1.000 commits/op 955216 ns/key 9005 B/op 107 allocs/op
+BenchmarkStatsSnapshot/1-keys-4 31833078 11.09 ns/op 1.000 segments 0 B/op 0 allocs/op
+BenchmarkStatsSnapshot/4096-keys-4 32462547 10.94 ns/op 16.00 segments 0 B/op 0 allocs/op
+BenchmarkStatsDuringGet/continuous-4 7295622 326.3 ns/op 35441936 scrapes 14890017 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/1Hz-4 67978503 34.39 ns/op 2.000 scrapes 0.8554 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/baseline-4 69426746 33.09 ns/op 0 scrapes 0 scrapes/s 64 B/op 1 allocs/op
+# Round 5
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3436345 66.49 ns/op 962.61 MB/s 66.49 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/BatchGet-4 2333721 102.8 ns/op 622.62 MB/s 102.8 ns/slot 248 B/op 6 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 239127 932.5 ns/op 2196.15 MB/s 29.14 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/BatchGet-4 128203 1769 ns/op 1157.57 MB/s 55.29 ns/slot 8960 B/op 100 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 15043 15816 ns/op 129.49 MB/s 494.3 ns/slot 14575 B/op 73 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/BatchGet-4 14524 16395 ns/op 124.91 MB/s 512.4 ns/slot 18929 B/op 139 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 27032 8900 ns/op 172.59 MB/s 278.1 ns/slot 8396 B/op 47 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/BatchGet-4 24522 9670 ns/op 158.84 MB/s 302.2 ns/slot 12242 B/op 105 allocs/op
+BenchmarkBatchGet/hot-1/raw/Get-loop-4 4997834 45.44 ns/op 1408.31 MB/s 45.44 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-1/typed-string/Get-loop-4 3256080 69.16 ns/op 925.42 MB/s 69.16 ns/slot 168 B/op 4 allocs/op
+BenchmarkBatchGet/hot-32/raw/Get-loop-4 191528 1188 ns/op 1723.97 MB/s 37.12 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/hot-32/typed-string/Get-loop-4 117036 1926 ns/op 1063.51 MB/s 60.18 ns/slot 5504 B/op 97 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/Get-loop-4 14262 16751 ns/op 122.26 MB/s 523.5 ns/slot 9349 B/op 161 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/typed-string/Get-loop-4 13785 17365 ns/op 117.94 MB/s 542.7 ns/slot 11653 B/op 225 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/Get-loop-4 17667 13354 ns/op 115.02 MB/s 417.3 ns/slot 7300 B/op 121 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/typed-string/Get-loop-4 17073 13907 ns/op 110.45 MB/s 434.6 ns/slot 9093 B/op 177 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/batch-4 3 14291902 ns/op 1.000 commits/op 14291902 ns/key 5016 B/op 41 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/batch-4 3 14493694 ns/op 1.000 commits/op 14493694 ns/key 2584 B/op 38 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/batch-4 3 15312333 ns/op 1.000 commits/op 957021 ns/key 43712 B/op 107 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/batch-4 3 15040069 ns/op 1.000 commits/op 940004 ns/key 7056 B/op 70 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/batch-4 3 16084694 ns/op 1.000 commits/op 1005293 ns/key 62298 B/op 153 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/batch-4 3 16085125 ns/op 1.000 commits/op 1005320 ns/key 8904 B/op 106 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=1/serial-4 3 16622444 ns/op 1.000 commits/op 16622444 ns/key 4872 B/op 38 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=1/serial-4 3 15964111 ns/op 1.000 commits/op 15964111 ns/key 2584 B/op 35 allocs/op
+BenchmarkBatchWrite/raw/Put/keys=16/serial-4 3 247685042 ns/op 16.00 commits/op 15480315 ns/key 73000 B/op 567 allocs/op
+BenchmarkBatchWrite/raw/Delete/keys=16/serial-4 3 260741181 ns/op 16.00 commits/op 16296324 ns/key 36352 B/op 514 allocs/op
+BenchmarkBatchWrite/typed/Put/keys=16/serial-4 3 254372306 ns/op 16.00 commits/op 15898269 ns/key 90504 B/op 601 allocs/op
+BenchmarkBatchWrite/typed/Delete/keys=16/serial-4 3 232204264 ns/op 16.00 commits/op 14512766 ns/key 36592 B/op 529 allocs/op
+BenchmarkStatsSnapshot/1-keys-4 31829047 11.02 ns/op 1.000 segments 0 B/op 0 allocs/op
+BenchmarkStatsSnapshot/4096-keys-4 33678664 10.64 ns/op 16.00 segments 0 B/op 0 allocs/op
+BenchmarkStatsDuringGet/baseline-4 69171621 33.22 ns/op 0 scrapes 0 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/1Hz-4 72483829 33.76 ns/op 2.000 scrapes 0.8174 scrapes/s 64 B/op 1 allocs/op
+BenchmarkStatsDuringGet/continuous-4 6464011 401.7 ns/op 41966586 scrapes 16160986 scrapes/s 64 B/op 1 allocs/op
+
+# Segment boundary and BatchGet scratch comparison
+# Boundary round 1
+BenchmarkBatchPutSegmentBoundary/empty-4 3 20266444 ns/op 206.95 MB/s 8394498 B/op 54 allocs/op
+BenchmarkBatchPutSegmentBoundary/rotate-4 3 27310722 ns/op 153.57 MB/s 8396074 B/op 87 allocs/op
+# Boundary round 2
+BenchmarkBatchPutSegmentBoundary/rotate-4 3 29534417 ns/op 142.01 MB/s 8394442 B/op 86 allocs/op
+BenchmarkBatchPutSegmentBoundary/empty-4 3 18645584 ns/op 224.95 MB/s 8392896 B/op 54 allocs/op
+# Boundary round 3
+BenchmarkBatchPutSegmentBoundary/empty-4 3 17843639 ns/op 235.06 MB/s 8392725 B/op 52 allocs/op
+BenchmarkBatchPutSegmentBoundary/rotate-4 3 25073389 ns/op 167.28 MB/s 8394301 B/op 85 allocs/op
+# Boundary round 4
+BenchmarkBatchPutSegmentBoundary/rotate-4 3 29272611 ns/op 143.28 MB/s 8394685 B/op 90 allocs/op
+BenchmarkBatchPutSegmentBoundary/empty-4 3 20662028 ns/op 202.99 MB/s 8392898 B/op 53 allocs/op
+# Boundary round 5
+BenchmarkBatchPutSegmentBoundary/empty-4 3 20369958 ns/op 205.90 MB/s 8392725 B/op 52 allocs/op
+BenchmarkBatchPutSegmentBoundary/rotate-4 3 33287375 ns/op 126.00 MB/s 8394962 B/op 90 allocs/op
+# Probe round 1
+# Variant base
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3963812 67.69 ns/op 945.55 MB/s 67.69 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 293245 915.0 ns/op 2238.36 MB/s 28.59 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 18940 15589 ns/op 131.38 MB/s 487.1 ns/slot 14576 B/op 73 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 35204 8598 ns/op 178.65 MB/s 268.7 ns/slot 8397 B/op 47 allocs/op
+# Variant scratch
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3081669 83.74 ns/op 764.28 MB/s 83.74 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 310886 862.0 ns/op 2375.80 MB/s 26.94 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 18835 15760 ns/op 129.95 MB/s 492.5 ns/slot 13164 B/op 72 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 35263 8320 ns/op 184.61 MB/s 260.0 ns/slot 6987 B/op 46 allocs/op
+# Probe round 2
+# Variant scratch
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3924764 74.23 ns/op 862.21 MB/s 74.23 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 314241 840.0 ns/op 2438.16 MB/s 26.25 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 19407 15376 ns/op 133.19 MB/s 480.5 ns/slot 13164 B/op 72 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 35391 8299 ns/op 185.08 MB/s 259.3 ns/slot 6987 B/op 46 allocs/op
+# Variant base
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 4308754 66.82 ns/op 957.86 MB/s 66.82 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 295701 897.9 ns/op 2280.94 MB/s 28.06 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 18908 15603 ns/op 131.26 MB/s 487.6 ns/slot 14577 B/op 73 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 34200 8368 ns/op 183.57 MB/s 261.5 ns/slot 8396 B/op 47 allocs/op
+# Probe round 3
+# Variant base
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 4373498 67.70 ns/op 945.36 MB/s 67.70 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 299599 898.2 ns/op 2280.07 MB/s 28.07 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 19251 15721 ns/op 130.27 MB/s 491.3 ns/slot 14576 B/op 73 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 34220 8469 ns/op 181.38 MB/s 264.6 ns/slot 8396 B/op 47 allocs/op
+# Variant scratch
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3934401 73.95 ns/op 865.41 MB/s 73.95 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 329672 819.3 ns/op 2499.71 MB/s 25.60 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 19204 15603 ns/op 131.25 MB/s 487.6 ns/slot 13169 B/op 72 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 35128 8598 ns/op 178.64 MB/s 268.7 ns/slot 6987 B/op 46 allocs/op
+# Probe round 4
+# Variant scratch
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3940284 73.49 ns/op 870.88 MB/s 73.49 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 318936 844.3 ns/op 2425.56 MB/s 26.39 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 19092 15643 ns/op 130.92 MB/s 488.8 ns/slot 13167 B/op 72 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 34465 8409 ns/op 182.66 MB/s 262.8 ns/slot 6987 B/op 46 allocs/op
+# Variant base
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 4370796 68.29 ns/op 937.18 MB/s 68.29 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 309213 891.6 ns/op 2296.87 MB/s 27.86 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 19258 15517 ns/op 131.99 MB/s 484.9 ns/slot 14573 B/op 73 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 34389 8427 ns/op 182.27 MB/s 263.3 ns/slot 8395 B/op 47 allocs/op
+# Probe round 5
+# Variant base
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 4387549 65.66 ns/op 974.70 MB/s 65.66 ns/slot 144 B/op 3 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 297783 909.6 ns/op 2251.45 MB/s 28.43 ns/slot 4608 B/op 34 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 19318 15487 ns/op 132.24 MB/s 484.0 ns/slot 14576 B/op 73 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 35038 8405 ns/op 182.74 MB/s 262.7 ns/slot 8400 B/op 47 allocs/op
+# Variant scratch
+BenchmarkBatchGet/hot-1/raw/BatchGet-4 3899679 74.11 ns/op 863.64 MB/s 74.11 ns/slot 96 B/op 2 allocs/op
+BenchmarkBatchGet/hot-32/raw/BatchGet-4 317690 819.2 ns/op 2499.90 MB/s 25.60 ns/slot 3200 B/op 33 allocs/op
+BenchmarkBatchGet/miss-os-warm-32/raw/BatchGet-4 19347 15354 ns/op 133.39 MB/s 479.8 ns/slot 13171 B/op 72 allocs/op
+BenchmarkBatchGet/duplicate-missing-os-warm-32/raw/BatchGet-4 35491 8457 ns/op 181.62 MB/s 264.3 ns/slot 6989 B/op 46 allocs/op
+
+# Existing Get benchmark at released tags
+# Version round 1
+# Variant v0.1.0
+BenchmarkGet/64/application-hit-4 2000000 45.19 ns/op 1416.36 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 185.6 ns/op 344.92 MB/s 64 B/op 1 allocs/op
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-4 2000000 47.73 ns/op 1340.80 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 307.8 ns/op 207.90 MB/s 64 B/op 1 allocs/op
+# Version round 2
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-4 2000000 50.29 ns/op 1272.63 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 286.8 ns/op 223.15 MB/s 64 B/op 1 allocs/op
+# Variant v0.1.0
+BenchmarkGet/64/application-hit-4 2000000 42.71 ns/op 1498.51 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 231.1 ns/op 276.92 MB/s 64 B/op 1 allocs/op
+# Version round 3
+# Variant v0.1.0
+BenchmarkGet/64/application-hit-4 2000000 48.53 ns/op 1318.77 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 195.8 ns/op 326.89 MB/s 64 B/op 1 allocs/op
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-4 2000000 39.02 ns/op 1640.11 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 295.3 ns/op 216.70 MB/s 64 B/op 1 allocs/op
+# Version round 4
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-4 2000000 44.70 ns/op 1431.77 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 319.4 ns/op 200.40 MB/s 64 B/op 1 allocs/op
+# Variant v0.1.0
+BenchmarkGet/64/application-hit-4 2000000 49.84 ns/op 1283.99 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 195.5 ns/op 327.33 MB/s 64 B/op 1 allocs/op
+# Version round 5
+# Variant v0.1.0
+BenchmarkGet/64/application-hit-4 2000000 49.51 ns/op 1292.72 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 197.2 ns/op 324.56 MB/s 64 B/op 1 allocs/op
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-4 2000000 50.69 ns/op 1262.63 MB/s 64 B/op 1 allocs/op
+BenchmarkGet/64/application-hit-parallel-4 2000000 290.4 ns/op 220.35 MB/s 64 B/op 1 allocs/op
+
+# Parallel Get with stock and relocated Stats field
+# Layout round 1
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-parallel-4 2000000 314.4 ns/op 203.55 MB/s 64 B/op 1 allocs/op
+# Variant layout
+BenchmarkGet/64/application-hit-parallel-4 2000000 230.7 ns/op 277.45 MB/s 64 B/op 1 allocs/op
+# Layout round 2
+# Variant layout
+BenchmarkGet/64/application-hit-parallel-4 2000000 234.0 ns/op 273.50 MB/s 64 B/op 1 allocs/op
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-parallel-4 2000000 309.2 ns/op 206.99 MB/s 64 B/op 1 allocs/op
+# Layout round 3
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-parallel-4 2000000 313.5 ns/op 204.13 MB/s 64 B/op 1 allocs/op
+# Variant layout
+BenchmarkGet/64/application-hit-parallel-4 2000000 187.5 ns/op 341.30 MB/s 64 B/op 1 allocs/op
+# Layout round 4
+# Variant layout
+BenchmarkGet/64/application-hit-parallel-4 2000000 195.3 ns/op 327.76 MB/s 64 B/op 1 allocs/op
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-parallel-4 2000000 305.6 ns/op 209.44 MB/s 64 B/op 1 allocs/op
+# Layout round 5
+# Variant v0.2.0
+BenchmarkGet/64/application-hit-parallel-4 2000000 306.1 ns/op 209.10 MB/s 64 B/op 1 allocs/op
+# Variant layout
+BenchmarkGet/64/application-hit-parallel-4 2000000 186.4 ns/op 343.27 MB/s 64 B/op 1 allocs/op
+
+# Exact-fit BatchPut allocation profile, 7x plus one calibration group
+File: base.test
+Type: alloc_space
+Time: 2026-11-19 11:27:02 JST
+Active filters:
+   focus=engine\.\(\*DB\)\.mutateBatch
+Showing nodes accounting for 65539kB, 62.76% of 104426.46kB total
+Dropped 52 nodes (cum <= 522.13kB)
+      flat  flat%   sum%        cum   cum%
+32769.25kB 31.38% 31.38% 32789.35kB 31.40%  github.com/anaregdesign/tarp/internal/storage.(*Store).AppendBatch
+   32768kB 31.38% 62.76%    32768kB 31.38%  bytes.Clone (inline)
+    1.25kB 0.0012% 62.76% 65566.48kB 62.79%  github.com/anaregdesign/tarp/internal/engine.(*DB).mutateBatch
+    0.50kB 0.00048% 62.76% 32768.50kB 31.38%  github.com/anaregdesign/tarp/internal/engine.(*DB).ownMutation
+         0     0% 62.76% 65566.48kB 62.79%  github.com/anaregdesign/tarp.(*DB).BatchPut (inline)
+         0     0% 62.76% 65566.48kB 62.79%  github.com/anaregdesign/tarp/benchmark.BenchmarkBatchPutSegmentBoundary.func1
+         0     0% 62.76% 65566.48kB 62.79%  github.com/anaregdesign/tarp/internal/engine.(*DB).BatchPut
+         0     0% 62.76% 57370.84kB 54.94%  testing.(*B).launch
+         0     0% 62.76%  8195.63kB  7.85%  testing.(*B).run1.func1
+         0     0% 62.76% 65566.48kB 62.79%  testing.(*B).runN
