@@ -57,8 +57,8 @@ func TestStatsSharesTypedViewsAndRetainsFinalSnapshot(t *testing.T) {
 	want := tarp.Stats{
 		LiveKeys: 1, LiveRecordBytes: 50, SelectedSegments: 1, SelectedDataBytes: 263,
 		ObsoletePutBytes: 100, TombstoneBytes: 49, MissingKeys: 1,
-		WriteCommits: 2, WrittenRecords: 4,
-		Cache: tarp.CacheStats{UsedBytes: 130, LimitBytes: 130, Hits: 1, Misses: 2, Evictions: 2},
+		BatchGetDuplicateInputs: 1, WriteCommits: 2, WrittenRecords: 4,
+		Cache: tarp.CacheStats{UsedBytes: 130, LimitBytes: 130, Hits: 1, Misses: 1, Evictions: 2},
 	}
 	if s := raw.Stats(); s != want || db.Stats() != want {
 		t.Fatalf("snapshots: raw %+v, typed %+v; want %+v", s, db.Stats(), want)
@@ -90,6 +90,7 @@ func TestStatsSharesTypedViewsAndRetainsFinalSnapshot(t *testing.T) {
 	}
 	defer next.Close()
 	want.Cache = tarp.CacheStats{LimitBytes: 130}
+	want.BatchGetDuplicateInputs = 0
 	want.MissingKeys, want.WriteCommits, want.WrittenRecords = 0, 0, 0
 	if s := next.Stats(); s != want {
 		t.Fatalf("reopened: %+v, want %+v", s, want)

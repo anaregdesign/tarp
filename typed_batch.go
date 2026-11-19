@@ -19,7 +19,20 @@ func (db *TypedDB[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 	if err := engine.CheckBatchCount(len(keys)); err != nil {
 		return nil, err
 	}
-	encoded := make([][]byte, len(keys))
+	// Only the call to the engine needs these slice headers. Keep a small
+	// batch on the stack, including when the encoded bytes come from a codec.
+	var encoded [][]byte
+	const smallBatch = 32
+	switch {
+	case len(keys) <= 1:
+		var one [1][]byte
+		encoded = one[:len(keys)]
+	case len(keys) <= smallBatch:
+		var small [smallBatch][]byte
+		encoded = small[:len(keys)]
+	default:
+		encoded = make([][]byte, len(keys))
+	}
 	for i, key := range keys {
 		k, err := db.encodeKey(key)
 		if err != nil {

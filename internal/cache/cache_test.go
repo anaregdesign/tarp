@@ -56,7 +56,8 @@ func TestExactLRUAgainstModel(t *testing.T) {
 			remove(k)
 			delete(values, k)
 		case 3:
-			got, found := c.Peek([]byte(k))
+			c.BeginBatch()
+			got, found, _ := c.PeekBatch([]byte(k))
 			want, exists := values[k]
 			if found != exists || !slices.Equal(got, want) {
 				t.Fatalf("peek %s: (%v, %t), want (%v, %t)", k, got, found, want, exists)
@@ -78,6 +79,23 @@ func TestExactLRUAgainstModel(t *testing.T) {
 	c.Clear()
 	if c.Bytes() != 0 || c.Evictions() != evictions {
 		t.Fatalf("after clear: used=%d evictions=%d want 0, %d", c.Bytes(), c.Evictions(), evictions)
+	}
+}
+
+func TestBatchPeekAcrossGenerationWrap(t *testing.T) {
+	c := New(1024)
+	c.Put("a", nil)
+	c.BeginBatch()
+	for i := range 2 {
+		_, found, duplicate := c.PeekBatch([]byte("a"))
+		if !found || duplicate != (i > 0) {
+			t.Fatalf("peek %d: found %t, duplicate %t", i, found, duplicate)
+		}
+	}
+	c.batch = math.MaxUint64
+	c.BeginBatch()
+	if _, found, duplicate := c.PeekBatch([]byte("a")); !found || duplicate {
+		t.Fatalf("after wrap: found %t, duplicate %t", found, duplicate)
 	}
 }
 

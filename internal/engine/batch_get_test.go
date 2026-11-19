@@ -21,14 +21,16 @@ func TestReadCountersSaturate(t *testing.T) {
 	db.stats.Cache.Hits = math.MaxUint64 - 1
 	db.stats.Cache.Misses = math.MaxUint64 - 1
 	db.stats.MissingKeys = math.MaxUint64 - 1
+	db.stats.BatchGetDuplicateInputs = math.MaxUint64 - 1
 	db.state.Unlock()
 	for range 2 {
-		if _, err := db.BatchGet([][]byte{[]byte("a"), []byte("b"), []byte("c")}); err != nil {
+		if _, err := db.BatchGet([][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("a"), []byte("b")}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	s := db.Stats()
-	if s.Cache.Hits != math.MaxUint64 || s.Cache.Misses != math.MaxUint64 || s.MissingKeys != math.MaxUint64 {
+	if s.Cache.Hits != math.MaxUint64 || s.Cache.Misses != math.MaxUint64 ||
+		s.MissingKeys != math.MaxUint64 || s.BatchGetDuplicateInputs != math.MaxUint64 {
 		t.Fatalf("read counters wrapped: %+v", s)
 	}
 }
@@ -58,8 +60,8 @@ func TestBatchGetPreservesOrderOwnershipAndCache(t *testing.T) {
 		t.Fatal(got)
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 4 || s.Cache.Misses != 2 || s.MissingKeys != 1 {
-		t.Fatalf("duplicate input slots should each count once: %+v", s)
+	if s.Cache.Hits != 3 || s.Cache.Misses != 1 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 2 {
+		t.Fatalf("unexpected counts for one Get and four distinct BatchGet keys: %+v", s)
 	}
 	got[1].Value[0] = 'B'
 	got[4].Value[0] = 'E'
@@ -77,6 +79,59 @@ func TestBatchGetPreservesOrderOwnershipAndCache(t *testing.T) {
 	}
 }
 
+func TestBatchGetCountsDistinctKeysInEachCall(t *testing.T) {
+	db := newTestDB(t, Options{CacheBytes: 130}, nil)
+	mustPut(t, db, "a", "A")
+	mustPut(t, db, "b", "B") // Only b fits in the LRU.
+	const distinct = 64
+	keys := make([][]byte, MaxBatchEntries)
+	for i := range keys {
+		keys[i] = []byte{byte('a' + i%distinct)}
+	}
+	for call := uint64(1); call <= 2; call++ {
+		if _, err := db.BatchGet(keys); err != nil {
+			t.Fatal(err)
+		}
+		s := db.Stats()
+		if s.Cache.Hits != call || s.Cache.Misses != call || s.MissingKeys != call*(distinct-2) ||
+			s.BatchGetDuplicateInputs != call*(MaxBatchEntries-distinct) {
+			t.Fatalf("after BatchGet call %d: %+v", call, s)
+		}
+	}
+}
+
+func TestBatchGetDistinguishesKeysWithMatchingSuffixes(t *testing.T) {
+	db := newTestDB(t, Options{CacheBytes: 132}, nil)
+	mustPut(t, db, "axx", "A")
+	mustPut(t, db, "bxx", "B") // Only bxx fits in the LRU.
+	for _, first := range []string{"xxx", "bxx"} {
+		// The first two uncached keys can differ at the suffix, while many
+		// later distinct keys share it and collide on the first probe.
+		keys := [][]byte{[]byte(first), []byte("xxy")}
+		for range 2 {
+			for prefix := byte(0); prefix < 128; prefix++ {
+				keys = append(keys, []byte{prefix, 'x', 'x'})
+			}
+		}
+		before := db.Stats()
+		results, err := db.BatchGet(keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, key := range keys {
+			found := string(key) == "axx" || string(key) == "bxx"
+			if results[i].Found != found || (found && (len(results[i].Value) != 1 || results[i].Value[0] != key[0]-'a'+'A')) {
+				t.Fatalf("slot %d, key %q: %+v", i, key, results[i])
+			}
+		}
+		after := db.Stats()
+		if after.Cache.Hits-before.Cache.Hits != 1 || after.Cache.Misses-before.Cache.Misses != 1 ||
+			after.MissingKeys-before.MissingKeys != 127 || after.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != 129 {
+			t.Fatalf("first key %q: before %+v, after %+v", first, before, after)
+		}
+	}
+}
+
 func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 	db := newTestDB(t, Options{}, &storage.IO{Hook: func(p string) error {
 		if p == "read:before" {
@@ -85,10 +140,14 @@ func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 		return nil
 	}})
 	mustPut(t, db, "a", "A")
-	if got, err := db.BatchGet([][]byte{[]byte("a"), nil}); got != nil || !errors.Is(err, ErrEmptyKey) {
+	if got, err := db.BatchGet([][]byte{[]byte("a"), []byte("a"), nil}); got != nil || !errors.Is(err, ErrEmptyKey) {
 		t.Fatalf("empty key: %+v, %v", got, err)
 	}
-	if got, err := db.BatchGet(make([][]byte, MaxBatchEntries+1)); got != nil || !errors.Is(err, ErrTooLarge) {
+	large := make([][]byte, MaxBatchEntries+1)
+	for i := range large {
+		large[i] = []byte("a")
+	}
+	if got, err := db.BatchGet(large); got != nil || !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("too many keys: %+v, %v", got, err)
 	}
 	if got, err := db.BatchGet(nil); err != nil || len(got) != 0 {
@@ -101,7 +160,7 @@ func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 		t.Fatalf("closed empty batch: %v", err)
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 0 || s.Cache.Misses != 0 || s.MissingKeys != 0 {
+	if s.Cache.Hits != 0 || s.Cache.Misses != 0 || s.MissingKeys != 0 || s.BatchGetDuplicateInputs != 0 {
 		t.Fatalf("rejected or empty batches counted lookups: %+v", s)
 	}
 }
@@ -170,7 +229,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 	mustPut(t, db, "b", "B")
 	mustPut(t, db, "z", "Z") // Only a is cold in the captured view.
 	old := db.index["a"].File
-	keys := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
+	keys := [][]byte{[]byte("a"), []byte("b"), []byte("a"), []byte("c"), []byte("c")}
 	done := make(chan struct{})
 	var got []BatchResult
 	var err error
@@ -179,6 +238,9 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		got, err = db.BatchGet(keys)
 	}()
 	<-started
+	if s := db.Stats(); s.Cache.Hits != 1 || s.Cache.Misses != 1 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 2 {
+		t.Fatalf("Stats while the first record read is paused: %+v", s)
+	}
 	mustPut(t, db, "a", "updated")
 	if err := db.Delete([]byte("b")); err != nil {
 		t.Fatal(err)
@@ -189,7 +251,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 	}
 	release()
 	<-done
-	want := []BatchResult{{[]byte("A"), true}, {[]byte("B"), true}, {}}
+	want := []BatchResult{{[]byte("A"), true}, {[]byte("B"), true}, {[]byte("A"), true}, {}, {}}
 	if err != nil || !reflect.DeepEqual(got, want) || old.References() != 0 {
 		t.Fatalf("read after checkpoint: %+v, %v, refs %d", got, err, old.References())
 	}
@@ -206,19 +268,21 @@ func TestBatchGetReadFailureDiscardsResultsAndPins(t *testing.T) {
 	mustPut(t, db, "a", "A")
 	mustPut(t, db, "b", "B")
 	mustPut(t, db, "c", "C")
+	mustPut(t, db, "d", "D")
 	file := db.index["a"].File
 	refs := file.References()
-	if got, err := db.BatchGet([][]byte{[]byte("c"), []byte("a"), []byte("b")}); got != nil || !errors.Is(err, ErrCorrupt) {
+	keys := [][]byte{[]byte("d"), []byte("a"), []byte("b"), []byte("c"), []byte("a"), []byte("x"), []byte("x")}
+	if got, err := db.BatchGet(keys); got != nil || !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("corrupt read: %+v, %v", got, err)
 	}
 	if file.References() != refs {
 		t.Fatalf("retained pins: %d, want %d", file.References(), refs)
 	}
-	if _, err := db.BatchGet(nil); !errors.Is(err, ErrUnhealthy) {
+	if _, err := db.BatchGet(keys); !errors.Is(err, ErrUnhealthy) {
 		t.Fatalf("next read: %v", err)
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 1 || s.Cache.Misses != 2 || s.MissingKeys != 0 {
+	if s.Cache.Hits != 1 || s.Cache.Misses != 3 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 2 {
 		t.Fatalf("failed I/O should retain probe counts: %+v", s)
 	}
 }
