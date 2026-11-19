@@ -10,7 +10,8 @@
 // typed view. Use compatible codecs across reopens and restores.
 //
 // One process owns a directory. Its DB supports concurrent goroutines and
-// linearizable single-key operations. Successful writes sync the data and
+// linearizable single-key operations. BatchPut and BatchDelete commit atomically.
+// BatchGet reads the requested keys at one point in time. Successful writes sync the data and
 // commit frontier before acknowledgment. Inspect OpError for the outcome of
 // failed writes. See the durability contract for storage assumptions.
 //

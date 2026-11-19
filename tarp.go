@@ -29,7 +29,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	return (*engine.DB)(db).Get(key)
 }
 
-// Entry is a snapshot key and value. Both byte slices belong to the caller.
+// Entry pairs a key and value for BatchPut and Scan. Both slices belong to the caller.
 type Entry = engine.Entry
 
 // Scan yields every live entry once in unspecified order. Each iteration captures

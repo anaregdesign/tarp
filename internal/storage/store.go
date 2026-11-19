@@ -197,7 +197,7 @@ func (s *Store) initialize() error {
 	return s.publishCatalog(s.Catalog, candidate)
 }
 
-func (s *Store) newSegment(kind uint32, point string, firstRecord []byte) (*File, *os.File, error) {
+func (s *Store) newSegment(kind uint32, point string, initialRecords []byte) (*File, *os.File, error) {
 	id, err := s.allocateID()
 	if err != nil {
 		return nil, nil, err
@@ -209,8 +209,8 @@ func (s *Store) newSegment(kind uint32, point string, firstRecord []byte) (*File
 	}
 	b := format.EncodeSegment(format.Segment{UUID: s.Current.UUID, ID: id, Kind: kind})
 	err = s.IO.Write(fd, b, 0, point+".write")
-	if err == nil && len(firstRecord) > 0 {
-		err = s.IO.Write(fd, firstRecord, format.SegmentHeaderBytes, "data.write")
+	if err == nil && len(initialRecords) > 0 {
+		err = s.IO.Write(fd, initialRecords, format.SegmentHeaderBytes, "data.write")
 	}
 	// A snapshot is private staging. Compact syncs the complete header and
 	// records at finishFile before any manifest may select this DATA file.
@@ -222,7 +222,7 @@ func (s *Store) newSegment(kind uint32, point string, firstRecord []byte) (*File
 		removeErr := s.IO.Do("segment.discard", func() error { return os.Remove(f.Path) })
 		return nil, nil, errors.Join(err, closeErr, removeErr)
 	}
-	f.Size.Store(format.SegmentHeaderBytes + int64(len(firstRecord)))
+	f.Size.Store(format.SegmentHeaderBytes + int64(len(initialRecords)))
 	s.Files[id] = f
 	return f, fd, nil
 }
@@ -234,14 +234,14 @@ func (s *Store) Rotate() error {
 	if s.Current.Generation == math.MaxUint64 {
 		return fault("rotation.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
 	}
-	return s.rotate(nil, nil)
+	return s.rotate(nil, s.Current.Sequence, nil)
 }
 
-// A rotating append syncs the header and its first record together. CURRENT
+// A rotating append syncs the header and its initial records together. CURRENT
 // selects the new segment, catalog and user sequence in one publication.
 // Explicit checkpoint sealing selects a header-only log at the old sequence.
-func (s *Store) rotate(firstRecord []byte, healthy func() error) error {
-	file, fd, err := s.newSegment(format.Log, "segment", firstRecord)
+func (s *Store) rotate(initialRecords []byte, lastSequence uint64, healthy func() error) error {
+	file, fd, err := s.newSegment(format.Log, "segment", initialRecords)
 	if err != nil {
 		return fault("rotation.segment", "not-applied", true, err)
 	}
@@ -259,9 +259,7 @@ func (s *Store) rotate(firstRecord []byte, healthy func() error) error {
 	candidate := s.Current
 	candidate.Generation++
 	candidate.ActiveID, candidate.ActiveEnd = file.ID, file.Size.Load()
-	if len(firstRecord) > 0 {
-		candidate.Sequence++
-	}
+	candidate.Sequence = lastSequence
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return errors.Join(err, fd.Close())
 	}
@@ -273,36 +271,90 @@ func (s *Store) rotate(firstRecord []byte, healthy func() error) error {
 	return nil
 }
 
+// Entry holds caller-owned bytes for an append.
+type Entry struct {
+	Key, Value []byte
+}
+
+func (s *Store) checkSequence(count int) error {
+	if s.Current.Sequence > math.MaxUint64-uint64(count) || s.Current.Generation == math.MaxUint64 {
+		return fault("commit.sequence", "not-applied", false, errors.New("storage: sequence or publication generation exhausted"))
+	}
+	return nil
+}
+
 func (s *Store) Append(kind uint8, key, value []byte, healthy func() error) (Location, error) {
-	if s.Current.Sequence == math.MaxUint64 || s.Current.Generation == math.MaxUint64 {
-		return Location{}, fault("commit.sequence", "not-applied", false, errors.New("storage: sequence or publication generation exhausted"))
+	if err := s.checkSequence(1); err != nil {
+		return Location{}, err
 	}
-	b := format.EncodeRecord(kind, s.Current.Sequence+1, key, value)
-	loc := Location{File: s.Files[s.Current.ActiveID], Offset: s.Current.ActiveEnd, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: s.Current.Sequence + 1}
-	if loc.Offset > format.SegmentHeaderBytes && loc.Offset > s.Config.TargetSegmentBytes-loc.Bytes {
-		if err := s.rotate(b, healthy); err != nil {
-			return Location{}, err
+	sequence := s.Current.Sequence + 1
+	b := format.EncodeRecord(kind, sequence, key, value)
+	file, offset, err := s.appendEncoded(b, sequence, healthy)
+	if err != nil {
+		return Location{}, err
+	}
+	return Location{File: file, Offset: offset, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence}, nil
+}
+
+// AppendBatch publishes all records at one frontier. The caller validates the
+// entries and their combined size against a single segment before admission.
+func (s *Store) AppendBatch(kind uint8, entries []Entry, healthy func() error) ([]Location, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	if err := s.checkSequence(len(entries)); err != nil {
+		return nil, err
+	}
+	var size int
+	for _, e := range entries {
+		size += format.RecordHeaderBytes + len(e.Key) + len(e.Value)
+	}
+	b := make([]byte, 0, size)
+	locations := make([]Location, len(entries))
+	sequence := s.Current.Sequence
+	for i, e := range entries {
+		sequence++
+		start := len(b)
+		b = format.AppendRecord(b, kind, sequence, e.Key, e.Value)
+		locations[i] = Location{Offset: int64(start), Bytes: int64(len(b) - start), ValueBytes: int64(len(e.Value)), Sequence: sequence}
+	}
+	file, offset, err := s.appendEncoded(b, sequence, healthy)
+	if err != nil {
+		return nil, err
+	}
+	for i := range locations {
+		locations[i].File = file
+		locations[i].Offset += offset
+	}
+	return locations, nil
+}
+
+func (s *Store) appendEncoded(b []byte, lastSequence uint64, healthy func() error) (*File, int64, error) {
+	offset := s.Current.ActiveEnd
+	if offset > format.SegmentHeaderBytes && offset > s.Config.TargetSegmentBytes-int64(len(b)) {
+		if err := s.rotate(b, lastSequence, healthy); err != nil {
+			return nil, 0, err
 		}
-		loc.File, loc.Offset = s.Files[s.Current.ActiveID], format.SegmentHeaderBytes
-		return loc, nil
+		return s.Files[s.Current.ActiveID], format.SegmentHeaderBytes, nil
 	}
-	if err := s.IO.Write(s.active, b, loc.Offset, "data.write"); err != nil {
-		return Location{}, fault("data.write", "not-applied", true, err)
+	if err := s.IO.Write(s.active, b, offset, "data.write"); err != nil {
+		return nil, 0, fault("data.write", "not-applied", true, err)
 	}
 	if err := s.IO.Sync(s.active, "data.sync"); err != nil {
-		return Location{}, fault("data.sync", "not-applied", true, err)
+		return nil, 0, fault("data.sync", "not-applied", true, err)
 	}
 	if err := healthy(); err != nil {
-		return Location{}, fault("commit.health", "not-applied", true, err)
+		return nil, 0, fault("commit.health", "not-applied", true, err)
 	}
 	candidate := s.Current
 	candidate.Generation++
-	candidate.Sequence, candidate.ActiveEnd = loc.Sequence, loc.Offset+loc.Bytes
+	candidate.Sequence, candidate.ActiveEnd = lastSequence, offset+int64(len(b))
 	if err := s.publish(candidate); err != nil {
-		return Location{}, err
+		return nil, 0, err
 	}
-	loc.File.Size.Store(candidate.ActiveEnd)
-	return loc, nil
+	file := s.Files[s.Current.ActiveID]
+	file.Size.Store(candidate.ActiveEnd)
+	return file, offset, nil
 }
 
 func (s *Store) Read(loc Location, key string) ([]byte, error) {

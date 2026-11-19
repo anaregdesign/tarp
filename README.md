@@ -5,7 +5,7 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.0.1
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.1.0
 in a new module, run the commands below. In an existing module, run just
 the `go get` command.
 
@@ -13,7 +13,7 @@ the `go get` command.
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.0.1
+go get github.com/anaregdesign/tarp@v0.1.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -63,8 +63,8 @@ go run .
 ## Storage and compatibility
 
 The parent directory must exist. One process exclusively owns a directory, while
-its `DB` supports concurrent goroutines without caller locks. Individual key
-operations are atomic and linearizable; separate calls are not a transaction.
+its `DB` supports concurrent goroutines without caller locks. Individual key operations are linearizable. Each batch call operates on its
+keys atomically. Separate calls have their own publication or read points.
 
 **Every successful `Open` starts automatic incremental compaction.** Both new
 and reopened stores use one unversioned storage and backup format. A database
@@ -152,10 +152,54 @@ and `Decode([]byte) (T, error)`. Use compatible codecs on reopen and after
 `Restore`. See the runnable [TypedDB example](typed_db_test.go) and
 [composite codec example](composite_codec_test.go).
 
+## Batch operations
+
+Use `BatchPut` to commit related values together and `BatchGet` to read a
+consistent view of just the keys you need. For example, given an open
+`*tarp.TypedDB[string, string]`:
+
+```go
+err := db.BatchPut([]tarp.TypedEntry[string, string]{
+    {Key: "job:42:state", Value: "done"},
+    {Key: "job:42:result", Value: "report.pdf"},
+})
+if err != nil {
+    return err
+}
+keys := []string{"job:42:state", "job:42:result"}
+results, err := db.BatchGet(keys)
+if err != nil {
+    return err
+}
+for i, r := range results {
+    if r.Found {
+        fmt.Println(keys[i], r.Value)
+    }
+}
+return db.BatchDelete(keys)
+```
+
+The byte API takes `[]tarp.Entry` for writes and `[][]byte` for reads and
+deletes. Results follow input order. A missing key has `Found == false`,
+and the caller owns a separate value slice for each occurrence of a found
+key. The result uses memory proportional to all returned values, including
+duplicates. Batch reads use cached values when available and preserve LRU recency. Repeated puts apply in input order. Repeated deletes
+remove a key once. If any requested delete key is missing, the whole call
+returns `ErrNotFound` before writing.
+
+Each call accepts up to `tarp.MaxBatchEntries` (4,096) inputs, counting
+duplicates. An empty batch succeeds on a healthy open DB. Write batches
+must fit a single segment. The sum of encoded record sizes must fit the
+effective `TargetSegmentBytes` minus the 64-byte segment header.
+All put entries count, including repeated keys. For deletes, only distinct
+keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
+before publication. Each nonempty write batch has one commit outcome.
+See the [runnable batch example](typed_batch_test.go).
+
 ## Contract
 
 `DB` provides `Get`, `Scan`, upserting `Put`, `Delete`, `Close`, online `Backup`,
-explicit online `Compact`, and `MaintenanceStatus`. Use `Open` to create or
+`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `MaintenanceStatus`. Use `Open` to create or
 reopen a database and `Restore` to restore a backup offline.
 
 - Keys and values are `[]byte`. Empty keys are rejected; empty values are valid.
@@ -182,7 +226,7 @@ Break to release the snapshot early. When using `iter.Pull2`, defer `stop()`.
 After an error, prior entries remain valid. Calling `Close` in the loop is
 supported. A subsequent read yields `ErrClosed`.
 
-No ordered scans, TTL, multi-key transactions, cross-file
+No ordered scans, TTL, general read/write transactions, cross-file
 records, or total disk quota is provided.
 
 ## Limits

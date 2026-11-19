@@ -118,7 +118,7 @@ func (db *TypedDB[K, V]) Delete(key K) error {
 	return db.core.Delete(k)
 }
 
-// TypedEntry contains the decoded key and value from a snapshot.
+// TypedEntry pairs a key and value for BatchPut and Scan.
 type TypedEntry[K, V any] struct {
 	Key   K
 	Value V

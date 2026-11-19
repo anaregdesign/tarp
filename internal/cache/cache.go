@@ -23,6 +23,15 @@ func New(limit int64) *Cache {
 
 func (c *Cache) Bytes() int64 { return c.used }
 
+// Peek returns immutable cached bytes without changing recency.
+func (c *Cache) Peek(key []byte) ([]byte, bool) {
+	e, ok := c.items[string(key)]
+	if !ok {
+		return nil, false
+	}
+	return e.value, true
+}
+
 func (c *Cache) Get(key []byte) ([]byte, bool) {
 	e, ok := c.items[string(key)]
 	if !ok {
