@@ -47,6 +47,54 @@ for mode in empty rotate; do
 done
 ```
 
+### BatchGet with observed Linux container I/O
+
+Run the container benchmark from the checkout.
+
+```sh
+sh benchmark/scripts/container-batch-get.sh /path/to/new-or-empty-results
+```
+
+The script requires Docker with a local Linux daemon (including Docker
+Desktop), Git, curl and Python 3. It resolves the latest stable Go from
+go.dev, pulls the corresponding official Bookworm image and uses its
+digest for the entire campaign. It runs with the source mounted read-only,
+networking disabled and a fresh Docker volume for fixture DATA. Docker
+removes the volume after the run. The result directory retains the exact
+toolchain, source checksums, engine revision, image and filesystem metadata,
+test log and `batch-get.jsonl`.
+
+One or eight closed-loop clients share one DB (`GOMAXPROCS=8`). Every call
+has 32 input slots. Each of six rounds uses a seeded shuffle, 256 requests
+per trial, and 64 B or 64 KiB values. Across rounds the driver balances the
+run position of limits 1 and 32 and the public default (zero option,
+effective limit 8). The two main arms request distinct live keys outside the
+tarp cache. The warm arm pre-reads fixture DATA, while the evicted arm syncs
+and advises Linux to evict only the private DATA files before measurement.
+Each distinct key appears once per trial. A separate all-hit control makes
+32 tarp cache hits per call. The duplicate control requests one live
+uncached key in all 32 slots and checks for one miss and 31 duplicate inputs.
+
+Each JSONL trial reports the observation status and Linux process-attributed
+storage read bytes (`/proc/self/io`), with whole-device read bytes when
+available. A positive delta after fixture eviction provides evidence of
+storage I/O over the trial. Read-ahead can serve later keys, and a Docker
+Desktop virtual disk can itself be cached by its host. Cache eviction or
+accounting that is unavailable, or an evicted trial with zero charged bytes,
+is reported as unsupported. Use the warm and hit controls to interpret the
+counter on the measured backend.
+
+The driver verifies ordered values and exact Stats deltas. Each latency
+sample covers the public `BatchGet` call. Requests/s uses elapsed wall time
+including correctness checks between calls. The JSONL retains trial
+p50/p95/p99 and the samples by client. With eight clients there are 32
+samples per client per trial, so its nearest-rank p99 is the maximum.
+Compare percentiles across rounds and inspect the individual samples for
+outliers. A complete campaign ends in a `complete` row.
+
+The [v0.4.0 container results](benchmarks/v0.4.0-container-batch-get.md)
+include the latency and throughput comparison and sample-level data.
+
 ## Compaction comparison
 
 `BenchmarkCompaction` and the opt-in JSONL drivers compare two operations on private
