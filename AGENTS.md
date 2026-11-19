@@ -27,6 +27,8 @@ Format changed Go files with `gofmt`, which uses tabs for indentation. Follow ex
 
 Run targeted tests on macOS during development. Leave Linux validation to GitHub Actions. Local Linux/Docker checks and full benchmarks require an explicit user request.
 
+Run benchmarks in a container using only the latest stable Go release available at the start of the campaign. Use the same container image digest for all comparison arms and record the digest and exact `go version` in the results.
+
 Use Go’s `testing` package, behavioral test names, and `t.TempDir()` for database files. For decoder changes, run `go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=15s -parallel=2`. Linux CI runs functional and race tests. Run power-loss and disk-exhaustion campaigns only in the [documented disposable VM](docs/qualification.md).
 
 ## Commits and Pull Requests
