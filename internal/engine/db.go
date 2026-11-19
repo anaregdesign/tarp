@@ -41,7 +41,8 @@ type DB struct {
 	// Its placement affects parallel cache-hit throughput.
 	stats Stats // guarded by state
 
-	batchReadSlots chan struct{} // shared by BatchGet calls on this DB
+	batchReadSlots      chan struct{} // shared by BatchGet calls on this DB
+	fastSmallBatchReads atomic.Bool   // last sampled small DATA reads completed quickly
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.

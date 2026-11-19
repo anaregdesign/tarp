@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/anaregdesign/tarp"
+	"github.com/anaregdesign/tarp/internal/format"
 )
 
 // Each operation returns a whole ordered result set. The immutable fixture
@@ -57,30 +58,8 @@ func BenchmarkBatchGet(b *testing.B) {
 		for _, api := range []string{"raw", "typed-string"} {
 			for _, method := range []string{"BatchGet", "Get-loop"} {
 				b.Run(tc.name+"/"+api+"/"+method, func(b *testing.B) {
-					// The last seeded key is never requested. It leaves the
-					// one-entry LRU cold for every timed key in the miss arms.
-					keys, baseValue, opts := measurementInput(64, slots+1)
-					if tc.cold {
-						opts.CacheBytes /= int64(len(keys))
-					}
-					db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), opts)
-					if err != nil {
-						b.Fatal(err)
-					}
-					b.Cleanup(func() {
-						if err := db.Close(); err != nil {
-							b.Error(err)
-						}
-					})
-					entries := make([]tarp.Entry, len(keys))
-					for i, key := range keys {
-						value := bytes.Clone(baseValue)
-						value[0] = byte(i)
-						entries[i] = tarp.Entry{Key: key, Value: value}
-					}
-					if err := db.BatchPut(entries); err != nil {
-						b.Fatal(err)
-					}
+					const valueBytes = 64
+					db, entries := openBatchReadFixture(b, valueBytes, slots, tc.cold, 0)
 					request := make([][]byte, len(tc.ids))
 					want := make([]tarp.BatchResult, len(tc.ids))
 					var found int
@@ -94,11 +73,11 @@ func BenchmarkBatchGet(b *testing.B) {
 							request[i] = []byte("absent-batch-key")
 							continue
 						}
-						request[i] = keys[id]
+						request[i] = entries[id].Key
 						want[i] = tarp.BatchResult{Value: entries[id].Value, Found: true}
 						found++
 					}
-					b.SetBytes(int64(found * len(baseValue)))
+					b.SetBytes(int64(found * valueBytes))
 					if api == "raw" {
 						measureBatchReads(b, method, db, request, want, db.Get, db.BatchGet, tc.cold, tc.ids)
 						return
@@ -118,6 +97,60 @@ func BenchmarkBatchGet(b *testing.B) {
 			}
 		}
 	}
+}
+
+// Compare the per-DB DATA read limit with one caller, a cold tarp LRU and
+// warm OS pages. The same shuffled trace is used for every limit and size.
+func BenchmarkBatchGetReadConcurrency(b *testing.B) {
+	const slots = 32
+	ids := rand.New(rand.NewPCG(70, 1)).Perm(slots)
+	for _, size := range []int{64, 64 << 10} {
+		for _, limit := range []int{1, 2, 4, 8} {
+			b.Run(fmt.Sprintf("%dB/limit-%d", size, limit), func(b *testing.B) {
+				db, entries := openBatchReadFixture(b, size, slots, true, limit)
+				keys := make([][]byte, slots)
+				want := make([]tarp.BatchResult, slots)
+				for i, id := range ids {
+					keys[i] = entries[id].Key
+					want[i] = tarp.BatchResult{Found: true, Value: entries[id].Value}
+				}
+				b.SetBytes(int64(size * slots))
+				measureBatchReads(b, "BatchGet", db, keys, want, db.Get, db.BatchGet, true, ids)
+			})
+		}
+	}
+}
+
+func openBatchReadFixture(b *testing.B, size, slots int, cold bool, limit int) (*tarp.DB, []tarp.Entry) {
+	b.Helper()
+	// The last key fills the one-entry cache in the cold cases.
+	keys, value, opts := measurementInput(size, slots+1)
+	opts.BatchReadConcurrency = limit
+	if cold {
+		opts.CacheBytes /= int64(len(keys))
+	}
+	recordBytes := int64(format.RecordHeaderBytes + len(keys[0]) + size)
+	opts.MaxRecordBytes = max(opts.MaxRecordBytes, recordBytes)
+	opts.TargetSegmentBytes = max(opts.TargetSegmentBytes, format.SegmentHeaderBytes+int64(len(keys))*recordBytes)
+	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), opts)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			b.Error(err)
+		}
+	})
+	entries := make([]tarp.Entry, len(keys))
+	for i, key := range keys {
+		v := bytes.Clone(value)
+		v[0] = byte(i)
+		entries[i] = tarp.Entry{Key: key, Value: v}
+	}
+	if err := db.BatchPut(entries); err != nil {
+		b.Fatal(err)
+	}
+	return db, entries
 }
 
 func measureBatchReads[K, V any, R ~struct {

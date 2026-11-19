@@ -5,7 +5,7 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.3.0
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.4.0
 in a new module, run the commands below. In an existing module, run just
 the `go get` command.
 
@@ -13,7 +13,7 @@ the `go get` command.
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.3.0
+go get github.com/anaregdesign/tarp@v0.4.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -189,8 +189,11 @@ returns `ErrNotFound` before writing.
 
 `BatchGet` preserves LRU recency and reads each distinct cold, live key once.
 Concurrent `BatchGet` calls on the same DB, including typed views, share the
-DATA read limit set by `Options.BatchReadConcurrency`. Set it to 1 to serialize
-these reads. A fully cached batch uses no read slots or workers. `Get` runs
+DATA read limit set by `Options.BatchReadConcurrency`. The default is 8.
+For example, `tarp.Options{BatchReadConcurrency: 16}` allows up to 16 reads,
+and a value of 1 serializes them. When reads of small records complete quickly,
+the caller can read them sequentially. If reads slow down, the batch can use available workers
+for the remaining records. A fully cached batch uses no read slots or workers. `Get` runs
 independently of this limit, and each DB has its own read slots.
 
 Each call accepts up to `tarp.MaxBatchEntries` (4,096) inputs, counting

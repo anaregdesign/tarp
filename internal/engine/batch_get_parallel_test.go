@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
@@ -33,6 +34,7 @@ func TestBatchGetLimitsConcurrentStorageReads(t *testing.T) {
 		calls, wantReads int
 	}{
 		{"default", 0, 10, 1, 8},
+		{"above-default", 16, 18, 1, 16},
 		{"serial", 1, 4, 2, 1},
 		{"distinct-cold-keys", 8, 2, 1, 2},
 		{"shared-across-batches", 2, 4, 3, 2},
@@ -183,4 +185,120 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 			t.Fatalf("after drain: pins = %d, want %d; reads = %d, want 2", got, refs, started.Load())
 		}
 	})
+}
+
+func TestBatchGetSmallReadsAdaptWithinTheSameBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		slowAt int
+	}{{"first-read", 1}, {"after-fast-prefix", 6}} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const limit, unique = 3, 16
+				const holdAfter = 11 // Leave enough work for all readers after the slow read.
+				training, step := make(chan struct{}), make(chan struct{})
+				endTraining := sync.OnceFunc(func() { close(training) })
+				release := sync.OnceFunc(func() { close(step) })
+				defer endTraining()
+				defer release()
+
+				var trained atomic.Bool
+				var started atomic.Int32
+				db := newTestDB(t, Options{CacheBytes: 130, BatchReadConcurrency: limit}, &storage.IO{
+					CleanerStart: make(chan struct{}),
+					Hook: func(point string) error {
+						if point != "read:before" {
+							return nil
+						}
+						n := int(started.Add(1))
+						if !trained.Load() {
+							<-training
+							return nil
+						}
+						if n == 1 || n == tc.slowAt || n > holdAfter {
+							<-step
+						}
+						return nil
+					},
+				})
+				keys := [][]byte{[]byte("?"), []byte("z")}
+				want := []BatchResult{{}, {Value: []byte("Z"), Found: true}}
+				for i := range unique {
+					key, value := []byte{byte('a' + i)}, []byte{byte('A' + i)}
+					mustPut(t, db, string(key), string(value))
+					keys = append(keys, key)
+					want = append(want, BatchResult{Value: value, Found: true})
+				}
+				mustPut(t, db, "z", "Z")
+				keys = append(keys, keys[2])
+				want = append(want, want[2])
+
+				done := startBatchGet(db, keys)
+				synctest.Wait()
+				if got := started.Load(); got != limit {
+					t.Fatalf("readers on first batch = %d, want %d", got, limit)
+				}
+				endTraining() // No virtual time passed while these reads were held.
+				if outcome := <-done; outcome.err != nil || !reflect.DeepEqual(outcome.results, want) {
+					t.Fatalf("training batch: %+v", outcome)
+				}
+				if got := started.Swap(0); got != unique {
+					t.Fatalf("training DATA reads = %d, want %d", got, unique)
+				}
+				// An absent key and an LRU hit supply no DATA latency samples.
+				if got, err := db.BatchGet(keys[:2]); err != nil || !reflect.DeepEqual(got, want[:2]) {
+					t.Fatalf("absent/hot batch: %+v, %v", got, err)
+				}
+				if got := started.Load(); got != 0 {
+					t.Fatalf("absent/hot batch issued %d DATA reads", got)
+				}
+				trained.Store(true)
+				before := db.Stats()
+				done = startBatchGet(db, keys)
+				synctest.Wait()
+				if got := started.Load(); got != 1 {
+					t.Fatalf("readers after fast training = %d, want 1", got)
+				}
+				if tc.slowAt != 1 {
+					step <- struct{}{}
+					synctest.Wait()
+					if got := int(started.Load()); got != tc.slowAt {
+						t.Fatalf("started while read %d is held = %d", tc.slowAt, got)
+					}
+				}
+				time.Sleep(time.Millisecond) // Only this checked read spans nonzero virtual time.
+				step <- struct{}{}
+				synctest.Wait()
+				if got := started.Load(); got != holdAfter+limit {
+					t.Fatalf("readers blocked in tail after slow read = %d, want %d", got-holdAfter, limit)
+				}
+				s := db.Stats()
+				if s.Cache.Hits-before.Cache.Hits != 1 || s.Cache.Misses-before.Cache.Misses != unique ||
+					s.MissingKeys-before.MissingKeys != 1 || s.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != 1 {
+					t.Fatalf("snapshot changed during scheduling: before %+v, after %+v", before, s)
+				}
+				// A second BatchGet must share the permits occupied by the promoted readers.
+				single := startBatchGet(db, keys[2:3])
+				synctest.Wait()
+				if got := started.Load(); got != holdAfter+limit {
+					t.Fatalf("concurrent single-key BatchGet exceeded the limit: %d tail reads", got-holdAfter)
+				}
+				release()
+				outcome := <-done
+				if outcome.err != nil || !reflect.DeepEqual(outcome.results, want) {
+					t.Fatalf("adaptive batch: %+v", outcome)
+				}
+				outcome.results[2].Value[0] = '!'
+				if string(outcome.results[len(keys)-1].Value) != "A" {
+					t.Fatal("adaptive batch returned aliased duplicate values")
+				}
+				if outcome := <-single; outcome.err != nil || !reflect.DeepEqual(outcome.results, want[2:3]) {
+					t.Fatalf("single-key batch: %+v", outcome)
+				}
+				if got := started.Load(); got != unique+1 {
+					t.Fatalf("DATA reads after training = %d, want %d", got, unique+1)
+				}
+			})
+		})
+	}
 }
