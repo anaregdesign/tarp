@@ -106,6 +106,10 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 			for name, data := range files {
 				writeFixtureFile(t, filepath.Join(source, name), []byte(data))
 			}
+			if err := VerifyBackup(t.Context(), source, testOptions().RestoreLimits()); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("VerifyBackup returned %v, want corrupt image", err)
+			}
+			checkBackupUnchanged(t, source, files)
 			err = Restore(t.Context(), RestoreRequest{
 				Source:      source,
 				Destination: filepath.Join(parent, "restored"),
@@ -256,22 +260,20 @@ func TestRestoreReportsPublicationOutcome(t *testing.T) {
 func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 	var reads, writes int
 	var copied int64
-	fs := &storage.IO{
-		CleanerStart: make(chan struct{}),
-		Hook: func(point string) error {
-			if point == "backup.read:after" {
-				reads++
-			}
-			return nil
-		},
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "backup.read:after" {
+			reads++
+		}
+		return nil
+	},
 		Wrote: func(point string, n int) {
 			if point == "backup.copy" {
 				writes++
 				copied += int64(n)
 			}
-		},
-	}
-	db := newTestDB(t, Options{}, fs)
+		}}
+	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+	db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
 	// This file crosses multiple buffer boundaries inside headers, keys and
 	// values. Its physical tail may grow while Backup reads its captured prefix.
 	keys := [][]byte{[]byte("first"), bytes.Repeat([]byte("k"), 33<<10), []byte("last")}

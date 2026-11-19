@@ -2,7 +2,9 @@ package engine
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"hash/maphash"
 	"maps"
 	"path/filepath"
 	"strings"
@@ -22,8 +24,55 @@ func requireWriteStats(t *testing.T, db *DB, commits, records, liveBytes uint64)
 	}
 }
 
+func TestPrepareDeletesResolvesHashCollisionsAndTableGrowth(t *testing.T) {
+	db := newTestDB(t, Options{}, nil)
+	var distinct [][]byte
+	for n := uint64(0); len(distinct) < 65; n++ {
+		key := binary.BigEndian.AppendUint64(nil, n)
+		// All these distinct keys start in the last inline bucket, forcing
+		// wraparound probing. Later inserts grow and rehash the table.
+		if maphash.Bytes(batchKeySeed, key)&31 == 31 {
+			distinct = append(distinct, key)
+		}
+	}
+	batch, err := db.PrepareDeletes(MaxBatchEntries, func(i int) ([]byte, error) {
+		return bytes.Clone(distinct[(i/2)%len(distinct)]), nil
+	})
+	if err != nil || len(batch.records) != len(distinct) || cap(batch.records) > 2*len(distinct) {
+		t.Fatalf("colliding keys: len=%d cap=%d err=%v", len(batch.records), cap(batch.records), err)
+	}
+	for i, key := range distinct {
+		if !bytes.Equal(key, batch.records[i].Key) {
+			t.Fatalf("key %d: got %x, want %x", i, batch.records[i].Key, key)
+		}
+	}
+}
+
+func TestPrepareDeletesRetainsOnlyDistinctKeysInOrder(t *testing.T) {
+	db := newTestDB(t, Options{}, nil)
+	for _, distinct := range []int{1, 16, MaxBatchEntries} {
+		calls := 0
+		batch, err := db.PrepareDeletes(MaxBatchEntries, func(i int) ([]byte, error) {
+			calls++
+			k := i % distinct
+			return []byte{byte(k >> 8), byte(k)}, nil
+		})
+		if err != nil || calls != MaxBatchEntries || len(batch.records) != distinct {
+			t.Fatalf("%d distinct: %d encoded, %d retained, %v", distinct, calls, len(batch.records), err)
+		}
+		if distinct <= 16 && cap(batch.records) > 16 {
+			t.Fatalf("reserved %d descriptors for %d distinct keys", cap(batch.records), distinct)
+		}
+		for i, record := range batch.records {
+			if !bytes.Equal(record.Key, []byte{byte(i >> 8), byte(i)}) {
+				t.Fatalf("%d distinct: record %d key %x", distinct, i, record.Key)
+			}
+		}
+	}
+}
+
 func TestBatchWriteRejectsWholeRequestBeforeMutation(t *testing.T) {
-	db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "a", "old")
 	entry := Entry{[]byte("a"), []byte("new")}
 	before := directoryBytes(t, db.store.Dir)
@@ -66,7 +115,7 @@ func TestBatchWriteRejectsWholeRequestBeforeMutation(t *testing.T) {
 func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	opts := testOptions() // 192 encoded bytes fit exactly in a new log.
 	opts.CacheBytes = 144 // one key and 15 bytes of value
-	db := newTestDB(t, opts, &storage.IO{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "a", "old")
 	before := db.store.Current
 	oldFile := db.index["a"].File
@@ -122,14 +171,15 @@ func TestBatchWritesRecoverWholeOutcome(t *testing.T) {
 		} {
 			t.Run(op+"/"+tc.point, func(t *testing.T) {
 				armed := false
-				fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+				fs := &storage.IO{Hook: func(p string) error {
 					if armed && p == tc.point {
 						return syscall.EIO
 					}
 					return nil
 				}}
+				engineHooks := &Hooks{CleanerStart: make(chan struct{})}
 				opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 170} // Pairs fit; each batch rotates.
-				db := newTestDB(t, opts, fs)
+				db := newTestDBWithHooks(t, opts, fs, engineHooks)
 				entries := []Entry{{[]byte("a"), []byte("old")}, {[]byte("b"), []byte("old")}}
 				if err := db.BatchPut(entries); err != nil {
 					t.Fatal(err)
@@ -185,7 +235,7 @@ func TestBatchPublicationWithScanCheckpointAndBackup(t *testing.T) {
 			close(resume)
 		}
 	}()
-	db := newTestDB(t, testOptions(), &storage.IO{PutCopied: func(int, int) {
+	db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{PutCopied: func(int, int) {
 		if armed.CompareAndSwap(true, false) {
 			close(copied)
 			<-resume

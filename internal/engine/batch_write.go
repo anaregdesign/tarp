@@ -1,9 +1,12 @@
 package engine
 
 import (
-	"fmt"
+	"bytes"
+	"hash/maphash"
 	"math"
+	"math/bits"
 
+	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
@@ -13,17 +16,20 @@ const MaxBatchEntries = 4096
 
 func CheckBatchCount(count int) error {
 	if count > MaxBatchEntries {
-		return fmt.Errorf("%w: batch has %d inputs, limit %d", ErrTooLarge, count, MaxBatchEntries)
+		return &BatchLimitError{Kind: BatchInputCountLimit, Index: -1, Actual: uint64(count), Limit: MaxBatchEntries}
 	}
 	return nil
 }
 
-func (db *DB) addBatchBytes(used int64, recordBytes uint64) (int64, error) {
-	limit := min(db.opts.TargetSegmentBytes-format.SegmentHeaderBytes, int64(math.MaxInt))
-	if recordBytes > uint64(limit-used) {
-		return used, fmt.Errorf("%w: batch exceeds %d encoded bytes", ErrTooLarge, limit)
+func (db *DB) addBatchBytes(index int, used, recordBytes uint64) (uint64, error) {
+	limit := uint64(min(db.opts.TargetSegmentBytes-format.SegmentHeaderBytes, int64(math.MaxInt)))
+	// Used fits a segment minus its header; recordBytes is either a validated
+	// Put or the record header plus one native-length delete key.
+	actual := used + recordBytes
+	if actual > limit {
+		return used, &BatchLimitError{Kind: BatchPayloadLimit, Index: index, Actual: actual, Limit: limit}
 	}
-	return used + int64(recordBytes), nil
+	return actual, nil
 }
 
 // A PreparedBatch has passed the count and encoded-size checks for one DB.
@@ -41,7 +47,7 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		return PreparedBatch{}, err
 	}
 	records := make([]storage.Entry, count)
-	var used int64
+	var used uint64
 	for i := range count {
 		entry, err := entryAt(i)
 		if err != nil {
@@ -49,9 +55,12 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		}
 		key, value := uint64(len(entry.Key)), uint64(len(entry.Value))
 		if err := db.opts.checkSize(key, value); err != nil {
+			if size, ok := err.(*SizeError); ok {
+				return PreparedBatch{}, &BatchLimitError{Kind: BatchEntrySizeLimit, Index: i, Entry: size}
+			}
 			return PreparedBatch{}, err
 		}
-		used, err = db.addBatchBytes(used, format.RecordHeaderBytes+key+value)
+		used, err = db.addBatchBytes(i, used, entrysize.RecordBytes(key, value))
 		if err != nil {
 			return PreparedBatch{}, err
 		}
@@ -66,28 +75,61 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 	if err := CheckBatchCount(count); err != nil {
 		return PreparedBatch{}, err
 	}
-	records := make([]storage.Entry, 0, count)
-	seen := make(map[string]struct{}, count)
-	var used int64
+	// Slots index the original immutable key bytes in records. Small sets
+	// need neither a heap-allocated table nor an owned string per distinct key.
+	const small = 16
+	var inline [2 * small]uint16
+	slots := inline[:]
+	records := make([]storage.Entry, 0, min(count, small))
+	var used uint64
 	for i := range count {
 		key, err := keyAt(i)
 		if err != nil {
 			return PreparedBatch{}, err
 		}
-		if _, ok := seen[string(key)]; ok {
-			continue
-		}
 		if len(key) == 0 {
 			return PreparedBatch{}, ErrEmptyKey
 		}
-		used, err = db.addBatchBytes(used, format.RecordHeaderBytes+uint64(len(key)))
+		slot := deleteKeySlot(slots, records, key)
+		if slots[slot] != 0 {
+			continue
+		}
+		used, err = db.addBatchBytes(i, used, entrysize.RecordBytes(uint64(len(key)), 0))
 		if err != nil {
 			return PreparedBatch{}, err
 		}
-		seen[string(key)] = struct{}{}
+		if len(records) == cap(records) {
+			// A dense, all-distinct prefix predicts the full request well. If
+			// duplicates already occurred, grow with the distinct set instead.
+			capacity := min(count, 2*len(records))
+			if i == len(records) {
+				capacity = count
+			}
+			grown := make([]storage.Entry, len(records), capacity)
+			copy(grown, records)
+			records = grown
+			slots = make([]uint16, 1<<bits.Len(uint(2*capacity-1)))
+			for j, record := range records {
+				slots[deleteKeySlot(slots, records, record.Key)] = uint16(j + 1)
+			}
+			slot = deleteKeySlot(slots, records, key)
+		}
+		slots[slot] = uint16(len(records) + 1)
 		records = append(records, storage.Entry{Key: key})
 	}
 	return PreparedBatch{db, format.Delete, records}, nil
+}
+
+// deleteKeySlot returns an empty bucket or the bucket of an equal key.
+// A zero slot is empty; other slots hold one-based indices into records.
+// The table is a power of two with at least twice as many slots as records.
+func deleteKeySlot(slots []uint16, records []storage.Entry, key []byte) int {
+	mask := len(slots) - 1
+	bucket := int(maphash.Bytes(batchKeySeed, key)) & mask
+	for slots[bucket] != 0 && !bytes.Equal(records[slots[bucket]-1].Key, key) {
+		bucket = (bucket + 1) & mask
+	}
+	return bucket
 }
 
 // Commit admits a typed call after all application codec calls have returned.

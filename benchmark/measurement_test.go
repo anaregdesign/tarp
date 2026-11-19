@@ -340,9 +340,9 @@ type measurementHooks struct {
 
 // The worker is held from Open through the timed window for controlled interference
 // comparisons. All foreground calls and the manual checkpoint use the normal engine.
-func (h *measurementHooks) interferenceIO() *storage.IO {
+func (h *measurementHooks) interferenceHooks() (*storage.IO, *engine.Hooks) {
 	h.cleanerStart = make(chan struct{})
-	return &storage.IO{CleanerStart: h.cleanerStart, Hook: h.hook, Wrote: h.wrote}
+	return &storage.IO{Hook: h.hook, Wrote: h.wrote}, &engine.Hooks{CleanerStart: h.cleanerStart}
 }
 
 func (h *measurementHooks) wrote(point string, n int) {
@@ -406,7 +406,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	overlapping := mode == "backup-compact" || mode == pinnedBackupMode
 	backingUp := mode == "backup" || overlapping
 	probe.Store(func(s *storage.Store) {
-		if s.IO == nil || s.IO.CleanerStart == nil || s.IO.Wrote == nil {
+		if s.IO == nil || s.IO.Wrote == nil || !probe.CleanerGatedBy(hooks.cleanerStart) {
 			t.Fatal("interference control requires its gated worker and per-actor byte observer")
 		}
 	})

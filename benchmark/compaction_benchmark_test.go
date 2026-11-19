@@ -38,7 +38,7 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 	keys, value, opts := measurementInput(size, 4)
 	opts.MaxRecordBytes = int64(format.RecordHeaderBytes + len(keys[0]) + size)
 	opts.TargetSegmentBytes = format.SegmentHeaderBytes + 32*opts.MaxRecordBytes
-	db, err := engine.OpenWithIO(filepath.Join(t.TempDir(), "seed"), opts, &storage.IO{CleanerStart: make(chan struct{})})
+	db, err := engine.OpenWithHooks(filepath.Join(t.TempDir(), "seed"), opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 	measurementCloneClosed(t, f.dir, dir)
 	start, retired := make(chan struct{}), make(chan struct{})
 	published := false
-	hooks := &storage.IO{CleanerStart: start, Hook: func(point string) error {
+	hooks := &storage.IO{Hook: func(point string) error {
 		// Both actor-specific events execute on the same worker, in order.
 		switch point {
 		case "clean.current.dirsync:after":
@@ -136,7 +136,8 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 		}
 		return nil
 	}}
-	db, err := engine.OpenWithIO(dir, f.opts, hooks)
+	engineHooks := &engine.Hooks{CleanerStart: start}
+	db, err := engine.OpenWithHooks(dir, f.opts, hooks, engineHooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +249,7 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 		t.Fatalf("fixture did not reclaim and replace DATA: %+v", result)
 	}
 
-	reopened, err := engine.OpenWithIO(dir, f.opts, &storage.IO{CleanerStart: make(chan struct{})})
+	reopened, err := engine.OpenWithHooks(dir, f.opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}

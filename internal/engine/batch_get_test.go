@@ -218,15 +218,13 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		opts := testOptions()
 		opts.CacheBytes = 260
 		opts.BatchReadConcurrency = 2
-		db := newTestDB(t, opts, &storage.IO{
-			CleanerStart: make(chan struct{}),
-			Hook: func(p string) error {
-				if p == "read:before" && started.Add(1) <= 2 {
-					<-resume
-				}
-				return nil
-			},
-		})
+		ioHooks := &storage.IO{Hook: func(p string) error {
+			if p == "read:before" && started.Add(1) <= 2 {
+				<-resume
+			}
+			return nil
+		}}
+		db := newTestDBWithHooks(t, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 		mustPut(t, db, "a", "A")
 		mustPut(t, db, "b", "B")
 		mustPut(t, db, "z", "Z")

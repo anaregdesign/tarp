@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/platform"
 )
@@ -74,6 +75,8 @@ type Store struct {
 	retired           map[uint64]*File
 	retiredCatalogs   map[uint64]struct{}
 	retireSyncPending bool
+	// Created reports that this Open published the initial CURRENT.
+	Created bool
 }
 
 func DataName(uuid [16]byte, id uint64) string {
@@ -101,13 +104,19 @@ func (s *Store) allocateID() (uint64, error) {
 	return s.nextID, nil
 }
 
-func Open(dir string, cfg Config, fs *IO) (_ *Store, index map[string]Location, result error) {
+func Open(dir string, cfg Config, fs *IO) (*Store, map[string]Location, error) {
+	return OpenContext(context.Background(), dir, cfg, false, fs)
+}
+
+func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (_ *Store, index map[string]Location, result error) {
 	absolute, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := os.Mkdir(absolute, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-		return nil, nil, err
+	if !existingOnly {
+		if err := os.Mkdir(absolute, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, nil, err
+		}
 	}
 	absolute, err = filepath.EvalSymlinks(absolute)
 	if err != nil {
@@ -123,6 +132,10 @@ func Open(dir string, cfg Config, fs *IO) (_ *Store, index map[string]Location, 
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, err
+		} else if existingOnly {
+			if err := checkUninitializedDir(absolute); err != nil {
+				return nil, nil, err
+			}
 		}
 	} else if err != nil {
 		return nil, nil, err
@@ -143,25 +156,32 @@ func Open(dir string, cfg Config, fs *IO) (_ *Store, index map[string]Location, 
 	if err := fs.SyncDir(absolute, "lock.dirsync"); err != nil {
 		return nil, nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	names, err := os.ReadDir(absolute)
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(names) == 1 && names[0].Name() == "LOCK" {
+		if existingOnly {
+			return nil, nil, &os.PathError{Op: "open", Path: filepath.Join(absolute, "CURRENT"), Err: os.ErrNotExist}
+		}
 		if err := fs.SyncDir(filepath.Dir(absolute), "init.parent.sync"); err != nil {
 			return nil, nil, err
 		}
 		if err := s.initialize(); err != nil {
 			return nil, nil, err
 		}
+		s.Created = true
 		return s, make(map[string]Location), nil
 	}
-	image, err := Validate(context.Background(), absolute, cfg)
+	image, err := Validate(ctx, absolute, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	s.Current, s.Catalog, s.Manifest, s.Files = image.Current, image.Catalog, image.Manifest, image.Files
-	if err := s.inspectNames(); err != nil {
+	if err := s.inspectNames(ctx); err != nil {
 		return nil, nil, err
 	}
 	s.active, err = os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
@@ -177,10 +197,32 @@ func Open(dir string, cfg Config, fs *IO) (_ *Store, index map[string]Location, 
 		}
 		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveEnd)
 	}
-	if _, _, err := s.Cleanup(); err != nil {
+	if _, _, err := s.cleanup(ctx); err != nil {
+		return nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
 	return s, image.Index, nil
+}
+
+// Neither LOCK nor CURRENT was observed before locking. Keep empty directories
+// untouched and report partial images as corrupt. A concurrently created LOCK
+// or CURRENT requires the usual authoritative check under the directory lock.
+func checkUninitializedDir(dir string) error {
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return &os.PathError{Op: "open", Path: filepath.Join(dir, "CURRENT"), Err: os.ErrNotExist}
+	}
+	for _, entry := range names {
+		if entry.Name() == "LOCK" || entry.Name() == "CURRENT" {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: missing CURRENT in %s", ErrCorrupt, dir)
 }
 
 func (s *Store) initialize() error {
@@ -328,7 +370,7 @@ func (s *Store) AppendBatch(kind uint8, entries []Entry, healthy func() error) (
 	locations := make([]Location, len(entries))
 	var size int64
 	for i, e := range entries {
-		n := int64(format.RecordHeaderBytes + len(e.Key) + len(e.Value))
+		n := entrysize.RecordBytes(int64(len(e.Key)), int64(len(e.Value)))
 		locations[i] = Location{Offset: size, Bytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.Sequence + uint64(i) + 1}
 		size += n
 	}
@@ -409,12 +451,15 @@ func (s *Store) Read(loc Location, key string) ([]byte, error) {
 	return value, err
 }
 
-func (s *Store) inspectNames() error {
+func (s *Store) inspectNames(ctx context.Context) error {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		name := e.Name()
 		info, err := e.Info()
 		if err != nil {
@@ -445,18 +490,27 @@ func (s *Store) ownedTemp(name string) bool {
 
 // Cleanup only runs under the writer gate; release pins never performs I/O.
 func (s *Store) Cleanup() (removed, pinned int64, result error) {
-	if err := s.inspectNames(); err != nil {
+	return s.cleanup(context.Background())
+}
+
+func (s *Store) cleanup(ctx context.Context) (removed, pinned int64, result error) {
+	if err := s.inspectNames(ctx); err != nil {
 		return 0, 0, err
 	}
 	selected := map[uint64]bool{s.Current.ActiveID: true}
 	for _, f := range s.Catalog.Files {
-		selected[f.ID] = true
+		if f.HasPhysicalFile() {
+			selected[f.ID] = true
+		}
 	}
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return removed, pinned, errors.Join(err, s.syncRetirements("cleanup.dirsync"))
+		}
 		name := e.Name()
 		remove := s.ownedTemp(name)
 		var removedID, manifestID uint64

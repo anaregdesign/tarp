@@ -5,7 +5,7 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.5.0
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.6.0
 in a new module, run the commands below. In an existing module, run just
 the `go get` command.
 
@@ -13,7 +13,7 @@ the `go get` command.
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.5.0
+go get github.com/anaregdesign/tarp@v0.6.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -66,6 +66,13 @@ The parent directory must exist. One process exclusively owns a directory, while
 its `DB` supports concurrent goroutines without caller locks. Individual key operations are linearizable. Each batch call operates on its
 keys atomically. Separate calls have their own publication or read points.
 
+Use `OpenExisting(ctx, dir, opts)` when a missing database is an error, for
+example when opening a restored database or checking a service's configured
+path. An absent or empty directory matches `fs.ErrNotExist`. Use
+`OpenContext(ctx, dir, opts)` for cancellable recovery with the usual
+create-or-open behavior. After either function returns a DB, its lifetime is
+controlled by `Close`. For typed access, use `Bind` on that DB.
+
 **Every successful `Open` starts automatic incremental compaction.** Both new
 and reopened stores use one unversioned storage and backup format. A database
 or backup from the previous implementation returns `ErrUnsupportedFormat`.
@@ -112,7 +119,7 @@ return scores.Put("score", 42)
 
 When upgrading from v0.4, replace `NewTypedDB(raw, ...)` with `Bind(raw, ...)`
 and call `Close`, `Stats`, `Backup` and maintenance methods on the owner.
-Existing v0.4 databases and backups use the same on-disk format as v0.5.
+Existing v0.4 and v0.5 databases and backups use the same on-disk format as v0.6.
 
 Built-in codecs cover `bool`, `string`, all integer, float and complex types,
 and `[]byte`. Use `Uint8Codec` for `byte` and `Int32Codec` for `rune`. Numeric
@@ -217,6 +224,11 @@ effective `TargetSegmentBytes` minus the 64-byte segment header.
 All put entries count, including repeated keys. For deletes, only distinct
 keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
 before publication. Each nonempty write batch has one commit outcome.
+Use `errors.As` with `*tarp.BatchLimitError` to distinguish input count,
+per-entry size and total encoded payload. Its `Index` is the original input
+position, or -1 for a request-wide count error. For count and payload limits,
+`Actual` and `Limit` report inputs or bytes respectively. A per-entry error
+also exposes the underlying `*tarp.SizeError` with its record and cache charges.
 Use `errors.As` with `*tarp.BatchCodecError` to get the zero-based input
 index and the field (`key` or `value`) of a failed codec call. The error
 also wraps the codec's cause.
@@ -309,10 +321,16 @@ return tarp.Restore(ctx, tarp.RestoreRequest{
 `Limits: opts.RestoreLimits()`. Configure handles, batch read concurrency
 and the segment target when opening the restored DB.
 
+To check an immutable backup without writing a second copy, call
+`tarp.VerifyBackup(ctx, backupDir, opts.RestoreLimits())`. It verifies the exact
+file set and digests, replays the selected records, and checks the live size
+limits. `Restore` performs these checks and independently validates the copied
+database before publishing it. Use `OpenExisting` to open that database.
+
 If `Backup` or `Restore` reports `ErrCommitUncertain` at destination rename
 or parent directory sync, inspect the destination before retrying. For a
-backup, validate the image by restoring it into a fresh directory. For a
-restore, open the published destination if present. A backup destination
+backup, validate the published image with `VerifyBackup`. For a restore,
+use `OpenExisting` to inspect the published destination. A backup destination
 error alone permits continued use of the source DB. A source read or checksum
 failure puts that DB into fail-stop and requires close/reopen.
 

@@ -71,7 +71,8 @@ func TestMeasurementMaintenanceCopyAndOverlap(t *testing.T) {
 				opts = measurementWriteOptions(opts, len(keys[0]), len(value), true)
 			}
 			hooks := &measurementHooks{}
-			db := newTestDB(t, opts, hooks.interferenceIO())
+			fs, engineHooks := hooks.interferenceHooks()
+			db := newTestDBWithHooks(t, opts, fs, engineHooks)
 			for _, key := range keys {
 				if err := db.Put(key, value); err != nil {
 					t.Fatal(err)
@@ -116,11 +117,11 @@ func TestMeasurementMaintenanceCopyAndOverlap(t *testing.T) {
 // no-op and its old snapshots are still selected.
 func TestMeasurementCountsOnlyNewMaintenanceOutput(t *testing.T) {
 	hooks := &measurementHooks{}
-	io := hooks.interferenceIO()
+	io, engineHooks := hooks.interferenceHooks()
 	io.WriteAt = func(fd *os.File, data []byte, off int64) (int, error) {
 		return fd.WriteAt(data[:min(len(data), 17)], off)
 	}
-	db := newTestDB(t, engine.Options{}, io)
+	db := newTestDBWithHooks(t, engine.Options{}, io, engineHooks)
 	mustPut(t, db, "k", "obsolete")
 	mustPut(t, db, "k", "value")
 	if _, err := db.Compact(context.Background()); err != nil {

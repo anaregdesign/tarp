@@ -21,7 +21,22 @@ type Options = engine.Options
 // Open creates or reopens a database and starts automatic incremental compaction.
 // The parent directory must exist. Incompatible options leave existing data intact.
 func Open(dir string, opts Options) (*DB, error) {
-	db, err := engine.Open(dir, opts)
+	return OpenContext(context.Background(), dir, opts)
+}
+
+// OpenContext creates or reopens a database like Open. The context controls
+// recovery and has no effect on a successfully returned DB. Once initialization
+// of a new database begins, it finishes before OpenContext returns.
+func OpenContext(ctx context.Context, dir string, opts Options) (*DB, error) {
+	db, err := engine.OpenContext(ctx, dir, opts, false)
+	return (*DB)(db), err
+}
+
+// OpenExisting reopens an initialized database with cancellable recovery.
+// An absent or empty directory returns an error matching fs.ErrNotExist.
+// It also accepts a database just published by Restore.
+func OpenExisting(ctx context.Context, dir string, opts Options) (*DB, error) {
+	db, err := engine.OpenContext(ctx, dir, opts, true)
 	return (*DB)(db), err
 }
 
@@ -71,6 +86,12 @@ type RestoreRequest = engine.RestoreRequest
 // The source must remain immutable and the destination must be new.
 func Restore(ctx context.Context, req RestoreRequest) error {
 	return engine.Restore(ctx, req)
+}
+
+// VerifyBackup checks the file set, checksums, committed records and live record
+// limits of an immutable backup. It does not create or modify any files.
+func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) error {
+	return engine.VerifyBackup(ctx, source, limits)
 }
 
 // CompactResult counts reclaimed file bytes and retired bytes still held by leases.

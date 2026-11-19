@@ -28,6 +28,80 @@ func openPublicDB(t *testing.T, dir string, opts tarp.Options) *tarp.DB {
 	return db
 }
 
+func TestOpenExistingRequiresInitializedDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if db, err := tarp.OpenExisting(t.Context(), missing, tarp.Options{}); db != nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent database: %v, %v", db, err)
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent directory after open: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		file string
+		want error
+	}{
+		{"empty", "", os.ErrNotExist},
+		{"lock-only", "LOCK", os.ErrNotExist},
+		{"partial", "unpublished-data", tarp.ErrCorrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.file != "" {
+				if err := os.WriteFile(filepath.Join(dir, tc.file), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if db, err := tarp.OpenExisting(t.Context(), dir, tarp.Options{}); db != nil || !errors.Is(err, tc.want) {
+				t.Fatalf("open: %v, %v", db, err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.file == "" && len(entries) != 0 || tc.file != "" && (len(entries) != 1 || entries[0].Name() != tc.file) {
+				t.Fatalf("directory after failed open: %v", entries)
+			}
+		})
+	}
+}
+
+func TestOpenExistingAcceptsRestoredDatabaseWithoutLockFile(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	if err := db.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	req := tarp.RestoreRequest{Source: filepath.Join(parent, "backup"), Destination: filepath.Join(parent, "restored")}
+	if err := db.Backup(t.Context(), req.Source); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarp.Restore(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(req.Destination, "LOCK")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restored LOCK before open: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	restored, err := tarp.OpenExisting(ctx, req.Destination, tarp.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := restored.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	cancel() // A successful handle has its own lifetime.
+	if other, err := tarp.OpenExisting(t.Context(), req.Destination, tarp.Options{}); other != nil || !errors.Is(err, tarp.ErrLocked) {
+		t.Fatalf("second owner: %v, %v", other, err)
+	}
+	if got, err := restored.Get([]byte("k")); err != nil || string(got) != "v" {
+		t.Fatalf("restored value: %q, %v", got, err)
+	}
+}
+
 func TestRestoreVerifiesOnlySelectedLimits(t *testing.T) {
 	db := openPublicDB(t, t.TempDir(), tarp.Options{})
 	if err := db.Put([]byte("k"), []byte("v")); err != nil {
@@ -38,11 +112,26 @@ func TestRestoreVerifiesOnlySelectedLimits(t *testing.T) {
 	if err := db.Backup(t.Context(), req.Source); err != nil {
 		t.Fatal(err)
 	}
+	if err := tarp.VerifyBackup(t.Context(), req.Source, tarp.RestoreLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(req.Source, "LOCK")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("verified backup should have no lock file: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := tarp.VerifyBackup(ctx, req.Source, tarp.RestoreLimits{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled verification: %v", err)
+	}
 	req.Limits.MaxRecordBytes = -1
 	if err := tarp.Restore(t.Context(), req); !errors.Is(err, tarp.ErrInvalidOptions) {
 		t.Fatalf("invalid restore limit: %v", err)
 	}
 	req.Limits = tarp.RestoreLimits{CacheBytes: 129}
+	var incompatible *tarp.CompatibilityError
+	if err := tarp.VerifyBackup(t.Context(), req.Source, req.Limits); !errors.As(err, &incompatible) || incompatible.RequiredCacheBytes != 130 {
+		t.Fatalf("verify live record limits: %v", err)
+	}
 	if err := tarp.Restore(t.Context(), req); !errors.Is(err, tarp.ErrIncompatibleOptions) {
 		t.Fatalf("incompatible cache limit: %v", err)
 	}
@@ -119,12 +208,18 @@ func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {
 					t.Fatalf("%s returned %v", operation, err)
 				}
 			}
+			opened, err := tarp.OpenContext(tc.ctx, target, tarp.Options{})
+			check("open", err)
+			if opened != nil {
+				t.Fatal("OpenContext returned a handle")
+			}
 			result, err := db.Compact(tc.ctx)
 			check("compact", err)
 			if result != (tarp.CompactResult{}) {
 				t.Fatalf("Compact returned %+v", result)
 			}
 			check("backup", db.Backup(tc.ctx, target))
+			check("verify-backup", tarp.VerifyBackup(tc.ctx, backup, tarp.RestoreLimits{}))
 			check("restore", tarp.Restore(tc.ctx, tarp.RestoreRequest{Source: backup, Destination: target}))
 			if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("unexpected destination: %v", err)

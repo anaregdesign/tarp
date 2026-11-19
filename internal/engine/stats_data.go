@@ -22,7 +22,7 @@ func (d *dataTotals) addFile(size, tombstones int64) {
 func (db *DB) initDataStats() {
 	var selected dataTotals
 	for _, entry := range db.store.Catalog.Files {
-		if entry.ID != 0 {
+		if entry.HasPhysicalFile() {
 			selected.addFile(entry.Bytes, db.store.Files[entry.ID].DeleteBytes.Load())
 		}
 	}

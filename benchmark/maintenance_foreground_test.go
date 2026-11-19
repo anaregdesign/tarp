@@ -29,7 +29,7 @@ func TestMaintenanceForeground(t *testing.T) {
 	fixture := os.Getenv("TARP_MAINTENANCE_FIXTURE")
 	if fixture == "" {
 		dir := filepath.Join(t.TempDir(), "working")
-		db, err := engine.OpenWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+		db, err := engine.OpenWithHooks(dir, opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,8 +78,9 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 	root := t.TempDir()
 	dir, target := filepath.Join(root, "db"), filepath.Join(root, "backup")
 	measurementCloneClosed(t, fixture, dir)
-	fs := &storage.IO{CleanerStart: make(chan struct{})}
-	db, err := engine.OpenWithIO(dir, opts, fs)
+	fs := &storage.IO{}
+	engineHooks := &engine.Hooks{CleanerStart: make(chan struct{})}
+	db, err := engine.OpenWithHooks(dir, opts, fs, engineHooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 	var waitStart, syncStart time.Time
 	var put *foregroundPut
 	window := maintenanceWindow{Mode: mode, StateSHA256: digest, Puts: make([]foregroundPut, 128)}
-	fs.WriterWait = func(acquired bool) {
+	engineHooks.WriterWait = func(acquired bool) {
 		if !acquired {
 			waitStart = time.Now()
 			pending.Store(true)
@@ -116,7 +117,7 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 		put.WaitNS = time.Since(waitStart).Nanoseconds()
 		ownGate = true
 	}
-	fs.PutCopied = func(_, _ int) {
+	engineHooks.PutCopied = func(_, _ int) {
 		// Append and all of its syncs have completed, and Put still owns the gate.
 		ownGate = false
 		pending.Store(false)
@@ -245,7 +246,7 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 			t.Fatal(err)
 		}
 	}
-	verified, err := engine.OpenWithIO(checkDir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+	verified, err := engine.OpenWithHooks(checkDir, opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}

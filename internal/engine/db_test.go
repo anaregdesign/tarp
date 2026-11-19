@@ -31,7 +31,12 @@ func testOptions() Options {
 
 func newTestDB(t *testing.T, opts Options, fs *storage.IO) *DB {
 	t.Helper()
-	db, err := OpenWithIO(filepath.Join(t.TempDir(), "db"), opts, fs)
+	return newTestDBWithHooks(t, opts, fs, nil)
+}
+
+func newTestDBWithHooks(t *testing.T, opts Options, fs *storage.IO, hooks *Hooks) *DB {
+	t.Helper()
+	db, err := OpenWithHooks(filepath.Join(t.TempDir(), "db"), opts, fs, hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +135,7 @@ func TestPersistenceOwnershipAndRotation(t *testing.T) {
 
 func TestQueuedPutDefersOwnedInput(t *testing.T) {
 	var copied atomic.Int64
-	db := newTestDB(t, testOptions(), &storage.IO{PutCopied: func(k, v int) {
+	db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{PutCopied: func(k, v int) {
 		copied.Add(int64(k + v))
 	}})
 	db.writer.Lock()
@@ -519,7 +524,7 @@ func TestConcurrentReadFailureBeforeFrontierLeavesPutUnapplied(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synced, release := make(chan struct{}), make(chan struct{})
 			armed := false
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+			fs := &storage.IO{Hook: func(p string) error {
 				if armed && p == tc.point {
 					close(synced)
 					<-release
@@ -529,8 +534,9 @@ func TestConcurrentReadFailureBeforeFrontierLeavesPutUnapplied(t *testing.T) {
 				}
 				return nil
 			}}
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
 			opts := Options{CacheBytes: 140, MaxRecordBytes: 64, TargetSegmentBytes: tc.target}
-			db := newTestDB(t, opts, fs)
+			db := newTestDBWithHooks(t, opts, fs, engineHooks)
 			mustPut(t, db, "cold", "old")
 			mustPut(t, db, "key", "old") // Evicts "cold", forcing Get to read the segment.
 			before := db.store.Current
@@ -556,7 +562,7 @@ func TestConcurrentReadFailureBeforeFrontierLeavesPutUnapplied(t *testing.T) {
 			if err := db.Close(); !errors.Is(err, syscall.EIO) {
 				t.Fatal(err)
 			}
-			reopened, err := OpenWithIO(db.store.Dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+			reopened, err := OpenWithHooks(db.store.Dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -618,8 +624,8 @@ func TestCloseRetainsBothReadAndCloseFailures(t *testing.T) {
 
 func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 	opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128}
-	fs := &storage.IO{CleanerStart: make(chan struct{})}
-	db := newTestDB(t, opts, fs)
+	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+	db := newTestDBWithHooks(t, opts, nil, engineHooks)
 	mustPut(t, db, "sealed", "first")
 	mustPut(t, db, "active", "second")
 	frontier := db.store.Current
@@ -659,7 +665,7 @@ func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 			for name, b := range files {
 				writeFixtureFile(t, filepath.Join(dir, name), []byte(b))
 			}
-			rejected, err := OpenWithIO(dir, opts, fs)
+			rejected, err := OpenWithHooks(dir, opts, nil, engineHooks)
 			if rejected != nil {
 				rejected.Close()
 				t.Fatal("opened corrupt fixture")
@@ -677,7 +683,7 @@ func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 			} else {
 				writeFixtureFile(t, filepath.Join(dir, sealed), []byte(original[sealed]))
 			}
-			reopened, err := OpenWithIO(dir, opts, fs)
+			reopened, err := OpenWithHooks(dir, opts, nil, engineHooks)
 			if err != nil {
 				t.Fatalf("retry after repair: %v", err)
 			}
@@ -790,7 +796,7 @@ func TestExistingEmptyDirectoryStillRequiresParentSync(t *testing.T) {
 func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(fmt.Sprint(rotate), func(t *testing.T) {
-			db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{})})
+			db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
 			mustPut(t, db, "k", "old")
 			if rotate {
 				mustPut(t, db, "pad", string(make([]byte, 60)))
@@ -826,6 +832,131 @@ func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenFinishesNewDatabasePublicationWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	storageIO := &storage.IO{Hook: func(point string) error {
+		if point == "current.rename:after" {
+			cancel()
+		}
+		return nil
+	}}
+	dir := filepath.Join(t.TempDir(), "new")
+	db, err := openDB(ctx, dir, testOptions(), false, storageIO, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatal("did not cancel at publication")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := OpenContext(t.Context(), dir, testOptions(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := retried.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The large value needs more chunk checks than the open preflight. Cancel
+// during its replay deterministically, before the uncommitted tail is repaired.
+type cancelDuringOpen struct {
+	context.Context
+	cancel    context.CancelFunc
+	remaining int
+}
+
+func (c *cancelDuringOpen) Err() error {
+	c.remaining--
+	if c.remaining == 0 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestOpenCancellationDuringReplayAllowsRetry(t *testing.T) {
+	opts := Options{}
+	db := newTestDB(t, opts, nil)
+	value := bytes.Repeat([]byte("v"), 512<<10)
+	if err := db.Put([]byte("key"), value); err != nil {
+		t.Fatal(err)
+	}
+	dir, active := db.store.Dir, db.index["key"].File.Path
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := fd.WriteString("uncommitted")
+	if err := errors.Join(writeErr, fd.Close()); err != nil {
+		t.Fatal(err)
+	}
+	before := directoryBytes(t, dir)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	replay := &cancelDuringOpen{Context: ctx, cancel: cancel, remaining: 12}
+	if failed, err := OpenContext(replay, dir, opts, true); failed != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled recovery: %v, %v", failed, err)
+	}
+	if !maps.Equal(directoryBytes(t, dir), before) {
+		t.Fatal("repaired files before replay completed")
+	}
+	retried, err := OpenContext(t.Context(), dir, opts, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retried.Close()
+	if got, err := retried.Get([]byte("key")); err != nil || !bytes.Equal(got, value) {
+		t.Fatalf("retry lost committed data: %d bytes, %v", len(got), err)
+	}
+}
+
+func TestOpenCancellationDuringCleanupSyncsUnlinksAndAllowsRetry(t *testing.T) {
+	opts := testOptions()
+	db := newTestDB(t, opts, nil)
+	mustPut(t, db, "k", "v")
+	dir, frontier := db.store.Dir, db.store.Current
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uint64{100, 101} {
+		name := storage.DataName(frontier.UUID, id)
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var unlinked, synced int
+	storageIO := &storage.IO{Hook: func(point string) error {
+		switch point {
+		case "cleanup.unlink:after":
+			unlinked++
+			cancel()
+		case "cleanup.dirsync:after":
+			synced++
+		}
+		return nil
+	}}
+	if failed, err := openDB(ctx, dir, opts, true, storageIO, nil); failed != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled cleanup: %v, %v", failed, err)
+	}
+	if unlinked != 1 || synced != 1 {
+		t.Fatalf("cleanup completed %d unlinks, %d directory syncs", unlinked, synced)
+	}
+	retried, err := OpenContext(t.Context(), dir, opts, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retried.Close()
+	wantValue(t, retried, "k", "v")
 }
 
 func TestRecoveryBoundaryFailureReleasesOwnershipAndPreservesAcknowledgment(t *testing.T) {
@@ -1132,14 +1263,15 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 	} {
 		t.Run(tc.point, func(t *testing.T) {
 			armed := false
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+			fs := &storage.IO{Hook: func(p string) error {
 				if armed && p == tc.point {
 					return syscall.EIO
 				}
 				return nil
 			}}
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
 			opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128}
-			db := newTestDB(t, opts, fs)
+			db := newTestDBWithHooks(t, opts, fs, engineHooks)
 			mustPut(t, db, "k", "old")
 			before := db.store.Current
 			armed = true
@@ -1156,7 +1288,7 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 			if err := db.Close(); !errors.Is(err, syscall.EIO) {
 				t.Fatal(err)
 			}
-			image, err := OpenWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+			image, err := OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 			if err != nil {
 				t.Fatal(err)
 			}

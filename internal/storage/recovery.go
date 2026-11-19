@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
 )
 
@@ -55,7 +56,7 @@ func Validate(ctx context.Context, dir string, cfg Config) (*Image, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if entry.ID == 0 {
+		if !entry.HasPhysicalFile() {
 			continue // This cleaned interval has no physical records.
 		}
 		path := filepath.Join(dir, DataName(current.UUID, entry.ID))
@@ -84,12 +85,27 @@ func Validate(ctx context.Context, dir string, cfg Config) (*Image, error) {
 		}
 		image.Files[file.ID] = file
 	}
-	for _, loc := range image.Index {
-		if loc.Bytes > math.MaxInt64-80 {
+	remaining := len(image.Index)
+	for key, loc := range image.Index {
+		if remaining%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		remaining--
+		// Both limits grow with payload length, so the largest live record
+		// determines both minima.
+		if loc.Bytes <= image.Required.RecordBytes {
+			continue
+		}
+		charge := entrysize.CacheCharge(uint64(len(key)), uint64(loc.ValueBytes))
+		if charge > math.MaxInt64 {
 			return nil, fmt.Errorf("%w: unrepresentable live cache charge", ErrCorrupt)
 		}
-		image.Required.CacheBytes = max(image.Required.CacheBytes, loc.Bytes+80)
-		image.Required.RecordBytes = max(image.Required.RecordBytes, loc.Bytes)
+		image.Required = CompatibilityError{CacheBytes: int64(charge), RecordBytes: loc.Bytes}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if image.Required.CacheBytes > cfg.CacheBytes || image.Required.RecordBytes > cfg.RecordBytes {
 		return nil, &image.Required

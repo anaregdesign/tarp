@@ -35,6 +35,20 @@ func TestGoldenVectors(t *testing.T) {
 	}
 }
 
+func TestMetadataOnlyCatalogEntryRetainsSequenceCoverage(t *testing.T) {
+	catalog := Catalog{ActiveID: 3, PrunedThrough: 4, Files: []File{
+		{ID: 2, Kind: Log, Bytes: SegmentHeaderBytes + RecordHeaderBytes + 1, First: 1, Last: 1},
+		{Kind: Cleaned, First: 2, Last: 4},
+	}}
+	got, err := DecodeCatalog(EncodeCatalog(catalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Files[0].HasPhysicalFile() || got.Files[1].HasPhysicalFile() || got.SealedEnd() != 4 {
+		t.Fatalf("unexpected physical files or sequence coverage in %+v", got)
+	}
+}
+
 func TestDecodeBackupWithFormerFileLimit(t *testing.T) {
 	// A backup written with a 256-byte source file limit.
 	wire, err := hex.DecodeString("544152504241434b00000000710000000000000085798e6197641f730000000001020300000000000000000000000000060000000000000003000000000000000002000000000000800000000000000000010000000000000100000000000000070043555252454e5480000000000000000000000000000000000000000000000000000000000000000000000000000000")

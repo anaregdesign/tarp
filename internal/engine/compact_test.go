@@ -38,7 +38,7 @@ func TestCompactReportsCheckpointPublicationOutcome(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			armed, calls := false, 0
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+			fs := &storage.IO{Hook: func(point string) error {
 				if armed && point == tc.point {
 					calls++
 					if calls == tc.occurrence {
@@ -47,7 +47,8 @@ func TestCompactReportsCheckpointPublicationOutcome(t *testing.T) {
 				}
 				return nil
 			}}
-			db := newTestDB(t, testOptions(), fs)
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			db := newTestDBWithHooks(t, testOptions(), fs, engineHooks)
 			mustPut(t, db, "k", "acknowledged")
 			armed = true
 			_, err := db.Compact(t.Context())
@@ -63,7 +64,7 @@ func TestCompactReportsCheckpointPublicationOutcome(t *testing.T) {
 			if err := db.Close(); !errors.Is(err, syscall.EIO) {
 				t.Fatalf("close after publication fault: %v", err)
 			}
-			reopened, err := OpenWithIO(db.store.Dir, testOptions(), &storage.IO{CleanerStart: make(chan struct{})})
+			reopened, err := OpenWithHooks(db.store.Dir, testOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +99,7 @@ func TestCompactRetriesPendingCleanupSync(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			armed, calls, syncs := false, 0, 0
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+			fs := &storage.IO{Hook: func(point string) error {
 				if !armed {
 					return nil
 				}
@@ -113,7 +114,8 @@ func TestCompactRetriesPendingCleanupSync(t *testing.T) {
 				}
 				return nil
 			}}
-			db := newTestDB(t, testOptions(), fs)
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			db := newTestDBWithHooks(t, testOptions(), fs, engineHooks)
 			mustPut(t, db, "k", "acknowledged")
 			if _, err := db.Compact(t.Context()); err != nil {
 				t.Fatal(err)
@@ -149,7 +151,7 @@ func TestCompactRetriesPendingCleanupSync(t *testing.T) {
 
 func TestCompactCanFinishCleanupAfterWorkerSyncFailure(t *testing.T) {
 	manualSyncs, workerSyncs := 0, 0
-	fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+	fs := &storage.IO{Hook: func(point string) error {
 		switch point {
 		case "cleanup.dirsync:before":
 			manualSyncs++
@@ -162,7 +164,8 @@ func TestCompactCanFinishCleanupAfterWorkerSyncFailure(t *testing.T) {
 		}
 		return nil
 	}}
-	db := newTestDB(t, testOptions(), fs)
+	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+	db := newTestDBWithHooks(t, testOptions(), fs, engineHooks)
 	mustPut(t, db, "k", "acknowledged")
 	first, err := db.Compact(t.Context())
 	var op *OpError
@@ -191,7 +194,7 @@ func TestCheckpointSyncsEveryCompletedSnapshotBeforePublication(t *testing.T) {
 		t.Run(fmt.Sprintf("fail-final-sync-%t", failFinalSync), func(t *testing.T) {
 			var files, synced int
 			var published bool
-			fs := &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+			fs := &storage.IO{Hook: func(point string) error {
 				switch point {
 				case "compact.segment.write:after":
 					files++
@@ -211,8 +214,9 @@ func TestCheckpointSyncsEveryCompletedSnapshotBeforePublication(t *testing.T) {
 				}
 				return nil
 			}}
+			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
 			opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 180}
-			db := newTestDB(t, opts, fs)
+			db := newTestDBWithHooks(t, opts, fs, engineHooks)
 			for _, key := range []string{"a", "b", "c", "d"} {
 				mustPut(t, db, key, "v")
 			}
@@ -341,18 +345,16 @@ func TestCleanupAfterFaultDoesNotRetainUnlinkedMetadata(t *testing.T) {
 
 func TestCheckpointCopiesInSourceOrderAndReusesReaders(t *testing.T) {
 	var opens, records int
-	db := newTestDB(t, Options{MaxRecordBytes: 64, TargetSegmentBytes: 180}, &storage.IO{
-		CleanerStart: make(chan struct{}),
-		Hook: func(point string) error {
-			switch point {
-			case "compact.source.open:after":
-				opens++
-			case "compact.record:after":
-				records++
-			}
-			return nil
-		},
-	})
+	ioHooks := &storage.IO{Hook: func(point string) error {
+		switch point {
+		case "compact.source.open:after":
+			opens++
+		case "compact.record:after":
+			records++
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{MaxRecordBytes: 64, TargetSegmentBytes: 180}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 	// Two records per log. Both records in the first file are overwritten.
 	for _, key := range []string{"a", "b", "c", "d", "e", "f", "a", "b"} {
 		mustPut(t, db, key, "v")
@@ -424,7 +426,7 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 func TestCompactionConcurrentTailWins(t *testing.T) {
 	var armed atomic.Bool
 	started, release := make(chan struct{}), make(chan struct{})
-	db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+	ioHooks := &storage.IO{Hook: func(p string) error {
 		// Header creation is staging I/O. A foreground writer must be able to
 		// append and rotate while it is blocked.
 		if p == "compact.segment.write:before" && armed.CompareAndSwap(true, false) {
@@ -436,7 +438,8 @@ func TestCompactionConcurrentTailWins(t *testing.T) {
 			}
 		}
 		return nil
-	}})
+	}}
+	db := newTestDBWithHooks(t, testOptions(), ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "a", "old")
 	mustPut(t, db, "b", "deleted")
 	armed.Store(true)

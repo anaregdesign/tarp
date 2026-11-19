@@ -90,7 +90,7 @@ type pausedScanResult struct {
 func measurePausedScan(t testing.TB, f repackFixture) pausedScanResult {
 	t.Helper()
 	startCleaner := make(chan struct{})
-	db, cleanup := f.openClone(t, &storage.IO{CleanerStart: startCleaner})
+	db, cleanup := f.openClone(t, nil, &engine.Hooks{CleanerStart: startCleaner})
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()

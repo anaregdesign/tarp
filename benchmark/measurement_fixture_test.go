@@ -20,7 +20,12 @@ import (
 
 func newTestDB(t *testing.T, opts engine.Options, fs *storage.IO) *engine.DB {
 	t.Helper()
-	db, err := engine.OpenWithIO(filepath.Join(t.TempDir(), "db"), opts, fs)
+	return newTestDBWithHooks(t, opts, fs, nil)
+}
+
+func newTestDBWithHooks(t *testing.T, opts engine.Options, fs *storage.IO, hooks *engine.Hooks) *engine.DB {
+	t.Helper()
+	db, err := engine.OpenWithHooks(filepath.Join(t.TempDir(), "db"), opts, fs, hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +88,7 @@ func measurementCloneClosed(t testing.TB, source, target string) {
 func measurementPrepareFixture(t *testing.T, source, target string, opts engine.Options, keys [][]byte, value []byte) {
 	t.Helper()
 	measurementCloneClosed(t, source, target)
-	db, err := engine.OpenWithIO(target, opts, &storage.IO{CleanerStart: make(chan struct{})})
+	db, err := engine.OpenWithHooks(target, opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +117,8 @@ func measurementOpenClone(t *testing.T, source string, opts engine.Options) (*en
 	path := filepath.Join(t.TempDir(), "db")
 	measurementCloneClosed(t, source, path)
 	hooks := &measurementHooks{}
-	db, err := engine.OpenWithIO(path, opts, hooks.interferenceIO())
+	fs, engineHooks := hooks.interferenceHooks()
+	db, err := engine.OpenWithHooks(path, opts, fs, engineHooks)
 	if err != nil {
 		t.Fatal(err)
 	}

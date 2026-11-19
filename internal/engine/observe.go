@@ -18,6 +18,11 @@ func (o Observer) Options() Options             { return o.db.opts }
 func (o Observer) Dir() string                  { return o.db.store.Dir }
 func (o Observer) CleanerDone() <-chan struct{} { return o.db.cleaner.done }
 
+// CleanerGatedBy verifies that this measurement owns the worker's start gate.
+func (o Observer) CleanerGatedBy(start <-chan struct{}) bool {
+	return start != nil && o.db.hooks != nil && o.db.hooks.CleanerStart == start
+}
+
 func (o Observer) Frontier() format.Frontier {
 	o.db.writer.Lock()
 	defer o.db.writer.Unlock()

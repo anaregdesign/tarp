@@ -59,7 +59,7 @@ func TestScanReiteratesWithOwnedEntries(t *testing.T) {
 
 func TestScanKeepsUnreadValuesAcrossCompact(t *testing.T) {
 	start := make(chan struct{})
-	db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: start})
+	db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: start})
 	want := make(map[string]string)
 	old := make(map[string]*storage.File)
 	for _, k := range []string{"a", "b", "c", "d"} {

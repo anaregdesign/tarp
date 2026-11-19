@@ -101,9 +101,9 @@ func startupRow(elapsed time.Duration, resources map[string]any) map[string]any 
 // counters then describe exactly the image that recovery read.
 func openStartupSample(t *testing.T, dir string, opts engine.Options) (*engine.DB, time.Duration) {
 	t.Helper()
-	fs := &storage.IO{CleanerStart: make(chan struct{})}
+	engineHooks := &engine.Hooks{CleanerStart: make(chan struct{})}
 	start := time.Now()
-	db, err := engine.OpenWithIO(dir, opts, fs)
+	db, err := engine.OpenWithHooks(dir, opts, nil, engineHooks)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +120,7 @@ func openStartupSample(t *testing.T, dir string, opts engine.Options) (*engine.D
 // it for the second recovery comparison. The cleaner cannot alter that input.
 func measurementCheckpointFixture(t *testing.T, dir string, opts engine.Options) {
 	t.Helper()
-	db, err := engine.OpenWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+	db, err := engine.OpenWithHooks(dir, opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}

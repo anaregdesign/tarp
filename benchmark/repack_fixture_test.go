@@ -33,7 +33,7 @@ func prepareRepackFixture(t testing.TB, size int) repackFixture {
 	opts.MaxRecordBytes = int64(format.RecordHeaderBytes + len(keys[0]) + size)
 	opts.TargetSegmentBytes = format.SegmentHeaderBytes + recordsPerLog*opts.MaxRecordBytes
 	dir := filepath.Join(t.TempDir(), "seed")
-	db, err := engine.OpenWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{})})
+	db, err := engine.OpenWithHooks(dir, opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func prepareRepackFixture(t testing.TB, size int) repackFixture {
 
 // openClone warms exactly the reader's key before the caller starts its timer.
 // The caller defers cleanup for this sample, including on benchmark failure.
-func (f repackFixture) openClone(t testing.TB, fs *storage.IO) (_ *engine.DB, cleanup func()) {
+func (f repackFixture) openClone(t testing.TB, fs *storage.IO, hooks *engine.Hooks) (_ *engine.DB, cleanup func()) {
 	t.Helper()
 	temp, err := os.MkdirTemp(filepath.Dir(f.dir), "repack-")
 	if err != nil {
@@ -101,7 +101,7 @@ func (f repackFixture) openClone(t testing.TB, fs *storage.IO) (_ *engine.DB, cl
 	}()
 	dir := filepath.Join(temp, "db")
 	measurementCloneClosed(t, f.dir, dir)
-	db, err = engine.OpenWithIO(dir, f.opts, fs)
+	db, err = engine.OpenWithHooks(dir, f.opts, fs, hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func (f repackFixture) verify(t testing.TB, db *engine.DB, repacked bool, puts i
 	if fileCount != wantFiles {
 		t.Fatalf("repacked=%t: found %d physical DATA files; want %d", repacked, fileCount, wantFiles)
 	}
-	reopened, err := engine.OpenWithIO(dir, f.opts, &storage.IO{CleanerStart: make(chan struct{})})
+	reopened, err := engine.OpenWithHooks(dir, f.opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}

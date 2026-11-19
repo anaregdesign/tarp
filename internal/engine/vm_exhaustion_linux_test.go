@@ -91,13 +91,14 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	var held atomic.Bool
 	// This fault campaign attributes ENOSPC, retry and reclaimed bytes to three
 	// explicit checkpoints. Isolate those calls from automatic reclamation.
-	db, err := OpenWithIO(dir, opts, &storage.IO{CleanerStart: make(chan struct{}), Hook: func(point string) error {
+	ioHooks := &storage.IO{Hook: func(point string) error {
 		if point == "backup.copy:before" && held.CompareAndSwap(false, true) {
 			close(ready)
 			<-release
 		}
 		return nil
-	}})
+	}}
+	db, err := OpenWithHooks(dir, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}

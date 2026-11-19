@@ -41,9 +41,7 @@ func TestBatchPutMemory(t *testing.T) {
 	var measuring bool
 	var writeHeap uint64
 	var dataBytes, writes int
-	// Park the cleaner so that reclamation cannot race the retained-heap sample.
 	fs := &storage.IO{
-		CleanerStart: make(chan struct{}),
 		Hook: func(point string) error {
 			if measuring && point == "data.write:before" && writeHeap == 0 {
 				writeHeap = batchLiveHeap()
@@ -57,7 +55,9 @@ func TestBatchPutMemory(t *testing.T) {
 			}
 		},
 	}
-	db, err := engine.OpenWithIO(filepath.Join(t.TempDir(), "db"), engine.Options{}, fs)
+	// Park the cleaner so that reclamation cannot race the retained-heap sample.
+	engineHooks := &engine.Hooks{CleanerStart: make(chan struct{})}
+	db, err := engine.OpenWithHooks(filepath.Join(t.TempDir(), "db"), engine.Options{}, fs, engineHooks)
 	if err != nil {
 		t.Fatal(err)
 	}

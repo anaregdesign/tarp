@@ -119,7 +119,7 @@ func TestDefaultOpenAutomaticallyCleans(t *testing.T) {
 			var err error
 			if reopen {
 				// Build an already eligible store and let public Open see it at startup.
-				db, err = OpenWithIO(dir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})
+				db, err = OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 			} else {
 				db, err = Open(dir, Options{})
 			}
@@ -188,14 +188,15 @@ func TestWorkerDefersForHeadroomAndRecovers(t *testing.T) {
 	start := make(chan struct{})
 	deferral := make(chan struct{})
 	var attempts atomic.Int32
-	fs := &storage.IO{CleanerStart: start, Hook: func(p string) error {
+	fs := &storage.IO{Hook: func(p string) error {
 		if p == "clean.headroom:before" && attempts.Add(1) == 1 {
 			close(deferral)
 			return syscall.ENOSPC
 		}
 		return nil
 	}}
-	db := newTestDB(t, Options{TargetSegmentBytes: 8192, MaxRecordBytes: 4096}, fs)
+	engineHooks := &Hooks{CleanerStart: start}
+	db := newTestDBWithHooks(t, Options{TargetSegmentBytes: 8192, MaxRecordBytes: 4096}, fs, engineHooks)
 	source := db.store.Files[db.store.Current.ActiveID].Path
 	for i := 0; i < 5; i++ {
 		mustPut(t, db, "hot", string(bytes.Repeat([]byte{byte(i)}, 2048)))
@@ -215,7 +216,7 @@ func TestWorkerDefersForHeadroomAndRecovers(t *testing.T) {
 }
 
 func TestCloseWhileWorkerWaitsForAdmission(t *testing.T) {
-	db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
 	done := make(chan error)
 	go func() { done <- db.Close() }()
 	if err := db.Close(); err != nil {
@@ -305,8 +306,8 @@ func waitForDataFiles(t *testing.T, db *DB, want int) {
 
 func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 	opts := Options{MaxRecordBytes: 4096, TargetSegmentBytes: 8192}
-	parked := &storage.IO{CleanerStart: make(chan struct{})}
-	db := newTestDB(t, opts, parked)
+	parked := &Hooks{CleanerStart: make(chan struct{})}
+	db := newTestDBWithHooks(t, opts, nil, parked)
 	dir := db.store.Dir
 
 	// Five sealed logs each lose their large hot value. Four retain a
@@ -356,7 +357,7 @@ func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{dir, restored} {
-		image, err := OpenWithIO(path, opts, parked)
+		image, err := OpenWithHooks(path, opts, nil, parked)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -385,7 +386,7 @@ func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 
 func TestAutomaticRepackKeepsSnapshotsAndLogIntervalsSeparate(t *testing.T) {
 	small := Options{MaxRecordBytes: 128, TargetSegmentBytes: 192}
-	db := newTestDB(t, small, &storage.IO{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, small, nil, &Hooks{CleanerStart: make(chan struct{})})
 	value := strings.Repeat("v", 48) // fits one record per 192-byte snapshot
 	for _, key := range []string{"a", "b", "c", "d"} {
 		mustPut(t, db, key, value)
@@ -431,7 +432,7 @@ func cleanerCrashOptions() Options {
 
 func seedCleanerCrashImage(t *testing.T, dir string) {
 	t.Helper()
-	db, err := OpenWithIO(dir, cleanerCrashOptions(), &storage.IO{CleanerStart: make(chan struct{})})
+	db, err := OpenWithHooks(dir, cleanerCrashOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +477,7 @@ func TestCleanerPublicationCrashMatrix(t *testing.T) {
 				}
 				// Stop further physical cleaning during inspection so either permissible
 				// on-disk selection must stand on its own.
-				db, err := OpenWithIO(dir, cleanerCrashOptions(), &storage.IO{CleanerStart: make(chan struct{})})
+				db, err := OpenWithHooks(dir, cleanerCrashOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
 				if err != nil {
 					t.Fatal(err)
 				}
