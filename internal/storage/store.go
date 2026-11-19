@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -186,7 +187,7 @@ func (s *Store) initialize() error {
 		return err
 	}
 	s.Catalog.UUID = s.Current.UUID
-	file, fd, err := s.newSegment(format.Log, "segment", nil)
+	file, fd, err := s.newSegment(format.Log, "segment", appendData{})
 	if err != nil {
 		return err
 	}
@@ -197,7 +198,7 @@ func (s *Store) initialize() error {
 	return s.publishCatalog(s.Catalog, candidate)
 }
 
-func (s *Store) newSegment(kind uint32, point string, initialRecords []byte) (*File, *os.File, error) {
+func (s *Store) newSegment(kind uint32, point string, initialRecords appendData) (*File, *os.File, error) {
 	id, err := s.allocateID()
 	if err != nil {
 		return nil, nil, err
@@ -209,8 +210,8 @@ func (s *Store) newSegment(kind uint32, point string, initialRecords []byte) (*F
 	}
 	b := format.EncodeSegment(format.Segment{UUID: s.Current.UUID, ID: id, Kind: kind})
 	err = s.IO.Write(fd, b, 0, point+".write")
-	if err == nil && len(initialRecords) > 0 {
-		err = s.IO.Write(fd, initialRecords, format.SegmentHeaderBytes, "data.write")
+	if err == nil && initialRecords.size > 0 {
+		err = initialRecords.writeAt(fd, format.SegmentHeaderBytes)
 	}
 	// A snapshot is private staging. Compact syncs the complete header and
 	// records at finishFile before any manifest may select this DATA file.
@@ -222,7 +223,7 @@ func (s *Store) newSegment(kind uint32, point string, initialRecords []byte) (*F
 		removeErr := s.IO.Do("segment.discard", func() error { return os.Remove(f.Path) })
 		return nil, nil, errors.Join(err, closeErr, removeErr)
 	}
-	f.Size.Store(format.SegmentHeaderBytes + int64(len(initialRecords)))
+	f.Size.Store(format.SegmentHeaderBytes + initialRecords.size)
 	s.Files[id] = f
 	return f, fd, nil
 }
@@ -234,13 +235,13 @@ func (s *Store) Rotate() error {
 	if s.Current.Generation == math.MaxUint64 {
 		return fault("rotation.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
 	}
-	return s.rotate(nil, s.Current.Sequence, nil)
+	return s.rotate(appendData{}, s.Current.Sequence, nil)
 }
 
 // A rotating append syncs the header and its initial records together. CURRENT
 // selects the new segment, catalog and user sequence in one publication.
 // Explicit checkpoint sealing selects a header-only log at the old sequence.
-func (s *Store) rotate(initialRecords []byte, lastSequence uint64, healthy func() error) error {
+func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy func() error) error {
 	file, fd, err := s.newSegment(format.Log, "segment", initialRecords)
 	if err != nil {
 		return fault("rotation.segment", "not-applied", true, err)
@@ -289,7 +290,10 @@ func (s *Store) Append(kind uint8, key, value []byte, healthy func() error) (Loc
 	}
 	sequence := s.Current.Sequence + 1
 	b := format.EncodeRecord(kind, sequence, key, value)
-	file, offset, err := s.appendEncoded(b, sequence, healthy)
+	data := appendData{size: int64(len(b)), writeAt: func(fd *os.File, off int64) error {
+		return s.IO.Write(fd, b, off, "data.write")
+	}}
+	file, offset, err := s.appendRecords(data, sequence, healthy)
 	if err != nil {
 		return Location{}, err
 	}
@@ -305,20 +309,30 @@ func (s *Store) AppendBatch(kind uint8, entries []Entry, healthy func() error) (
 	if err := s.checkSequence(len(entries)); err != nil {
 		return nil, err
 	}
-	var size int
-	for _, e := range entries {
-		size += format.RecordHeaderBytes + len(e.Key) + len(e.Value)
-	}
-	b := make([]byte, 0, size)
 	locations := make([]Location, len(entries))
-	sequence := s.Current.Sequence
+	var size int64
 	for i, e := range entries {
-		sequence++
-		start := len(b)
-		b = format.AppendRecord(b, kind, sequence, e.Key, e.Value)
-		locations[i] = Location{Offset: int64(start), Bytes: int64(len(b) - start), ValueBytes: int64(len(e.Value)), Sequence: sequence}
+		n := int64(format.RecordHeaderBytes + len(e.Key) + len(e.Value))
+		locations[i] = Location{Offset: size, Bytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.Sequence + uint64(i) + 1}
+		size += n
 	}
-	file, offset, err := s.appendEncoded(b, sequence, healthy)
+	data := appendData{size: size, writeAt: func(fd *os.File, off int64) error {
+		// Buffer small records together; bufio writes large values directly from
+		// the caller's slice. The buffer lives only through this append.
+		dst := &outputWriter{fs: s.IO, fd: fd, offset: off, point: "data.write"}
+		w := bufio.NewWriterSize(dst, int(min(size, 32<<10)))
+		var header [format.RecordHeaderBytes]byte
+		for i, e := range entries {
+			format.EncodeRecordHeader(&header, kind, locations[i].Sequence, e.Key, e.Value)
+			for _, part := range [3][]byte{header[:], e.Key, e.Value} {
+				if _, err := w.Write(part); err != nil {
+					return err
+				}
+			}
+		}
+		return w.Flush()
+	}}
+	file, offset, err := s.appendRecords(data, locations[len(locations)-1].Sequence, healthy)
 	if err != nil {
 		return nil, err
 	}
@@ -329,15 +343,21 @@ func (s *Store) AppendBatch(kind uint8, entries []Entry, healthy func() error) (
 	return locations, nil
 }
 
-func (s *Store) appendEncoded(b []byte, lastSequence uint64, healthy func() error) (*File, int64, error) {
+// appendData is written synchronously to either the current or a new segment.
+type appendData struct {
+	size    int64
+	writeAt func(*os.File, int64) error
+}
+
+func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func() error) (*File, int64, error) {
 	offset := s.Current.ActiveEnd
-	if offset > format.SegmentHeaderBytes && offset > s.Config.TargetSegmentBytes-int64(len(b)) {
-		if err := s.rotate(b, lastSequence, healthy); err != nil {
+	if offset > format.SegmentHeaderBytes && offset > s.Config.TargetSegmentBytes-data.size {
+		if err := s.rotate(data, lastSequence, healthy); err != nil {
 			return nil, 0, err
 		}
 		return s.Files[s.Current.ActiveID], format.SegmentHeaderBytes, nil
 	}
-	if err := s.IO.Write(s.active, b, offset, "data.write"); err != nil {
+	if err := data.writeAt(s.active, offset); err != nil {
 		return nil, 0, fault("data.write", "not-applied", true, err)
 	}
 	if err := s.IO.Sync(s.active, "data.sync"); err != nil {
@@ -348,7 +368,7 @@ func (s *Store) appendEncoded(b []byte, lastSequence uint64, healthy func() erro
 	}
 	candidate := s.Current
 	candidate.Generation++
-	candidate.Sequence, candidate.ActiveEnd = lastSequence, offset+int64(len(b))
+	candidate.Sequence, candidate.ActiveEnd = lastSequence, offset+data.size
 	if err := s.publish(candidate); err != nil {
 		return nil, 0, err
 	}

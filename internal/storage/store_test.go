@@ -66,6 +66,11 @@ func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
 }
 
 func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
+	// The first value exceeds the encoding buffer. The second record shares
+	// the same commit, even when a write fails after the whole first record.
+	entries := []Entry{{[]byte("a"), bytes.Repeat([]byte("1"), 96<<10)}, {[]byte("b"), []byte("2")}}
+	firstBytes := int64(format.RecordHeaderBytes + len(entries[0].Key) + len(entries[0].Value))
+	batchBytes := firstBytes + int64(format.RecordHeaderBytes+len(entries[1].Key)+len(entries[1].Value))
 	for _, rotate := range []bool{false, true} {
 		for _, tc := range []struct {
 			point, outcome string
@@ -80,10 +85,9 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("rotate=%v/%s", rotate, tc.point), func(t *testing.T) {
 				dir := t.TempDir()
-				cfg := Config{CacheBytes: 4096, RecordBytes: 100, TargetSegmentBytes: 1024, Handles: 1}
+				cfg := Config{CacheBytes: 1 << 20, RecordBytes: 128 << 10, TargetSegmentBytes: 1 << 20, Handles: 1}
 				if rotate {
-					// Exactly enough payload for the two 50-byte batch records.
-					cfg.TargetSegmentBytes = format.SegmentHeaderBytes + 100
+					cfg.TargetSegmentBytes = format.SegmentHeaderBytes + batchBytes
 				}
 				s, _, err := Open(dir, cfg, nil)
 				if err != nil {
@@ -107,16 +111,19 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 					return nil
 				}}
 				if tc.point == "partial-data" {
+					start := before.ActiveEnd
+					if rotate {
+						start = format.SegmentHeaderBytes
+					}
+					cut := start + firstBytes + 1
 					s.IO.WriteAt = func(f *os.File, b []byte, off int64) (int, error) {
-						if bytes.HasPrefix(b, []byte("TARPRECD")) {
-							// Leave a whole first record and the start of the second.
-							n, err := f.WriteAt(b[:51], off)
+						if off < cut && cut-off <= int64(len(b)) {
+							n, err := f.WriteAt(b[:cut-off], off)
 							return n, errors.Join(err, injected)
 						}
 						return f.WriteAt(b, off)
 					}
 				}
-				entries := []Entry{{[]byte("a"), []byte("1")}, {[]byte("b"), []byte("2")}}
 				locations, err := s.AppendBatch(format.Put, entries, healthy)
 				if tc.point == "" {
 					if err != nil || publications != 1 || len(locations) != 2 {

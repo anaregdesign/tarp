@@ -24,7 +24,6 @@ type DB struct {
 	store   *storage.Store
 	writer  engineMutex
 	state   engineMutex
-	stats   Stats // guarded by state
 	index   map[string]storage.Location
 	cache   *cache.Cache
 	failed  atomic.Pointer[failure]
@@ -37,6 +36,10 @@ type DB struct {
 	closeErr error
 	backup   atomic.Bool
 	compact  atomic.Bool
+
+	// Keep the snapshot after the fields shared by Get and lifecycle admission.
+	// Its placement affects parallel cache-hit throughput.
+	stats Stats // guarded by state
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
