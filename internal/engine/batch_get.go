@@ -211,27 +211,3 @@ func batchKeySlot(slots []uint16, keys [][]byte, i, sample int) int {
 	slots[bucket] = uint16(i + 1)
 	return i
 }
-
-func (db *DB) readBatchMisses(keys [][]byte, results []BatchResult, reads []batchRead) error {
-	defer func() {
-		for _, r := range reads {
-			if r.loc.File != nil {
-				db.releaseScanPin(r.loc.File)
-			}
-		}
-	}()
-
-	for _, r := range reads {
-		if r.loc.File == nil {
-			results[r.slot] = BatchResult{Value: bytes.Clone(results[r.source].Value), Found: true}
-			continue
-		}
-		value, err := db.store.Read(r.loc, string(keys[r.slot]))
-		if err != nil {
-			db.poison(err)
-			return operationError("batch-get", "read", err)
-		}
-		results[r.slot].Value = value
-	}
-	return nil
-}

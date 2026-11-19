@@ -183,9 +183,15 @@ The byte API takes `[]tarp.Entry` for writes and `[][]byte` for reads and
 deletes. Results follow input order. A missing key has `Found == false`,
 and the caller owns a separate value slice for each occurrence of a found
 key. The result uses memory proportional to all returned values, including
-duplicates. Batch reads use cached values when available and preserve LRU recency. Repeated puts apply in input order. Repeated deletes
+duplicates. Repeated puts apply in input order. Repeated deletes
 remove a key once. If any requested delete key is missing, the whole call
 returns `ErrNotFound` before writing.
+
+`BatchGet` preserves LRU recency and reads each distinct cold, live key once.
+Concurrent `BatchGet` calls on the same DB, including typed views, share the
+DATA read limit set by `Options.BatchReadConcurrency`. Set it to 1 to serialize
+these reads. A fully cached batch uses no read slots or workers. `Get` runs
+independently of this limit, and each DB has its own read slots.
 
 Each call accepts up to `tarp.MaxBatchEntries` (4,096) inputs, counting
 duplicates. An empty batch succeeds on a healthy open DB. Write batches
@@ -241,6 +247,7 @@ the commit sync protocol.
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
 | `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Also bounds the total DATA bytes read in one automatic repack. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
+| `BatchReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 
 For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
 bytes and `128 + K + V` cache bytes. An entry that exceeds either limit returns

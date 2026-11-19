@@ -40,6 +40,8 @@ type DB struct {
 	// Keep the snapshot after the fields shared by Get and lifecycle admission.
 	// Its placement affects parallel cache-hit throughput.
 	stats Stats // guarded by state
+
+	batchReadSlots chan struct{} // shared by BatchGet calls on this DB
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
@@ -58,6 +60,7 @@ func OpenWithIO(dir string, opts Options, fs *storage.IO) (*DB, error) {
 		return nil, operationError("open", "recovery", err)
 	}
 	db := &DB{opts: opts, store: s, index: index, cache: cache.New(opts.CacheBytes), closed: make(chan struct{})}
+	db.batchReadSlots = make(chan struct{}, opts.BatchReadConcurrency)
 	db.cond = sync.NewCond(&db.life)
 	for _, loc := range index {
 		loc.File.Pin()

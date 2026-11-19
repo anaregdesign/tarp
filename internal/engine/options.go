@@ -17,10 +17,13 @@ type Options struct {
 	// Zero selects 4 MiB. The target grows to fit a header and one maximum record.
 	TargetSegmentBytes int64
 	ReadFileHandles    int
+	// BatchReadConcurrency limits concurrent DATA reads across BatchGet calls
+	// on this DB. Zero selects 8. One runs the reads serially.
+	BatchReadConcurrency int
 }
 
 func (o Options) normalized() (Options, error) {
-	if o.CacheBytes < 0 || o.MaxRecordBytes < 0 || o.ReadFileHandles < 0 || o.TargetSegmentBytes < 0 {
+	if o.CacheBytes < 0 || o.MaxRecordBytes < 0 || o.ReadFileHandles < 0 || o.TargetSegmentBytes < 0 || o.BatchReadConcurrency < 0 {
 		return o, fmt.Errorf("%w: negative setting", ErrInvalidOptions)
 	}
 	if o.CacheBytes == 0 {
@@ -31,6 +34,9 @@ func (o Options) normalized() (Options, error) {
 	}
 	if o.ReadFileHandles == 0 {
 		o.ReadFileHandles = 64
+	}
+	if o.BatchReadConcurrency == 0 {
+		o.BatchReadConcurrency = 8
 	}
 	if o.CacheBytes < cache.MetadataBytes+1 || o.MaxRecordBytes < format.RecordHeaderBytes+1 ||
 		o.MaxRecordBytes > math.MaxInt64-format.SegmentHeaderBytes {
