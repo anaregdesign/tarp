@@ -14,7 +14,8 @@ type DB engine.DB
 // CacheBytes bounds the logical LRU charge (64 MiB), MaxRecordBytes bounds
 // one encoded record (1 MiB), TargetSegmentBytes sizes new log and checkpoint
 // files and bounds repack inputs (4 MiB), and ReadFileHandles sizes the cache-miss
-// read pool (64).
+// read pool (64). BatchReadConcurrency limits simultaneous DATA reads across
+// BatchGet calls on this DB (8).
 type Options = engine.Options
 
 // Open creates or reopens a database and starts automatic incremental compaction.

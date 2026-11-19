@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -25,6 +26,39 @@ func openPublicDB(t *testing.T, dir string, opts tarp.Options) *tarp.DB {
 		}
 	})
 	return db
+}
+
+func TestBatchReadConcurrencyOnReopen(t *testing.T) {
+	dir := t.TempDir()
+	seed := openPublicDB(t, dir, tarp.Options{})
+	a, b := []byte("a"), []byte("b")
+	if err := seed.BatchPut([]tarp.Entry{{Key: a, Value: a}, {Key: b, Value: b}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if db, err := tarp.Open(dir, tarp.Options{BatchReadConcurrency: -1}); db != nil || !errors.Is(err, tarp.ErrInvalidOptions) {
+		if db != nil {
+			db.Close()
+		}
+		t.Fatalf("Open with negative BatchReadConcurrency returned %p, %v", db, err)
+	}
+	for _, limit := range []int{0, 1, 3} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			db := openPublicDB(t, dir, tarp.Options{BatchReadConcurrency: limit})
+			keys := [][]byte{b, a, b}
+			results, err := db.BatchGet(keys)
+			if err != nil || len(results) != len(keys) {
+				t.Fatalf("BatchGet returned %+v, %v", results, err)
+			}
+			for i, r := range results {
+				if !r.Found || string(r.Value) != string(keys[i]) {
+					t.Fatalf("result %d = %+v, want %q", i, r, keys[i])
+				}
+			}
+		})
+	}
 }
 
 func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {

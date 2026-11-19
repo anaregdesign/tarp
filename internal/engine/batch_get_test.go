@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
@@ -209,52 +210,52 @@ func TestBatchGetSeesWholeBatchMutations(t *testing.T) {
 }
 
 func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
-	started, resume := make(chan struct{}), make(chan struct{})
-	release := sync.OnceFunc(func() { close(resume) })
-	defer release()
-	var paused atomic.Bool
-	opts := testOptions()
-	opts.CacheBytes = 260
-	db := newTestDB(t, opts, &storage.IO{
-		CleanerStart: make(chan struct{}),
-		Hook: func(p string) error {
-			if p == "read:before" && paused.CompareAndSwap(false, true) {
-				close(started)
-				<-resume
-			}
-			return nil
-		},
+	synctest.Test(t, func(t *testing.T) {
+		resume := make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		defer release()
+		var started atomic.Int32
+		opts := testOptions()
+		opts.CacheBytes = 260
+		opts.BatchReadConcurrency = 2
+		db := newTestDB(t, opts, &storage.IO{
+			CleanerStart: make(chan struct{}),
+			Hook: func(p string) error {
+				if p == "read:before" && started.Add(1) <= 2 {
+					<-resume
+				}
+				return nil
+			},
+		})
+		mustPut(t, db, "a", "A")
+		mustPut(t, db, "b", "B")
+		mustPut(t, db, "z", "Z")
+		mustPut(t, db, "w", "W") // a and b are cold while z stays cached.
+		oldA, oldB := db.index["a"].File, db.index["b"].File
+		keys := [][]byte{[]byte("b"), []byte("a"), []byte("z"), []byte("b"), []byte("c"), []byte("a"), []byte("c")}
+		done := startBatchGet(db, keys)
+		synctest.Wait()
+		if got := started.Load(); got != 2 {
+			t.Fatalf("in-flight reads = %d, want 2", got)
+		}
+		if s := db.Stats(); s.Cache.Hits != 1 || s.Cache.Misses != 2 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 3 {
+			t.Fatalf("Stats while both record reads are paused: %+v", s)
+		}
+		mustPut(t, db, "a", "updated")
+		if err := db.Delete([]byte("b")); err != nil {
+			t.Fatal(err)
+		}
+		mustPut(t, db, "c", "later")
+		if result, err := db.Compact(t.Context()); err != nil || result.PinnedBytes == 0 {
+			t.Fatalf("compact with batch reads in flight: %+v, %v", result, err)
+		}
+		release()
+		outcome := <-done
+		want := []BatchResult{{[]byte("B"), true}, {[]byte("A"), true}, {[]byte("Z"), true}, {[]byte("B"), true}, {}, {[]byte("A"), true}, {}}
+		if outcome.err != nil || !reflect.DeepEqual(outcome.results, want) || oldA.References() != 0 || oldB.References() != 0 {
+			t.Fatalf("read after checkpoint: %+v, %v, refs %d/%d", outcome.results, outcome.err, oldA.References(), oldB.References())
+		}
 	})
-	mustPut(t, db, "a", "A")
-	mustPut(t, db, "b", "B")
-	mustPut(t, db, "z", "Z") // Only a is cold in the captured view.
-	old := db.index["a"].File
-	keys := [][]byte{[]byte("a"), []byte("b"), []byte("a"), []byte("c"), []byte("c")}
-	done := make(chan struct{})
-	var got []BatchResult
-	var err error
-	go func() {
-		defer close(done)
-		got, err = db.BatchGet(keys)
-	}()
-	<-started
-	if s := db.Stats(); s.Cache.Hits != 1 || s.Cache.Misses != 1 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 2 {
-		t.Fatalf("Stats while the first record read is paused: %+v", s)
-	}
-	mustPut(t, db, "a", "updated")
-	if err := db.Delete([]byte("b")); err != nil {
-		t.Fatal(err)
-	}
-	mustPut(t, db, "c", "later")
-	if result, err := db.Compact(t.Context()); err != nil || result.PinnedBytes == 0 {
-		t.Fatalf("compact with batch read in flight: %+v, %v", result, err)
-	}
-	release()
-	<-done
-	want := []BatchResult{{[]byte("A"), true}, {[]byte("B"), true}, {[]byte("A"), true}, {}, {}}
-	if err != nil || !reflect.DeepEqual(got, want) || old.References() != 0 {
-		t.Fatalf("read after checkpoint: %+v, %v, refs %d", got, err, old.References())
-	}
 }
 
 func TestBatchGetReadFailureDiscardsResultsAndPins(t *testing.T) {

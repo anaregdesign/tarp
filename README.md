@@ -5,7 +5,7 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.3.0
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.4.0
 in a new module, run the commands below. In an existing module, run just
 the `go get` command.
 
@@ -13,7 +13,7 @@ the `go get` command.
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.3.0
+go get github.com/anaregdesign/tarp@v0.4.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -183,9 +183,18 @@ The byte API takes `[]tarp.Entry` for writes and `[][]byte` for reads and
 deletes. Results follow input order. A missing key has `Found == false`,
 and the caller owns a separate value slice for each occurrence of a found
 key. The result uses memory proportional to all returned values, including
-duplicates. Batch reads use cached values when available and preserve LRU recency. Repeated puts apply in input order. Repeated deletes
+duplicates. Repeated puts apply in input order. Repeated deletes
 remove a key once. If any requested delete key is missing, the whole call
 returns `ErrNotFound` before writing.
+
+`BatchGet` preserves LRU recency and reads each distinct cold, live key once.
+Concurrent `BatchGet` calls on the same DB, including typed views, share the
+DATA read limit set by `Options.BatchReadConcurrency`. The default is 8.
+For example, `tarp.Options{BatchReadConcurrency: 16}` allows up to 16 reads,
+and a value of 1 serializes them. When reads of small records complete quickly,
+the caller can read them sequentially. If reads slow down, the batch can use available workers
+for the remaining records. A fully cached batch uses no read slots or workers. `Get` runs
+independently of this limit, and each DB has its own read slots.
 
 Each call accepts up to `tarp.MaxBatchEntries` (4,096) inputs, counting
 duplicates. An empty batch succeeds on a healthy open DB. Write batches
@@ -241,6 +250,7 @@ the commit sync protocol.
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
 | `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Also bounds the total DATA bytes read in one automatic repack. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
+| `BatchReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 
 For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
 bytes and `128 + K + V` cache bytes. An entry that exceeds either limit returns
