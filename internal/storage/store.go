@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -155,7 +156,7 @@ func Open(dir string, cfg Config, fs *IO) (_ *Store, index map[string]Location, 
 		}
 		return s, make(map[string]Location), nil
 	}
-	image, err := Validate(absolute, cfg)
+	image, err := Validate(context.Background(), absolute, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -187,7 +188,7 @@ func (s *Store) initialize() error {
 		return err
 	}
 	s.Catalog.UUID = s.Current.UUID
-	file, fd, err := s.newSegment(format.Log, "segment", appendData{})
+	file, fd, err := s.newLog(appendData{})
 	if err != nil {
 		return err
 	}
@@ -198,34 +199,49 @@ func (s *Store) initialize() error {
 	return s.publishCatalog(s.Catalog, candidate)
 }
 
-func (s *Store) newSegment(kind uint32, point string, initialRecords appendData) (*File, *os.File, error) {
+func (s *Store) newLog(initialRecords appendData) (*File, *os.File, error) {
+	f, err := s.reserveSegment(format.Log)
+	if err != nil {
+		return nil, nil, err
+	}
+	fd, err := f.create(s.Current.UUID, s.IO, "segment", initialRecords)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.Files[f.ID] = f
+	return f, fd, nil
+}
+
+// reserveSegment allocates a unique identity under the writer gate without I/O.
+func (s *Store) reserveSegment(kind uint32) (*File, error) {
 	id, err := s.allocateID()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	f := &File{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}
+	return &File{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}, nil
+}
+
+func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords appendData) (*os.File, error) {
 	fd, err := os.OpenFile(f.Path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	b := format.EncodeSegment(format.Segment{UUID: s.Current.UUID, ID: id, Kind: kind})
-	err = s.IO.Write(fd, b, 0, point+".write")
+	b := format.EncodeSegment(format.Segment{UUID: uuid, ID: f.ID, Kind: f.Kind})
+	err = fs.Write(fd, b, 0, point+".write")
 	if err == nil && initialRecords.size > 0 {
 		err = initialRecords.writeAt(fd, format.SegmentHeaderBytes)
 	}
-	// A snapshot is private staging. Compact syncs the complete header and
-	// records at finishFile before any manifest may select this DATA file.
-	if err == nil && kind != format.Snapshot {
-		err = s.IO.Sync(fd, point+".sync")
+	// Private checkpoints sync the complete file before publication.
+	if err == nil && f.Kind != format.Snapshot {
+		err = fs.Sync(fd, point+".sync")
 	}
 	if err != nil {
 		closeErr := fd.Close()
-		removeErr := s.IO.Do("segment.discard", func() error { return os.Remove(f.Path) })
-		return nil, nil, errors.Join(err, closeErr, removeErr)
+		removeErr := fs.Do("segment.discard", func() error { return os.Remove(f.Path) })
+		return nil, errors.Join(err, closeErr, removeErr)
 	}
 	f.Size.Store(format.SegmentHeaderBytes + initialRecords.size)
-	s.Files[id] = f
-	return f, fd, nil
+	return fd, nil
 }
 
 func (s *Store) Rotate() error {
@@ -242,7 +258,7 @@ func (s *Store) Rotate() error {
 // selects the new segment, catalog and user sequence in one publication.
 // Explicit checkpoint sealing selects a header-only log at the old sequence.
 func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy func() error) error {
-	file, fd, err := s.newSegment(format.Log, "segment", initialRecords)
+	file, fd, err := s.newLog(initialRecords)
 	if err != nil {
 		return fault("rotation.segment", "not-applied", true, err)
 	}

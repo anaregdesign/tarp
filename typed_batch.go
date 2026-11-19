@@ -6,6 +6,21 @@ import (
 	"github.com/anaregdesign/tarp/internal/engine"
 )
 
+// BatchCodecError identifies a failed codec call in a typed batch. Index is
+// the zero-based position in the original input, including duplicate keys.
+type BatchCodecError struct {
+	Operation string // BatchGet, BatchPut or BatchDelete.
+	Index     int
+	Field     string // "key" or "value".
+	Err       error
+}
+
+func (e *BatchCodecError) Error() string {
+	return fmt.Sprintf("tarp: %s input[%d] %s: %v", e.Operation, e.Index, e.Field, e.Err)
+}
+
+func (e *BatchCodecError) Unwrap() error { return e.Err }
+
 // TypedBatchResult holds a decoded BatchGet value. Missing keys have Found
 // false and the zero value of V.
 type TypedBatchResult[V any] struct {
@@ -15,7 +30,7 @@ type TypedBatchResult[V any] struct {
 
 // BatchGet reads keys at one point in time, preserving input order. A codec
 // or DB error discards the entire result. Only found values are decoded.
-func (db *TypedDB[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
+func (db *View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 	if err := engine.CheckBatchCount(len(keys)); err != nil {
 		return nil, err
 	}
@@ -34,9 +49,9 @@ func (db *TypedDB[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 		encoded = make([][]byte, len(keys))
 	}
 	for i, key := range keys {
-		k, err := db.encodeKey(key)
+		k, err := db.keyCodec.Encode(key)
 		if err != nil {
-			return nil, err
+			return nil, &BatchCodecError{Operation: "BatchGet", Index: i, Field: "key", Err: err}
 		}
 		encoded[i] = k
 	}
@@ -47,9 +62,9 @@ func (db *TypedDB[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 	results := make([]TypedBatchResult[V], len(raw))
 	for i, r := range raw {
 		if r.Found {
-			value, err := db.decodeValue(r.Value)
+			value, err := db.valueCodec.Decode(r.Value)
 			if err != nil {
-				return nil, err
+				return nil, &BatchCodecError{Operation: "BatchGet", Index: i, Field: "value", Err: err}
 			}
 			results[i] = TypedBatchResult[V]{Value: value, Found: true}
 		}
@@ -59,55 +74,37 @@ func (db *TypedDB[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 
 // BatchPut encodes the entire batch before its atomic commit. For repeated
 // encoded keys the last value wins. DB.BatchPut limits apply to encoded bytes.
-func (db *TypedDB[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
-	if err := engine.CheckBatchCount(len(entries)); err != nil {
-		return err
-	}
-	core := (*engine.DB)(db.core)
-	encoded := make([]Entry, len(entries))
-	var used int64
-	for i, entry := range entries {
-		key, err := db.encodeKey(entry.Key)
+func (db *View[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
+	batch, err := (*engine.DB)(db.core).PreparePuts(len(entries), func(i int) (Entry, error) {
+		entry := entries[i]
+		key, err := db.keyCodec.Encode(entry.Key)
 		if err != nil {
-			return err
+			return Entry{}, &BatchCodecError{Operation: "BatchPut", Index: i, Field: "key", Err: err}
 		}
 		value, err := db.valueCodec.Encode(entry.Value)
 		if err != nil {
-			return fmt.Errorf("tarp: encode value: %w", err)
+			return Entry{}, &BatchCodecError{Operation: "BatchPut", Index: i, Field: "value", Err: err}
 		}
-		encoded[i] = Entry{Key: key, Value: value}
-		used, err = core.CheckBatchPutEntry(encoded[i], used)
-		if err != nil {
-			return err
-		}
+		return Entry{Key: key, Value: value}, nil
+	})
+	if err != nil {
+		return err
 	}
-	return db.core.BatchPut(encoded)
+	return batch.Commit()
 }
 
 // BatchDelete atomically removes the distinct encoded keys. A missing key
 // returns ErrNotFound before publication.
-func (db *TypedDB[K, V]) BatchDelete(keys []K) error {
-	if err := engine.CheckBatchCount(len(keys)); err != nil {
+func (db *View[K, V]) BatchDelete(keys []K) error {
+	batch, err := (*engine.DB)(db.core).PrepareDeletes(len(keys), func(i int) ([]byte, error) {
+		key, err := db.keyCodec.Encode(keys[i])
+		if err != nil {
+			return nil, &BatchCodecError{Operation: "BatchDelete", Index: i, Field: "key", Err: err}
+		}
+		return key, nil
+	})
+	if err != nil {
 		return err
 	}
-	core := (*engine.DB)(db.core)
-	encoded := make([][]byte, 0, len(keys))
-	seen := make(map[string]struct{}, len(keys))
-	var used int64
-	for _, key := range keys {
-		k, err := db.encodeKey(key)
-		if err != nil {
-			return err
-		}
-		if _, exists := seen[string(k)]; exists {
-			continue
-		}
-		used, err = core.CheckBatchDeleteKey(k, used)
-		if err != nil {
-			return err
-		}
-		seen[string(k)] = struct{}{}
-		encoded = append(encoded, k)
-	}
-	return db.core.BatchDelete(encoded)
+	return batch.Commit()
 }

@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"hash/crc32"
@@ -136,7 +137,7 @@ func TestScanCommittedRanges(t *testing.T) {
 		record := EncodeRecord(Put, 1, []byte{0, 0xff}, value)
 		all := append(EncodeSegment(Segment{ID: 1, Kind: Log}), record...)
 		found := 0
-		if err := Scan(bytes.NewReader(all), int64(len(all)), func(off int64, r Record, k string) error {
+		if err := Scan(t.Context(), bytes.NewReader(all), int64(len(all)), func(off int64, r Record, k string) error {
 			got, err := ReadValue(bytes.NewReader(all), off, r.Bytes(), k, r.Sequence)
 			if err != nil || !bytes.Equal(got, value) {
 				t.Fatalf("read: %x %v", got, err)
@@ -147,12 +148,12 @@ func TestScanCommittedRanges(t *testing.T) {
 			t.Fatalf("scan: %d %v", found, err)
 		}
 		for end := 65; end < len(all); end++ {
-			if err := Scan(bytes.NewReader(all), int64(end), func(int64, Record, string) error { return nil }); !errors.Is(err, ErrCorrupt) {
+			if err := Scan(t.Context(), bytes.NewReader(all), int64(end), func(int64, Record, string) error { return nil }); !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("truncation %d: %v", end, err)
 			}
 		}
 		all[len(all)-1] ^= 1
-		if err := Scan(bytes.NewReader(all), int64(len(all)), func(int64, Record, string) error { return nil }); !errors.Is(err, ErrCorrupt) {
+		if err := Scan(t.Context(), bytes.NewReader(all), int64(len(all)), func(int64, Record, string) error { return nil }); !errors.Is(err, ErrCorrupt) {
 			t.Fatalf("payload corruption: %v", err)
 		}
 	}
@@ -161,6 +162,30 @@ func TestScanCommittedRanges(t *testing.T) {
 type readerAtFunc func([]byte, int64) (int, error)
 
 func (f readerAtFunc) ReadAt(b []byte, off int64) (int, error) { return f(b, off) }
+
+func TestScanStopsDuringLargeRecord(t *testing.T) {
+	data := EncodeSegment(Segment{ID: 1, Kind: Log})
+	data = append(data, EncodeRecord(Put, 1, []byte("key"), make([]byte, streamChunk*8))...)
+	source := bytes.NewReader(data)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	input := readerAtFunc(func(b []byte, off int64) (int, error) {
+		if ctx.Err() != nil {
+			t.Fatal("read another chunk after cancellation")
+		}
+		if off > SegmentHeaderBytes {
+			cancel()
+		}
+		return source.ReadAt(b, off)
+	})
+	err := Scan(ctx, input, int64(len(data)), func(int64, Record, string) error {
+		t.Fatal("visited a partially checked record")
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrupt) {
+		t.Fatalf("interrupted scan returned %v", err)
+	}
+}
 
 func TestScanBatchesOnlyCommittedBytes(t *testing.T) {
 	data := EncodeSegment(Segment{ID: 1, Kind: Log})
@@ -184,7 +209,7 @@ func TestScanBatchesOnlyCommittedBytes(t *testing.T) {
 		return source.ReadAt(b, off)
 	})
 	seen, next := 0, int64(SegmentHeaderBytes)
-	err := Scan(input, end, func(off int64, r Record, key string) error {
+	err := Scan(t.Context(), input, end, func(off int64, r Record, key string) error {
 		seen++
 		if off != next || r.Sequence != uint64(seen) {
 			t.Fatalf("unexpected record %d at %d", r.Sequence, off)
@@ -199,7 +224,7 @@ func TestScanBatchesOnlyCommittedBytes(t *testing.T) {
 		t.Fatalf("scan saw %d records in %d reads ending at %d/%d, want %d: %v", seen, calls, pos, next, end, err)
 	}
 	data[end-1] ^= 1
-	err = Scan(bytes.NewReader(data), end, func(int64, Record, string) error { return nil })
+	err = Scan(t.Context(), bytes.NewReader(data), end, func(int64, Record, string) error { return nil })
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("corrupt last byte of streamed value: %v", err)
 	}
@@ -227,7 +252,7 @@ func TestScanHandlesReadAtResults(t *testing.T) {
 				return tc.n, tc.err
 			})
 			var visits int
-			err := Scan(src, end, func(int64, Record, string) error {
+			err := Scan(t.Context(), src, end, func(int64, Record, string) error {
 				visits++
 				return nil
 			})

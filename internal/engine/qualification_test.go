@@ -87,7 +87,11 @@ func TestProcessCrashRecoveryMatrix(t *testing.T) {
 			}
 			if tc.mode == "backup" {
 				if _, err := os.Stat(filepath.Join(parent, "output")); err == nil {
-					if err := Restore(context.Background(), filepath.Join(parent, "output"), filepath.Join(parent, "restored"), testOptions()); err != nil {
+					if err := Restore(context.Background(), RestoreRequest{
+						Source:      filepath.Join(parent, "output"),
+						Destination: filepath.Join(parent, "restored"),
+						Limits:      testOptions().RestoreLimits(),
+					}); err != nil {
 						t.Fatalf("published incomplete backup: %v", err)
 					}
 				} else if !errors.Is(err, os.ErrNotExist) {
@@ -133,7 +137,11 @@ func TestCrashHelper(t *testing.T) {
 	}}
 	if os.Getenv("TARP_CRASH_MODE") == "restore" {
 		armed.Store(true)
-		t.Fatal(restoreWithIO(context.Background(), filepath.Join(parent, "backup"), filepath.Join(parent, "output"), testOptions(), fs))
+		t.Fatal(restoreWithIO(context.Background(), RestoreRequest{
+			Source:      filepath.Join(parent, "backup"),
+			Destination: filepath.Join(parent, "output"),
+			Limits:      testOptions().RestoreLimits(),
+		}, fs))
 	}
 	db, err := OpenWithIO(filepath.Join(parent, "db"), testOptions(), fs)
 	if err != nil {
@@ -304,7 +312,11 @@ func TestPowerCutGuest(t *testing.T) {
 		fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().Sequence)
 		err = db.Backup(context.Background(), output)
 	case "restore":
-		err = restoreWithIO(context.Background(), backup, output, testOptions(), faults)
+		err = restoreWithIO(context.Background(), RestoreRequest{
+			Source:      backup,
+			Destination: output,
+			Limits:      testOptions().RestoreLimits(),
+		}, faults)
 	case "recover":
 		db, err = OpenWithIO(dir, testOptions(), faults)
 	case "overlap":

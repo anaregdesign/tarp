@@ -180,7 +180,11 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 		}
 		if cfg.Mode == "restore" {
 			path := filepath.Join(filepath.Dir(dir), "source-validated")
-			if err := Restore(context.Background(), dir+"-restore-source", path, testOptions()); err != nil {
+			if err := Restore(context.Background(), RestoreRequest{
+				Source:      dir + "-restore-source",
+				Destination: path,
+				Limits:      testOptions().RestoreLimits(),
+			}); err != nil {
 				t.Fatalf("acknowledged restore-source backup was lost: %v", err)
 			}
 			check(path)
@@ -194,7 +198,11 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 			path := output
 			if cfg.Mode != "restore" {
 				path = filepath.Join(filepath.Dir(dir), "output-validated")
-				if err := Restore(context.Background(), output, path, vmCaseOptions(cfg.Mode)); err != nil {
+				if err := Restore(context.Background(), RestoreRequest{
+					Source:      output,
+					Destination: path,
+					Limits:      vmCaseOptions(cfg.Mode).RestoreLimits(),
+				}); err != nil {
 					t.Fatalf("published incomplete backup: %v", err)
 				}
 			}

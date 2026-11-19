@@ -264,7 +264,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			return err
 		}
 	}
-	image, err := validateBackupImage(source, cfg)
+	image, err := validateBackupImage(ctx, source, cfg)
 	if err != nil {
 		return err
 	}
@@ -299,7 +299,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			return err
 		}
 	}
-	if _, err := validateBackupImage(stage, cfg); err != nil {
+	if _, err := validateBackupImage(ctx, stage, cfg); err != nil {
 		return err
 	}
 	err = publishDirectory(ctx, fs, stage, target, "restore")
@@ -309,8 +309,8 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 
 // Once BACKUP is recognized, every selected object must have the canonical
 // signature. An incompatible inner CURRENT is corruption of this backup.
-func validateBackupImage(dir string, cfg Config) (*Image, error) {
-	img, err := Validate(dir, cfg)
+func validateBackupImage(ctx context.Context, dir string, cfg Config) (*Image, error) {
+	img, err := Validate(ctx, dir, cfg)
 	if errors.Is(err, format.ErrUnsupported) {
 		return nil, fmt.Errorf("%w: backup selected an incompatible CURRENT", ErrCorrupt)
 	}

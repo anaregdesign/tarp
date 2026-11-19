@@ -22,25 +22,46 @@ type Options struct {
 	BatchReadConcurrency int
 }
 
+// RestoreLimits bounds the logical cache charge and encoded size of each live
+// record in a restored image. Zero fields select the same defaults as Open.
+type RestoreLimits struct {
+	CacheBytes     int64
+	MaxRecordBytes int64
+}
+
+// RestoreLimits returns the settings used to verify a restored image.
+func (o Options) RestoreLimits() RestoreLimits {
+	return RestoreLimits{CacheBytes: o.CacheBytes, MaxRecordBytes: o.MaxRecordBytes}
+}
+
+func (l RestoreLimits) normalized() (RestoreLimits, error) {
+	if l.CacheBytes == 0 {
+		l.CacheBytes = 64 << 20
+	}
+	if l.MaxRecordBytes == 0 {
+		l.MaxRecordBytes = 1 << 20
+	}
+	if l.CacheBytes < cache.MetadataBytes+1 || l.MaxRecordBytes < format.RecordHeaderBytes+1 ||
+		l.MaxRecordBytes > math.MaxInt64-format.SegmentHeaderBytes {
+		return l, fmt.Errorf("%w: invalid cache or record size", ErrInvalidOptions)
+	}
+	return l, nil
+}
+
 func (o Options) normalized() (Options, error) {
-	if o.CacheBytes < 0 || o.MaxRecordBytes < 0 || o.ReadFileHandles < 0 || o.TargetSegmentBytes < 0 || o.BatchReadConcurrency < 0 {
+	if o.ReadFileHandles < 0 || o.TargetSegmentBytes < 0 || o.BatchReadConcurrency < 0 {
 		return o, fmt.Errorf("%w: negative setting", ErrInvalidOptions)
 	}
-	if o.CacheBytes == 0 {
-		o.CacheBytes = 64 << 20
+	limits, err := o.RestoreLimits().normalized()
+	if err != nil {
+		return o, err
 	}
-	if o.MaxRecordBytes == 0 {
-		o.MaxRecordBytes = 1 << 20
-	}
+	o.CacheBytes, o.MaxRecordBytes = limits.CacheBytes, limits.MaxRecordBytes
 	if o.ReadFileHandles == 0 {
 		o.ReadFileHandles = 64
 	}
 	if o.BatchReadConcurrency == 0 {
 		o.BatchReadConcurrency = 8
-	}
-	if o.CacheBytes < cache.MetadataBytes+1 || o.MaxRecordBytes < format.RecordHeaderBytes+1 ||
-		o.MaxRecordBytes > math.MaxInt64-format.SegmentHeaderBytes {
-		return o, fmt.Errorf("%w: invalid cache or record size", ErrInvalidOptions)
 	}
 	if o.TargetSegmentBytes == 0 {
 		o.TargetSegmentBytes = 4 << 20

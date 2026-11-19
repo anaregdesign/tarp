@@ -645,7 +645,11 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}
 	if backingUp {
 		restoredPath := filepath.Join(root, "restored")
-		if err := engine.Restore(t.Context(), target, restoredPath, probe.Options()); err != nil {
+		if err := engine.Restore(t.Context(), engine.RestoreRequest{
+			Source:      target,
+			Destination: restoredPath,
+			Limits:      probe.Options().RestoreLimits(),
+		}); err != nil {
 			t.Fatal(err)
 		}
 		restored, err := engine.Open(restoredPath, probe.Options())

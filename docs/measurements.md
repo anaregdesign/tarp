@@ -181,16 +181,18 @@ format cutover and automatic compaction. The [recorded baseline](measurement-bas
 contains actual run links, results, environment differences and interpretation.
 The separately guarded manual workflow implements the reproducible driver;
 its implementation alone is not evidence that a different run passed.
-Run each size with each supported family's latest patch:
+New measurement campaigns run all three sizes with the latest stable Go
+in a container. Supply the same official Bookworm image digest used for the
+other measurements in that campaign. The workflow records the image,
+toolchain and QEMU versions with the guest evidence.
 
 ```sh
 gh workflow run qualification.yml --ref REVIEWED_REF \
   -f confirmation=disposable-vm-only -f mode=measure \
-  -f go-version=stable -f value-bytes=1024
+  -f measurement-digest="$GO_IMAGE_DIGEST" -f value-bytes=1024
 ```
 
-Select `64`, `1024`, or `4096`; `1.26.x` selects the other initially supported
-family. This is not a normal CI matrix. Each job reruns actual volatile-device
+Select `64`, `1024`, or `4096`. Each job reruns actual volatile-device
 controls, then runs one plain measurement guest and a separate diagnostic guest.
 Both use the pinned amd64 Ubuntu 24.04 / 6.8 / ext4 ordered / honest-flush NBD
 stack. Primary/diagnostic guests are bounded to 30/15 minutes, the controller

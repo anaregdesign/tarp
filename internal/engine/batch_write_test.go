@@ -218,7 +218,11 @@ func TestBatchPublicationWithScanCheckpointAndBackup(t *testing.T) {
 	if err := db.Backup(t.Context(), backup); err != nil {
 		t.Fatal(err)
 	}
-	if err := Restore(t.Context(), backup, restored, testOptions()); err != nil {
+	if err := Restore(t.Context(), RestoreRequest{
+		Source:      backup,
+		Destination: restored,
+		Limits:      testOptions().RestoreLimits(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	copyDB, err := Open(restored, testOptions())

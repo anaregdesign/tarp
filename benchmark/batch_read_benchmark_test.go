@@ -82,7 +82,7 @@ func BenchmarkBatchGet(b *testing.B) {
 						measureBatchReads(b, method, db, request, want, db.Get, db.BatchGet, tc.cold, tc.ids)
 						return
 					}
-					typed, err := tarp.NewTypedDB(db, tarp.StringCodec{}, tarp.StringCodec{})
+					typed, err := tarp.Bind(db, tarp.StringCodec{}, tarp.StringCodec{})
 					if err != nil {
 						b.Fatal(err)
 					}

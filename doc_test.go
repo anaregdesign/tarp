@@ -42,7 +42,7 @@ func roundTrip() (result error) {
 		return err
 	}
 	restored := filepath.Join(parent, "restored")
-	if err := tarp.Restore(context.Background(), backup, restored, tarp.Options{}); err != nil {
+	if err := tarp.Restore(context.Background(), tarp.RestoreRequest{Source: backup, Destination: restored}); err != nil {
 		return err
 	}
 	image, err := tarp.Open(restored, tarp.Options{})

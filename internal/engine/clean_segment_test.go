@@ -101,7 +101,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 		t.Fatalf("counted a retired source twice: %d %v", n, err)
 	}
 	restoreDir := filepath.Join(t.TempDir(), "restore")
-	if err := Restore(ctx, backupDir, restoreDir, Options{}); err != nil {
+	if err := Restore(ctx, RestoreRequest{Source: backupDir, Destination: restoreDir}); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := OpenWithIO(restoreDir, Options{}, &storage.IO{CleanerStart: make(chan struct{})})

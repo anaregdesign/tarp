@@ -33,7 +33,8 @@ const (
 )
 
 // OpError preserves the failed phase, publication outcome and underlying cause.
-// After an Unknown result, close/reopen before inspecting the resulting state.
+// An Unknown database commit requires close/reopen. An Unknown Backup or Restore
+// destination publication requires inspecting the destination.
 type OpError struct {
 	Operation string
 	Phase     string

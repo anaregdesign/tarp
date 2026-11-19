@@ -237,7 +237,11 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 	checkDir, seq := dir, initial.Sequence+uint64(len(window.Puts))
 	if mode == "backup" {
 		checkDir, seq = filepath.Join(root, "restored"), initial.Sequence
-		if err := engine.Restore(context.Background(), target, checkDir, opts); err != nil {
+		if err := engine.Restore(context.Background(), engine.RestoreRequest{
+			Source:      target,
+			Destination: checkDir,
+			Limits:      opts.RestoreLimits(),
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

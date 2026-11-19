@@ -106,7 +106,11 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 			for name, data := range files {
 				writeFixtureFile(t, filepath.Join(source, name), []byte(data))
 			}
-			err = Restore(t.Context(), source, filepath.Join(parent, "restored"), testOptions())
+			err = Restore(t.Context(), RestoreRequest{
+				Source:      source,
+				Destination: filepath.Join(parent, "restored"),
+				Limits:      testOptions().RestoreLimits(),
+			})
 			var op *OpError
 			if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrUnsupportedFormat) || !errors.As(err, &op) || op.Outcome != NotApplied {
 				t.Fatalf("Restore returned %v, want unapplied corruption", err)
@@ -120,25 +124,52 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 }
 
 func TestRestoreValidatesStagedBytesBeforePublication(t *testing.T) {
-	source, parent := makeRestoreBackup(t), t.TempDir()
+	source := makeRestoreBackup(t)
 	before := directoryBytes(t, source)
-	damaged := false
-	fs := &storage.IO{WriteAt: func(fd *os.File, b []byte, off int64) (int, error) {
-		if !damaged && strings.HasPrefix(filepath.Base(fd.Name()), "DATA-") {
-			damaged = true
-			b = bytes.Clone(b)
-			b[len(b)-1] ^= 1
-		}
-		return fd.WriteAt(b, off)
-	}}
-	err := restoreWithIO(t.Context(), source, filepath.Join(parent, "restored"), testOptions(), fs)
-	if !damaged || !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("staged data damage=%t, Restore returned %v", damaged, err)
+	for _, interrupted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", interrupted), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var damaged bool
+			var synced int
+			fs := &storage.IO{
+				WriteAt: func(fd *os.File, b []byte, off int64) (int, error) {
+					if !damaged && strings.HasPrefix(filepath.Base(fd.Name()), "DATA-") {
+						damaged = true
+						b = bytes.Clone(b)
+						b[len(b)-1] ^= 1
+					}
+					return fd.WriteAt(b, off)
+				},
+				Hook: func(point string) error {
+					if point == "restore.file.sync:after" {
+						synced++
+						// Every listed file has been copied, leaving staged validation next.
+						if interrupted && synced == len(before)-1 {
+							cancel()
+						}
+					}
+					return nil
+				},
+			}
+			parent := t.TempDir()
+			req := RestoreRequest{
+				Source:      source,
+				Destination: filepath.Join(parent, "restored"),
+				Limits:      testOptions().RestoreLimits(),
+			}
+			err := restoreWithIO(ctx, req, fs)
+			var op *OpError
+			if !damaged || !errors.As(err, &op) || op.Outcome != NotApplied ||
+				errors.Is(err, ErrCorrupt) == interrupted || errors.Is(err, context.Canceled) != interrupted {
+				t.Fatalf("damaged=%t canceled=%t, Restore returned %v", damaged, interrupted, err)
+			}
+			if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
+				t.Fatalf("failed staged validation left output: %v, %v", entries, err)
+			}
+			checkBackupUnchanged(t, source, before)
+		})
 	}
-	if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
-		t.Fatalf("failed staged validation left output: %v, %v", entries, err)
-	}
-	checkBackupUnchanged(t, source, before)
 }
 
 func TestRestoreReportsPublicationOutcome(t *testing.T) {
@@ -176,7 +207,11 @@ func TestRestoreReportsPublicationOutcome(t *testing.T) {
 			}}
 			parent := t.TempDir()
 			dst := filepath.Join(parent, "restored")
-			err := restoreWithIO(ctx, source, dst, testOptions(), fs)
+			err := restoreWithIO(ctx, RestoreRequest{
+				Source:      source,
+				Destination: dst,
+				Limits:      testOptions().RestoreLimits(),
+			}, fs)
 			var op *OpError
 			if !injected || !errors.As(err, &op) || op.Operation != "restore" || op.Outcome != tc.outcome ||
 				!errors.Is(err, tc.cause) || errors.Is(err, ErrCommitUncertain) != (tc.outcome == Unknown) ||
@@ -195,7 +230,11 @@ func TestRestoreReportsPublicationOutcome(t *testing.T) {
 				if len(entries) != 0 {
 					t.Fatalf("unpublished Restore left output: %v", entries)
 				}
-				if err := Restore(t.Context(), source, dst, testOptions()); err != nil {
+				if err := Restore(t.Context(), RestoreRequest{
+					Source:      source,
+					Destination: dst,
+					Limits:      testOptions().RestoreLimits(),
+				}); err != nil {
 					t.Fatalf("restore retry: %v", err)
 				}
 			}
@@ -264,7 +303,7 @@ func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 		t.Fatalf("captured end %d, copied %d with %d payload reads and %d writes", end, copied, reads, writes)
 	}
 	restored := filepath.Join(t.TempDir(), "restored")
-	if err := Restore(t.Context(), target, restored, Options{}); err != nil {
+	if err := Restore(t.Context(), RestoreRequest{Source: target, Destination: restored}); err != nil {
 		t.Fatal(err)
 	}
 	clone, err := Open(restored, Options{})
@@ -358,7 +397,11 @@ func TestConcurrentPublishersNeverReplace(t *testing.T) {
 	if success != 1 {
 		t.Fatalf("publish successes: %d", success)
 	}
-	if err := Restore(context.Background(), target, filepath.Join(t.TempDir(), "restore"), testOptions()); err != nil {
+	if err := Restore(context.Background(), RestoreRequest{
+		Source:      target,
+		Destination: filepath.Join(t.TempDir(), "restore"),
+		Limits:      testOptions().RestoreLimits(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -378,7 +421,7 @@ func TestMixedStoreCheckpointAndBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "restore")
-	if err := Restore(context.Background(), backup, target, Options{}); err != nil {
+	if err := Restore(context.Background(), RestoreRequest{Source: backup, Destination: target}); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := Open(target, Options{})
@@ -456,7 +499,11 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 	// Backup release wakes the default worker even on an otherwise idle DB.
 	waitForUnlink(t, db, pinnedFile.Path)
 	restored := filepath.Join(t.TempDir(), "restored")
-	if err := Restore(context.Background(), target, restored, testOptions()); err != nil {
+	if err := Restore(context.Background(), RestoreRequest{
+		Source:      target,
+		Destination: restored,
+		Limits:      testOptions().RestoreLimits(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	image, err := Open(restored, testOptions())
@@ -503,7 +550,11 @@ func TestBackupDestinationFailuresDoNotPoisonSource(t *testing.T) {
 			wantValue(t, db, "a", "v")
 			mustPut(t, db, "a", "still-healthy")
 			if uncertain {
-				if err := Restore(context.Background(), target, filepath.Join(t.TempDir(), "restored"), testOptions()); err != nil {
+				if err := Restore(context.Background(), RestoreRequest{
+					Source:      target,
+					Destination: filepath.Join(t.TempDir(), "restored"),
+					Limits:      testOptions().RestoreLimits(),
+				}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -526,12 +577,20 @@ func TestRestoreValidationAndNoReplace(t *testing.T) {
 	}
 	destination := t.TempDir()
 	before := directoryBytes(t, backup)
-	if err := Restore(context.Background(), backup, destination, testOptions()); !errors.Is(err, os.ErrExist) {
+	if err := Restore(context.Background(), RestoreRequest{
+		Source:      backup,
+		Destination: destination,
+		Limits:      testOptions().RestoreLimits(),
+	}); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("restored over empty existing directory: %v", err)
 	}
 	opts := testOptions()
 	opts.CacheBytes = 140
-	if err := Restore(context.Background(), backup, filepath.Join(t.TempDir(), "small"), opts); !errors.Is(err, ErrIncompatibleOptions) {
+	if err := Restore(context.Background(), RestoreRequest{
+		Source:      backup,
+		Destination: filepath.Join(t.TempDir(), "small"),
+		Limits:      opts.RestoreLimits(),
+	}); !errors.Is(err, ErrIncompatibleOptions) {
 		t.Fatalf("restore smaller cache: %v", err)
 	}
 	if !reflect.DeepEqual(before, directoryBytes(t, backup)) {
@@ -551,7 +610,11 @@ func TestRestoreValidationAndNoReplace(t *testing.T) {
 			break
 		}
 	}
-	if err := Restore(context.Background(), backup, filepath.Join(t.TempDir(), "corrupt"), testOptions()); !errors.Is(err, ErrCorrupt) {
+	if err := Restore(context.Background(), RestoreRequest{
+		Source:      backup,
+		Destination: filepath.Join(t.TempDir(), "corrupt"),
+		Limits:      testOptions().RestoreLimits(),
+	}); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("restore accepted corruption: %v", err)
 	}
 }

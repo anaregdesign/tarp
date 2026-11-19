@@ -6,8 +6,8 @@
 //
 // Use OpenTyped with a Codec for each of the key and value types to work with
 // Go values. NewCodec derives a codec for scalar types and their combinations
-// in structs, slices, arrays, and maps. NewTypedDB shares an open DB with a
-// typed view. Use compatible codecs across reopens and restores.
+// in structs, slices, arrays, and maps. Bind lends typed access to an open DB.
+// The owner closes the DB. Use compatible codecs across reopens and restores.
 //
 // One process owns a directory. Its DB supports concurrent goroutines and
 // linearizable single-key operations. BatchPut and BatchDelete commit atomically.
