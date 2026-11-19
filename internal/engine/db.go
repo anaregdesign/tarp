@@ -173,11 +173,9 @@ func (db *DB) Delete(key []byte) error {
 	return db.mutate(format.Delete, key, nil)
 }
 
-func (db *DB) mutate(kind uint8, key, value []byte) error {
-	op := "put"
-	if kind == format.Delete {
-		op = "delete"
-	}
+// lockMutation notifies automatic maintenance of queued writers and returns the
+// active file ID used to detect a rotation when releasing the writer gate.
+func (db *DB) lockMutation() uint64 {
 	db.cleaner.writers.Add(1)
 	fs := db.store.IO
 	if fs != nil && fs.WriterWait != nil {
@@ -187,18 +185,28 @@ func (db *DB) mutate(kind uint8, key, value []byte) error {
 	if fs != nil && fs.WriterWait != nil {
 		fs.WriterWait(true)
 	}
-	previousActive := db.store.Current.ActiveID
+	return db.store.Current.ActiveID
+}
+
+func (db *DB) unlockMutation(previousActive uint64, invalidatedSealed bool) {
+	rotated := previousActive != db.store.Current.ActiveID
+	db.writer.Unlock()
+	if db.cleaner.writers.Add(-1) == 0 {
+		db.resumeCleaner()
+	}
+	if rotated || invalidatedSealed {
+		db.notifyCleaner()
+	}
+}
+
+func (db *DB) mutate(kind uint8, key, value []byte) error {
+	op := "put"
+	if kind == format.Delete {
+		op = "delete"
+	}
+	previousActive := db.lockMutation()
 	invalidatedSealed := false
-	defer func() {
-		rotated := previousActive != db.store.Current.ActiveID
-		db.writer.Unlock()
-		if db.cleaner.writers.Add(-1) == 0 {
-			db.resumeCleaner()
-		}
-		if rotated || invalidatedSealed {
-			db.notifyCleaner()
-		}
-	}()
+	defer func() { db.unlockMutation(previousActive, invalidatedSealed) }()
 	if err := db.health(); err != nil {
 		return err
 	}
@@ -212,42 +220,55 @@ func (db *DB) mutate(kind uint8, key, value []byte) error {
 	}
 	loc, err := db.store.Append(kind, key, value, db.health)
 	if err != nil {
-		var fault *storage.Fault
-		if errors.As(err, &fault) && fault.Unsafe {
-			db.poison(err)
-		}
+		db.storageFailure(err)
 		return operationError(op, "commit", err)
 	}
-	// The caller keeps inputs stable through return. Own retained data only
-	// after the append succeeds, outside the state lock used by readers.
-	k := string(key)
-	if kind == format.Put {
-		value = bytes.Clone(value)
-		if fs := db.store.IO; fs != nil && fs.PutCopied != nil {
-			fs.PutCopied(len(k), len(value))
-		}
-	}
+	entry := db.ownMutation(kind, key, value)
 	db.state.Lock()
 	defer db.state.Unlock()
 	if err := db.health(); err != nil {
 		return &OpError{Operation: op, Phase: "memory-publication", Outcome: Committed, Err: err}
 	}
-	if old, exists := db.index[k]; exists {
+	invalidatedSealed = db.applyMutation(kind, entry, loc)
+	return nil
+}
+
+type ownedMutation struct {
+	key   string
+	value []byte
+}
+
+// Copy outside the state lock, only after the append succeeds.
+func (db *DB) ownMutation(kind uint8, key, value []byte) ownedMutation {
+	entry := ownedMutation{key: string(key)}
+	if kind == format.Put {
+		entry.value = bytes.Clone(value)
+		if fs := db.store.IO; fs != nil && fs.PutCopied != nil {
+			fs.PutCopied(len(key), len(value))
+		}
+	}
+	return entry
+}
+
+// applyMutation requires the state lock and reports obsolete data in a sealed file.
+func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc storage.Location) bool {
+	invalidatedSealed := false
+	if old, exists := db.index[entry.key]; exists {
 		invalidatedSealed = old.File != loc.File
 		old.File.LiveBytes.Add(-old.Bytes)
 		old.File.Unpin()
 	}
 	if kind == format.Delete {
 		loc.File.DeleteBytes.Add(loc.Bytes)
-		delete(db.index, k)
-		db.cache.Delete(k)
+		delete(db.index, entry.key)
+		db.cache.Delete(entry.key)
 	} else {
 		loc.File.Pin()
 		loc.File.LiveBytes.Add(loc.Bytes)
-		db.index[k] = loc
-		db.cache.Put(k, value)
+		db.index[entry.key] = loc
+		db.cache.Put(entry.key, entry.value)
 	}
-	return nil
+	return invalidatedSealed
 }
 
 // Close rejects new calls, waits for admitted calls and releases ownership last.

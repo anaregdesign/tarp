@@ -79,6 +79,9 @@ Obsolete records are validated even above a new admission limit.
 | 104 | 20 | Reserved |
 | 124 | 4 | CRC32C of bytes [0,124) |
 
+Batch writes append consecutive ordinary records in one segment. One frontier
+publication selects the end offset and sequence of the final record.
+
 Existing selected sealed/snapshot lengths must match exactly. Active physical
 length must be at least its committed end; only a suffix strictly beyond that
 end is discardable after validation and compatible-options checks.

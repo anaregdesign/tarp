@@ -1,11 +1,15 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/anaregdesign/tarp/internal/format"
 )
 
 func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
@@ -58,5 +62,114 @@ func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
 	defer reopened.Close()
 	if _, err := os.Stat(owned.Name()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recognized temporary file after valid Open: %v", err)
+	}
+}
+
+func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
+	for _, rotate := range []bool{false, true} {
+		for _, tc := range []struct {
+			point, outcome string
+			committed      bool
+		}{
+			{"partial-data", "not-applied", false},
+			{"current.sync:after", "not-applied", false},
+			{"current.rename:before", "unknown", false},
+			{"current.rename:after", "unknown", true},
+			{"current.dirsync:after", "unknown", true},
+			{"", "", true},
+		} {
+			t.Run(fmt.Sprintf("rotate=%v/%s", rotate, tc.point), func(t *testing.T) {
+				dir := t.TempDir()
+				cfg := Config{CacheBytes: 4096, RecordBytes: 100, TargetSegmentBytes: 1024, Handles: 1}
+				if rotate {
+					// Exactly enough payload for the two 50-byte batch records.
+					cfg.TargetSegmentBytes = format.SegmentHeaderBytes + 100
+				}
+				s, _, err := Open(dir, cfg, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				healthy := func() error { return nil }
+				if _, err := s.Append(format.Put, []byte("seed"), nil, healthy); err != nil {
+					t.Fatal(err)
+				}
+				before := s.Current
+				injected := errors.New("injected batch failure")
+				publications := 0
+				s.IO = &IO{Hook: func(point string) error {
+					if point == tc.point {
+						return injected
+					}
+					if point == "current.rename:after" {
+						publications++
+					}
+					return nil
+				}}
+				if tc.point == "partial-data" {
+					s.IO.WriteAt = func(f *os.File, b []byte, off int64) (int, error) {
+						if bytes.HasPrefix(b, []byte("TARPRECD")) {
+							// Leave a whole first record and the start of the second.
+							n, err := f.WriteAt(b[:51], off)
+							return n, errors.Join(err, injected)
+						}
+						return f.WriteAt(b, off)
+					}
+				}
+				entries := []Entry{{[]byte("a"), []byte("1")}, {[]byte("b"), []byte("2")}}
+				locations, err := s.AppendBatch(format.Put, entries, healthy)
+				if tc.point == "" {
+					if err != nil || publications != 1 || len(locations) != 2 {
+						t.Fatalf("append returned %v, %v with %d publications", locations, err, publications)
+					}
+					for i, loc := range locations {
+						v, err := s.Read(loc, string(entries[i].Key))
+						if err != nil || !bytes.Equal(v, entries[i].Value) {
+							t.Fatalf("read returned %q, %v", v, err)
+						}
+					}
+				} else {
+					var fault *Fault
+					if len(locations) != 0 || !errors.Is(err, injected) || !errors.As(err, &fault) || fault.Outcome != tc.outcome {
+						t.Fatalf("append returned %v, %v, want %s", locations, err, tc.outcome)
+					}
+				}
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, index, err := Open(dir, cfg, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				after := reopened.Current
+				if tc.committed {
+					if after.Sequence != before.Sequence+2 || after.Generation != before.Generation+1 || (after.ActiveID != before.ActiveID) != rotate {
+						t.Fatalf("frontier after batch: %+v -> %+v", before, after)
+					}
+					for _, e := range entries {
+						loc, ok := index[string(e.Key)]
+						if !ok {
+							t.Fatalf("missing %q", e.Key)
+						}
+						v, err := reopened.Read(loc, string(e.Key))
+						if err != nil || !bytes.Equal(v, e.Value) {
+							t.Fatalf("reopened %q: %q, %v", e.Key, v, err)
+						}
+					}
+				} else if after != before || len(index) != 1 {
+					t.Fatalf("unpublished batch appeared: %+v -> %+v, keys %v", before, after, index)
+				}
+			})
+		}
+	}
+}
+
+func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
+	s := &Store{Current: format.Frontier{Sequence: math.MaxUint64 - 1}}
+	_, err := s.AppendBatch(format.Put, []Entry{{Key: []byte("a")}, {Key: []byte("b")}}, nil)
+	var f *Fault
+	if !errors.As(err, &f) || f.Unsafe || f.Outcome != "not-applied" {
+		t.Fatalf("sequence overflow returned %v", err)
 	}
 }

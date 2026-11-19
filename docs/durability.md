@@ -62,7 +62,10 @@ Generated directories/files use 0700/0600, subject to a stricter umask.
 A writer gate serializes durable publications. The short state mutex orders
 index/cache visibility and exact global MRU updates. Disk I/O, waiting for a
 writer/read handle, and full-value copying do not happen under the state mutex.
-No multi-key transaction or atomic multi-call read is implied.
+BatchGet captures all requested keys under one state lock. It returns results
+in input order and preserves cache recency. BatchPut and BatchDelete publish
+all index and cache updates under one state lock. Each separate API call has
+its own linearization point.
 
 Hits capture immutable cached bytes under state and return a copy outside it.
 Misses pin an indexed location, perform positional checked I/O outside state,
@@ -97,6 +100,15 @@ It writes and syncs the new catalog and syncs the directory before replacing
 the committed record. Explicit full-checkpoint sealing instead selects an empty
 active log at the existing sequence. Sequences, generations and file IDs never wrap.
 No record spans files or overwrites previously committed bytes.
+
+A nonempty BatchPut or BatchDelete encodes consecutive ordinary records with
+dense user sequences in a single segment. If the active file has insufficient
+room, the writer starts a new segment containing the entire batch. A single
+replacement CURRENT publishes its final sequence and offset, after the data
+and any new catalog are synced. Memory publication follows durable publication.
+An uncertain commit outcome applies to the entire batch. Reopen and backup
+select either frontier and can never select an intermediate record boundary.
+The prior whole-VM campaign described above predates the batch API.
 
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the

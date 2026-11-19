@@ -20,7 +20,7 @@ func TestExactLRUAgainstModel(t *testing.T) {
 				model = slices.Delete(model, i, i+1)
 			}
 		}
-		switch rng.IntN(3) {
+		switch rng.IntN(4) {
 		case 0:
 			v := make([]byte, rng.IntN(9))
 			c.Put(k, v)
@@ -52,6 +52,12 @@ func TestExactLRUAgainstModel(t *testing.T) {
 			c.Delete(k)
 			remove(k)
 			delete(values, k)
+		case 3:
+			got, found := c.Peek([]byte(k))
+			want, exists := values[k]
+			if found != exists || !slices.Equal(got, want) {
+				t.Fatalf("peek %s: (%v, %t), want (%v, %t)", k, got, found, want, exists)
+			}
 		}
 		order := []string{}
 		var charge int64

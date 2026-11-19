@@ -95,7 +95,14 @@ type Record struct {
 func (r Record) Bytes() int64 { return RecordHeaderBytes + r.KeyBytes + r.ValueBytes }
 
 func EncodeRecord(kind uint8, sequence uint64, key, value []byte) []byte {
-	b := make([]byte, RecordHeaderBytes+len(key)+len(value))
+	return AppendRecord(nil, kind, sequence, key, value)
+}
+
+// AppendRecord appends one complete wire record to dst.
+func AppendRecord(dst []byte, kind uint8, sequence uint64, key, value []byte) []byte {
+	start := len(dst)
+	dst = append(dst, make([]byte, RecordHeaderBytes+len(key)+len(value))...)
+	b := dst[start:]
 	copy(b, "TARPRECD")
 	b[10] = kind
 	order.PutUint64(b[16:], sequence)
@@ -105,7 +112,7 @@ func EncodeRecord(kind uint8, sequence uint64, key, value []byte) []byte {
 	copy(b[RecordHeaderBytes+len(key):], value)
 	order.PutUint32(b[40:], crc32.Checksum(b[RecordHeaderBytes:], table))
 	order.PutUint32(b[12:], crc32.Checksum(b[:RecordHeaderBytes], table))
-	return b
+	return dst
 }
 
 func DecodeRecord(b []byte, available int64) (Record, error) {
