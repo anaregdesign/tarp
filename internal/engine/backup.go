@@ -81,18 +81,19 @@ func Restore(ctx context.Context, req RestoreRequest) error {
 }
 
 // VerifyBackup checks the complete immutable source without writing files.
-func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) error {
+func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) (storage.BackupInfo, error) {
 	if ctx == nil {
-		return validContextError("verify-backup")
+		return storage.BackupInfo{}, validContextError("verify-backup")
 	}
 	cfg, err := limits.backupConfig()
 	if err != nil {
-		return err
+		return storage.BackupInfo{}, err
 	}
-	if err := storage.VerifyBackup(ctx, source, cfg); err != nil {
-		return operationError("verify-backup", "validation", err)
+	info, err := storage.VerifyBackup(ctx, source, cfg)
+	if err != nil {
+		return storage.BackupInfo{}, operationError("verify-backup", "validation", err)
 	}
-	return nil
+	return info, nil
 }
 
 func (l RestoreLimits) backupConfig() (storage.Config, error) {

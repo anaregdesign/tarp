@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 func (s *Store) publishCatalog(catalog format.Catalog, candidate format.Frontier) error {
@@ -20,7 +21,7 @@ var errCatalogChanged = errors.New("storage: catalog changed while preparing cle
 func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Frontier, actor string, offGate func(func() error) error) (result error) {
 	id, err := s.allocateID()
 	if err != nil {
-		return fault("catalog.identity", "not-applied", false, err)
+		return fault("catalog.identity", publication.NotApplied, false, err)
 	}
 	b := format.EncodeCatalog(catalog)
 	name := filepath.Join(s.Dir, ManifestName(s.Current.UUID, id))
@@ -32,7 +33,7 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 				return
 			}
 			var f *Fault
-			if errors.As(result, &f) && f.Outcome == "unknown" {
+			if errors.As(result, &f) && f.Outcome == publication.Unknown {
 				return
 			}
 			err := s.IO.Do("clean.discard.catalog", func() error { return os.Remove(name) })
@@ -51,10 +52,10 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 	}
 	prepare := func() error {
 		if err := s.IO.NewFile(name, b, actor+"catalog"); err != nil {
-			return fault("catalog.prepare", "not-applied", true, err)
+			return fault("catalog.prepare", publication.NotApplied, true, err)
 		}
 		if err := s.IO.SyncDir(s.Dir, actor+"catalog.dirsync"); err != nil {
-			return fault("catalog.dirsync", "not-applied", true, err)
+			return fault("catalog.dirsync", publication.NotApplied, true, err)
 		}
 		return nil
 	}
@@ -68,7 +69,7 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 			return errCatalogChanged
 		}
 		if s.Current.Generation == math.MaxUint64 {
-			return fault("clean.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
+			return fault("clean.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 		}
 		candidate = s.Current
 		candidate.Generation++
@@ -93,7 +94,7 @@ func (s *Store) publishFor(candidate format.Frontier, actor string) (result erro
 	pattern := fmt.Sprintf(".tarp-current-%x-*.tmp", s.Current.UUID)
 	f, err := os.CreateTemp(s.Dir, pattern)
 	if err != nil {
-		return fault("current.create", "not-applied", true, err)
+		return fault("current.create", publication.NotApplied, true, err)
 	}
 	name := f.Name()
 	closed := false
@@ -109,22 +110,22 @@ func (s *Store) publishFor(candidate format.Frontier, actor string) (result erro
 		}
 	}()
 	if err := s.IO.Write(f, format.EncodeFrontier(candidate), 0, actor+"current.write"); err != nil {
-		return fault("current.write", "not-applied", true, err)
+		return fault("current.write", publication.NotApplied, true, err)
 	}
 	if err := s.IO.Sync(f, actor+"current.sync"); err != nil {
-		return fault("current.sync", "not-applied", true, err)
+		return fault("current.sync", publication.NotApplied, true, err)
 	}
 	if err := f.Close(); err != nil {
 		closed = true
-		return fault("current.close", "not-applied", true, err)
+		return fault("current.close", publication.NotApplied, true, err)
 	}
 	closed = true
 	if err := s.IO.Do(actor+"current.rename", func() error { return os.Rename(name, filepath.Join(s.Dir, "CURRENT")) }); err != nil {
-		return fault("current.rename", "unknown", true, err)
+		return fault("current.rename", publication.Unknown, true, err)
 	}
 	renamed = true
 	if err := s.IO.SyncDir(s.Dir, actor+"current.dirsync"); err != nil {
-		return fault("current.dirsync", "unknown", true, err)
+		return fault("current.dirsync", publication.Unknown, true, err)
 	}
 	s.Current = candidate
 	return nil

@@ -137,6 +137,26 @@ func TestTypedBatchBounds(t *testing.T) {
 	}
 }
 
+func TestTypedBatchGetChargesEncodedBytesBeforeDecoding(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxBatchResultBytes: 7})
+	if err := db.Put([]byte("key"), []byte("invalid")); err != nil {
+		t.Fatal(err)
+	}
+	decodeErr := errors.New("malformed value")
+	view, err := tarp.Bind(db, tarp.StringCodec{}, rejectingStringCodec{decodeErr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := view.BatchGet([]string{"key", "absent", "key"})
+	var limit *tarp.BatchLimitError
+	if got != nil || !errors.Is(err, tarp.ErrTooLarge) || !errors.As(err, &limit) ||
+		limit.Kind != tarp.BatchResultBytesLimit || limit.Index != 2 || limit.Actual != 14 || limit.Limit != 7 {
+		t.Fatalf("oversized typed result: %+v, %v", got, err)
+	}
+	_, err = view.BatchGet([]string{"key"})
+	requireBatchCodecError(t, err, decodeErr, "BatchGet", 0, "value")
+}
+
 type closeOwnerCodec struct {
 	tarp.StringCodec
 	owner *tarp.DB

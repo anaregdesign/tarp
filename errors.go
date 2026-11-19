@@ -1,6 +1,9 @@
 package tarp
 
-import "github.com/anaregdesign/tarp/internal/engine"
+import (
+	"github.com/anaregdesign/tarp/internal/engine"
+	"github.com/anaregdesign/tarp/internal/publication"
+)
 
 var (
 	ErrEmptyKey            = engine.ErrEmptyKey
@@ -20,12 +23,12 @@ var (
 )
 
 // Outcome describes publication of the requested operation.
-type Outcome = engine.Outcome
+type Outcome = publication.Outcome
 
 const (
-	NotApplied = engine.NotApplied
-	Committed  = engine.Committed
-	Unknown    = engine.Unknown
+	NotApplied = publication.NotApplied
+	Committed  = publication.Committed
+	Unknown    = publication.Unknown
 )
 
 // OpError identifies the failed operation, phase, publication outcome and cause.
@@ -34,22 +37,27 @@ const (
 // destination. A destination error alone allows continued use of a backup source.
 type OpError = engine.OpError
 
-// SizeError reports the size of an entry that exceeds admission limits.
+// SizeError reports entry sizes and their limits. RecordBytes and CacheCharge
+// are the calculated costs. MaxRecordBytes and CacheBytes are the respective
+// configured budgets. Overflow means the costs do not fit in uint64.
 type SizeError = engine.SizeError
 
-// BatchLimitKind identifies a batch input-count, entry-size or payload limit.
+// BatchLimitKind identifies a batch input-count, entry-size, payload or result-byte limit.
 type BatchLimitKind = engine.BatchLimitKind
 
 const (
-	BatchInputCountLimit = engine.BatchInputCountLimit
-	BatchEntrySizeLimit  = engine.BatchEntrySizeLimit
-	BatchPayloadLimit    = engine.BatchPayloadLimit
+	BatchInputCountLimit  = engine.BatchInputCountLimit
+	BatchEntrySizeLimit   = engine.BatchEntrySizeLimit
+	BatchPayloadLimit     = engine.BatchPayloadLimit
+	BatchResultBytesLimit = engine.BatchResultBytesLimit
 )
 
 // BatchLimitError matches ErrTooLarge. Index is the original zero-based input
 // position, or -1 for a request-wide count failure. Actual and Limit are
 // counts for BatchInputCountLimit or encoded bytes through Index for
-// BatchPayloadLimit. For BatchEntrySizeLimit both are zero and errors.As can
+// BatchPayloadLimit. For BatchResultBytesLimit they describe encoded value
+// bytes, counting each requested occurrence of a found key. For
+// BatchEntrySizeLimit both are zero and errors.As can
 // also retrieve the underlying *SizeError with its record and cache charges.
 type BatchLimitError = engine.BatchLimitError
 

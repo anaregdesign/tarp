@@ -166,13 +166,13 @@ func Scan(ctx context.Context, f io.ReaderAt, end int64, visit func(int64, Recor
 	for offset := start; offset < end; {
 		record, key, err := ReadRecordKey(ctx, stream, offset, end-offset, buffer)
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return fmt.Errorf("%w: truncated record: %w", ErrCorrupt, err)
+			return fmt.Errorf("%w: truncated record at offset %d: %w", ErrCorrupt, offset, err)
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("record at offset %d: %w", offset, err)
 		}
 		if err := visit(offset, record, key); err != nil {
-			return err
+			return fmt.Errorf("record at offset %d: %w", offset, err)
 		}
 		offset += record.Bytes()
 	}

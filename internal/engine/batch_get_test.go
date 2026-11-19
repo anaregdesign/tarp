@@ -166,6 +166,63 @@ func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 	}
 }
 
+func TestBatchGetLimitsSnapshotValueBytesBeforeReading(t *testing.T) {
+	var reads atomic.Int64
+	opts := Options{CacheBytes: 132, MaxBatchResultBytes: 7}
+	db := newTestDB(t, opts, &storage.IO{Hook: func(point string) error {
+		if point == "read:before" {
+			reads.Add(1)
+		}
+		return nil
+	}})
+	mustPut(t, db, "c", "123")
+	mustPut(t, db, "e", "")
+	mustPut(t, db, "h", "45") // Only h fits in the cache now.
+	c, e, h, missing := []byte("c"), []byte("e"), []byte("h"), []byte("absent")
+	file := db.index["c"].File
+	refs, stats := file.References(), db.Stats()
+	for _, tc := range []struct {
+		keys   [][]byte
+		index  int
+		actual uint64
+	}{
+		{[][]byte{c, e, missing, h, c}, 4, 8},
+		{[][]byte{h, h, h, h}, 3, 8},
+		{[][]byte{c, c, c}, 2, 9},
+	} {
+		got, err := db.BatchGet(tc.keys)
+		var limit *BatchLimitError
+		if got != nil || !errors.Is(err, ErrTooLarge) || !errors.As(err, &limit) ||
+			limit.Kind != BatchResultBytesLimit || limit.Actual != tc.actual || limit.Limit != 7 || limit.Index != tc.index {
+			t.Fatalf("keys %q: got %+v, err %+v", tc.keys, got, err)
+		}
+	}
+	if file.References() != refs || db.Stats() != stats || reads.Load() != 0 {
+		t.Fatalf("rejected batches changed refs, stats or reads: %d, %+v, %d", file.References(), db.Stats(), reads.Load())
+	}
+	got, err := db.BatchGet([][]byte{c, e, missing, h, h})
+	if err != nil || len(got) != 5 || string(got[0].Value) != "123" || !got[1].Found || len(got[1].Value) != 0 ||
+		got[2].Found || string(got[3].Value) != "45" || string(got[4].Value) != "45" || reads.Load() != 2 {
+		t.Fatalf("exact fit: %+v, %v, %d reads", got, err, reads.Load())
+	}
+}
+
+func TestBatchGetSizeBoundCannotWrap(t *testing.T) {
+	// Four maximum values would wrap to four bytes in uint64. The second
+	// result already exceeds the limit. No payload allocation is necessary.
+	const size = 1<<62 + 1
+	db := DB{
+		opts:  Options{CacheBytes: size + 129, MaxRecordBytes: size + 49, MaxBatchResultBytes: math.MaxInt64},
+		index: map[string]storage.Location{"k": {ValueBytes: size}},
+	}
+	key := []byte("k")
+	var limit *BatchLimitError
+	err := db.checkBatchResultSize([][]byte{key, key, key, key})
+	if !errors.As(err, &limit) || limit.Index != 1 || limit.Actual != 2*uint64(size) || limit.Limit != math.MaxInt64 {
+		t.Fatalf("large result: %+v", err)
+	}
+}
+
 func TestBatchGetSeesWholeBatchMutations(t *testing.T) {
 	db := newTestDB(t, Options{}, nil)
 	keys := [][]byte{[]byte("left"), []byte("right")}
@@ -218,6 +275,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		opts := testOptions()
 		opts.CacheBytes = 260
 		opts.BatchReadConcurrency = 2
+		opts.MaxBatchResultBytes = 5 // The original keys fit; the concurrent replacements do not.
 		ioHooks := &storage.IO{Hook: func(p string) error {
 			if p == "read:before" && started.Add(1) <= 2 {
 				<-resume
@@ -252,6 +310,9 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		want := []BatchResult{{[]byte("B"), true}, {[]byte("A"), true}, {[]byte("Z"), true}, {[]byte("B"), true}, {}, {[]byte("A"), true}, {}}
 		if outcome.err != nil || !reflect.DeepEqual(outcome.results, want) || oldA.References() != 0 || oldB.References() != 0 {
 			t.Fatalf("read after checkpoint: %+v, %v, refs %d/%d", outcome.results, outcome.err, oldA.References(), oldB.References())
+		}
+		if got, err := db.BatchGet(keys); got != nil || !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("new snapshot: %+v, %v", got, err)
 		}
 	})
 }

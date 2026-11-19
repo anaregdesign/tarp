@@ -11,6 +11,7 @@ import (
 	"slices"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 // CleanSegment pins the physical sources in one contiguous catalog run. Its
@@ -229,7 +230,7 @@ func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error
 		}
 	}
 	if s.Current.Generation == math.MaxUint64 {
-		return fault("clean.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
+		return fault("clean.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
 	catalog := s.Catalog
 	catalog.Files = slices.Clone(catalog.Files)

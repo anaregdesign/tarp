@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"syscall"
+
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 var (
@@ -24,12 +26,12 @@ var (
 )
 
 // Outcome describes publication of the requested operation, not temporary space.
-type Outcome string
+type Outcome = publication.Outcome
 
 const (
-	NotApplied Outcome = "not-applied"
-	Committed  Outcome = "committed"
-	Unknown    Outcome = "unknown"
+	NotApplied = publication.NotApplied
+	Committed  = publication.Committed
+	Unknown    = publication.Unknown
 )
 
 // OpError preserves the failed phase, publication outcome and underlying cause.
@@ -57,13 +59,16 @@ func (e *OpError) Is(target error) bool {
 type SizeError struct {
 	KeyBytes, ValueBytes, RecordBytes, CacheCharge uint64
 	Overflow                                       bool
-	Limits                                         Options
+	// MaxRecordBytes limits RecordBytes, including the encoded header.
+	MaxRecordBytes int64
+	// CacheBytes limits CacheCharge, including logical cache metadata.
+	CacheBytes int64
 }
 
 func (e *SizeError) Error() string {
 	return fmt.Sprintf("%v: key=%d value=%d record=%d cache=%d overflow=%t; limits record=%d cache=%d",
 		ErrTooLarge, e.KeyBytes, e.ValueBytes, e.RecordBytes, e.CacheCharge, e.Overflow,
-		e.Limits.MaxRecordBytes, e.Limits.CacheBytes)
+		e.MaxRecordBytes, e.CacheBytes)
 }
 
 func (e *SizeError) Unwrap() error { return ErrTooLarge }
@@ -72,9 +77,10 @@ func (e *SizeError) Unwrap() error { return ErrTooLarge }
 type BatchLimitKind string
 
 const (
-	BatchInputCountLimit BatchLimitKind = "input-count"
-	BatchEntrySizeLimit  BatchLimitKind = "entry-size"
-	BatchPayloadLimit    BatchLimitKind = "payload-bytes"
+	BatchInputCountLimit  BatchLimitKind = "input-count"
+	BatchEntrySizeLimit   BatchLimitKind = "entry-size"
+	BatchPayloadLimit     BatchLimitKind = "payload-bytes"
+	BatchResultBytesLimit BatchLimitKind = "result-bytes"
 )
 
 // BatchLimitError reports an oversized batch before publication. Index is the
@@ -83,7 +89,8 @@ type BatchLimitError struct {
 	Kind  BatchLimitKind
 	Index int
 	// Actual and Limit are input counts for BatchInputCountLimit, or encoded
-	// record bytes for BatchPayloadLimit. Actual includes the offending input
+	// record bytes for BatchPayloadLimit, or returned value bytes for
+	// BatchResultBytesLimit. Actual includes the offending input
 	// and counts each distinct delete key once. Both fields are zero for
 	// BatchEntrySizeLimit, whose Entry reports both record and cache limits.
 	Actual, Limit uint64
@@ -96,6 +103,8 @@ func (e *BatchLimitError) Error() string {
 		return fmt.Sprintf("%v: batch has %d inputs, limit %d", ErrTooLarge, e.Actual, e.Limit)
 	case BatchEntrySizeLimit:
 		return fmt.Sprintf("tarp: batch input[%d]: %v", e.Index, e.Entry)
+	case BatchResultBytesLimit:
+		return fmt.Sprintf("%v: batch input[%d] raises the result to %d value bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
 	default:
 		return fmt.Sprintf("%v: batch input[%d] raises the encoded payload to %d bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
 	}

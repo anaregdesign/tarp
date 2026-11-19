@@ -426,7 +426,7 @@ func operationError(op, phase string, err error) *OpError {
 	outcome := NotApplied
 	var fault *storage.Fault
 	if errors.As(err, &fault) {
-		phase, outcome = fault.Phase, Outcome(fault.Outcome)
+		phase, outcome = fault.Phase, fault.Outcome
 	}
 	return &OpError{Operation: op, Phase: phase, Outcome: outcome, Err: publicCause(err)}
 }

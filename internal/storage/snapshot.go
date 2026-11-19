@@ -5,9 +5,11 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 
 	"github.com/anaregdesign/tarp/internal/format"
@@ -117,7 +119,7 @@ func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error) {
 			return span.Finish()
 		})
 		if err = errors.Join(err, fd.Close()); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", filepath.Base(captured.File.Path), err)
 		}
 	}
 	if err := ctx.Err(); err != nil {

@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/bits"
 
+	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -39,6 +40,10 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 		db.state.Unlock()
 		return nil, err
 	}
+	if err := db.checkBatchResultSize(keys); err != nil {
+		db.state.Unlock()
+		return nil, err
+	}
 	reads := db.captureBatch(keys, results)
 	db.state.Unlock()
 
@@ -58,6 +63,29 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 		return nil, err
 	}
 	return results, nil
+}
+
+// checkBatchResultSize runs under the snapshot lock, before pinning files,
+// changing counters or copying values. Most small requests fit even if every
+// input has the largest admissible value and can skip the index walk.
+func (db *DB) checkBatchResultSize(keys [][]byte) error {
+	limit := uint64(db.opts.MaxBatchResultBytes)
+	// Both kinds of charge include at least one key byte.
+	maxValue := min(db.opts.MaxRecordBytes-entrysize.RecordHeaderBytes, db.opts.CacheBytes-entrysize.CacheMetadataBytes) - 1
+	high, upper := bits.Mul64(uint64(len(keys)), uint64(maxValue))
+	if high == 0 && upper <= limit {
+		return nil
+	}
+	var actual uint64
+	for i, key := range keys {
+		// Before adding, actual is at most the int64 limit. Adding another
+		// nonnegative int64 therefore cannot overflow uint64.
+		actual += uint64(db.index[string(key)].ValueBytes)
+		if actual > limit {
+			return &BatchLimitError{Kind: BatchResultBytesLimit, Index: i, Actual: actual, Limit: limit}
+		}
+	}
+	return nil
 }
 
 func (db *DB) captureBatch(keys [][]byte, results []BatchResult) []batchRead {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
@@ -73,14 +74,15 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 	batchBytes := firstBytes + int64(format.RecordHeaderBytes+len(entries[1].Key)+len(entries[1].Value))
 	for _, rotate := range []bool{false, true} {
 		for _, tc := range []struct {
-			point, outcome string
-			committed      bool
+			point     string
+			outcome   publication.Outcome
+			committed bool
 		}{
-			{"partial-data", "not-applied", false},
-			{"current.sync:after", "not-applied", false},
-			{"current.rename:before", "unknown", false},
-			{"current.rename:after", "unknown", true},
-			{"current.dirsync:after", "unknown", true},
+			{"partial-data", publication.NotApplied, false},
+			{"current.sync:after", publication.NotApplied, false},
+			{"current.rename:before", publication.Unknown, false},
+			{"current.rename:after", publication.Unknown, true},
+			{"current.dirsync:after", publication.Unknown, true},
 			{"", "", true},
 		} {
 			t.Run(fmt.Sprintf("rotate=%v/%s", rotate, tc.point), func(t *testing.T) {
@@ -176,7 +178,7 @@ func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
 	s := &Store{Current: format.Frontier{Sequence: math.MaxUint64 - 1}}
 	_, err := s.AppendBatch(format.Put, []Entry{{Key: []byte("a")}, {Key: []byte("b")}}, nil)
 	var f *Fault
-	if !errors.As(err, &f) || f.Unsafe || f.Outcome != "not-applied" {
+	if !errors.As(err, &f) || f.Unsafe || f.Outcome != publication.NotApplied {
 		t.Fatalf("sequence overflow returned %v", err)
 	}
 }

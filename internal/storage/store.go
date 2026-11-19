@@ -17,6 +17,7 @@ import (
 	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/platform"
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 var ErrCorrupt = format.ErrCorrupt
@@ -128,7 +129,7 @@ func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool,
 		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
 		if err == nil {
 			if _, err := format.DecodeFrontier(b); err != nil {
-				return nil, nil, err
+				return nil, nil, fmt.Errorf("CURRENT: %w", err)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, err
@@ -291,7 +292,7 @@ func (s *Store) Rotate() error {
 		return nil
 	}
 	if s.Current.Generation == math.MaxUint64 {
-		return fault("rotation.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
+		return fault("rotation.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
 	return s.rotate(appendData{}, s.Current.Sequence, nil)
 }
@@ -302,11 +303,11 @@ func (s *Store) Rotate() error {
 func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy func() error) error {
 	file, fd, err := s.newLog(initialRecords)
 	if err != nil {
-		return fault("rotation.segment", "not-applied", true, err)
+		return fault("rotation.segment", publication.NotApplied, true, err)
 	}
 	if healthy != nil {
 		if err := healthy(); err != nil {
-			return errors.Join(fault("commit.health", "not-applied", true, err), fd.Close())
+			return errors.Join(fault("commit.health", publication.NotApplied, true, err), fd.Close())
 		}
 	}
 	catalog := s.Catalog
@@ -325,7 +326,7 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 	old := s.active
 	s.active = fd
 	if err := errors.Join(old.Close(), s.IO.Check("rotation.close:after")); err != nil {
-		return fault("rotation.close", "committed", true, err)
+		return fault("rotation.close", publication.Committed, true, err)
 	}
 	return nil
 }
@@ -337,7 +338,7 @@ type Entry struct {
 
 func (s *Store) checkSequence(count int) error {
 	if s.Current.Sequence > math.MaxUint64-uint64(count) || s.Current.Generation == math.MaxUint64 {
-		return fault("commit.sequence", "not-applied", false, errors.New("storage: sequence or publication generation exhausted"))
+		return fault("commit.sequence", publication.NotApplied, false, errors.New("storage: sequence or publication generation exhausted"))
 	}
 	return nil
 }
@@ -416,13 +417,13 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 		return s.Files[s.Current.ActiveID], format.SegmentHeaderBytes, nil
 	}
 	if err := data.writeAt(s.active, offset); err != nil {
-		return nil, 0, fault("data.write", "not-applied", true, err)
+		return nil, 0, fault("data.write", publication.NotApplied, true, err)
 	}
 	if err := s.IO.Sync(s.active, "data.sync"); err != nil {
-		return nil, 0, fault("data.sync", "not-applied", true, err)
+		return nil, 0, fault("data.sync", publication.NotApplied, true, err)
 	}
 	if err := healthy(); err != nil {
-		return nil, 0, fault("commit.health", "not-applied", true, err)
+		return nil, 0, fault("commit.health", publication.NotApplied, true, err)
 	}
 	candidate := s.Current
 	candidate.Generation++

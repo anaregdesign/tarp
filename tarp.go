@@ -10,13 +10,29 @@ import (
 // DB owns its directory until Close finishes. Do not copy a DB.
 type DB engine.DB
 
-// Options configures one database. A zero field selects its default.
-// CacheBytes bounds the logical LRU charge (64 MiB), MaxRecordBytes bounds
-// one encoded record (1 MiB), TargetSegmentBytes sizes new log and checkpoint
-// files and bounds repack inputs (4 MiB), and ReadFileHandles sizes the cache-miss
-// read pool (64). BatchReadConcurrency limits simultaneous DATA reads across
-// BatchGet calls on this DB (8).
-type Options = engine.Options
+// Options configures one database. Zero fields select their defaults.
+type Options struct {
+	// CacheBytes is the logical LRU budget. Each live entry must fit. Zero selects 64 MiB.
+	CacheBytes int64
+	// MaxRecordBytes limits the encoded header, key and value of one record. Zero selects 1 MiB.
+	MaxRecordBytes int64
+	// TargetSegmentBytes sizes new logs and checkpoints and caps repack input.
+	// The default is 4 MiB. The target grows to fit one maximum record and a segment header.
+	TargetSegmentBytes int64
+	// ReadFileHandles bounds the pool of reusable DATA handles. Zero selects 64.
+	ReadFileHandles int
+	// BatchReadConcurrency limits simultaneous DATA reads across BatchGet calls on this DB. Zero selects 8.
+	BatchReadConcurrency int
+	// MaxBatchResultBytes limits the sum of encoded value bytes in one BatchGet
+	// result, including duplicates. Missing keys and empty values cost zero.
+	// It excludes result metadata and allocations by application codecs. Zero selects 64 MiB.
+	MaxBatchResultBytes int64
+}
+
+// RestoreLimits returns the limits used to verify live records for restore.
+func (o Options) RestoreLimits() RestoreLimits {
+	return RestoreLimits(engine.Options(o).RestoreLimits())
+}
 
 // Open creates or reopens a database and starts automatic incremental compaction.
 // The parent directory must exist. Incompatible options leave existing data intact.
@@ -28,7 +44,7 @@ func Open(dir string, opts Options) (*DB, error) {
 // recovery and has no effect on a successfully returned DB. Once initialization
 // of a new database begins, it finishes before OpenContext returns.
 func OpenContext(ctx context.Context, dir string, opts Options) (*DB, error) {
-	db, err := engine.OpenContext(ctx, dir, opts, false)
+	db, err := engine.OpenContext(ctx, dir, engine.Options(opts), false)
 	return (*DB)(db), err
 }
 
@@ -36,7 +52,7 @@ func OpenContext(ctx context.Context, dir string, opts Options) (*DB, error) {
 // An absent or empty directory returns an error matching fs.ErrNotExist.
 // It also accepts a database just published by Restore.
 func OpenExisting(ctx context.Context, dir string, opts Options) (*DB, error) {
-	db, err := engine.OpenContext(ctx, dir, opts, true)
+	db, err := engine.OpenContext(ctx, dir, engine.Options(opts), true)
 	return (*DB)(db), err
 }
 
@@ -76,22 +92,53 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 
 // RestoreLimits bounds the logical cache charge and encoded size of each live
 // record in a restored image. Zero fields select the same defaults as Open.
-type RestoreLimits = engine.RestoreLimits
+type RestoreLimits struct {
+	// CacheBytes bounds the logical cache charge of the largest live entry. Zero selects 64 MiB.
+	CacheBytes int64
+	// MaxRecordBytes bounds the largest live encoded record, including its header. Zero selects 1 MiB.
+	MaxRecordBytes int64
+}
 
 // RestoreRequest names the immutable Source backup, a new Destination directory
 // and the Limits to verify before publishing the restored database.
-type RestoreRequest = engine.RestoreRequest
+type RestoreRequest struct {
+	// Source is the immutable backup directory.
+	Source string
+	// Destination is the new database directory. Its parent must already exist.
+	Destination string
+	// Limits specifies the cache and record sizes to validate before publication.
+	Limits RestoreLimits
+}
 
 // Restore verifies a completed backup and publishes a new, closed database.
 // The source must remain immutable and the destination must be new.
 func Restore(ctx context.Context, req RestoreRequest) error {
-	return engine.Restore(ctx, req)
+	return engine.Restore(ctx, engine.RestoreRequest{
+		Source: req.Source, Destination: req.Destination, Limits: engine.RestoreLimits(req.Limits),
+	})
+}
+
+// BackupInfo describes a verified backup at its committed sequence.
+type BackupInfo struct {
+	DatabaseID [16]byte // Database UUID, shared by its backups and restored copies.
+	Sequence   uint64   // Last committed user sequence in the backup.
+	LiveKeys   uint64   // Number of keys present at Sequence.
+	// RequiredLimits gives the largest live cache charge and encoded record size.
+	// Both are zero for an empty image. Zero option fields select defaults.
+	RequiredLimits RestoreLimits
 }
 
 // VerifyBackup checks the file set, checksums, committed records and live record
-// limits of an immutable backup. It does not create or modify any files.
-func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) error {
-	return engine.VerifyBackup(ctx, source, limits)
+// limits of an immutable backup without writing files. Any error returns a zero BackupInfo.
+func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) (BackupInfo, error) {
+	info, err := engine.VerifyBackup(ctx, source, engine.RestoreLimits(limits))
+	if err != nil {
+		return BackupInfo{}, err
+	}
+	return BackupInfo{
+		DatabaseID: info.DatabaseID, Sequence: info.Sequence, LiveKeys: info.LiveKeys,
+		RequiredLimits: RestoreLimits{CacheBytes: info.RequiredCacheBytes, MaxRecordBytes: info.RequiredRecordBytes},
+	}, nil
 }
 
 // CompactResult counts reclaimed file bytes and retired bytes still held by leases.

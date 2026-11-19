@@ -378,6 +378,19 @@ GOMAXPROCS=4 go test -run '^$' -bench 'Benchmark(Get|DurablePut|Compaction)$' \
 go tool pprof -top /existing-evidence-directory/run.jsonl.mutex.pprof
 ```
 
+`BenchmarkMixedWriters` also emits `calls/s`, `ns/get-p50`, `ns/get-p99`,
+`ns/put-p50` and `ns/put-p99` as named Go benchmark metrics. Throughput divides
+the total number of API calls by total worker wall time. Each latency metric
+is the median of that per-window percentile across benchmark iterations.
+The ordinary `ns/op` measures one 4,096-call mixed workload including its
+measurement bookkeeping. Use the named units as separate columns or rows
+in release comparisons so slow reads and slow writes can be identified.
+Convert logs containing these named metrics into one CSV row per sample:
+
+```sh
+awk -f benchmark/scripts/mixed-metrics.awk baseline.log candidate.log > mixed.csv
+```
+
 Fixed operation counts keep rotating-write file creation bounded.
 `BenchmarkGet/.../application-hit-parallel` uses Go's `RunParallel` with
 GOMAXPROCS workers. `BenchmarkDurablePut` records observed rotations per timed

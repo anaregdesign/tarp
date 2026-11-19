@@ -50,7 +50,7 @@ func checkBackupUnchanged(t *testing.T, source string, before map[string]string)
 func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 	original := directoryBytes(t, makeRestoreBackup(t))
 	for _, damage := range []string{"sequence", "cutoff", "active suffix", "segment identity", "inner signature",
-		"missing selected file", "unlisted file", "listed unselected file", "duplicate entry"} {
+		"missing selected file", "unlisted file", "listed unselected file", "duplicate entry", "repeated record sequence", "file digest"} {
 		t.Run(damage, func(t *testing.T) {
 			files := maps.Clone(original)
 			meta, err := format.DecodeBackup([]byte(files["BACKUP"]))
@@ -62,6 +62,7 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 				t.Fatal(err)
 			}
 			active := storage.DataName(current.UUID, current.ActiveID)
+			wantLocation := ""
 			// Keep the outer hash valid so that Restore must validate the image.
 			replaceFile := func(name string, data []byte) {
 				t.Helper()
@@ -100,14 +101,29 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 				meta.Files = append(meta.Files, format.BackupFile{Name: name, Hash: sha256.Sum256(nil)})
 			case "duplicate entry":
 				meta.Files = append(meta.Files, meta.Files[0])
+			case "repeated record sequence":
+				firstEnd := current.ActiveEnd
+				data := append([]byte(files[active]), format.EncodeRecord(format.Put, current.Sequence, []byte("next"), nil)...)
+				replaceFile(active, data)
+				current.Sequence++
+				meta.Sequence = current.Sequence
+				current.ActiveEnd = int64(len(data))
+				replaceFile("CURRENT", format.EncodeFrontier(current))
+				wantLocation = fmt.Sprintf("%s: record at offset %d", active, firstEnd)
+			case "file digest":
+				data := []byte(files[active])
+				data[len(data)-1] ^= 1
+				files[active] = string(data)
+				wantLocation = active
 			}
 			files["BACKUP"] = string(format.EncodeBackup(meta))
 			source, parent := t.TempDir(), t.TempDir()
 			for name, data := range files {
 				writeFixtureFile(t, filepath.Join(source, name), []byte(data))
 			}
-			if err := VerifyBackup(t.Context(), source, testOptions().RestoreLimits()); !errors.Is(err, ErrCorrupt) {
-				t.Fatalf("VerifyBackup returned %v, want corrupt image", err)
+			info, err := VerifyBackup(t.Context(), source, testOptions().RestoreLimits())
+			if !errors.Is(err, ErrCorrupt) || info != (storage.BackupInfo{}) || !strings.Contains(err.Error(), wantLocation) {
+				t.Fatalf("VerifyBackup returned %+v, %v; want zero report and corruption at %q", info, err, wantLocation)
 			}
 			checkBackupUnchanged(t, source, files)
 			err = Restore(t.Context(), RestoreRequest{
@@ -116,7 +132,8 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 				Limits:      testOptions().RestoreLimits(),
 			})
 			var op *OpError
-			if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrUnsupportedFormat) || !errors.As(err, &op) || op.Outcome != NotApplied {
+			if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrUnsupportedFormat) || !errors.As(err, &op) || op.Outcome != NotApplied ||
+				!strings.Contains(err.Error(), wantLocation) {
 				t.Fatalf("Restore returned %v, want unapplied corruption", err)
 			}
 			if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
@@ -134,12 +151,12 @@ func TestRestoreValidatesStagedBytesBeforePublication(t *testing.T) {
 		t.Run(fmt.Sprintf("canceled=%t", interrupted), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			var damaged bool
+			var damagedFile string
 			var synced int
 			fs := &storage.IO{
 				WriteAt: func(fd *os.File, b []byte, off int64) (int, error) {
-					if !damaged && strings.HasPrefix(filepath.Base(fd.Name()), "DATA-") {
-						damaged = true
+					if damagedFile == "" && strings.HasPrefix(filepath.Base(fd.Name()), "DATA-") {
+						damagedFile = filepath.Base(fd.Name())
 						b = bytes.Clone(b)
 						b[len(b)-1] ^= 1
 					}
@@ -164,9 +181,12 @@ func TestRestoreValidatesStagedBytesBeforePublication(t *testing.T) {
 			}
 			err := restoreWithIO(ctx, req, fs)
 			var op *OpError
-			if !damaged || !errors.As(err, &op) || op.Outcome != NotApplied ||
+			if damagedFile == "" || !errors.As(err, &op) || op.Outcome != NotApplied ||
 				errors.Is(err, ErrCorrupt) == interrupted || errors.Is(err, context.Canceled) != interrupted {
-				t.Fatalf("damaged=%t canceled=%t, Restore returned %v", damaged, interrupted, err)
+				t.Fatalf("damaged=%q canceled=%t, Restore returned %v", damagedFile, interrupted, err)
+			}
+			if !interrupted && !strings.Contains(err.Error(), fmt.Sprintf("%s: record at offset %d", damagedFile, format.SegmentHeaderBytes)) {
+				t.Fatalf("staged corruption lost its location: %v", err)
 			}
 			if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
 				t.Fatalf("failed staged validation left output: %v, %v", entries, err)
