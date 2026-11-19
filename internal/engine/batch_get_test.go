@@ -100,6 +100,38 @@ func TestBatchGetCountsDistinctKeysInEachCall(t *testing.T) {
 	}
 }
 
+func TestBatchGetDistinguishesKeysWithMatchingSuffixes(t *testing.T) {
+	db := newTestDB(t, Options{CacheBytes: 132}, nil)
+	mustPut(t, db, "axx", "A")
+	mustPut(t, db, "bxx", "B") // Only bxx fits in the LRU.
+	for _, first := range []string{"xxx", "bxx"} {
+		// The first two uncached keys can differ at the suffix, while many
+		// later distinct keys share it and collide on the first probe.
+		keys := [][]byte{[]byte(first), []byte("xxy")}
+		for range 2 {
+			for prefix := byte(0); prefix < 128; prefix++ {
+				keys = append(keys, []byte{prefix, 'x', 'x'})
+			}
+		}
+		before := db.Stats()
+		results, err := db.BatchGet(keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, key := range keys {
+			found := string(key) == "axx" || string(key) == "bxx"
+			if results[i].Found != found || (found && (len(results[i].Value) != 1 || results[i].Value[0] != key[0]-'a'+'A')) {
+				t.Fatalf("slot %d, key %q: %+v", i, key, results[i])
+			}
+		}
+		after := db.Stats()
+		if after.Cache.Hits-before.Cache.Hits != 1 || after.Cache.Misses-before.Cache.Misses != 1 ||
+			after.MissingKeys-before.MissingKeys != 127 || after.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != 129 {
+			t.Fatalf("first key %q: before %+v, after %+v", first, before, after)
+		}
+	}
+}
+
 func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 	db := newTestDB(t, Options{}, &storage.IO{Hook: func(p string) error {
 		if p == "read:before" {

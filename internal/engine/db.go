@@ -331,7 +331,7 @@ func (db *DB) Close() error {
 		loc.File.Unpin()
 	}
 	db.state.Lock()
-	db.stats = db.statsLocked()
+	db.readStatsLocked(&db.stats)
 	db.index, db.cache = nil, nil
 	db.state.Unlock()
 	err := publicCause(db.store.Close())

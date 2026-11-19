@@ -3,6 +3,7 @@ package benchmark
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"path/filepath"
 	"reflect"
@@ -30,6 +31,10 @@ func BenchmarkBatchGet(b *testing.B) {
 	shuffled := slices.Clone(unique)
 	rng := rand.New(rand.NewPCG(66, 1))
 	rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+	shuffledAbsent := make([]int, slots)
+	for i, id := range shuffled {
+		shuffledAbsent[i] = -2 - id
+	}
 	repeatedHot := make([]int, slots)
 	repeatedAbsent := make([]int, slots)
 	for i := range repeatedAbsent {
@@ -37,7 +42,7 @@ func BenchmarkBatchGet(b *testing.B) {
 	}
 	for _, tc := range []struct {
 		name string
-		ids  []int // -1 requests an absent key.
+		ids  []int // Negative IDs request absent keys.
 		cold bool
 	}{
 		{"hot-1", unique[:1], false},
@@ -45,6 +50,7 @@ func BenchmarkBatchGet(b *testing.B) {
 		{"hot-shuffled-32", shuffled, false},
 		{"repeated-hot-32", repeatedHot, false},
 		{"repeated-absent-32", repeatedAbsent, false},
+		{"shuffled-distinct-absent-32", shuffledAbsent, false},
 		{"miss-os-warm-32", unique, true},
 		{"duplicate-missing-os-warm-32", mixed, true},
 	} {
@@ -79,7 +85,12 @@ func BenchmarkBatchGet(b *testing.B) {
 					want := make([]tarp.BatchResult, len(tc.ids))
 					var found int
 					for i, id := range tc.ids {
-						if id < 0 {
+						if id < -1 {
+							// Continue the fixture's fixed-width hex key space past the seed.
+							request[i] = []byte(fmt.Sprintf("%016x", slots-1-id))
+							continue
+						}
+						if id == -1 {
 							request[i] = []byte("absent-batch-key")
 							continue
 						}

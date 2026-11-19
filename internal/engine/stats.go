@@ -28,14 +28,15 @@ type Stats struct {
 }
 
 // Stats also returns the retained final snapshot after Close.
-func (db *DB) Stats() Stats {
+func (db *DB) Stats() (s Stats) {
 	db.state.Lock()
-	defer db.state.Unlock()
-	return db.statsLocked()
+	db.readStatsLocked(&s)
+	db.state.Unlock()
+	return s
 }
 
-func (db *DB) statsLocked() Stats {
-	s := db.stats
+func (db *DB) readStatsLocked(s *Stats) {
+	*s = db.stats
 	if db.cache != nil {
 		s.LiveKeys = uint64(len(db.index))
 		s.Cache.UsedBytes = uint64(db.cache.Bytes())
@@ -43,5 +44,4 @@ func (db *DB) statsLocked() Stats {
 		s.Cache.Evictions = db.cache.Evictions()
 		s.ObsoletePutBytes = s.SelectedDataBytes - s.SelectedSegments*format.SegmentHeaderBytes - s.LiveRecordBytes - s.TombstoneBytes
 	}
-	return s
 }
