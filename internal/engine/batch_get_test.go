@@ -212,8 +212,9 @@ func TestBatchGetSizeBoundCannotWrap(t *testing.T) {
 	// result already exceeds the limit. No payload allocation is necessary.
 	const size = 1<<62 + 1
 	db := DB{
-		opts:  Options{CacheBytes: size + 129, MaxRecordBytes: size + 49, MaxBatchResultBytes: math.MaxInt64},
-		index: map[string]storage.Location{"k": {ValueBytes: size}},
+		opts:              Options{MaxBatchResultBytes: math.MaxInt64},
+		index:             map[string]storage.Location{"k": {ValueBytes: size}},
+		maxSeenValueBytes: size,
 	}
 	key := []byte("k")
 	var limit *BatchLimitError
@@ -221,6 +222,49 @@ func TestBatchGetSizeBoundCannotWrap(t *testing.T) {
 	if !errors.As(err, &limit) || limit.Index != 1 || limit.Actual != 2*uint64(size) || limit.Limit != math.MaxInt64 {
 		t.Fatalf("large result: %+v", err)
 	}
+}
+
+func TestBatchGetSizeBoundTracksPublishedAndRecoveredValues(t *testing.T) {
+	opts := Options{MaxBatchResultBytes: 4}
+	db := newTestDB(t, opts, nil)
+	a, b := []byte("a"), []byte("b")
+	checkTooLarge := func(db *DB, keys [][]byte, index int, actual uint64) {
+		t.Helper()
+		got, err := db.BatchGet(keys)
+		var limit *BatchLimitError
+		if got != nil || !errors.As(err, &limit) || limit.Kind != BatchResultBytesLimit ||
+			limit.Index != index || limit.Actual != actual || limit.Limit != 4 {
+			t.Fatalf("BatchGet(%q) = %+v, %v; want %d bytes at index %d", keys, got, err, actual, index)
+		}
+	}
+
+	mustPut(t, db, "a", "x")
+	mustPut(t, db, "a", "xyz")
+	checkTooLarge(db, [][]byte{a, a}, 1, 6)
+	if err := db.BatchPut([]Entry{{a, []byte("xy")}, {b, []byte("12345")}}); err != nil {
+		t.Fatal(err)
+	}
+	checkTooLarge(db, [][]byte{b}, 0, 5)
+	if err := db.Delete(b); err != nil {
+		t.Fatal(err)
+	}
+	// The deleted maximum still contributes to the bound. Exact sizes fit.
+	got, err := db.BatchGet([][]byte{a, b, a})
+	if err != nil || !reflect.DeepEqual(got, []BatchResult{{[]byte("xy"), true}, {}, {[]byte("xy"), true}}) {
+		t.Fatalf("BatchGet after delete = %+v, %v", got, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.maxSeenValueBytes != 2 {
+		t.Fatalf("recovered value bound = %d, want 2", reopened.maxSeenValueBytes)
+	}
+	checkTooLarge(reopened, [][]byte{a, a, a}, 2, 6)
 }
 
 func TestBatchGetSeesWholeBatchMutations(t *testing.T) {

@@ -6,7 +6,6 @@ import (
 	"math"
 	"math/bits"
 
-	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -66,13 +65,11 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 }
 
 // checkBatchResultSize runs under the snapshot lock, before pinning files,
-// changing counters or copying values. Most small requests fit even if every
-// input has the largest admissible value and can skip the index walk.
+// changing counters or copying values. Skip the index walk when even a batch
+// repeating the largest observed value would fit.
 func (db *DB) checkBatchResultSize(keys [][]byte) error {
 	limit := uint64(db.opts.MaxBatchResultBytes)
-	// Both kinds of charge include at least one key byte.
-	maxValue := min(db.opts.MaxRecordBytes-entrysize.RecordHeaderBytes, db.opts.CacheBytes-entrysize.CacheMetadataBytes) - 1
-	high, upper := bits.Mul64(uint64(len(keys)), uint64(maxValue))
+	high, upper := bits.Mul64(uint64(len(keys)), uint64(db.maxSeenValueBytes))
 	if high == 0 && upper <= limit {
 		return nil
 	}
