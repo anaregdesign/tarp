@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -23,6 +24,7 @@ type DB struct {
 	store   *storage.Store
 	writer  engineMutex
 	state   engineMutex
+	stats   Stats // guarded by state
 	index   map[string]storage.Location
 	cache   *cache.Cache
 	failed  atomic.Pointer[failure]
@@ -57,7 +59,9 @@ func OpenWithIO(dir string, opts Options, fs *storage.IO) (*DB, error) {
 	for _, loc := range index {
 		loc.File.Pin()
 		loc.File.LiveBytes.Add(loc.Bytes)
+		db.stats.LiveRecordBytes += uint64(loc.Bytes)
 	}
+	db.initDataStats()
 	db.startCleaner()
 	return db, nil
 }
@@ -93,6 +97,13 @@ func (db *DB) done() {
 	db.life.Unlock()
 }
 
+// countLookup records one classified key probe while the caller holds state.
+func countLookup(counter *uint64) {
+	if *counter < math.MaxUint64 {
+		*counter++
+	}
+}
+
 // Get returns an independently owned value, or ErrNotFound.
 func (db *DB) Get(key []byte) ([]byte, error) {
 	if err := db.admit(); err != nil {
@@ -103,24 +114,33 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		return nil, ErrEmptyKey
 	}
 	var k string
-	for {
+	for firstLookup := true; ; firstLookup = false {
 		db.state.Lock()
 		if err := db.health(); err != nil {
 			db.state.Unlock()
 			return nil, err
 		}
 		if value, ok := db.cache.Get(key); ok {
+			if firstLookup {
+				countLookup(&db.stats.Cache.Hits)
+			}
 			db.state.Unlock()
 			return bytes.Clone(value), nil
 		}
 		loc, ok := db.index[string(key)]
 		if !ok {
+			if firstLookup {
+				countLookup(&db.stats.MissingKeys)
+			}
 			db.state.Unlock()
 			return nil, ErrNotFound
 		}
+		if firstLookup {
+			countLookup(&db.stats.Cache.Misses)
+		}
 		loc.File.Pin()
 		db.state.Unlock()
-		if k == "" {
+		if firstLookup {
 			k = string(key)
 		}
 		value, err := db.store.Read(loc, k)
@@ -230,7 +250,17 @@ func (db *DB) mutate(kind uint8, key, value []byte) error {
 		return &OpError{Operation: op, Phase: "memory-publication", Outcome: Committed, Err: err}
 	}
 	invalidatedSealed = db.applyMutation(kind, entry, loc)
+	db.countWriteCommit(previousActive)
 	return nil
+}
+
+// countWriteCommit runs once per published single or batch write under state.
+func (db *DB) countWriteCommit(previousActive uint64) {
+	db.stats.WriteCommits++
+	if db.store.Current.ActiveID != previousActive {
+		db.stats.SelectedSegments++
+		db.stats.SelectedDataBytes += format.SegmentHeaderBytes
+	}
 }
 
 type ownedMutation struct {
@@ -256,18 +286,23 @@ func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc storage.Locatio
 	if old, exists := db.index[entry.key]; exists {
 		invalidatedSealed = old.File != loc.File
 		old.File.LiveBytes.Add(-old.Bytes)
+		db.stats.LiveRecordBytes -= uint64(old.Bytes)
 		old.File.Unpin()
 	}
 	if kind == format.Delete {
 		loc.File.DeleteBytes.Add(loc.Bytes)
+		db.stats.TombstoneBytes += uint64(loc.Bytes)
 		delete(db.index, entry.key)
 		db.cache.Delete(entry.key)
 	} else {
 		loc.File.Pin()
 		loc.File.LiveBytes.Add(loc.Bytes)
+		db.stats.LiveRecordBytes += uint64(loc.Bytes)
 		db.index[entry.key] = loc
 		db.cache.Put(entry.key, entry.value)
 	}
+	db.stats.WrittenRecords++
+	db.stats.SelectedDataBytes += uint64(loc.Bytes)
 	return invalidatedSealed
 }
 
@@ -292,7 +327,10 @@ func (db *DB) Close() error {
 	for _, loc := range db.index {
 		loc.File.Unpin()
 	}
+	db.state.Lock()
+	db.stats = db.statsLocked()
 	db.index, db.cache = nil, nil
+	db.state.Unlock()
 	err := publicCause(db.store.Close())
 	if f := db.failed.Load(); f != nil {
 		err = errors.Join(f.err, err)

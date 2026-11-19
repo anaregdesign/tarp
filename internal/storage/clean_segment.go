@@ -30,6 +30,10 @@ type Relocation struct {
 	Old, New Location
 }
 
+// OutputBytes is the logical length of the finished replacement DATA file.
+// An empty cleaned interval has zero bytes.
+func (c *CleanSegment) OutputBytes() int64 { return c.output.Size.Load() }
+
 // BeginClean runs under the writer gate. The selected catalog is immutable.
 // New log rotations may append to the catalog while these sources are copied.
 func (s *Store) BeginClean(entries []format.File) (*CleanSegment, error) {

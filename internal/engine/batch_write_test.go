@@ -13,6 +13,15 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+func requireWriteStats(t *testing.T, db *DB, commits, records, liveBytes uint64) {
+	t.Helper()
+	s := db.Stats()
+	if s.WriteCommits != commits || s.WrittenRecords != records || s.LiveRecordBytes != liveBytes {
+		t.Fatalf("write stats: commits %d, records %d, live bytes %d; want %d, %d, %d",
+			s.WriteCommits, s.WrittenRecords, s.LiveRecordBytes, commits, records, liveBytes)
+	}
+}
+
 func TestBatchWriteRejectsWholeRequestBeforeMutation(t *testing.T) {
 	db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "a", "old")
@@ -41,6 +50,7 @@ func TestBatchWriteRejectsWholeRequestBeforeMutation(t *testing.T) {
 			t.Fatal("batch changed files despite admission result", tc.want)
 		}
 		wantValue(t, db, "a", "old")
+		requireWriteStats(t, db, 1, 1, 52)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -67,6 +77,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	if err := db.BatchPut(entries); err != nil {
 		t.Fatal(err)
 	}
+	requireWriteStats(t, db, 2, 4, 128)
 	after := db.store.Current
 	if after.Generation != before.Generation+1 || after.Sequence != before.Sequence+3 || after.ActiveID == before.ActiveID || after.ActiveEnd != 256 {
 		t.Fatalf("batch frontier: %+v -> %+v", before, after)
@@ -89,6 +100,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	if err := db.BatchDelete(keys); err != nil {
 		t.Fatal(err)
 	}
+	requireWriteStats(t, db, 3, 6, 0)
 	tombstones := db.store.Files[db.store.Current.ActiveID]
 	if db.store.Current.Sequence != after.Sequence+2 || db.store.Current.Generation != after.Generation+1 ||
 		tombstones.DeleteBytes.Load() != 98 || file.LiveBytes.Load() != 0 || file.References() != 0 || len(db.index) != 0 || db.cache.Bytes() != 0 {
@@ -138,6 +150,7 @@ func TestBatchWritesRecoverWholeOutcome(t *testing.T) {
 				if err := db.BatchPut(nil); !errors.Is(err, ErrUnhealthy) {
 					t.Fatal(err)
 				}
+				requireWriteStats(t, db, 1, 2, 104)
 				if err := db.Close(); !errors.Is(err, syscall.EIO) {
 					t.Fatal(err)
 				}
@@ -156,6 +169,7 @@ func TestBatchWritesRecoverWholeOutcome(t *testing.T) {
 				if got := scanContents(t, reopened.Scan(t.Context())); !maps.Equal(got, want) {
 					t.Fatalf("after recovery: %v, want %v", got, want)
 				}
+				requireWriteStats(t, reopened, 0, 0, uint64(52*len(want)))
 			})
 		}
 	}
@@ -187,6 +201,7 @@ func TestBatchPublicationWithScanCheckpointAndBackup(t *testing.T) {
 	go func() { done <- db.BatchPut(entries) }()
 	<-copied
 	// Commit finished, but the batch is still preparing its owned copies.
+	requireWriteStats(t, db, 1, 2, 104)
 	old := scanContents(t, db.Scan(t.Context()))
 	close(resume)
 	if err := <-done; err != nil {
@@ -195,6 +210,7 @@ func TestBatchPublicationWithScanCheckpointAndBackup(t *testing.T) {
 	if !maps.Equal(old, map[string]string{"a": "old", "b": "old"}) {
 		t.Fatal("observed intermediate batch state", old)
 	}
+	requireWriteStats(t, db, 2, 4, 104)
 	if _, err := db.Compact(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -213,4 +229,6 @@ func TestBatchPublicationWithScanCheckpointAndBackup(t *testing.T) {
 	if got := scanContents(t, copyDB.Scan(t.Context())); !maps.Equal(got, map[string]string{"a": "new", "b": "new"}) {
 		t.Fatal("restored state", got)
 	}
+	requireWriteStats(t, db, 2, 4, 104)
+	requireWriteStats(t, copyDB, 0, 0, 104)
 }

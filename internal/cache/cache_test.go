@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"math"
 	"math/rand/v2"
 	"slices"
 	"strconv"
@@ -11,6 +12,7 @@ func TestExactLRUAgainstModel(t *testing.T) {
 	const limit = 3 * (MetadataBytes + 1 + 8)
 	c := New(limit)
 	model := []string{}
+	var evictions uint64
 	values := make(map[string][]byte)
 	rng := rand.New(rand.NewPCG(1, 2))
 	for step := 0; step < 3000; step++ {
@@ -37,6 +39,7 @@ func TestExactLRUAgainstModel(t *testing.T) {
 				}
 				delete(values, model[len(model)-1])
 				model = model[:len(model)-1]
+				evictions++
 			}
 		case 1:
 			_, got := c.Get([]byte(k))
@@ -68,5 +71,23 @@ func TestExactLRUAgainstModel(t *testing.T) {
 		if !slices.Equal(model, order) || charge != c.used || c.used > limit {
 			t.Fatalf("step %d: order=%v model=%v charge=%d used=%d", step, order, model, charge, c.used)
 		}
+		if c.Evictions() != evictions {
+			t.Fatalf("step %d: evictions=%d want %d", step, c.Evictions(), evictions)
+		}
+	}
+	c.Clear()
+	if c.Bytes() != 0 || c.Evictions() != evictions {
+		t.Fatalf("after clear: used=%d evictions=%d want 0, %d", c.Bytes(), c.Evictions(), evictions)
+	}
+}
+
+func TestEvictionCounterSaturates(t *testing.T) {
+	c := New(MetadataBytes + 1)
+	c.evictions = math.MaxUint64 - 1
+	for _, key := range []string{"a", "b", "c"} {
+		c.Put(key, nil)
+	}
+	if c.Evictions() != math.MaxUint64 {
+		t.Fatalf("eviction counter wrapped to %d", c.Evictions())
 	}
 }

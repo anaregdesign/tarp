@@ -33,12 +33,20 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 	locations := make([]storage.Location, len(keys))
 	results := make([]BatchResult, len(keys))
 	db.state.Lock()
+	if err := db.health(); err != nil {
+		db.state.Unlock()
+		return nil, err
+	}
 	for i, key := range keys {
 		if value, ok := db.cache.Peek(key); ok {
+			countLookup(&db.stats.Cache.Hits)
 			results[i] = BatchResult{Value: value, Found: true}
 		} else if loc, ok := db.index[string(key)]; ok {
+			countLookup(&db.stats.Cache.Misses)
 			loc.File.Pin()
 			locations[i] = loc
+		} else {
+			countLookup(&db.stats.MissingKeys)
 		}
 	}
 	db.state.Unlock()

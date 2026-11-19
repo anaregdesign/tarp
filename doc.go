@@ -19,7 +19,8 @@
 // It reclaims obsolete records, repacks small files and yields for writers
 // and backup. Compact explicitly builds a full checkpoint. MaintenanceStatus reports worker
 // activity, deferred retirement and logical bytes unlinked. Provide temporary
-// space for both maintenance and backup. Close joins the worker.
+// space for both maintenance and backup. Close joins the worker. Stats returns
+// a constant-time snapshot of storage, cache and foreground activity.
 //
 // Open and Restore accept one unversioned format. A database or backup from
 // the previous implementation is unsupported. Use Backup for a consistent

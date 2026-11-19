@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"runtime"
 	"sync"
@@ -11,6 +12,26 @@ import (
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
+
+func TestReadCountersSaturate(t *testing.T) {
+	db := newTestDB(t, Options{CacheBytes: 130}, nil)
+	mustPut(t, db, "a", "A")
+	mustPut(t, db, "b", "B")
+	db.state.Lock()
+	db.stats.Cache.Hits = math.MaxUint64 - 1
+	db.stats.Cache.Misses = math.MaxUint64 - 1
+	db.stats.MissingKeys = math.MaxUint64 - 1
+	db.state.Unlock()
+	for range 2 {
+		if _, err := db.BatchGet([][]byte{[]byte("a"), []byte("b"), []byte("c")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := db.Stats()
+	if s.Cache.Hits != math.MaxUint64 || s.Cache.Misses != math.MaxUint64 || s.MissingKeys != math.MaxUint64 {
+		t.Fatalf("read counters wrapped: %+v", s)
+	}
+}
 
 func TestBatchGetPreservesOrderOwnershipAndCache(t *testing.T) {
 	var reads atomic.Int64
@@ -35,6 +56,10 @@ func TestBatchGetPreservesOrderOwnershipAndCache(t *testing.T) {
 		!got[2].Found || string(got[2].Value) != "A" || !got[3].Found || len(got[3].Value) != 0 ||
 		!got[4].Found || string(got[4].Value) != "D" || !got[5].Found || string(got[5].Value) != "D" {
 		t.Fatal(got)
+	}
+	s := db.Stats()
+	if s.Cache.Hits != 4 || s.Cache.Misses != 2 || s.MissingKeys != 1 {
+		t.Fatalf("duplicate input slots should each count once: %+v", s)
 	}
 	got[1].Value[0] = 'B'
 	got[4].Value[0] = 'E'
@@ -74,6 +99,10 @@ func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 	}
 	if _, err := db.BatchGet(nil); !errors.Is(err, ErrClosed) {
 		t.Fatalf("closed empty batch: %v", err)
+	}
+	s := db.Stats()
+	if s.Cache.Hits != 0 || s.Cache.Misses != 0 || s.MissingKeys != 0 {
+		t.Fatalf("rejected or empty batches counted lookups: %+v", s)
 	}
 }
 
@@ -187,5 +216,9 @@ func TestBatchGetReadFailureDiscardsResultsAndPins(t *testing.T) {
 	}
 	if _, err := db.BatchGet(nil); !errors.Is(err, ErrUnhealthy) {
 		t.Fatalf("next read: %v", err)
+	}
+	s := db.Stats()
+	if s.Cache.Hits != 1 || s.Cache.Misses != 2 || s.MissingKeys != 0 {
+		t.Fatalf("failed I/O should retain probe counts: %+v", s)
 	}
 }
