@@ -12,6 +12,35 @@ Benchmarks, smoke measurement profiles, and the VM measurement workflow run only
 on a separate explicit user request. Ordinary functional and race tests provide
 the routine PR checks.
 
+## Public batch APIs and Stats
+
+Run `benchmark/scripts/api-benchmarks.sh` to compare grouped and single reads,
+durable puts/deletes, exact-fit writes with and without rotation, and Stats
+collection at idle or alongside foreground Gets. The [v0.2.0 native
+results](benchmarks/v0.2.0-native.md) include workload definitions, per-key
+and per-group units, all five rounds and follow-up diagnostics.
+
+To compare concurrent hot Gets, use the same test driver and Go toolchain
+for both revisions. Alternate which binary runs first in each of five rounds.
+
+```sh
+go test -c -o /tmp/tarp-api.test ./benchmark
+GOMAXPROCS=4 /tmp/tarp-api.test -test.run '^$' -test.bench '^BenchmarkParallelGetDuringStats$' -test.benchtime 2100ms -test.benchmem
+```
+
+The baseline and one-second ticker share the same 128 resident keys. Parallel
+ns/op divides wall time by all completed Gets. For heap and RSS, run each
+mode in a fresh process. The diagnostic fills the default segment with six
+mixed-size records, parks the cleaner, and samples the live heap after forced
+GC during the first data write, after publication, and with a single 32-byte
+value retained. Peak RSS covers the whole process.
+
+```sh
+for mode in empty rotate; do
+    GOMAXPROCS=4 TARP_BATCH_PUT_MEMORY=$mode /tmp/tarp-api.test -test.run '^TestBatchPutMemory$' -test.v
+done
+```
+
 ## Compaction comparison
 
 `BenchmarkCompaction` and the opt-in JSONL drivers compare two operations on private

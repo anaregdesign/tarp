@@ -30,8 +30,9 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 		}
 	}
 
-	locations := make([]storage.Location, len(keys))
 	results := make([]BatchResult, len(keys))
+	var locations []storage.Location
+	var firstMiss int
 	db.state.Lock()
 	if err := db.health(); err != nil {
 		db.state.Unlock()
@@ -43,13 +44,35 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 			results[i] = BatchResult{Value: value, Found: true}
 		} else if loc, ok := db.index[string(key)]; ok {
 			countLookup(&db.stats.Cache.Misses)
+			if locations == nil {
+				firstMiss = i
+				locations = make([]storage.Location, len(keys)-i)
+			}
 			loc.File.Pin()
-			locations[i] = loc
+			locations[i-firstMiss] = loc
 		} else {
 			countLookup(&db.stats.MissingKeys)
 		}
 	}
 	db.state.Unlock()
+
+	// Cached values are immutable. Clone after releasing state so each slot
+	// owns its result. Batches served entirely here need no pin bookkeeping.
+	for i := range results {
+		results[i].Value = bytes.Clone(results[i].Value)
+	}
+	if locations != nil {
+		if err := db.readBatchMisses(keys[firstMiss:], results[firstMiss:], locations); err != nil {
+			return nil, err
+		}
+	}
+	if err := db.health(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func (db *DB) readBatchMisses(keys [][]byte, results []BatchResult, locations []storage.Location) error {
 	defer func() {
 		for _, loc := range locations {
 			if loc.File != nil {
@@ -60,10 +83,6 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 
 	read := make(map[storage.Location][]byte)
 	for i, loc := range locations {
-		if results[i].Found {
-			results[i].Value = bytes.Clone(results[i].Value)
-			continue
-		}
 		if loc.File == nil {
 			continue
 		}
@@ -74,13 +93,10 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 		value, err := db.store.Read(loc, string(keys[i]))
 		if err != nil {
 			db.poison(err)
-			return nil, operationError("batch-get", "read", err)
+			return operationError("batch-get", "read", err)
 		}
 		read[loc] = value
 		results[i] = BatchResult{Value: value, Found: true}
 	}
-	if err := db.health(); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return nil
 }

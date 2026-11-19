@@ -145,7 +145,7 @@ func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error) {
 }
 
 func (s *Store) NewSnapshotFile() (*File, *os.File, error) {
-	return s.newSegment(format.Snapshot, "compact.segment", nil)
+	return s.newSegment(format.Snapshot, "compact.segment", appendData{})
 }
 
 // SnapshotReader reuses a single source descriptor while copying a pinned
