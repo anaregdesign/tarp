@@ -47,6 +47,15 @@ func (c *Cache) BeginBatch() {
 	}
 }
 
+// Peek returns immutable cached bytes without changing recency.
+func (c *Cache) Peek(key []byte) ([]byte, bool) {
+	e, ok := c.items[string(key)]
+	if !ok {
+		return nil, false
+	}
+	return e.value, true
+}
+
 // PeekBatch returns the immutable value, its presence, and whether this key
 // already occurred in this batch. Peeking preserves recency.
 func (c *Cache) PeekBatch(key []byte) (value []byte, found, duplicate bool) {

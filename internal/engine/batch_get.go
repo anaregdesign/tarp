@@ -61,13 +61,21 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 }
 
 func (db *DB) captureBatch(keys [][]byte, results []BatchResult) []batchRead {
+	if len(keys) == 1 {
+		if value, found := db.cache.Peek(keys[0]); found {
+			countLookup(&db.stats.Cache.Hits)
+			results[0] = BatchResult{Value: value, Found: true}
+			return nil
+		}
+		return db.captureBatchKeys(keys, results, 0, 1, false)
+	}
 	db.cache.BeginBatch()
 	var firstUncached, uncached int
 	var hits uint64
 	for i, key := range keys {
 		value, found, duplicate := db.cache.PeekBatch(key)
 		if !found {
-			if i == 0 && len(keys) > 1 {
+			if i == 0 {
 				if _, live := db.index[string(key)]; !live {
 					// Lead with the index on missing-key requests: absent
 					// keys then need no further LRU probes.
