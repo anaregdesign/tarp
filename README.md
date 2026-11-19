@@ -5,7 +5,7 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.4.0
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.5.0
 in a new module, run the commands below. In an existing module, run just
 the `go get` command.
 
@@ -13,7 +13,7 @@ the `go get` command.
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.4.0
+go get github.com/anaregdesign/tarp@v0.5.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -96,9 +96,23 @@ func storeScore(dir string) (score int64, err error) {
 }
 ```
 
-`TypedDB` also supports `Delete`, snapshot iteration with `Scan`, and the same
-backup and maintenance operations as `DB`. Use `NewTypedDB` to wrap an open
-`*DB`. Both handles share the same records and closing either closes both.
+`OpenTyped` returns an owning `*TypedDB`, with the same backup, maintenance
+and close operations as `*DB`. To lend an open DB to another component, use
+`Bind`. The returned `*View[K,V]` can read, write, scan and batch the same
+records. The opener controls the shared database lifetime.
+An owner created with `OpenTyped` can lend its existing codecs with `db.View()`.
+
+```go
+scores, err := tarp.Bind(raw, tarp.StringCodec{}, tarp.Int64Codec{})
+if err != nil {
+    return err
+}
+return scores.Put("score", 42)
+```
+
+When upgrading from v0.4, replace `NewTypedDB(raw, ...)` with `Bind(raw, ...)`
+and call `Close`, `Stats`, `Backup` and maintenance methods on the owner.
+Existing v0.4 databases and backups use the same on-disk format as v0.5.
 
 Built-in codecs cover `bool`, `string`, all integer, float and complex types,
 and `[]byte`. Use `Uint8Codec` for `byte` and `Int32Codec` for `rune`. Numeric
@@ -203,6 +217,9 @@ effective `TargetSegmentBytes` minus the 64-byte segment header.
 All put entries count, including repeated keys. For deletes, only distinct
 keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
 before publication. Each nonempty write batch has one commit outcome.
+Use `errors.As` with `*tarp.BatchCodecError` to get the zero-based input
+index and the field (`key` or `value`) of a failed codec call. The error
+also wraps the codec's cause.
 See the [runnable batch example](typed_batch_test.go).
 
 ## Contract
@@ -218,9 +235,10 @@ reopen a database and `Restore` to restore a backup offline.
 - `Get` uses an exact global LRU first. Misses read a checked indexed file record
   and cache it; updates/deletes cannot race a stale miss into visibility.
 - Successful writes include data, commit-frontier, and directory syncs before
-  memory publication. An error need not mean rollback: use `errors.Is` and
-  inspect `*OpError` with `errors.As` to distinguish `NotApplied`, `Committed`, and `Unknown`.
-  `ErrCommitUncertain` or `ErrUnhealthy` requires close/reopen before further use.
+  memory publication. Use `errors.As` to inspect the operation, phase and
+  outcome in `*OpError`. After an uncertain database write, close and reopen
+  the DB and inspect its contents before deciding whether to retry.
+  `ErrUnhealthy` also requires close/reopen.
 - Oversized single `Put` inputs return `ErrTooLarge` before changing files,
   values, or cache order. Ordinary fullness evicts LRU.
 - `Close` rejects new calls, cancels and joins the worker, and waits for admitted calls. Repeated/concurrent
@@ -277,13 +295,28 @@ bytes and one read handle.
 ## Backup, restore, and maintenance
 
 ```go
-err := db.Backup(ctx, "/existing-parent/new-backup")
-err = tarp.Restore(ctx, "/existing-parent/new-backup",
-	"/existing-parent/new-restored-db", tarp.Options{})
-result, err := db.Compact(ctx)
+if err := db.Backup(ctx, backupDir); err != nil {
+    return err
+}
+return tarp.Restore(ctx, tarp.RestoreRequest{
+    Source:      backupDir,
+    Destination: restoredDir,
+})
 ```
 
-Handle each result before starting the next operation. `Backup` captures a
+`RestoreRequest.Limits` defaults to the same cache and record limits as
+`Open`. To migrate a v0.4 call that passed `opts`, set
+`Limits: opts.RestoreLimits()`. Configure handles, batch read concurrency
+and the segment target when opening the restored DB.
+
+If `Backup` or `Restore` reports `ErrCommitUncertain` at destination rename
+or parent directory sync, inspect the destination before retrying. For a
+backup, validate the image by restoring it into a fresh directory. For a
+restore, open the published destination if present. A backup destination
+error alone permits continued use of the source DB. A source read or checksum
+failure puts that DB into fail-stop and requires close/reopen.
+
+`Backup` captures a
 consistent committed point in time and copies outside the writer gate while
 writes continue. `Restore` checks hashes, formats, records, sequences, and live
 limits, then publishes a new closed database. Existing destinations, even empty

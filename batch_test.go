@@ -71,7 +71,11 @@ func TestBatchRoundTripAcrossCheckpointBackupAndReopen(t *testing.T) {
 		t.Fatalf("deleted keys after reopen = %+v, %v", r, err)
 	}
 	restored := filepath.Join(parent, "restored")
-	if err := tarp.Restore(t.Context(), backup, restored, opts); err != nil {
+	if err := tarp.Restore(t.Context(), tarp.RestoreRequest{
+		Source:      backup,
+		Destination: restored,
+		Limits:      opts.RestoreLimits(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	check(open(restored))

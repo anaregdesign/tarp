@@ -977,7 +977,10 @@ func TestPreviousReleaseRejectionPreservesInput(t *testing.T) {
 	}
 	before := directoryBytes(t, previous)
 	target := filepath.Join(t.TempDir(), "restored")
-	if err := Restore(context.Background(), previous, target, Options{}); !errors.Is(err, ErrUnsupportedFormat) {
+	if err := Restore(context.Background(), RestoreRequest{
+		Source:      previous,
+		Destination: target,
+	}); !errors.Is(err, ErrUnsupportedFormat) {
 		t.Fatalf("old backup: %v", err)
 	}
 	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) || !reflect.DeepEqual(directoryBytes(t, previous), before) {
@@ -1074,7 +1077,11 @@ func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "restored")
-	if err := Restore(context.Background(), backup, target, smaller); err != nil {
+	if err := Restore(context.Background(), RestoreRequest{
+		Source:      backup,
+		Destination: target,
+		Limits:      smaller.RestoreLimits(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{dir, target} {

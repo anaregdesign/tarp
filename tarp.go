@@ -59,10 +59,18 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	return (*engine.DB)(db).Backup(ctx, destination)
 }
 
+// RestoreLimits bounds the logical cache charge and encoded size of each live
+// record in a restored image. Zero fields select the same defaults as Open.
+type RestoreLimits = engine.RestoreLimits
+
+// RestoreRequest names the immutable Source backup, a new Destination directory
+// and the Limits to verify before publishing the restored database.
+type RestoreRequest = engine.RestoreRequest
+
 // Restore verifies a completed backup and publishes a new, closed database.
 // The source must remain immutable and the destination must be new.
-func Restore(ctx context.Context, backup, destination string, opts Options) error {
-	return engine.Restore(ctx, backup, destination, opts)
+func Restore(ctx context.Context, req RestoreRequest) error {
+	return engine.Restore(ctx, req)
 }
 
 // CompactResult counts reclaimed file bytes and retired bytes still held by leases.

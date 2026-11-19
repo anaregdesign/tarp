@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"os"
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
@@ -83,91 +82,25 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		db.compactFailure(err)
 		return result, operationError("compact", "scan", err)
 	}
-	var reader storage.SnapshotReader
-	var files []*storage.File
-	var outputs []format.File
-	var fd *os.File
-	var active *storage.File
-	offset := int64(format.SegmentHeaderBytes)
-	attempted := false
-	finishFile := func() error {
-		if fd == nil {
-			return nil
-		}
-		err := errors.Join(db.store.IO.Sync(fd, "compact.sync"), fd.Close())
-		fd = nil
-		if err == nil {
-			active.Size.Store(offset)
-			outputs = append(outputs, format.File{ID: active.ID, Bytes: offset, Kind: format.Snapshot})
-		}
-		return err
-	}
+	checkpoint := db.store.NewCheckpoint(capture)
 	defer func() {
-		if closeErr := reader.Close(); closeErr != nil {
-			db.compactFailure(closeErr)
-			returned = errors.Join(returned, operationError("compact", "source-close", closeErr))
-		}
-		if fd != nil {
-			returned = errors.Join(returned, fd.Close())
-		}
-		if returned != nil && !attempted && db.health() == nil {
-			db.writer.Lock()
-			if db.health() == nil {
-				returned = errors.Join(returned, db.store.DiscardOutputs(files))
+		if returned != nil && db.health() == nil {
+			if err := checkpoint.Discard(); err != nil {
+				returned = errors.Join(returned, err)
 			}
-			db.writer.Unlock()
 		}
 	}()
-	buffer := make([]byte, 32<<10)
-	for i := range moves {
-		move := &moves[i]
-		loc := move.Old
-		if err := ctx.Err(); err != nil {
-			return result, operationError("compact", "copy", err)
-		}
-		if fd == nil || offset > db.opts.TargetSegmentBytes-loc.Bytes {
-			if err := finishFile(); err != nil {
-				db.compactFailure(err)
-				return result, operationError("compact", "output-sync", err)
-			}
-			db.writer.Lock()
-			if err := db.health(); err != nil {
-				db.writer.Unlock()
-				return result, err
-			}
-			active, fd, err = db.store.NewSnapshotFile()
-			db.writer.Unlock()
-			if err != nil {
-				db.compactFailure(err)
-				return result, operationError("compact", "output-create", err)
-			}
-			files = append(files, active)
-			offset = format.SegmentHeaderBytes
-		}
-		if err := reader.CopyRecord(ctx, db.store.IO, loc, move.Key, fd, offset, buffer); err != nil {
-			db.compactFailure(err)
-			return result, operationError("compact", "copy", err)
-		}
-		move.New = loc
-		move.New.File, move.New.Offset = active, offset
-		offset += loc.Bytes
-	}
-	if err := reader.Close(); err != nil {
+	if err := checkpoint.Copy(ctx, moves, db.reserveSnapshotFile); err != nil {
 		db.compactFailure(err)
-		return result, operationError("compact", "source-close", err)
+		return result, operationError("compact", "copy", err)
 	}
-	if err := finishFile(); err != nil {
-		db.compactFailure(err)
-		return result, operationError("compact", "output-sync", err)
-	}
-	oldData, newData := checkpointDataTotals(capture, outputs)
+	oldData, newData := checkpointDataTotals(capture, checkpoint.Entries())
 	db.writer.Lock()
 	if err := errors.Join(ctx.Err(), db.health()); err != nil {
 		db.writer.Unlock()
 		return result, operationError("compact", "pre-publication", err)
 	}
-	attempted = true
-	err = db.store.InstallCheckpoint(capture, outputs)
+	err = checkpoint.Install()
 	if err == nil {
 		db.replaceDataStats(oldData, newData)
 	}
@@ -176,21 +109,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	for _, move := range moves {
-		db.state.Lock()
-		current, exists := db.index[move.Key]
-		if exists && current.Sequence == move.Old.Sequence && current.File == move.Old.File && current.Offset == move.Old.Offset {
-			move.New.File.Pin()
-			move.New.File.LiveBytes.Add(move.New.Bytes)
-			current.File.LiveBytes.Add(-current.Bytes)
-			db.index[move.Key] = move.New
-			current.File.Unpin()
-		}
-		db.state.Unlock()
-		if err := db.store.IO.Check("compact.remap:after"); err != nil {
-			db.poison(err)
-		}
-	}
+	db.relocate(moves, "compact.remap:after")
 	capture.Release()
 	released = true
 	db.writer.Lock()
@@ -200,6 +119,34 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	}
 	result.ReclaimedBytes, result.PinnedBytes, err = db.store.Cleanup()
 	return result, compactCleanupError(err)
+}
+
+func (db *DB) reserveSnapshotFile() (*storage.File, error) {
+	db.writer.Lock()
+	defer db.writer.Unlock()
+	if err := db.health(); err != nil {
+		return nil, err
+	}
+	return db.store.ReserveSnapshotFile()
+}
+
+// relocate moves index ownership only while it still names the copied record.
+// Each change holds the state lock briefly; concurrent puts and deletes win.
+func (db *DB) relocate(moves []storage.Relocation, after string) {
+	for _, move := range moves {
+		db.state.Lock()
+		if db.index[move.Key] == move.Old {
+			move.New.File.Pin()
+			move.New.File.LiveBytes.Add(move.New.Bytes)
+			db.index[move.Key] = move.New
+			move.Old.File.LiveBytes.Add(-move.Old.Bytes)
+			move.Old.File.Unpin()
+		}
+		db.state.Unlock()
+		if err := db.store.IO.Check(after); err != nil {
+			db.poison(err)
+		}
+	}
 }
 
 func compactCleanupError(err error) error {

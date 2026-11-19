@@ -143,7 +143,7 @@ func TestCompositeCodecRejectsNestedDuplicateNaNKeysBeforePut(t *testing.T) {
 	another := math.Float32frombits(0x7fc00002)
 	codec := mustDerive[Reading](t)
 	raw := openPublicDB(t, t.TempDir(), tarp.Options{})
-	db, err := tarp.NewTypedDB(raw, tarp.StringCodec{}, codec)
+	db, err := tarp.Bind(raw, tarp.StringCodec{}, codec)
 	if err != nil {
 		t.Fatal(err)
 	}

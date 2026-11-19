@@ -20,7 +20,7 @@ func (db *DB) Stats() Stats {
 	return (*engine.DB)(db).Stats()
 }
 
-// Stats returns statistics for the underlying DB, shared by all its typed views.
+// Stats returns statistics for the database owned by this typed handle.
 func (db *TypedDB[K, V]) Stats() Stats {
 	return db.core.Stats()
 }

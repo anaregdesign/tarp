@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -22,7 +23,10 @@ type Image struct {
 }
 
 // Validate never changes a file and does not require/create LOCK.
-func Validate(dir string, cfg Config) (*Image, error) {
+func Validate(ctx context.Context, dir string, cfg Config) (*Image, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	b, err := readCurrent(filepath.Join(dir, "CURRENT"))
 	if err != nil {
 		return nil, fmt.Errorf("%w: missing or unreadable CURRENT: %w", ErrCorrupt, err)
@@ -48,6 +52,9 @@ func Validate(dir string, cfg Config) (*Image, error) {
 	}
 	image := &Image{Current: current, Catalog: catalog, Manifest: b, Files: make(map[uint64]*File), Index: make(map[string]Location)}
 	for _, entry := range append(append([]format.File(nil), catalog.Files...), active) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if entry.ID == 0 {
 			continue // This cleaned interval has no physical records.
 		}
@@ -59,7 +66,7 @@ func Validate(dir string, cfg Config) (*Image, error) {
 		file := &File{ID: entry.ID, Kind: entry.Kind, Path: path}
 		file.Size.Store(physical)
 		span := format.NewRecordRange(entry, catalog.Cutoff)
-		scanErr := format.Scan(fd, entry.Bytes, func(offset int64, r format.Record, key string) error {
+		scanErr := format.Scan(ctx, fd, entry.Bytes, func(offset int64, r format.Record, key string) error {
 			if err := span.Accept(r); err != nil {
 				return err
 			}
@@ -68,7 +75,11 @@ func Validate(dir string, cfg Config) (*Image, error) {
 			}
 			return applyRecord(image.Index, file, catalog.PrunedThrough, offset, r, key)
 		})
-		if err := errors.Join(scanErr, span.Finish(), fd.Close()); err != nil {
+		// The sequence range is only complete after a successful full scan.
+		if scanErr == nil {
+			scanErr = span.Finish()
+		}
+		if err := errors.Join(scanErr, fd.Close()); err != nil {
 			return nil, err
 		}
 		image.Files[file.ID] = file

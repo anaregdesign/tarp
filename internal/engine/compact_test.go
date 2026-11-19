@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
@@ -423,10 +424,16 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 func TestCompactionConcurrentTailWins(t *testing.T) {
 	var armed atomic.Bool
 	started, release := make(chan struct{}), make(chan struct{})
-	db := newTestDB(t, testOptions(), &storage.IO{Hook: func(p string) error {
-		if p == "compact.write:before" && armed.CompareAndSwap(true, false) {
+	db := newTestDB(t, testOptions(), &storage.IO{CleanerStart: make(chan struct{}), Hook: func(p string) error {
+		// Header creation is staging I/O. A foreground writer must be able to
+		// append and rotate while it is blocked.
+		if p == "compact.segment.write:before" && armed.CompareAndSwap(true, false) {
 			close(started)
-			<-release
+			select {
+			case <-release:
+			case <-time.After(30 * time.Second):
+				return errors.New("checkpoint header blocked foreground mutations")
+			}
 		}
 		return nil
 	}})
@@ -450,6 +457,12 @@ func TestCompactionConcurrentTailWins(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+	if loc, ok := db.index["a"]; !ok || loc.File.Kind != format.Log {
+		t.Fatalf("concurrent update relocated into checkpoint: %+v", loc)
+	}
+	if _, exists := db.index["b"]; exists {
+		t.Fatal("concurrent delete was relocated into the live index")
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -467,14 +480,10 @@ func TestCompactionConcurrentTailWins(t *testing.T) {
 }
 
 func TestMaintenanceCancellationAndNoSpace(t *testing.T) {
-	for _, compact := range []bool{false, true} {
-		t.Run(fmt.Sprint(compact), func(t *testing.T) {
+	for _, point := range []string{"backup.copy:after", "compact.scan:before", "compact.write:after"} {
+		t.Run(point, func(t *testing.T) {
 			var armed atomic.Bool
 			ctx, cancel := context.WithCancel(context.Background())
-			point := "backup.copy:after"
-			if compact {
-				point = "compact.write:after"
-			}
 			db := newTestDB(t, testOptions(), &storage.IO{Hook: func(p string) error {
 				if p == point && armed.CompareAndSwap(true, false) {
 					cancel()
@@ -485,12 +494,13 @@ func TestMaintenanceCancellationAndNoSpace(t *testing.T) {
 			mustPut(t, db, "a", strings.Repeat("v", 60))
 			armed.Store(true)
 			var err error
-			if compact {
+			if strings.HasPrefix(point, "compact.") {
 				_, err = db.Compact(ctx)
 			} else {
 				err = db.Backup(ctx, filepath.Join(t.TempDir(), "backup"))
 			}
-			if !errors.Is(err, context.Canceled) {
+			var op *OpError
+			if !errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrupt) || !errors.As(err, &op) || op.Outcome != NotApplied {
 				t.Fatalf("cancellation: %v", err)
 			}
 			wantValue(t, db, "a", strings.Repeat("v", 60))

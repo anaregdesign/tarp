@@ -154,7 +154,7 @@ Use `errors.Is` for category/underlying causes and `errors.As` for `*OpError`,
 | Frontier rename attempted or directory sync uncertain | `Unknown`, matching `ErrCommitUncertain` | Fail-stop |
 | All commit syncs finish but another read detects source failure before memory publication | Known `Committed`, unhealthy error | Fail-stop |
 | Source read/checksum failure | Explicit original error, no cache fallback | Fail-stop |
-| Backup destination failure | Output publication status only; not source rollback | Source may remain healthy |
+| Backup or restore destination rename or parent directory sync fails | `Unknown`, matching `ErrCommitUncertain` for the destination | Inspect the destination before retry. A backup source can continue serving requests after a destination failure |
 | Preliminary log rotation fails during `Compact` | `NotApplied` for the checkpoint, even if the rotation selected a new active log | An I/O failure during publication requires close/reopen |
 | Unpublished checkpoint ENOSPC/EDQUOT | Selected sources retained; cleanup errors joined | May remain healthy |
 | Cleanup after a durable checkpoint | Committed maintenance error | Valid logical image; retry cleanup |

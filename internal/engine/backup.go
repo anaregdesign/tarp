@@ -67,21 +67,29 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	return nil
 }
 
-// Restore verifies a completed backup and publishes a new, closed database.
-// It never overwrites an existing destination. Source backups must be immutable.
-func Restore(ctx context.Context, backup, destination string, opts Options) error {
-	return restoreWithIO(ctx, backup, destination, opts, nil)
+// RestoreRequest describes the backup to verify and the new database to publish.
+type RestoreRequest struct {
+	Source      string
+	Destination string
+	Limits      RestoreLimits
 }
 
-func restoreWithIO(ctx context.Context, backup, destination string, opts Options, fs *storage.IO) error {
+// Restore verifies a completed backup and publishes a new, closed database.
+// It never overwrites an existing destination. Source backups must be immutable.
+func Restore(ctx context.Context, req RestoreRequest) error {
+	return restoreWithIO(ctx, req, nil)
+}
+
+func restoreWithIO(ctx context.Context, req RestoreRequest, fs *storage.IO) error {
 	if ctx == nil {
 		return validContextError("restore")
 	}
-	opts, err := opts.normalized()
+	limits, err := req.Limits.normalized()
 	if err != nil {
 		return err
 	}
-	if err := storage.Restore(ctx, backup, destination, storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes}, fs); err != nil {
+	cfg := storage.Config{CacheBytes: limits.CacheBytes, RecordBytes: limits.MaxRecordBytes}
+	if err := storage.Restore(ctx, req.Source, req.Destination, cfg, fs); err != nil {
 		return operationError("restore", "validation/copy", err)
 	}
 	return nil

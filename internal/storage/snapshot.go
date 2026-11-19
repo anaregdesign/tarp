@@ -5,10 +5,8 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"fmt"
 	"hash"
 	"io"
-	"math"
 	"os"
 	"slices"
 
@@ -107,10 +105,7 @@ func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error) {
 		}
 		err = fs.Do("compact.scan", func() error {
 			span := format.NewRecordRange(captured.Entry, c.Catalog.Cutoff)
-			err := format.Scan(sourceReader{fd}, captured.Entry.Bytes, func(offset int64, r format.Record, key string) error {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
+			err := format.Scan(ctx, sourceReader{fd}, captured.Entry.Bytes, func(offset int64, r format.Record, key string) error {
 				if err := span.Accept(r); err != nil {
 					return err
 				}
@@ -142,92 +137,4 @@ func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error) {
 		return cmp.Compare(a.Old.Offset, b.Old.Offset)
 	})
 	return moves, nil
-}
-
-func (s *Store) NewSnapshotFile() (*File, *os.File, error) {
-	return s.newSegment(format.Snapshot, "compact.segment", appendData{})
-}
-
-// SnapshotReader reuses a single source descriptor while copying a pinned
-// checkpoint in physical read order. Close it before publishing the result.
-type SnapshotReader struct {
-	source *File
-	fd     *os.File
-}
-
-func (r *SnapshotReader) Close() error {
-	if r.fd == nil {
-		return nil
-	}
-	err := r.fd.Close()
-	r.source, r.fd = nil, nil
-	if err != nil {
-		return &SourceError{err}
-	}
-	return nil
-}
-
-func (r *SnapshotReader) CopyRecord(ctx context.Context, fs *IO, old Location, key string, dst *os.File, offset int64, buffer []byte) error {
-	if r.source != old.File {
-		if err := r.Close(); err != nil {
-			return err
-		}
-		fd, err := OpenRegular(old.File.Path)
-		if err != nil {
-			return &SourceError{err}
-		}
-		r.source, r.fd = old.File, fd
-		if err := fs.Check("compact.source.open:after"); err != nil {
-			return &SourceError{err}
-		}
-	}
-	writer := &outputWriter{fs: fs, fd: dst, offset: offset, point: "compact.write"}
-	record, err := format.CopyRecord(ctx, sourceReader{r.fd}, writer, old.Offset, old.Bytes,
-		&format.Identity{Key: key, Sequence: old.Sequence}, buffer)
-	if err == nil {
-		if record.Bytes() != old.Bytes {
-			return fmt.Errorf("%w: changed checkpoint record length", ErrCorrupt)
-		}
-		return fs.Check("compact.record:after")
-	}
-	var destination *destinationError
-	if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		return &SourceError{err}
-	}
-	return err
-}
-
-func (s *Store) InstallCheckpoint(capture *Capture, outputs []format.File) error {
-	if s.Current.Generation == math.MaxUint64 {
-		return fault("compact.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
-	}
-	// Incremental work is serialized with a full checkpoint. Only foreground
-	// rotations can extend this captured prefix while copying takes place.
-	catalog := format.Catalog{
-		UUID: s.Current.UUID, Cutoff: capture.Current.Sequence, PrunedThrough: capture.Current.Sequence,
-		ActiveID: s.Current.ActiveID, Files: append([]format.File(nil), outputs...),
-	}
-	catalog.Files = append(catalog.Files, s.Catalog.Files[len(capture.Catalog.Files):]...)
-	candidate := s.Current
-	candidate.Generation++
-	return s.publishCatalog(catalog, candidate)
-}
-
-// DiscardOutputs removes only this compaction's unpublished, closed outputs.
-func (s *Store) DiscardOutputs(outputs []*File) error {
-	var result error
-	for _, f := range outputs {
-		err := s.IO.Do("compact.discard", func() error { return os.Remove(f.Path) })
-		if errors.Is(err, os.ErrNotExist) {
-			err = nil
-		}
-		result = errors.Join(result, err)
-		if err == nil {
-			delete(s.Files, f.ID)
-		}
-	}
-	if len(outputs) != 0 {
-		result = errors.Join(result, s.IO.SyncDir(s.Dir, "compact.discard.dirsync"))
-	}
-	return result
 }

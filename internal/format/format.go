@@ -150,19 +150,19 @@ func DecodeRecord(b []byte, available int64) (Record, error) {
 }
 
 // Scan verifies complete records without allocating their values.
-func Scan(f io.ReaderAt, end int64, visit func(int64, Record, string) error) error {
+func Scan(ctx context.Context, f io.ReaderAt, end int64, visit func(int64, Record, string) error) error {
 	if end < SegmentHeaderBytes {
 		return bad("segment end")
 	}
 	const start = int64(SegmentHeaderBytes)
 	if end == start {
-		return nil
+		return ctx.Err()
 	}
 	size := int(min(int64(streamChunk), end-start))
 	stream := bufio.NewReaderSize(io.NewSectionReader(exactReadAt{f}, start, end-start), size)
 	buffer := make([]byte, size)
 	for offset := start; offset < end; {
-		record, key, err := ReadRecordKey(context.Background(), stream, offset, end-offset, buffer)
+		record, key, err := ReadRecordKey(ctx, stream, offset, end-offset, buffer)
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("%w: truncated record: %w", ErrCorrupt, err)
 		}
@@ -174,7 +174,7 @@ func Scan(f io.ReaderAt, end int64, visit func(int64, Record, string) error) err
 		}
 		offset += record.Bytes()
 	}
-	return nil
+	return ctx.Err()
 }
 
 // A buffered reader can defer an I/O error beyond the selected end. Pass

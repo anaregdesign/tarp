@@ -18,23 +18,6 @@ func CheckBatchCount(count int) error {
 	return nil
 }
 
-// CheckBatchPutEntry lets typed callers validate entries as their codecs produce them.
-func (db *DB) CheckBatchPutEntry(entry Entry, used int64) (int64, error) {
-	key, value := uint64(len(entry.Key)), uint64(len(entry.Value))
-	if err := db.opts.checkSize(key, value); err != nil {
-		return used, err
-	}
-	return db.addBatchBytes(used, format.RecordHeaderBytes+key+value)
-}
-
-// CheckBatchDeleteKey charges a single distinct key to the encoded batch.
-func (db *DB) CheckBatchDeleteKey(key []byte, used int64) (int64, error) {
-	if len(key) == 0 {
-		return used, ErrEmptyKey
-	}
-	return db.addBatchBytes(used, format.RecordHeaderBytes+uint64(len(key)))
-}
-
 func (db *DB) addBatchBytes(used int64, recordBytes uint64) (int64, error) {
 	limit := min(db.opts.TargetSegmentBytes-format.SegmentHeaderBytes, int64(math.MaxInt))
 	if recordBytes > uint64(limit-used) {
@@ -43,26 +26,98 @@ func (db *DB) addBatchBytes(used int64, recordBytes uint64) (int64, error) {
 	return used + int64(recordBytes), nil
 }
 
+// A PreparedBatch has passed the count and encoded-size checks for one DB.
+// Its encoded input bytes must remain immutable until Commit returns.
+type PreparedBatch struct {
+	db      *DB
+	kind    uint8
+	records []storage.Entry
+}
+
+// PreparePuts checks entries as the caller produces them. A failure stops
+// encoding immediately. No database lock is held while calling entryAt.
+func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (PreparedBatch, error) {
+	if err := CheckBatchCount(count); err != nil {
+		return PreparedBatch{}, err
+	}
+	records := make([]storage.Entry, count)
+	var used int64
+	for i := range count {
+		entry, err := entryAt(i)
+		if err != nil {
+			return PreparedBatch{}, err
+		}
+		key, value := uint64(len(entry.Key)), uint64(len(entry.Value))
+		if err := db.opts.checkSize(key, value); err != nil {
+			return PreparedBatch{}, err
+		}
+		used, err = db.addBatchBytes(used, format.RecordHeaderBytes+key+value)
+		if err != nil {
+			return PreparedBatch{}, err
+		}
+		records[i] = storage.Entry(entry)
+	}
+	return PreparedBatch{db, format.Put, records}, nil
+}
+
+// PrepareDeletes counts every input but charges only the first occurrence
+// of each encoded key. Existence is checked under the writer gate at commit.
+func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (PreparedBatch, error) {
+	if err := CheckBatchCount(count); err != nil {
+		return PreparedBatch{}, err
+	}
+	records := make([]storage.Entry, 0, count)
+	seen := make(map[string]struct{}, count)
+	var used int64
+	for i := range count {
+		key, err := keyAt(i)
+		if err != nil {
+			return PreparedBatch{}, err
+		}
+		if _, ok := seen[string(key)]; ok {
+			continue
+		}
+		if len(key) == 0 {
+			return PreparedBatch{}, ErrEmptyKey
+		}
+		used, err = db.addBatchBytes(used, format.RecordHeaderBytes+uint64(len(key)))
+		if err != nil {
+			return PreparedBatch{}, err
+		}
+		seen[string(key)] = struct{}{}
+		records = append(records, storage.Entry{Key: key})
+	}
+	return PreparedBatch{db, format.Delete, records}, nil
+}
+
+// Commit admits a typed call after all application codec calls have returned.
+func (b PreparedBatch) Commit() error {
+	if err := b.db.admit(); err != nil {
+		return err
+	}
+	defer b.db.done()
+	return b.apply()
+}
+
+func (b PreparedBatch) apply() error {
+	op := "batch-put"
+	if b.kind == format.Delete {
+		op = "batch-delete"
+	}
+	return b.db.mutateBatch(op, b.kind, b.records)
+}
+
 // BatchPut commits all entries in input order. A repeated key retains its last value.
 func (db *DB) BatchPut(entries []Entry) error {
 	if err := db.admit(); err != nil {
 		return err
 	}
 	defer db.done()
-	if err := CheckBatchCount(len(entries)); err != nil {
+	batch, err := db.PreparePuts(len(entries), func(i int) (Entry, error) { return entries[i], nil })
+	if err != nil {
 		return err
 	}
-	records := make([]storage.Entry, len(entries))
-	var used int64
-	for i, entry := range entries {
-		var err error
-		used, err = db.CheckBatchPutEntry(entry, used)
-		if err != nil {
-			return err
-		}
-		records[i] = storage.Entry(entry)
-	}
-	return db.mutateBatch("batch-put", format.Put, records)
+	return batch.apply()
 }
 
 // BatchDelete requires every distinct key to exist before appending any records.
@@ -71,25 +126,11 @@ func (db *DB) BatchDelete(keys [][]byte) error {
 		return err
 	}
 	defer db.done()
-	if err := CheckBatchCount(len(keys)); err != nil {
+	batch, err := db.PrepareDeletes(len(keys), func(i int) ([]byte, error) { return keys[i], nil })
+	if err != nil {
 		return err
 	}
-	records := make([]storage.Entry, 0, len(keys))
-	seen := make(map[string]struct{}, len(keys))
-	var used int64
-	for _, key := range keys {
-		if _, ok := seen[string(key)]; ok {
-			continue
-		}
-		var err error
-		used, err = db.CheckBatchDeleteKey(key, used)
-		if err != nil {
-			return err
-		}
-		seen[string(key)] = struct{}{}
-		records = append(records, storage.Entry{Key: key})
-	}
-	return db.mutateBatch("batch-delete", format.Delete, records)
+	return batch.apply()
 }
 
 func (db *DB) mutateBatch(op string, kind uint8, records []storage.Entry) error {

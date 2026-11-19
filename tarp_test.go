@@ -28,6 +28,31 @@ func openPublicDB(t *testing.T, dir string, opts tarp.Options) *tarp.DB {
 	return db
 }
 
+func TestRestoreVerifiesOnlySelectedLimits(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	if err := db.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	req := tarp.RestoreRequest{Source: filepath.Join(dir, "backup"), Destination: filepath.Join(dir, "restored")}
+	if err := db.Backup(t.Context(), req.Source); err != nil {
+		t.Fatal(err)
+	}
+	req.Limits.MaxRecordBytes = -1
+	if err := tarp.Restore(t.Context(), req); !errors.Is(err, tarp.ErrInvalidOptions) {
+		t.Fatalf("invalid restore limit: %v", err)
+	}
+	req.Limits = tarp.RestoreLimits{CacheBytes: 129}
+	if err := tarp.Restore(t.Context(), req); !errors.Is(err, tarp.ErrIncompatibleOptions) {
+		t.Fatalf("incompatible cache limit: %v", err)
+	}
+	opts := tarp.Options{CacheBytes: 130, MaxRecordBytes: 50, ReadFileHandles: -1, TargetSegmentBytes: -1, BatchReadConcurrency: -1}
+	req.Limits = opts.RestoreLimits()
+	if err := tarp.Restore(t.Context(), req); err != nil {
+		t.Fatalf("restore with exact live record limits: %v", err)
+	}
+}
+
 func TestBatchReadConcurrencyOnReopen(t *testing.T) {
 	dir := t.TempDir()
 	seed := openPublicDB(t, dir, tarp.Options{})
@@ -100,7 +125,7 @@ func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {
 				t.Fatalf("Compact returned %+v", result)
 			}
 			check("backup", db.Backup(tc.ctx, target))
-			check("restore", tarp.Restore(tc.ctx, backup, target, tarp.Options{}))
+			check("restore", tarp.Restore(tc.ctx, tarp.RestoreRequest{Source: backup, Destination: target}))
 			if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("unexpected destination: %v", err)
 			}
@@ -294,7 +319,11 @@ func FuzzDBHistory(f *testing.F) {
 			case restore:
 				if backupPath != "" {
 					dst := filepath.Join(t.TempDir(), "restored")
-					if err := tarp.Restore(t.Context(), backupPath, dst, opts); err != nil {
+					if err := tarp.Restore(t.Context(), tarp.RestoreRequest{
+						Source:      backupPath,
+						Destination: dst,
+						Limits:      opts.RestoreLimits(),
+					}); err != nil {
 						t.Fatalf("step %d Restore: %v", i, err)
 					}
 					image := openPublicDB(t, dst, opts)

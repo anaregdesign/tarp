@@ -92,20 +92,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	db.replaceDataStats(oldData, newData)
 	db.writer.Unlock()
 
-	for _, m := range moves {
-		db.state.Lock()
-		if db.index[m.Key] == m.Old {
-			m.New.File.Pin()
-			m.New.File.LiveBytes.Add(m.New.Bytes)
-			db.index[m.Key] = m.New
-			m.Old.File.LiveBytes.Add(-m.Old.Bytes)
-			m.Old.File.Unpin()
-		}
-		db.state.Unlock()
-		if err := db.store.IO.Check("clean.remap:after"); err != nil {
-			db.poison(err)
-		}
-	}
+	db.relocate(moves, "clean.remap:after")
 	if err := db.health(); err != nil {
 		return &OpError{Operation: "clean", Phase: "post-publication", Outcome: Committed, Err: err}
 	}

@@ -163,7 +163,7 @@ func TestDefaultOpenAutomaticallyCleans(t *testing.T) {
 			if err := db.Backup(context.Background(), backup); err != nil {
 				t.Fatal(err)
 			}
-			if err := Restore(context.Background(), backup, restored, Options{}); err != nil {
+			if err := Restore(context.Background(), RestoreRequest{Source: backup, Destination: restored}); err != nil {
 				t.Fatal(err)
 			}
 			image, err := Open(restored, Options{})
@@ -348,7 +348,11 @@ func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored := filepath.Join(t.TempDir(), "restored")
-	if err := Restore(t.Context(), backup, restored, opts); err != nil {
+	if err := Restore(t.Context(), RestoreRequest{
+		Source:      backup,
+		Destination: restored,
+		Limits:      opts.RestoreLimits(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{dir, restored} {

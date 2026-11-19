@@ -58,7 +58,7 @@ func BenchmarkBatchWrite(b *testing.B) {
 								b.Fatal(err)
 							}
 							if api == "typed" {
-								typed, err := tarp.NewTypedDB(raw, tarp.StringCodec{}, tarp.BytesCodec{})
+								typed, err := tarp.Bind(raw, tarp.StringCodec{}, tarp.BytesCodec{})
 								if err != nil {
 									b.Fatal(err)
 								}

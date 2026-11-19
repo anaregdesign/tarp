@@ -28,7 +28,10 @@ const (
 	Unknown    = engine.Unknown
 )
 
-// OpError preserves the failed phase, publication outcome and underlying cause.
+// OpError identifies the failed operation, phase, publication outcome and cause.
+// An unknown database commit requires close/reopen before checking its effects.
+// An unknown Backup or Restore destination publication requires inspecting the
+// destination. A destination error alone allows continued use of a backup source.
 type OpError = engine.OpError
 
 // SizeError reports the size of an entry that exceeds admission limits.

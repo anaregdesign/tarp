@@ -31,7 +31,7 @@ func ExampleDB_Stats() {
 	// Output: 2 1 2
 }
 
-func TestStatsSharesTypedViewsAndRetainsFinalSnapshot(t *testing.T) {
+func TestOwnerStatsIncludeViewOperationsAndRetainFinalSnapshot(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
 	opts := tarp.Options{CacheBytes: 130} // one single-byte key and value
 	raw, err := tarp.Open(dir, opts)
@@ -39,7 +39,7 @@ func TestStatsSharesTypedViewsAndRetainsFinalSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	db, err := tarp.NewTypedDB(raw, tarp.StringCodec{}, tarp.StringCodec{})
+	db, err := tarp.Bind(raw, tarp.StringCodec{}, tarp.StringCodec{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +60,8 @@ func TestStatsSharesTypedViewsAndRetainsFinalSnapshot(t *testing.T) {
 		BatchGetDuplicateInputs: 1, WriteCommits: 2, WrittenRecords: 4,
 		Cache: tarp.CacheStats{UsedBytes: 130, LimitBytes: 130, Hits: 1, Misses: 1, Evictions: 2},
 	}
-	if s := raw.Stats(); s != want || db.Stats() != want {
-		t.Fatalf("snapshots: raw %+v, typed %+v; want %+v", s, db.Stats(), want)
+	if s := raw.Stats(); s != want {
+		t.Fatalf("raw stats after view operations = %+v, want %+v", s, want)
 	}
 	// Scrape while Close releases the DB, and once more after shutdown.
 	var wg sync.WaitGroup
@@ -69,19 +69,19 @@ func TestStatsSharesTypedViewsAndRetainsFinalSnapshot(t *testing.T) {
 	wg.Go(func() {
 		close(start)
 		for range 1000 {
-			if s := db.Stats(); s != want {
+			if s := raw.Stats(); s != want {
 				t.Errorf("snapshot during Close = %+v", s)
 				return
 			}
 		}
 	})
 	<-start
-	err = db.Close()
+	err = raw.Close()
 	wg.Wait()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw.Stats() != want || db.Stats() != want {
+	if raw.Stats() != want {
 		t.Fatal("lost final snapshot")
 	}
 	next, err := tarp.Open(dir, opts)

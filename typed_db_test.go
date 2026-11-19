@@ -7,20 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/anaregdesign/tarp"
 )
 
-func TestTypedDBSharesRawRecordsAndLifecycle(t *testing.T) {
+func TestBoundViewSharesRecordsAndOwnerControlsLifetime(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
 	raw, err := tarp.Open(dir, tarp.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	db, err := tarp.NewTypedDB(raw, tarp.BytesCodec{}, tarp.Uint16Codec{})
+	db, err := tarp.Bind(raw, tarp.BytesCodec{}, tarp.Uint16Codec{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,17 +41,16 @@ func TestTypedDBSharesRawRecordsAndLifecycle(t *testing.T) {
 	if err := db.Put(nil, 1); !errors.Is(err, tarp.ErrEmptyKey) {
 		t.Fatalf("Put empty key = %v", err)
 	}
-	if err := db.Close(); err != nil {
+	for _, method := range []string{"Close", "Backup", "Compact", "Stats", "MaintenanceStatus"} {
+		if _, present := reflect.TypeOf(db).MethodByName(method); present {
+			t.Fatalf("bound view exposes owner method %s", method)
+		}
+	}
+	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Get(key); !errors.Is(err, tarp.ErrClosed) {
-		t.Fatalf("raw Get after typed Close = %v", err)
-	}
-	if err := db.Backup(t.Context(), filepath.Join(t.TempDir(), "backup")); !errors.Is(err, tarp.ErrClosed) {
-		t.Fatalf("Backup after typed Close = %v", err)
-	}
-	if got, want := db.MaintenanceStatus(), raw.MaintenanceStatus(); got != want {
-		t.Fatalf("maintenance status after Close = %+v, want %+v", got, want)
+	if _, err := db.Get(key); !errors.Is(err, tarp.ErrClosed) {
+		t.Fatalf("view Get after owner Close = %v", err)
 	}
 
 	reopened, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.BytesCodec{}, tarp.Uint16Codec{})
@@ -69,6 +69,40 @@ func TestTypedDBSharesRawRecordsAndLifecycle(t *testing.T) {
 	}
 	if err := reopened.Delete(key); !errors.Is(err, tarp.ErrNotFound) {
 		t.Fatalf("Delete missing key = %v", err)
+	}
+}
+
+func TestReplacingTypedViewKeepsOwnerOnOriginalDatabase(t *testing.T) {
+	owner, err := tarp.OpenTyped(t.TempDir(), tarp.Options{}, tarp.StringCodec{}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	borrowed := owner.View()
+	original := owner.View()
+	if err := borrowed.Put("k", "original"); err != nil {
+		t.Fatal(err)
+	}
+	other := openPublicDB(t, t.TempDir(), tarp.Options{})
+	replacement, err := tarp.Bind(other, tarp.StringCodec{}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	*borrowed = *replacement
+	if err := borrowed.Put("k", "other"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := owner.Get("k"); got != "original" || err != nil {
+		t.Fatalf("owner after replacing its borrowed view = %q, %v", got, err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := original.Get("k"); !errors.Is(err, tarp.ErrClosed) {
+		t.Fatalf("original view after owner closed = %v", err)
+	}
+	if got, err := borrowed.Get("k"); got != "other" || err != nil {
+		t.Fatalf("replacement after owner closed = %q, %v", got, err)
 	}
 }
 
@@ -96,7 +130,7 @@ func TestTypedDBPreservesCodecErrorsAndPriorValue(t *testing.T) {
 	}
 	defer raw.Close()
 	keyErr, valueErr := errors.New("key codec error"), errors.New("value codec error")
-	db, err := tarp.NewTypedDB(raw, rejectingStringCodec{keyErr}, rejectingStringCodec{valueErr})
+	db, err := tarp.Bind(raw, rejectingStringCodec{keyErr}, rejectingStringCodec{valueErr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +167,7 @@ func TestTypedDBScanStopsOnCodecErrorOrBreak(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	db, err := tarp.NewTypedDB(raw, rejectingStringCodec{keyErr}, rejectingStringCodec{valueErr})
+	db, err := tarp.Bind(raw, rejectingStringCodec{keyErr}, rejectingStringCodec{valueErr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +216,7 @@ func TestTypedDBScanStopsOnCodecErrorOrBreak(t *testing.T) {
 	if read != 1 {
 		t.Fatal("Scan yielded no entry")
 	}
-	if result, err := db.Compact(t.Context()); err != nil || result.PinnedBytes != 0 {
+	if result, err := raw.Compact(t.Context()); err != nil || result.PinnedBytes != 0 {
 		t.Fatalf("Compact after break = %+v, %v", result, err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -200,8 +234,8 @@ func TestTypedDBScanStopsOnCodecErrorOrBreak(t *testing.T) {
 }
 
 func TestTypedDBRequiresCoreAndCodecs(t *testing.T) {
-	if db, err := tarp.NewTypedDB(nil, tarp.StringCodec{}, tarp.StringCodec{}); db != nil || err == nil {
-		t.Fatalf("NewTypedDB with nil core = %v, %v", db, err)
+	if db, err := tarp.Bind(nil, tarp.StringCodec{}, tarp.StringCodec{}); db != nil || err == nil {
+		t.Fatalf("Bind with nil core = %v, %v", db, err)
 	}
 	dir := filepath.Join(t.TempDir(), "db")
 	for _, tc := range []struct{ key, value tarp.Codec[string] }{
@@ -222,8 +256,8 @@ func TestTypedDBRequiresCoreAndCodecs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	if db, err := tarp.NewTypedDB(raw, tarp.StringCodec{}, (*tarp.StringCodec)(nil)); db != nil || err == nil {
-		t.Fatalf("NewTypedDB with nil value codec = %v, %v", db, err)
+	if db, err := tarp.Bind(raw, tarp.StringCodec{}, (*tarp.StringCodec)(nil)); db != nil || err == nil {
+		t.Fatalf("Bind with nil value codec = %v, %v", db, err)
 	}
 }
 
