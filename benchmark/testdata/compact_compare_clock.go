@@ -1,5 +1,5 @@
-// Package compareclock collects wall times in the diagnostic binaries for #102.
-// The uninstrumented release builds run the same workload in separate processes.
+// Package compareclock collects wall times in diagnostic Compact binaries.
+// Uninstrumented builds run the same workload in separate processes.
 package compareclock
 
 import (
@@ -16,6 +16,21 @@ type Timer struct {
 }
 
 var Replay, Emit, Copy, RecordCopy, Relocate, RelocateWait, OtherWriterWait, ForegroundWait, ForegroundSync Timer
+
+var RelocateHold writerHold
+
+// Each process runs one Compact. A relocation batch records its hold before
+// unlocking the writer gate, and Report reads the totals after Compact returns.
+type writerHold struct {
+	ns, calls, maxNS int64
+}
+
+func (h *writerHold) Add(start int64) {
+	elapsed := Now() - start
+	h.ns += elapsed
+	h.calls++
+	h.maxNS = max(h.maxNS, elapsed)
+}
 
 func Now() int64 { return time.Since(epoch).Nanoseconds() }
 
@@ -44,20 +59,23 @@ func (t *Timer) Add(start int64) {
 	}
 }
 
-func Report() any {
+func Report() map[string]int64 {
 	return map[string]int64{
-		"compact_ns":                   windowEnd.Load() - windowStart.Load(),
-		"replay_including_emit_ns":     Replay.ns.Load(),
-		"emit_ns":                      Emit.ns.Load(),
-		"checkpoint_copy_inclusive_ns": Copy.ns.Load(),
-		"record_copy_ns":               RecordCopy.ns.Load(),
-		"record_copy_calls":            RecordCopy.calls.Load(),
-		"relocation_ns":                Relocate.ns.Load(),
-		"relocation_writer_wait_ns":    RelocateWait.ns.Load(),
-		"relocation_writer_acquires":   RelocateWait.calls.Load(),
-		"other_compact_writer_wait_ns": OtherWriterWait.ns.Load(),
-		"foreground_writer_wait_ns":    ForegroundWait.ns.Load(),
-		"foreground_sync_ns":           ForegroundSync.ns.Load(),
-		"foreground_sync_calls":        ForegroundSync.calls.Load(),
+		"compact_ns":                    windowEnd.Load() - windowStart.Load(),
+		"replay_including_emit_ns":      Replay.ns.Load(),
+		"emit_ns":                       Emit.ns.Load(),
+		"checkpoint_copy_inclusive_ns":  Copy.ns.Load(),
+		"record_copy_ns":                RecordCopy.ns.Load(),
+		"record_copy_calls":             RecordCopy.calls.Load(),
+		"relocation_ns":                 Relocate.ns.Load(),
+		"relocation_writer_wait_ns":     RelocateWait.ns.Load(),
+		"relocation_writer_acquires":    RelocateWait.calls.Load(),
+		"relocation_writer_hold_calls":  RelocateHold.calls,
+		"relocation_writer_hold_ns":     RelocateHold.ns,
+		"relocation_writer_max_hold_ns": RelocateHold.maxNS,
+		"other_compact_writer_wait_ns":  OtherWriterWait.ns.Load(),
+		"foreground_writer_wait_ns":     ForegroundWait.ns.Load(),
+		"foreground_sync_ns":            ForegroundSync.ns.Load(),
+		"foreground_sync_calls":         ForegroundSync.calls.Load(),
 	}
 }

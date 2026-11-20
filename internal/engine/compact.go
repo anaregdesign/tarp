@@ -141,7 +141,13 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	db.relocate(&moves, "compact.remap:after")
+	// Group more memory-index updates per writer lock. The spool reader still
+	// limits batches by encoded bytes and releases the gate between batches.
+	maxBatch := storage.RelocationBatchCount
+	if db.opts.IndexMode == IndexMemory {
+		maxBatch = 128
+	}
+	db.relocate(&moves, maxBatch, "compact.remap:after")
 	capture.Release()
 	released = true
 	db.writer.Lock()
@@ -155,8 +161,8 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 
 // The replacement layout is already committed. A partial remap fail-stops the
 // instance, leaving the authoritative DATA for a fresh indexed Open.
-func (db *DB) relocate(moves *storage.Relocations, after string) {
-	err := moves.EachBatch(func(batch []storage.Relocation) error {
+func (db *DB) relocate(moves *storage.Relocations, maxBatch int, after string) {
+	err := moves.EachBatch(maxBatch, func(batch []storage.Relocation) error {
 		if err := db.relocateBatch(batch); err != nil {
 			return err
 		}

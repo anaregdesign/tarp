@@ -64,7 +64,7 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 		name            string
 		count, keyBytes int
 		spill           bool
-	}{{"small", moveBatchCount, 1, false}, {"many", moveBatchCount + 1, 1, true},
+	}{{"small", RelocationBatchCount, 1, false}, {"many", RelocationBatchCount + 1, 1, true},
 		{"exact bytes", 1, moveBatchBytes - relocationHeader, false}, {"large keys", 3, moveBatchBytes, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			var moves Relocations
@@ -86,8 +86,8 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 				t.Fatalf("spilled = %t, want %t", moves.fd != nil, tc.spill)
 			}
 			seen := 0
-			err := moves.EachBatch(func(batch []Relocation) error {
-				if len(batch) > moveBatchCount || len(batch) > 1 && len(batch)*(relocationHeader+tc.keyBytes) > moveBatchBytes {
+			err := moves.EachBatch(RelocationBatchCount, func(batch []Relocation) error {
+				if len(batch) > RelocationBatchCount || len(batch) > 1 && len(batch)*(relocationHeader+tc.keyBytes) > moveBatchBytes {
 					t.Fatalf("batch length %d exceeds fixed window", len(batch))
 				}
 				for _, move := range batch {

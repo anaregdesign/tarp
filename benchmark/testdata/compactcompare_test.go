@@ -19,9 +19,9 @@ import (
 )
 
 // The diagnostic-only binary supplies timings for individual Compact stages.
-var compactDiagnostic = func() any { return nil }
+var compactDiagnostic = func() map[string]int64 { return nil }
 
-// TestCompactCompare is compiled into each released benchmark package. A single
+// TestCompactCompare is compiled into each arm's benchmark package. A single
 // seed invocation prepares the closed disk image used by both binaries.
 func TestCompactCompare(t *testing.T) {
 	mode := os.Getenv("TARP_COMPARE_MODE")
@@ -114,20 +114,27 @@ func TestCompactCompare(t *testing.T) {
 		row = measureInterferenceFor(t, db, hooks, keys[:8], value, originalMode, 500*time.Millisecond)
 		for _, worker := range []string{"read", "durable_put"} {
 			sample := row[worker].(sampledLatency)
-			if sample.Operations <= 0 {
-				t.Fatalf("%s completed no foreground operations", worker)
+			if sample.Operations <= 0 || sample.P99NS <= 0 {
+				t.Fatalf("%s missing foreground latency measurements", worker)
 			}
 			if worker == "durable_put" {
 				puts = sample.Operations
+			} else {
+				sample.SamplesNS = nil // Keep the much smaller Put sample for pooled tails.
 			}
-			sample.SamplesNS = nil
 			row[worker] = sample
 		}
 		if mode == "diagnostic" {
-			row["stages"] = compactDiagnostic()
-			if row["stages"] == nil {
+			stages := compactDiagnostic()
+			if stages == nil {
 				t.Fatal("missing per-stage instrumentation in diagnostic binary")
 			}
+			acquires := stages["relocation_writer_acquires"]
+			hold, longest := stages["relocation_writer_hold_ns"], stages["relocation_writer_max_hold_ns"]
+			if acquires != stages["relocation_writer_hold_calls"] || longest > hold || (acquires > 0 && longest <= 0) {
+				t.Fatalf("invalid relocation writer measurements: %+v", stages)
+			}
+			row["stages"] = stages
 		}
 	default:
 		t.Fatalf("unknown comparison mode %q", mode)

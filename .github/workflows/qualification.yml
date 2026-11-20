@@ -29,6 +29,11 @@ on:
         description: Optional official Go image digest shared by the measurement campaign
         type: string
         required: false
+      compact-pair:
+        description: Compare v0.8.0 with v0.9.0 (releases), or v0.9.0 with the selected ref (candidate)
+        type: choice
+        default: releases
+        options: [releases, candidate]
       group:
         description: Bounded phase group; all is limited to 192 cases and 50 minutes
         required: true
@@ -72,6 +77,7 @@ jobs:
           TARP_QUAL_CASE: ${{ inputs.case }}
           TARP_QUAL_VALUE_BYTES: ${{ inputs.value-bytes }}
           TARP_MEASUREMENT_DIGEST: ${{ inputs.measurement-digest }}
+          TARP_COMPACT_PAIR: ${{ inputs.compact-pair }}
         run: |
           if [[ "$TARP_QUAL_MODE" == measure || "$TARP_QUAL_MODE" == compact-compare ]]; then
             exec bash benchmark/scripts/container-vm-measurement.sh

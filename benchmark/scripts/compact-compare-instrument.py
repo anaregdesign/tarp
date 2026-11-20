@@ -1,12 +1,12 @@
-"""Add stage timing only to archived v0.8.0 and v0.9.0 diagnostic builds."""
+"""Add stage timing only to diagnostic builds of the compared archives."""
 from pathlib import Path
 import shutil
 import sys
 
 root = Path(sys.argv[1])
-arm = sys.argv[2]
-if arm not in ("base", "next"):
-    raise ValueError(arm)
+layout = sys.argv[2]
+if layout not in ("v08", "v09"):
+    raise ValueError(layout)
 clock_import = '"github.com/anaregdesign/tarp/internal/compareclock"'
 
 
@@ -43,11 +43,14 @@ shutil.copyfile(Path(__file__).resolve().parents[1] / 'testdata/compact_compare_
     'package benchmark\nimport ' + clock_import +
     '\nfunc init() { compactDiagnostic = compareclock.Report }\n')
 
-moves = 'moves []storage.Relocation' if arm == 'base' else 'moves *storage.Relocations'
+compact = (root / 'internal/engine/compact.go').read_text()
+# Relocation has different parameters in each revision. Time the full method.
+relocate, = (line.removesuffix(' {') for line in compact.splitlines()
+             if line.startswith('func (db *DB) relocate(') and line.endswith(' {'))
 edit('internal/engine/compact.go', [
     on_entry('func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error)',
              'compareclock.BeginCompact()\n\tdefer compareclock.EndCompact()'),
-    timed(f'func (db *DB) relocate({moves}, after string)', 'Relocate'),
+    timed(relocate, 'Relocate'),
     ('db.writer.Lock()', writer_wait('OtherWriterWait'), 4),
 ])
 edit('internal/engine/db.go', [
@@ -69,7 +72,7 @@ edit('internal/storage/io.go', [(old_sync, '''func (i *IO) Sync(f *os.File, poin
     return i.Do(point, f.Sync)
 }''', 1)])
 
-if arm == 'base':
+if layout == 'v08':
     replay = 'func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error)'
     checkpoint_args = 'moves []Relocation'
     copy_record = 'func (r *snapshotReader) copyRecord(ctx context.Context, fs *IO, old Location, key string, dst *os.File, offset int64, buffer []byte) error'
@@ -81,6 +84,7 @@ else:
     callback_changes = [timed('func(src *os.File, key string, old Location) error', 'Emit')]
     edit('internal/engine/index.go', [
         ('db.writer.Lock()', writer_wait('RelocateWait'), 1),
+        ('defer db.writer.Unlock()', 'defer db.writer.Unlock()\n\tdefer compareclock.RelocateHold.Add(compareclock.Now())', 1),
     ])
 edit('internal/storage/snapshot.go', [timed(replay, 'Replay')])
 edit('internal/storage/checkpoint.go', [

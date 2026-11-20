@@ -30,7 +30,7 @@ func run(args []string, output io.Writer) error {
 	campaignDir := flags.String("campaign", "", "prepared disposable hosted-runner work directory")
 	runtimeDir := flags.String("runtime-suite", "", "prepared disposable hosted-runner full-suite work directory")
 	measurementDir := flags.String("measurements", "", "prepared disposable hosted-runner measurement work directory")
-	compareDir := flags.String("compact-compare", "", "compare v0.8.0 and v0.9.0 Compact in one disposable guest")
+	compareDir := flags.String("compact-compare", "", "compare two Compact builds in one disposable guest")
 	valueBytes := flags.Int("value-bytes", 0, "measurement value size: 64, 1024 or 4096")
 	group := flags.String("group", "", "bounded campaign group (default smoke)")
 	selected := flags.String("case", "", "one exact case name within the selected group")

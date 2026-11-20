@@ -34,7 +34,7 @@ docker run --rm --pull=never \
     --mount "type=bind,src=$scratch,dst=/work" --workdir /src \
     -e GITHUB_ACTIONS -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT \
     -e RUNNER_ENVIRONMENT -e RUNNER_OS -e RUNNER_ARCH -e RUNNER_TEMP=/work \
-    -e TARP_QUAL_CONFIRM -e TARP_QUAL_MODE -e TARP_QUAL_VALUE_BYTES \
+    -e TARP_QUAL_CONFIRM -e TARP_QUAL_MODE -e TARP_QUAL_VALUE_BYTES -e TARP_COMPACT_PAIR \
     -e EXPECT_GO="$version" -e RUN_UID="$(id -u)" -e RUN_GID="$(id -g)" \
     "$image" bash -euc '
         if [[ -n $EXPECT_GO ]]; then test "$(go env GOVERSION)" = "$EXPECT_GO"; fi

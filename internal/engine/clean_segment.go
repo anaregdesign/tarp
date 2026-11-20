@@ -121,7 +121,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	db.replaceDataStats(oldData, newData)
 	db.writer.Unlock()
 
-	db.relocate(&moves, "clean.remap:after")
+	db.relocate(&moves, storage.RelocationBatchCount, "clean.remap:after")
 	if err := db.health(); err != nil {
 		return &OpError{Operation: "clean", Phase: "post-publication", Outcome: Committed, Err: err}
 	}

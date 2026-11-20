@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/platform"
@@ -31,8 +32,10 @@ type Relocations struct {
 
 const (
 	relocationHeader = 7*8 + 4
-	moveBatchCount   = 32
 	moveBatchBytes   = 8 << 10
+
+	// RelocationBatchCount is the default number of moves to stage or replay at once.
+	RelocationBatchCount = 32
 )
 
 func (m *Relocations) open() error {
@@ -50,7 +53,7 @@ func (m *Relocations) append(key string, old, next Location) error {
 	err := m.fs.Do("index.moves.write", func() error {
 		move := Relocation{Key: key, Old: old, Next: next}
 		if m.fd == nil {
-			if m.count < moveBatchCount && int64(len(key)) <= moveBatchBytes-relocationHeader-m.bytes {
+			if m.count < RelocationBatchCount && int64(len(key)) <= moveBatchBytes-relocationHeader-m.bytes {
 				m.small = append(m.small, move)
 				m.bytes += relocationHeader + int64(len(key))
 				m.count++
@@ -126,7 +129,7 @@ func (m *Relocations) Close() error {
 }
 
 func (m *Relocations) Each(visit func(key string, old, next Location) error) error {
-	return m.EachBatch(func(batch []Relocation) error {
+	return m.EachBatch(RelocationBatchCount, func(batch []Relocation) error {
 		for _, move := range batch {
 			if err := visit(move.Key, move.Old, move.Next); err != nil {
 				return err
@@ -136,16 +139,22 @@ func (m *Relocations) Each(visit func(key string, old, next Location) error) err
 	})
 }
 
-// EachBatch streams immutable batches. A key larger than the byte threshold
-// is visited by itself. The caller must not retain the slice after returning.
-func (m *Relocations) EachBatch(visit func([]Relocation) error) error {
+// EachBatch streams up to maxCount moves (which must be positive) within
+// the byte limit. A larger key is visited by itself. The caller must not
+// retain the slice after returning.
+func (m *Relocations) EachBatch(maxCount int, visit func([]Relocation) error) error {
 	if m.count == 0 {
 		return nil
 	}
 	if m.fd == nil {
-		return visit(m.small)
+		for batch := range slices.Chunk(m.small, maxCount) {
+			if err := visit(batch); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	var batch [moveBatchCount]Relocation
+	batch := make([]Relocation, min(m.count, maxCount))
 	used, size := 0, 0
 	r := bufio.NewReaderSize(io.NewSectionReader(m.fd, 0, m.bytes), 32<<10)
 	left := m.bytes
