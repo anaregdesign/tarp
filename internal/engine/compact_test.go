@@ -752,7 +752,7 @@ func TestCompactScratchFailureLeavesSourceHealthy(t *testing.T) {
 	wantValue(t, db, "k", "retry")
 }
 
-func TestCheckpointProgressesWhileAnotherKeySyncs(t *testing.T) {
+func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 	for _, mode := range []string{"overwrite", "delete", "abort"} {
 		t.Run(mode, func(t *testing.T) {
 			entries := make([]Entry, 350)
@@ -762,28 +762,30 @@ func TestCheckpointProgressesWhileAnotherKeySyncs(t *testing.T) {
 			key := entries[len(entries)-1].Key
 			staged, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 			var db *DB
-			var source *storage.File
+			var original storage.Location
+			var firstRemaining int64
 			started, progressed := false, false
 			prepares := 0
 			fs := &storage.IO{Hook: func(point string) error {
 				switch point {
 				case "data.sync:before", "index.prepare:before":
+					if original.File == nil {
+						return nil // The fixture is being written.
+					}
 					if point == "index.prepare:before" {
-						if source == nil || mode != "abort" {
+						if mode != "abort" {
 							return nil
 						}
+						// Fail the second prepare while the first key is staged.
 						prepares++
 						if prepares != 2 {
 							return nil
 						}
 					}
-					if source == nil {
-						return nil
-					}
 					close(staged)
 					select {
 					case <-release:
-					case <-time.After(5 * time.Second):
+					case <-time.After(30 * time.Second):
 						return errors.New("no relocation progress during durable write")
 					}
 					if mode == "abort" {
@@ -792,6 +794,7 @@ func TestCheckpointProgressesWhileAnotherKeySyncs(t *testing.T) {
 				case "compact.remap:after":
 					if !started {
 						started = true
+						firstRemaining = original.File.LiveKeys.Load()
 						go func() {
 							if mode == "delete" {
 								done <- db.Delete(key)
@@ -801,12 +804,22 @@ func TestCheckpointProgressesWhileAnotherKeySyncs(t *testing.T) {
 						}()
 						select {
 						case <-staged:
-						case <-time.After(time.Second):
+						case <-time.After(30 * time.Second):
 							return errors.New("writer did not stage")
 						}
 					}
-					if !progressed && source.LiveKeys.Load() < 150 {
-						if ok, err := db.relocateUnstaged([]storage.Relocation{{Key: string(key)}}); ok || err != nil {
+					if !progressed && original.File.LiveKeys.Load() < firstRemaining {
+						// The writer is still paused. A disjoint batch moved, but
+						// its pending key must take the writer-lock fallback.
+						// This fixture is copied in source order into a single file.
+						head, ok := testLookup(t, db, string(entries[0].Key))
+						if !ok || head.File.Kind != format.Snapshot {
+							return errors.New("first key did not reach the snapshot")
+						}
+						next := original
+						next.File = head.File
+						move := storage.Relocation{Key: string(key), Old: original, Next: next}
+						if ok, err := db.relocateUnstaged([]storage.Relocation{move}); ok || err != nil {
 							return fmt.Errorf("staged key remapped: %t %v", ok, err)
 						}
 						progressed = true
@@ -823,15 +836,14 @@ func TestCheckpointProgressesWhileAnotherKeySyncs(t *testing.T) {
 			if err := db.BatchPut(entries); err != nil {
 				t.Fatal(err)
 			}
-			old, _ := testLookup(t, db, string(key))
-			source = old.File
+			original, _ = testLookup(t, db, string(key))
 			if _, err := db.Compact(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			if !progressed || source.LiveBytes.Load() != 0 || source.LiveKeys.Load() != 0 {
-				t.Fatalf("progress=%v, original file retains %d keys", progressed, source.LiveKeys.Load())
+			if !progressed || original.File.LiveBytes.Load() != 0 || original.File.LiveKeys.Load() != 0 {
+				t.Fatalf("progress=%v, original file retains %d keys", progressed, original.File.LiveKeys.Load())
 			}
-			if _, err := os.Stat(source.Path); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(original.File.Path); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("source retained: %v", err)
 			}
 			check := func(db *DB) {

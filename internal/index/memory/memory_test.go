@@ -46,3 +46,35 @@ func TestMemoryConcurrentReadersAndPublishedMultiKeyTransactions(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestRelocateChecksFullAddressAndPreservesExistingViews(t *testing.T) {
+	db := memory.New()
+	defer db.Close()
+	old := index.Address{FileID: 1, Offset: 64, Bytes: 80, ValueBytes: 16, Sequence: 5}
+	next := old
+	next.FileID = 7
+	tx := db.Begin()
+	if err := tx.Put("k", old); err != nil {
+		tx.Abort()
+		t.Fatal(err)
+	}
+	tx.Commit()
+	view := db.View()
+	defer view.Close()
+
+	moves := db.(index.ResidentRelocator)
+	stale := old
+	stale.Sequence--
+	if moves.Relocate("k", stale, next) {
+		t.Fatal("relocated a record at a different sequence")
+	}
+	if !moves.Relocate("k", old, next) || moves.Relocate("k", old, next) || moves.Relocate("absent", old, next) {
+		t.Fatal("expected only the first relocation to match")
+	}
+	if addr, ok, err := db.Lookup("k"); err != nil || !ok || addr != next {
+		t.Fatalf("live index lookup returned %+v, %t, %v", addr, ok, err)
+	}
+	if addr, ok, err := view.Lookup("k"); err != nil || !ok || addr != old {
+		t.Fatalf("captured lookup returned %+v, %t, %v", addr, ok, err)
+	}
+}
