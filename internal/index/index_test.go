@@ -48,14 +48,17 @@ func TestBackendTransactionsExposeWholeSnapshots(t *testing.T) {
 			view := db.View()
 			defer view.Close()
 			tx = db.Begin()
-			if err := tx.Delete(key); err != nil {
-				t.Fatal(err)
+			if old, found, err := tx.Apply(index.Mutation{Key: key, Delete: true, Address: b}); err != nil || !found || old != a {
+				t.Errorf("delete returned %v %v %v", old, found, err)
 			}
 			if _, ok, err := tx.Lookup(key); err != nil || ok {
 				t.Fatalf("staged delete: %v %v", ok, err)
 			}
-			if err := tx.Put(key, b); err != nil {
-				t.Fatal(err)
+			if old, found, err := tx.Apply(index.Mutation{Key: key, Delete: true}); err != nil || found || old != (index.Address{}) {
+				t.Errorf("second delete returned %v %v %v", old, found, err)
+			}
+			if old, found, err := tx.Apply(index.Mutation{Key: key, Address: b}); err != nil || found || old != (index.Address{}) {
+				t.Errorf("reinsert returned %v %v %v", old, found, err)
 			}
 			if err := tx.Put("other", b); err != nil {
 				t.Fatal(err)
@@ -149,22 +152,17 @@ func TestBackendsAgainstSameRandomizedSnapshotModel(t *testing.T) {
 				tx := backend.Begin()
 				for step := range 17 {
 					key := keys[rng.Intn(len(keys))]
-					old, found, err := tx.Lookup(key)
 					want, live := model[key]
-					if err != nil || found != live || old != want {
-						t.Fatalf("staged lookup: %v, %v", found, err)
-					}
-					if live && rng.Intn(3) == 0 {
-						if err := tx.Delete(key); err != nil {
-							t.Fatal(err)
-						}
+					m := index.Mutation{Key: key, Delete: rng.Intn(3) == 0}
+					if m.Delete {
 						delete(model, key)
 					} else {
-						a := index.Address{FileID: uint64(1 + epoch%4), Offset: int64(step) * 4096, Bytes: 64, ValueBytes: 1, Sequence: uint64(1 + epoch*17 + step)}
-						if err := tx.Put(key, a); err != nil {
-							t.Fatal(err)
-						}
-						model[key] = a
+						m.Address = index.Address{FileID: uint64(1 + epoch%4), Offset: int64(step) * 4096, Bytes: 64, ValueBytes: 1, Sequence: uint64(1 + epoch*17 + step)}
+						model[key] = m.Address
+					}
+					if old, found, err := tx.Apply(m); err != nil || found != live || old != want {
+						tx.Abort()
+						t.Fatalf("previous address: %v %v %v, want %v %v", old, found, err, want, live)
 					}
 				}
 				if epoch%5 == 0 {

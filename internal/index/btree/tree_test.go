@@ -186,6 +186,13 @@ func TestCorruptPageAndCloseInIteration(t *testing.T) {
 	if _, _, err = v.Lookup("key"); !errors.Is(err, errPage) {
 		t.Fatalf("corrupt page: %v", err)
 	}
+	tx = tr.Begin()
+	_, _, err = tx.Apply(index.Mutation{Key: "key", Address: addr(4)})
+	tx.Abort()
+	var lookupErr *index.LookupError
+	if !errors.As(err, &lookupErr) || !errors.Is(err, errPage) {
+		t.Fatalf("mutation with unreadable previous address: %v", err)
+	}
 
 	other := openTest(t)
 	tx = other.Begin()

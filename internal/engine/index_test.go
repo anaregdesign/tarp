@@ -111,3 +111,46 @@ func TestIndexedReadsRejectMissingDataFileAndReleasePins(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexedWritesAbortIfPreviousFileIsMissing(t *testing.T) {
+	for _, backend := range []struct {
+		name string
+		mode IndexMode
+	}{{"memory", IndexMemory}, {"btree", IndexBTree}} {
+		for _, op := range []string{"put", "delete"} {
+			t.Run(backend.name+"/"+op, func(t *testing.T) {
+				opts := Options{IndexMode: backend.mode, MaxRecordBytes: 64, TargetSegmentBytes: 128}
+				db := newTestDBWithHooks(t, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
+				mustPut(t, db, "a", "old")
+				mustPut(t, db, "b", "v")
+				old := testLoc(t, db, "a")
+				if old.File == testLoc(t, db, "b").File {
+					t.Fatal("expected a sealed file holding a")
+				}
+				dir, frontier := db.store.Dir, db.store.Current
+				delete(db.files, old.File.ID)
+				var err error
+				if op == "put" {
+					err = db.Put([]byte("a"), []byte("new"))
+				} else {
+					err = db.Delete([]byte("a"))
+				}
+				var failure *OpError
+				if !errors.Is(err, ErrCorrupt) || !errors.As(err, &failure) || failure.Outcome != NotApplied ||
+					!errors.Is(db.health(), ErrUnhealthy) || db.store.Current != frontier {
+					t.Fatalf("%s = %v, health %v, frontier %+v", op, err, db.health(), db.store.Current)
+				}
+				if err := db.Close(); !errors.Is(err, ErrCorrupt) {
+					t.Fatalf("Close after failed index read: %v", err)
+				}
+				db, err = Open(dir, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				wantValue(t, db, "a", "old")
+				wantValue(t, db, "b", "v")
+			})
+		}
+	}
+}

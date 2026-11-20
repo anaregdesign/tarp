@@ -39,11 +39,28 @@ func LookupMany(v View, keys []string, set func(int, Address, bool)) error {
 	return nil
 }
 
-// Tx stages operations for a single writer. Lookup observes earlier staged
-// mutations. A writer must call exactly one of Commit or Abort. Commit makes
-// the prepared state visible without further fallible I/O.
+// Mutation replaces the address of Key. Delete removes Key and ignores Address.
+type Mutation struct {
+	Key     string
+	Address Address
+	Delete  bool
+}
+
+// LookupError identifies a failure to read the previous transaction state.
+type LookupError struct{ Err error }
+
+func (e *LookupError) Error() string { return e.Err.Error() }
+func (e *LookupError) Unwrap() error { return e.Err }
+
+// Tx stages operations for a single writer. Lookup and Apply observe earlier
+// staged mutations. A writer must call exactly one of Commit or Abort. Commit
+// makes the prepared state visible without further fallible I/O.
 type Tx interface {
 	Mutations
+	// Apply returns the previous address and presence. Deleting a missing
+	// key is a no-op. On LookupError the previous state is unavailable.
+	// An error preparing the mutation still returns the previous state.
+	Apply(Mutation) (Address, bool, error)
 	Commit()
 	Abort()
 }

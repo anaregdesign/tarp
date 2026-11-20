@@ -46,6 +46,9 @@ func (x *transaction) write(n node) (uint64, error) {
 }
 func (x *transaction) key(key string) (keyRef, error) {
 	ref := keyRef{inline: key, length: uint64(len(key))}
+	if ref.length > x.tree.p.maxKey.Load() {
+		x.tree.p.maxKey.Store(ref.length)
+	}
 	if len(key) <= maxInline {
 		return ref, nil
 	}
@@ -86,23 +89,34 @@ func (x *transaction) retireKey(k keyRef) error {
 	}
 	return nil
 }
-func (x *transaction) Put(key string, a index.Address) error { return x.change(key, &a) }
-func (x *transaction) Delete(key string) error               { return x.change(key, nil) }
-func (x *transaction) change(key string, addr *index.Address) error {
+func (x *transaction) Put(key string, a index.Address) error {
+	_, _, err := x.Apply(index.Mutation{Key: key, Address: a})
+	return err
+}
+func (x *transaction) Delete(key string) error {
+	_, _, err := x.Apply(index.Mutation{Key: key, Delete: true})
+	return err
+}
+
+type mutation struct {
+	index.Mutation
+	previous index.Address
+	existed  bool
+}
+
+func (x *transaction) Apply(m index.Mutation) (index.Address, bool, error) {
 	if x.err != nil {
-		return x.err
+		return index.Address{}, false, &index.LookupError{Err: x.err}
 	}
 	if x.done {
-		return errors.New("btree: finished transaction")
+		return index.Address{}, false, errors.New("btree: finished transaction")
 	}
-	if addr != nil && uint64(len(key)) > x.tree.p.maxKey.Load() {
-		x.tree.p.maxKey.Store(uint64(len(key)))
-	}
-	res, err := x.update(x.root, key, addr, 0)
+	edit := mutation{Mutation: m}
+	res, err := x.update(x.root, &edit, 0)
 	if err == nil && res.right != 0 {
 		res.left, err = x.write(node{kind: branch, left: res.left, cells: []cell{{key: res.separator, child: res.right}}})
 	}
-	if err == nil && addr == nil {
+	if err == nil && m.Delete && edit.existed {
 		for res.left != 0 {
 			p, e := x.tree.p.read(res.left)
 			if e != nil {
@@ -120,10 +134,10 @@ func (x *transaction) change(key string, addr *index.Address) error {
 	}
 	if err != nil {
 		x.err = err
-		return err
+		return edit.previous, edit.existed, err
 	}
 	x.root = res.left
-	return nil
+	return edit.previous, edit.existed, nil
 }
 
 type replacement struct {
@@ -131,9 +145,9 @@ type replacement struct {
 	separator   keyRef
 }
 
-func (x *transaction) update(id uint64, key string, addr *index.Address, depth int) (replacement, error) {
+func (x *transaction) update(id uint64, edit *mutation, depth int) (replacement, error) {
 	if depth >= maxDepth {
-		return replacement{}, errPage
+		return replacement{}, &index.LookupError{Err: errPage}
 	}
 	var p *page
 	var err error
@@ -142,16 +156,16 @@ func (x *transaction) update(id uint64, key string, addr *index.Address, depth i
 	if id != 0 {
 		p, err = x.tree.p.read(id)
 		if err != nil {
-			return replacement{}, err
+			return replacement{}, &index.LookupError{Err: err}
 		}
-		slot, found, err = p.search(x.tree.p, key)
+		slot, found, err = p.search(x.tree.p, edit.Key)
 		if err != nil {
-			return replacement{}, err
+			return replacement{}, &index.LookupError{Err: err}
 		}
 	}
 	var n node
 	if id == 0 || p[4] == leaf {
-		if addr == nil && !found {
+		if edit.Delete && !found {
 			return replacement{left: id}, nil
 		}
 		if id != 0 {
@@ -159,26 +173,30 @@ func (x *transaction) update(id uint64, key string, addr *index.Address, depth i
 		} else {
 			n.kind = leaf
 		}
+		if found {
+			edit.previous = n.cells[slot].address
+			edit.existed = true
+		}
 		switch {
-		case addr == nil:
+		case edit.Delete:
 			if err = x.retireKey(n.cells[slot].key); err != nil {
 				return replacement{}, err
 			}
 			n.cells = slices.Delete(n.cells, slot, slot+1)
 			x.count--
 		case found:
-			n.cells[slot].address = *addr
+			n.cells[slot].address = edit.Address
 		default:
-			ref, e := x.key(key)
+			ref, e := x.key(edit.Key)
 			if e != nil {
 				return replacement{}, e
 			}
-			n.cells = slices.Insert(n.cells, slot, cell{key: ref, address: *addr})
+			n.cells = slices.Insert(n.cells, slot, cell{key: ref, address: edit.Address})
 			x.count++
 		}
 	} else {
 		child := p.child(slot)
-		change, e := x.update(child, key, addr, depth+1)
+		change, e := x.update(child, edit, depth+1)
 		if e != nil {
 			return replacement{}, e
 		}
@@ -207,7 +225,7 @@ func (x *transaction) update(id uint64, key string, addr *index.Address, depth i
 			}
 			if change.right != 0 {
 				n.cells = slices.Insert(n.cells, slot, cell{key: change.separator, child: change.right})
-			} else if addr == nil && len(n.cells) > 0 {
+			} else if edit.Delete && len(n.cells) > 0 {
 				if e = x.mergeChildren(&n, max(slot-1, 0)); e != nil {
 					return replacement{}, e
 				}
@@ -247,6 +265,11 @@ func (x *transaction) mergeChildren(parent *node, sep int) error {
 	}
 	if a[4] != b[4] {
 		return errPage
+	}
+	// The merged prefix cannot be longer than either sibling's prefix, so
+	// their cells need at least as much space as they already occupy.
+	if header+a.packedCellBytes()+b.packedCellBytes() > pageSize {
+		return nil
 	}
 	merged := a.decode()
 	r := b.decode()

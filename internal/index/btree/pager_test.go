@@ -6,6 +6,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/anaregdesign/tarp/internal/index"
 )
 
 type failScratchWrite struct {
@@ -33,13 +35,14 @@ func TestSpillFailureAbortsBeforePublishingRoot(t *testing.T) {
 		tr.p.file = failScratchWrite{file, short}
 		tr.p.mu.Unlock()
 		x = tr.Begin()
-		err := x.Put(strings.Repeat("k", int(MinBudget)), addr(2))
+		old, found, err := x.Apply(index.Mutation{Key: strings.Repeat("k", int(MinBudget)), Address: addr(2)})
 		want := error(syscall.ENOSPC)
 		if short {
 			want = io.ErrShortWrite
 		}
-		if !errors.Is(err, want) {
-			t.Fatalf("spill = %v, want %v", err, want)
+		var lookupErr *index.LookupError
+		if !errors.Is(err, want) || errors.As(err, &lookupErr) || found || old != (index.Address{}) {
+			t.Errorf("spill after resolving absent key = %v %v %v, want %v", old, found, err, want)
 		}
 		x.Abort()
 		tr.p.mu.Lock()
