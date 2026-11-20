@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -25,6 +26,53 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+// Measurement rows keep their published JSON keys across API renames. Conversions
+// from the engine structs check that every field is represented here.
+type measurementOptions struct {
+	IndexMode               engine.IndexMode `json:"IndexMode"`
+	BTreeMemoryBudgetBytes  int64            `json:"IndexMemoryBytes"`
+	ValueCacheBudgetBytes   int64            `json:"CacheBytes"`
+	MaxRecordBytes          int64            `json:"MaxRecordBytes"`
+	TargetSegmentBytes      int64            `json:"TargetSegmentBytes"`
+	ReadFileHandles         int              `json:"ReadFileHandles"`
+	BatchGetReadConcurrency int              `json:"BatchReadConcurrency"`
+	MaxBatchGetValueBytes   int64            `json:"MaxBatchResultBytes"`
+}
+
+type measurementCompactResult struct {
+	UnlinkedBytes          int64 `json:"ReclaimedBytes"`
+	PinnedRetiredDataBytes int64 `json:"PinnedBytes"`
+}
+
+func TestMeasurementJSONKeepsPublishedFieldNames(t *testing.T) {
+	options := engine.Options{
+		IndexMode: engine.IndexBTree, BTreeMemoryBudgetBytes: 1 << 20, ValueCacheBudgetBytes: 512,
+		MaxRecordBytes: 256, TargetSegmentBytes: 4096, ReadFileHandles: 4,
+		BatchGetReadConcurrency: 2, MaxBatchGetValueBytes: 128,
+	}
+	compact := engine.CompactResult{UnlinkedBytes: 100, PinnedRetiredDataBytes: 200}
+	for _, tc := range []struct {
+		row  any
+		want map[string]int64
+	}{
+		{measurementOptions(options), map[string]int64{
+			"IndexMode": 2, "IndexMemoryBytes": 1 << 20, "CacheBytes": 512,
+			"MaxRecordBytes": 256, "TargetSegmentBytes": 4096, "ReadFileHandles": 4,
+			"BatchReadConcurrency": 2, "MaxBatchResultBytes": 128,
+		}},
+		{measurementCompactResult(compact), map[string]int64{"ReclaimedBytes": 100, "PinnedBytes": 200}},
+	} {
+		data, err := json.Marshal(tc.row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]int64
+		if err := json.Unmarshal(data, &got); err != nil || !maps.Equal(got, tc.want) {
+			t.Errorf("measurement JSON for %T = %s, %v; want %v", tc.row, data, err, tc.want)
+		}
+	}
+}
+
 func measurementInput(size, count int) ([][]byte, []byte, engine.Options) {
 	keys := make([][]byte, count)
 	for i := range keys {
@@ -35,7 +83,7 @@ func measurementInput(size, count int) ([][]byte, []byte, engine.Options) {
 		value[i] = byte(i*31 + size)
 	}
 	return keys, value, engine.Options{
-		CacheBytes: int64((cache.MetadataBytes + 16 + size) * count), MaxRecordBytes: 8 << 10,
+		ValueCacheBudgetBytes: int64((cache.MetadataBytes + 16 + size) * count), MaxRecordBytes: 8 << 10,
 		TargetSegmentBytes: 64 << 10, ReadFileHandles: 8,
 	}
 }
@@ -51,7 +99,7 @@ func benchmarkDB(b *testing.B, size int, miss bool) (*tarp.DB, [][]byte, []byte)
 	b.Helper()
 	keys, value, opts := measurementInput(size, 128)
 	if miss {
-		opts.CacheBytes /= 16
+		opts.ValueCacheBudgetBytes /= 16
 	}
 	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), tarp.Options(opts))
 	if err != nil {
@@ -265,7 +313,7 @@ func resourceSample(t *testing.T, db *engine.DB) map[string]any {
 	runtime.ReadMemStats(&before)
 	probe := engine.Observe(db)
 	liveKeys := probe.LiveKeys()
-	cacheBytes := db.Stats().Cache.UsedBytes
+	cacheBytes := db.Stats().ValueCache.UsedBytes
 	copyIndex := probe.CloneMemoryIndex()
 	var logicalIndex int64
 	for key, loc := range copyIndex {
@@ -302,7 +350,7 @@ func resourceSample(t *testing.T, db *engine.DB) map[string]any {
 	}
 	result := map[string]any{
 		"heap_alloc_bytes": before.HeapAlloc, "runtime_sys_bytes": before.Sys, "process_peak_rss_bytes": peakRSS,
-		"cache_logical_bytes": cacheBytes, "cache_limit_bytes": probe.Options().CacheBytes,
+		"cache_logical_bytes": cacheBytes, "cache_limit_bytes": probe.Options().ValueCacheBudgetBytes,
 		"live_keys": liveKeys, "index_mode": probe.Options().IndexMode, "index_metrics": probe.IndexMetrics(),
 		"open_process_fds_including_sampler": len(fds), "read_handle_limit": probe.Options().ReadFileHandles,
 		"directory_logical_file_bytes": logical, "directory_allocated_bytes": allocated, "layout": observedLayout(db),
@@ -539,7 +587,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 		compact, err = db.Compact(t.Context())
 		compactEnd = time.Now()
 		if err == nil && mode == pinnedBackupMode {
-			pinnedFiles, err = witnessBackupPins(probe, compact.PinnedBytes)
+			pinnedFiles, err = witnessBackupPins(probe, compact.PinnedRetiredDataBytes)
 		}
 		return err
 	}
@@ -604,7 +652,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}
 	close(stop)
 	output := map[string]any{
-		"maintenance_ns": maintenanceNS, "compact": compact,
+		"maintenance_ns": maintenanceNS, "compact": measurementCompactResult(compact),
 		"fixture_sequence_before_workers": fixtureSequence, "fixture_live_keys": expectedKeys,
 		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestHash),
 		"automatic_cleaner": "held from Open through the measured foreground and manual-checkpoint window",
@@ -744,7 +792,7 @@ func TestMeasurementProfiles(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				write("options", size, repetition, engine.Observe(db).Options())
+				write("options", size, repetition, measurementOptions(engine.Observe(db).Options()))
 				get := func(i int) error {
 					got, err := db.Get(keys[i%len(keys)])
 					runtime.KeepAlive(got)
@@ -791,7 +839,7 @@ func TestMeasurementProfiles(t *testing.T) {
 				interferenceFixture := filepath.Join(t.TempDir(), "interference-fixture")
 				measurementPrepareFixture(t, dir, interferenceFixture, opts, keys, value)
 				missOpts := opts
-				missOpts.CacheBytes /= 16
+				missOpts.ValueCacheBudgetBytes /= 16
 				db, err = engine.OpenWithIO(dir, missOpts, io)
 				if err != nil {
 					t.Fatal(err)
@@ -856,7 +904,7 @@ func TestMeasurementProfiles(t *testing.T) {
 					if err := writer.Put(keys[0], value); err != nil {
 						t.Fatal(err)
 					}
-					write(fmt.Sprintf("durable_put_options_rotate_%t", rotate), size, repetition, engine.Observe(writer).Options())
+					write(fmt.Sprintf("durable_put_options_rotate_%t", rotate), size, repetition, measurementOptions(engine.Observe(writer).Options()))
 					write(fmt.Sprintf("durable_put_rotate_%t", rotate), size, repetition,
 						measureCalls(t, 32, 1, func(int) error { return writer.Put(keys[0], value) }))
 					if !rotate {

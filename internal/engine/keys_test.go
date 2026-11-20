@@ -54,7 +54,7 @@ func TestKeysSnapshotUsesNoDataReadsOrFilePins(t *testing.T) {
 				t.Fatal(err)
 			}
 			mustPut(t, db, "new", "later")
-			if result, err := db.Compact(t.Context()); err != nil || result.PinnedBytes != 0 {
+			if result, err := db.Compact(t.Context()); err != nil || result.PinnedRetiredDataBytes != 0 {
 				t.Fatalf("compact during Keys = %+v, %v", result, err)
 			}
 		}

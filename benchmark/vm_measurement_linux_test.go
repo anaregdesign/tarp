@@ -222,9 +222,9 @@ func vmResources(t *testing.T, db *engine.DB) map[string]any {
 	}
 	sample["layout"] = observedLayout(db)
 	stats := db.Stats()
-	sample["live_keys"], sample["cache_logical_bytes"] = stats.LiveKeys, stats.Cache.UsedBytes
+	sample["live_keys"], sample["cache_logical_bytes"] = stats.LiveKeys, stats.ValueCache.UsedBytes
 	sample["index_mode"], sample["index_metrics"] = engine.Observe(db).Options().IndexMode, engine.Observe(db).IndexMetrics()
-	sample["cache_limit_bytes"], sample["read_handle_limit"] = engine.Observe(db).Options().CacheBytes, engine.Observe(db).Options().ReadFileHandles
+	sample["cache_limit_bytes"], sample["read_handle_limit"] = engine.Observe(db).Options().ValueCacheBudgetBytes, engine.Observe(db).Options().ReadFileHandles
 	sample["process_fds_including_sampler"], sample["read_data_fds"], sample["write_data_fds"] = len(fds), readFDs, writeFDs
 	sample["directory_logical_file_bytes"], sample["directory_allocated_bytes"] = logical, allocated
 	sample["filesystem_available_bytes"] = guesttest.AvailableBytes(t)
@@ -299,7 +299,7 @@ func vmDeviceInterval(t *testing.T, next *int, kind string, call func()) {
 func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 	t.Helper()
 	keys, value, opts := measurementInput(size, qualification.MeasurementKeys)
-	opts.CacheBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
+	opts.ValueCacheBudgetBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
 	hooks := &measurementHooks{}
 	dir := "/mnt/tarp-data/working-set"
 	db, err := engine.OpenWithIO(dir, opts, &storage.IO{Hook: hooks.hook})
@@ -335,7 +335,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 	}
 	write("environment", 0, map[string]any{
 		"go": runtime.Version(), "goos": runtime.GOOS, "goarch": runtime.GOARCH, "gomaxprocs": runtime.GOMAXPROCS(0),
-		"storage_format": "unversioned", "guest_cpuinfo": string(cpu), "guest_meminfo": string(memory), "options": engine.Observe(db).Options(),
+		"storage_format": "unversioned", "guest_cpuinfo": string(cpu), "guest_meminfo": string(memory), "options": measurementOptions(engine.Observe(db).Options()),
 		"working_keys": len(keys), "hot_keys": 8, "key_bytes": 16, "repetitions": 5,
 		"read_samples": 8192, "mixed_samples": 4096, "durable_samples": 64,
 		"cold_get_samples_per_rep": 32, "cold_open_samples_per_history_state": 5,
@@ -432,7 +432,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 				}
 				vmMeasureLatency(write, fmt.Sprintf("durable_put_rotate_%t", rotate), repetition, latency(putRaw, 64, putElapsed))
 				write(fmt.Sprintf("durable_put_rotation_checks_%t", rotate), repetition, map[string]any{
-					"effective_options": engine.Observe(writer).Options(), "prefills": 1, "timed_puts": 64, "verified_samples": 64, "rotation_expected": rotate,
+					"effective_options": measurementOptions(engine.Observe(writer).Options()), "prefills": 1, "timed_puts": 64, "verified_samples": 64, "rotation_expected": rotate,
 					"scope": "one fully synced prefill outside timing; active IDs checked after every timed Put; wall_ns sums only timed API intervals",
 				})
 				if rotate {

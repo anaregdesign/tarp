@@ -102,8 +102,8 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	if err != nil {
 		return nil, err
 	}
-	cfg := storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
-	keys, err := openIndex(opts.IndexMode, opts.IndexMemoryBytes/2)
+	cfg := storage.Config{ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
+	keys, err := openIndex(opts.IndexMode, opts.BTreeMemoryBudgetBytes/2)
 	if err != nil {
 		return nil, operationError("open", "index", err)
 	}
@@ -111,9 +111,9 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	if err != nil {
 		return nil, operationError("open", "recovery", errors.Join(err, keys.Close()))
 	}
-	db := &DB{opts: opts, store: s, keys: keys, files: make(map[uint64]*storage.File), cache: cache.New(opts.CacheBytes), closed: make(chan struct{}), hooks: hooks}
+	db := &DB{opts: opts, store: s, keys: keys, files: make(map[uint64]*storage.File), cache: cache.New(opts.ValueCacheBudgetBytes), closed: make(chan struct{}), hooks: hooks}
 	db.resident, _ = keys.(index.ResidentLookup)
-	db.batchReadSlots = make(chan struct{}, opts.BatchReadConcurrency)
+	db.batchReadSlots = make(chan struct{}, opts.BatchGetReadConcurrency)
 	db.cond = sync.NewCond(&db.life)
 	for id, f := range s.Files {
 		if live := f.LiveBytes.Load(); live != 0 {
@@ -188,14 +188,14 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		}
 		if value, ok := db.cache.Get(key); ok {
 			if first {
-				countLookup(&db.stats.Cache.Hits)
+				countLookup(&db.stats.ValueCache.Hits)
 			}
 			db.state.Unlock()
 			return bytes.Clone(value), nil
 		}
 		if int64(len(key)) > db.opts.MaxRecordBytes-format.RecordHeaderBytes {
 			if first {
-				countLookup(&db.stats.MissingKeys)
+				countLookup(&db.stats.MissingKeyLookups)
 			}
 			db.state.Unlock()
 			return nil, ErrNotFound
@@ -229,9 +229,9 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		}
 		if first {
 			if found {
-				countLookup(&db.stats.Cache.Misses)
+				countLookup(&db.stats.ValueCache.Misses)
 			} else {
-				countLookup(&db.stats.MissingKeys)
+				countLookup(&db.stats.MissingKeyLookups)
 			}
 		}
 		revision := db.revision
@@ -493,7 +493,7 @@ func publicCause(err error) error {
 	}
 	var incompatible *storage.CompatibilityError
 	if errors.As(err, &incompatible) {
-		return errors.Join(&CompatibilityError{RequiredCacheBytes: incompatible.CacheBytes, RequiredRecordBytes: incompatible.RecordBytes}, err)
+		return errors.Join(&CompatibilityError{RequiredValueCacheBudgetBytes: incompatible.ValueCacheBudgetBytes, RequiredRecordBytes: incompatible.RecordBytes}, err)
 	}
 	switch {
 	case errors.Is(err, format.ErrCorrupt):

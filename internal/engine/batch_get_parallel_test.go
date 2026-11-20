@@ -46,7 +46,7 @@ func TestBatchGetLimitsConcurrentStorageReads(t *testing.T) {
 				release := sync.OnceFunc(func() { close(gate) })
 				defer release()
 				var started atomic.Int32
-				opts := Options{CacheBytes: 130, BatchReadConcurrency: tc.limit}
+				opts := Options{ValueCacheBudgetBytes: 130, BatchGetReadConcurrency: tc.limit}
 				ioHooks := &storage.IO{Hook: func(point string) error {
 					if point == "read:before" {
 						started.Add(1)
@@ -149,7 +149,7 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 			}
 			return nil
 		}}
-		db := newTestDBWithHooks(t, Options{CacheBytes: 130, BatchReadConcurrency: 2}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+		db := newTestDBWithHooks(t, Options{ValueCacheBudgetBytes: 130, BatchGetReadConcurrency: 2}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 		for _, k := range []string{"a", "b", "c", "z"} {
 			mustPut(t, db, k, k)
 		}
@@ -169,7 +169,7 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 			t.Fatalf("pins while draining = %d, want %d", got, refs+3)
 		}
 		s := db.Stats()
-		if s.Cache.Misses != 3 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 1 {
+		if s.ValueCache.Misses != 3 || s.MissingKeyLookups != 1 || s.BatchGetDuplicateInputs != 1 {
 			t.Fatalf("incomplete snapshot during error handling: %+v", s)
 		}
 		release()
@@ -214,7 +214,7 @@ func TestBatchGetSmallReadsAdaptWithinTheSameBatch(t *testing.T) {
 					}
 					return nil
 				}}
-				db := newTestDBWithHooks(t, Options{CacheBytes: 130, BatchReadConcurrency: limit}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+				db := newTestDBWithHooks(t, Options{ValueCacheBudgetBytes: 130, BatchGetReadConcurrency: limit}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 				keys := [][]byte{[]byte("?"), []byte("z")}
 				want := []BatchResult{{}, {Value: []byte("Z"), Found: true}}
 				for i := range unique {
@@ -267,8 +267,8 @@ func TestBatchGetSmallReadsAdaptWithinTheSameBatch(t *testing.T) {
 					t.Fatalf("readers blocked in tail after slow read = %d, want %d", got-holdAfter, limit)
 				}
 				s := db.Stats()
-				if s.Cache.Hits-before.Cache.Hits != 1 || s.Cache.Misses-before.Cache.Misses != unique ||
-					s.MissingKeys-before.MissingKeys != 1 || s.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != 1 {
+				if s.ValueCache.Hits-before.ValueCache.Hits != 1 || s.ValueCache.Misses-before.ValueCache.Misses != unique ||
+					s.MissingKeyLookups-before.MissingKeyLookups != 1 || s.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != 1 {
 					t.Fatalf("snapshot changed during scheduling: before %+v, after %+v", before, s)
 				}
 				// A second BatchGet must share the permits occupied by the promoted readers.

@@ -7,7 +7,7 @@ import (
 )
 
 func TestOptionsAdmission(t *testing.T) {
-	o := Options{CacheBytes: 130, MaxRecordBytes: 50, ReadFileHandles: 1}
+	o := Options{ValueCacheBudgetBytes: 130, MaxRecordBytes: 50, ReadFileHandles: 1}
 	if _, err := o.normalized(); err != nil {
 		t.Fatal(err)
 	}
@@ -26,45 +26,45 @@ func TestOptionsAdmission(t *testing.T) {
 			t.Fatalf("size %d/%d: %v", tc.k, tc.v, err)
 		}
 	}
-	for _, invalid := range []Options{{CacheBytes: -1}, {CacheBytes: 128}, {MaxRecordBytes: 48}, {ReadFileHandles: -1}, {MaxRecordBytes: math.MaxInt64 - 63}, {MaxBatchResultBytes: -1}} {
+	for _, invalid := range []Options{{ValueCacheBudgetBytes: -1}, {ValueCacheBudgetBytes: 128}, {MaxRecordBytes: 48}, {ReadFileHandles: -1}, {MaxRecordBytes: math.MaxInt64 - 63}, {MaxBatchGetValueBytes: -1}} {
 		if _, err := invalid.normalized(); !errors.Is(err, ErrInvalidOptions) {
 			t.Fatalf("options %#v: %v", invalid, err)
 		}
 	}
 }
 
-func TestMaxBatchResultBytesNormalization(t *testing.T) {
+func TestMaxBatchGetValueBytesNormalization(t *testing.T) {
 	for _, tc := range []struct{ input, want int64 }{{0, 64 << 20}, {1, 1}, {math.MaxInt64, math.MaxInt64}} {
-		got, err := (Options{MaxBatchResultBytes: tc.input}).normalized()
-		if err != nil || got.MaxBatchResultBytes != tc.want {
-			t.Fatalf("MaxBatchResultBytes %d: got %d, %v", tc.input, got.MaxBatchResultBytes, err)
+		got, err := (Options{MaxBatchGetValueBytes: tc.input}).normalized()
+		if err != nil || got.MaxBatchGetValueBytes != tc.want {
+			t.Fatalf("MaxBatchGetValueBytes %d: got %d, %v", tc.input, got.MaxBatchGetValueBytes, err)
 		}
 	}
 }
 
 func TestAdmissionCacheAndRecoveryUseSameEntrySizes(t *testing.T) {
-	opts := Options{MaxRecordBytes: 51, CacheBytes: 131}
+	opts := Options{MaxRecordBytes: 51, ValueCacheBudgetBytes: 131}
 	db := newTestDB(t, opts, nil)
 	mustPut(t, db, "ab", "x")
 	stats := db.Stats()
-	if stats.LiveRecordBytes != 51 || stats.Cache.UsedBytes != 131 {
-		t.Fatalf("record bytes = %d, cache bytes = %d", stats.LiveRecordBytes, stats.Cache.UsedBytes)
+	if stats.LiveRecordBytes != 51 || stats.ValueCache.UsedBytes != 131 {
+		t.Fatalf("record bytes = %d, cache bytes = %d", stats.LiveRecordBytes, stats.ValueCache.UsedBytes)
 	}
 	var size *SizeError
-	if err := db.Put([]byte("ab"), []byte("xx")); !errors.As(err, &size) || size.RecordBytes != 52 || size.CacheCharge != 132 {
+	if err := db.Put([]byte("ab"), []byte("xx")); !errors.As(err, &size) || size.RecordBytes != 52 || size.ValueCacheChargeBytes != 132 {
 		t.Fatalf("size error = %+v, err = %v", size, err)
 	}
 	dir := db.store.Dir
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for _, smaller := range []Options{{MaxRecordBytes: 50, CacheBytes: 131}, {MaxRecordBytes: 51, CacheBytes: 130}} {
+	for _, smaller := range []Options{{MaxRecordBytes: 50, ValueCacheBudgetBytes: 131}, {MaxRecordBytes: 51, ValueCacheBudgetBytes: 130}} {
 		var required *CompatibilityError
 		opened, err := Open(dir, smaller)
 		if opened != nil {
 			opened.Close()
 		}
-		if !errors.As(err, &required) || required.RequiredRecordBytes != 51 || required.RequiredCacheBytes != 131 {
+		if !errors.As(err, &required) || required.RequiredRecordBytes != 51 || required.RequiredValueCacheBudgetBytes != 131 {
 			t.Fatalf("reopen with %+v: required = %+v, err = %v", smaller, required, err)
 		}
 	}

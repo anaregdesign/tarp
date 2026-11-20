@@ -85,9 +85,9 @@ func (db *DB) peekBatch(keys [][]byte, results []BatchResult, stopOnMiss bool) (
 
 func (db *DB) batchCounts(hits, misses, absent, duplicate int) {
 	add := func(p *uint64, n int) { *p += min(uint64(n), math.MaxUint64-*p) }
-	add(&db.stats.Cache.Hits, hits)
-	add(&db.stats.Cache.Misses, misses)
-	add(&db.stats.MissingKeys, absent)
+	add(&db.stats.ValueCache.Hits, hits)
+	add(&db.stats.ValueCache.Misses, misses)
+	add(&db.stats.MissingKeyLookups, absent)
 	add(&db.stats.BatchGetDuplicateInputs, duplicate)
 }
 
@@ -100,7 +100,7 @@ func checkBatchBytes(count int, limit, maximum int64, size func(int) int64) erro
 	for i := range count {
 		used += uint64(size(i))
 		if used > uint64(limit) {
-			return &BatchLimitError{Kind: BatchResultBytesLimit, Index: i, Actual: used, Limit: uint64(limit)}
+			return &BatchLimitError{Kind: BatchGetValueBytesLimit, Index: i, Actual: used, Limit: uint64(limit)}
 		}
 	}
 	return nil
@@ -115,7 +115,7 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 	}
 	hits, uncached := db.peekBatch(keys, results, true)
 	if uncached == 0 {
-		err := checkBatchBytes(len(keys), db.opts.MaxBatchResultBytes, db.maxSeenValueBytes, func(i int) int64 { return int64(len(results[i].Value)) })
+		err := checkBatchBytes(len(keys), db.opts.MaxBatchGetValueBytes, db.maxSeenValueBytes, func(i int) int64 { return int64(len(results[i].Value)) })
 		if err == nil {
 			db.batchCounts(hits, 0, 0, len(keys)-hits)
 		}
@@ -216,7 +216,7 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		db.poison(err)
 		return nil, operationError("batch-get", "index", err)
 	}
-	err := checkBatchBytes(len(keys), db.opts.MaxBatchResultBytes, maximum, func(i int) int64 {
+	err := checkBatchBytes(len(keys), db.opts.MaxBatchGetValueBytes, maximum, func(i int) int64 {
 		if results[i].Found {
 			return int64(len(results[i].Value))
 		}
@@ -264,7 +264,7 @@ func (db *DB) rejectBatchFile(reads []batchRead, id uint64) error {
 // captureResidentMisses runs entirely under state. A missing first key favors
 // probing the hash index first, avoiding an LRU lookup for remaining absent keys.
 func (db *DB) captureResidentMisses(keys [][]byte, results []BatchResult) ([]batchRead, error) {
-	if err := checkBatchBytes(len(keys), db.opts.MaxBatchResultBytes, db.maxSeenValueBytes, func(i int) int64 {
+	if err := checkBatchBytes(len(keys), db.opts.MaxBatchGetValueBytes, db.maxSeenValueBytes, func(i int) int64 {
 		a, _ := db.resident.LookupResident(keys[i])
 		return a.ValueBytes
 	}); err != nil {

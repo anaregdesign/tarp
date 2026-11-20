@@ -40,7 +40,7 @@ func TestStatsSnapshotDoesNotAllocate(t *testing.T) {
 
 func TestOwnerStatsIncludeViewOperationsAndRetainFinalSnapshot(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
-	opts := tarp.Options{CacheBytes: 130} // one single-byte key and value
+	opts := tarp.Options{ValueCacheBudgetBytes: 130} // one single-byte key and value
 	raw, err := tarp.Open(dir, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -63,9 +63,9 @@ func TestOwnerStatsIncludeViewOperationsAndRetainFinalSnapshot(t *testing.T) {
 	}
 	want := tarp.Stats{
 		LiveKeys: 1, LiveRecordBytes: 50, SelectedSegments: 1, SelectedDataBytes: 263,
-		ObsoletePutBytes: 100, TombstoneBytes: 49, MissingKeys: 1,
+		ObsoletePutBytes: 100, TombstoneBytes: 49, MissingKeyLookups: 1,
 		BatchGetDuplicateInputs: 1, WriteCommits: 2, WrittenRecords: 4,
-		Cache: tarp.CacheStats{UsedBytes: 130, LimitBytes: 130, Hits: 1, Misses: 1, Evictions: 2},
+		ValueCache: tarp.ValueCacheStats{UsedBytes: 130, LimitBytes: 130, Hits: 1, Misses: 1, Evictions: 2},
 	}
 	if s := raw.Stats(); s != want {
 		t.Fatalf("raw stats after view operations = %+v, want %+v", s, want)
@@ -96,9 +96,9 @@ func TestOwnerStatsIncludeViewOperationsAndRetainFinalSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer next.Close()
-	want.Cache = tarp.CacheStats{LimitBytes: 130}
+	want.ValueCache = tarp.ValueCacheStats{LimitBytes: 130}
 	want.BatchGetDuplicateInputs = 0
-	want.MissingKeys, want.WriteCommits, want.WrittenRecords = 0, 0, 0
+	want.MissingKeyLookups, want.WriteCommits, want.WrittenRecords = 0, 0, 0
 	if s := next.Stats(); s != want {
 		t.Fatalf("reopened: %+v, want %+v", s, want)
 	}

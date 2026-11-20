@@ -91,8 +91,8 @@ func BenchmarkStatsDuringGet(b *testing.B) {
 				}
 			}()
 			after := db.Stats()
-			if !bytes.Equal(got, want) || after.Cache.Hits-before.Cache.Hits != uint64(b.N) ||
-				after.Cache.Misses != before.Cache.Misses {
+			if !bytes.Equal(got, want) || after.ValueCache.Hits-before.ValueCache.Hits != uint64(b.N) ||
+				after.ValueCache.Misses != before.ValueCache.Misses {
 				b.Fatalf("unexpected Get workload: N=%d before=%+v after=%+v", b.N, before, after)
 			}
 			b.ReportMetric(float64(scrapes), "scrapes")

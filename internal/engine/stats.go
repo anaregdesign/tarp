@@ -2,8 +2,8 @@ package engine
 
 import "github.com/anaregdesign/tarp/internal/format"
 
-// CacheStats describes this DB's exact LRU and its cumulative activity since Open.
-type CacheStats struct {
+// ValueCacheStats describes the value LRU and its cumulative activity since Open.
+type ValueCacheStats struct {
 	UsedBytes  uint64 // Logical entry charges, including cache metadata.
 	LimitBytes uint64 // Effective cache budget.
 	Hits       uint64 // Distinct keys per Get or BatchGet call found in the LRU.
@@ -20,8 +20,8 @@ type Stats struct {
 	SelectedDataBytes       uint64 // Committed lengths of selected DATA files, including headers.
 	ObsoletePutBytes        uint64 // Superseded or deleted Put records in the selected DATA.
 	TombstoneBytes          uint64 // Retained encoded Delete records in the selected DATA.
-	Cache                   CacheStats
-	MissingKeys             uint64 // Distinct keys per Get or BatchGet call absent from the live index.
+	ValueCache              ValueCacheStats
+	MissingKeyLookups       uint64 // Lookups absent from the live index since Open, counting each key once per Get or BatchGet call.
 	BatchGetDuplicateInputs uint64 // Input positions beyond the first for each encoded key at BatchGet snapshot capture.
 	WriteCommits            uint64 // Foreground write calls published in memory since Open.
 	WrittenRecords          uint64 // Foreground Put and Delete records in those commits.
@@ -43,9 +43,9 @@ func (db *DB) ReadStats(s *Stats) {
 func (db *DB) readStatsLocked(s *Stats) {
 	*s = db.stats
 	if db.cache != nil {
-		s.Cache.UsedBytes = uint64(db.cache.Bytes())
-		s.Cache.LimitBytes = uint64(db.opts.CacheBytes)
-		s.Cache.Evictions = db.cache.Evictions()
+		s.ValueCache.UsedBytes = uint64(db.cache.Bytes())
+		s.ValueCache.LimitBytes = uint64(db.opts.ValueCacheBudgetBytes)
+		s.ValueCache.Evictions = db.cache.Evictions()
 		s.ObsoletePutBytes = s.SelectedDataBytes - s.SelectedSegments*format.SegmentHeaderBytes - s.LiveRecordBytes - s.TombstoneBytes
 	}
 }

@@ -148,7 +148,7 @@ func (image *Image) measure(key string, recordBytes, valueBytes int64) error {
 	if charge > math.MaxInt64 {
 		return fmt.Errorf("%w: unrepresentable live cache charge", ErrCorrupt)
 	}
-	image.Required = RequiredLimits{CacheBytes: int64(charge), RecordBytes: recordBytes}
+	image.Required = RequiredLimits{ValueCacheBudgetBytes: int64(charge), RecordBytes: recordBytes}
 	return nil
 }
 

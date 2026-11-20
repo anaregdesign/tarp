@@ -2,7 +2,8 @@
 
 Call `db.Stats()` once per scrape. Both `DB` and `TypedDB` return a
 `tarp.Stats` value for the underlying open DB. Each metric is a `uint64`.
-Cache metrics are grouped under `Stats.Cache` in a `tarp.CacheStats` value.
+The `Stats.ValueCache` field has type `tarp.ValueCacheStats` and measures the
+value LRU. B+tree page-cache accesses are outside these counters.
 The snapshot is coherent across the fields, including concurrent batch and
 catalog publications. Taking it uses a short state lock and constant work,
 performs no file I/O, and preserves LRU membership, recency and counters.
@@ -17,8 +18,8 @@ performs no file I/O, and preserves LRU membership, recency and counters.
 | `SelectedDataBytes` | `tarp_selected_data_bytes` | Sum of selected DATA lengths, using the committed end of the active log |
 | `ObsoletePutBytes` | `tarp_obsolete_put_bytes` | Superseded or deleted Put records still present in selected DATA |
 | `TombstoneBytes` | `tarp_tombstone_bytes` | Encoded Delete records retained in selected DATA |
-| `Cache.UsedBytes` | `tarp_cache_used_bytes` | Logical charges of cached keys, values and entry metadata |
-| `Cache.LimitBytes` | `tarp_cache_limit_bytes` | Effective logical cache budget after option normalization |
+| `ValueCache.UsedBytes` | `tarp_cache_used_bytes` | Logical charges of cached keys, values and entry metadata |
+| `ValueCache.LimitBytes` | `tarp_cache_limit_bytes` | Effective logical cache budget after option normalization |
 
 Each selected segment contributes a 64-byte header. The remaining selected
 bytes equal `LiveRecordBytes + ObsoletePutBytes + TombstoneBytes`. A newly
@@ -26,17 +27,17 @@ created DB has one empty segment and 64 selected bytes. Physical disk use also
 includes filesystem allocation, metadata, temporary files and retired files.
 Obsolete records can reside in the active log or in segments below the
 automatic cleaner's threshold. For its most recent observation of retired
-bytes held by pins, use `MaintenanceStatus().PinnedBytes`.
+bytes held by pins, use `AutoCompactionStatus().PinnedRetiredDataBytes`.
 
 ## Counters
 
 | Field | Suggested Prometheus metric | Counts since Open |
 | --- | --- | --- |
-| `Cache.Hits` | `tarp_cache_hits_total` | Distinct keys per read call found in the LRU |
-| `Cache.Misses` | `tarp_cache_misses_total` | Distinct keys per read call found only in the live index |
-| `MissingKeys` | `tarp_missing_keys_total` | Distinct keys per read call absent from the live index |
+| `ValueCache.Hits` | `tarp_cache_hits_total` | Distinct keys per read call found in the LRU |
+| `ValueCache.Misses` | `tarp_cache_misses_total` | Distinct keys per read call found only in the live index |
+| `MissingKeyLookups` | `tarp_missing_keys_total` | Distinct absent keys per read call, counted again on each call |
 | `BatchGetDuplicateInputs` | `tarp_batch_get_duplicate_inputs_total` | Input positions beyond the first for each encoded key in a captured BatchGet |
-| `Cache.Evictions` | `tarp_cache_evictions_total` | LRU entries evicted to meet the byte limit |
+| `ValueCache.Evictions` | `tarp_cache_evictions_total` | LRU entries evicted to meet the byte limit |
 | `WriteCommits` | `tarp_write_commits_total` | Nonempty foreground write calls published to the selected key index |
 | `WrittenRecords` | `tarp_written_records_total` | Put and Delete records published by those calls |
 

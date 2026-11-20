@@ -190,7 +190,7 @@ func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := tarp.VerifyBackup(t.Context(), req.Source)
-	wantLimits := tarp.RestoreLimits{CacheBytes: 128 + 1 + valueBytes, MaxRecordBytes: 48 + 1 + valueBytes}
+	wantLimits := tarp.RestoreLimits{ValueCacheBudgetBytes: 128 + 1 + valueBytes, MaxRecordBytes: 48 + 1 + valueBytes}
 	if err != nil || info.Sequence != 1 || info.LiveKeys != 1 || info.DatabaseID == ([16]byte{}) ||
 		info.RequiredLimits != wantLimits {
 		t.Fatalf("verified backup = %+v, %v", info, err)
@@ -212,13 +212,13 @@ func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 	}
 	for _, limits := range []tarp.RestoreLimits{
 		{}, // The default record limit is too small.
-		{CacheBytes: wantLimits.CacheBytes - 1, MaxRecordBytes: wantLimits.MaxRecordBytes},
+		{ValueCacheBudgetBytes: wantLimits.ValueCacheBudgetBytes - 1, MaxRecordBytes: wantLimits.MaxRecordBytes},
 	} {
 		req.Limits = limits
 		for _, err := range []error{info.CheckLimits(limits), tarp.Restore(t.Context(), req)} {
 			var incompatible *tarp.CompatibilityError
 			if !errors.Is(err, tarp.ErrIncompatibleOptions) || !errors.As(err, &incompatible) ||
-				incompatible.RequiredCacheBytes != wantLimits.CacheBytes || incompatible.RequiredRecordBytes != wantLimits.MaxRecordBytes {
+				incompatible.RequiredValueCacheBudgetBytes != wantLimits.ValueCacheBudgetBytes || incompatible.RequiredRecordBytes != wantLimits.MaxRecordBytes {
 				t.Fatalf("checking limits %+v: %v", limits, err)
 			}
 		}
@@ -226,7 +226,7 @@ func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 			t.Fatalf("incompatible restore destination: %v", err)
 		}
 	}
-	opts := tarp.Options{CacheBytes: wantLimits.CacheBytes, MaxRecordBytes: wantLimits.MaxRecordBytes, ReadFileHandles: -1, TargetSegmentBytes: -1, BatchReadConcurrency: -1}
+	opts := tarp.Options{ValueCacheBudgetBytes: wantLimits.ValueCacheBudgetBytes, MaxRecordBytes: wantLimits.MaxRecordBytes, ReadFileHandles: -1, TargetSegmentBytes: -1, BatchGetReadConcurrency: -1}
 	req.Limits = opts.RestoreLimits()
 	if err := info.CheckLimits(req.Limits); err != nil {
 		t.Fatalf("check exact live record limits: %v", err)
@@ -248,7 +248,7 @@ func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 	}
 }
 
-func TestBatchReadConcurrencyOnReopen(t *testing.T) {
+func TestBatchGetReadConcurrencyOnReopen(t *testing.T) {
 	dir := t.TempDir()
 	seed := openPublicDB(t, dir, tarp.Options{})
 	a, b := []byte("a"), []byte("b")
@@ -258,15 +258,15 @@ func TestBatchReadConcurrencyOnReopen(t *testing.T) {
 	if err := seed.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if db, err := tarp.Open(dir, tarp.Options{BatchReadConcurrency: -1}); db != nil || !errors.Is(err, tarp.ErrInvalidOptions) {
+	if db, err := tarp.Open(dir, tarp.Options{BatchGetReadConcurrency: -1}); db != nil || !errors.Is(err, tarp.ErrInvalidOptions) {
 		if db != nil {
 			db.Close()
 		}
-		t.Fatalf("Open with negative BatchReadConcurrency returned %p, %v", db, err)
+		t.Fatalf("Open with negative BatchGetReadConcurrency returned %p, %v", db, err)
 	}
 	for _, limit := range []int{0, 1, 3} {
 		t.Run(strconv.Itoa(limit), func(t *testing.T) {
-			db := openPublicDB(t, dir, tarp.Options{BatchReadConcurrency: limit})
+			db := openPublicDB(t, dir, tarp.Options{BatchGetReadConcurrency: limit})
 			keys := [][]byte{b, a, b}
 			results, err := db.BatchGet(keys)
 			if err != nil || len(results) != len(keys) {
@@ -468,7 +468,7 @@ func FuzzDBHistory(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, steps []byte) {
 		// A small target rotates on the second Put. All values fit admission.
-		opts := tarp.Options{CacheBytes: 144, MaxRecordBytes: 64, TargetSegmentBytes: 128, ReadFileHandles: 1}
+		opts := tarp.Options{ValueCacheBudgetBytes: 144, MaxRecordBytes: 64, TargetSegmentBytes: 128, ReadFileHandles: 1}
 		if len(steps) > 0 && steps[0]&0x80 != 0 {
 			opts.IndexMode = tarp.IndexBTree
 		}
@@ -624,7 +624,12 @@ func TestIndexModesShareDataSnapshotsAndBackups(t *testing.T) {
 }
 
 func TestIndexOptionErrorsLeaveNewDirectoryAbsent(t *testing.T) {
-	for _, o := range []tarp.Options{{IndexMode: 99}, {IndexMode: tarp.IndexMemory, IndexMemoryBytes: 1 << 20}, {IndexMode: tarp.IndexBTree, IndexMemoryBytes: 1}, {IndexMode: tarp.IndexBTree, IndexMemoryBytes: -1}} {
+	for _, o := range []tarp.Options{
+		{IndexMode: 99},
+		{IndexMode: tarp.IndexMemory, BTreeMemoryBudgetBytes: 1 << 20},
+		{IndexMode: tarp.IndexBTree, BTreeMemoryBudgetBytes: 1},
+		{IndexMode: tarp.IndexBTree, BTreeMemoryBudgetBytes: -1},
+	} {
 		dir := filepath.Join(t.TempDir(), "new")
 		if db, err := tarp.Open(dir, o); db != nil || !errors.Is(err, tarp.ErrInvalidOptions) {
 			t.Fatalf("Open(%+v) = %v, %v", o, db, err)
@@ -643,8 +648,9 @@ func ExampleOpen_indexMode() {
 	defer os.RemoveAll(dir)
 
 	db, err := tarp.Open(dir, tarp.Options{
-		IndexMode:        tarp.IndexBTree,
-		IndexMemoryBytes: 16 << 20,
+		IndexMode:              tarp.IndexBTree,
+		BTreeMemoryBudgetBytes: 16 << 20,
+		ValueCacheBudgetBytes:  64 << 20,
 	})
 	if err != nil {
 		panic(err)

@@ -21,7 +21,7 @@ import (
 
 func vmCaseOptions(mode string) Options {
 	if mode == "exhaustion" {
-		return Options{CacheBytes: 64 << 10, MaxRecordBytes: 8 << 10, TargetSegmentBytes: 1 << 20, ReadFileHandles: 4}
+		return Options{ValueCacheBudgetBytes: 64 << 10, MaxRecordBytes: 8 << 10, TargetSegmentBytes: 1 << 20, ReadFileHandles: 4}
 	}
 	return testOptions()
 }
@@ -163,19 +163,19 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	}
 	vmReleaseFiller(t, filler, 2<<20)
 	compacted, err := db.Compact(ctx)
-	if err != nil || compacted.PinnedBytes == 0 {
+	if err != nil || compacted.PinnedRetiredDataBytes == 0 {
 		t.Fatalf("retry must retain the slow backup's old generation: %+v %v", compacted, err)
 	}
-	verdict.CheckpointRetryPassed, verdict.PinnedBytes = true, compacted.PinnedBytes
+	verdict.CheckpointRetryPassed, verdict.PinnedBytes = true, compacted.PinnedRetiredDataBytes
 	close(release)
 	if err := <-backupDone; err != nil {
 		t.Fatalf("slow backup after checkpoint retry: %v", err)
 	}
 	cleaned, err := db.Compact(ctx)
-	if err != nil || cleaned.PinnedBytes != 0 || cleaned.ReclaimedBytes == 0 {
+	if err != nil || cleaned.PinnedRetiredDataBytes != 0 || cleaned.UnlinkedBytes == 0 {
 		t.Fatalf("released backup pins must permit safe reclamation: %+v %v", cleaned, err)
 	}
-	verdict.ReleasedPinnedBytes, verdict.ReclaimedAfterRelease = cleaned.PinnedBytes, cleaned.ReclaimedBytes
+	verdict.ReleasedPinnedBytes, verdict.ReclaimedAfterRelease = cleaned.PinnedRetiredDataBytes, cleaned.UnlinkedBytes
 	verdict.FinalFillerBytes, _ = vmFill(t, filler)
 	if _, err := db.Get(keys[0]); err != nil {
 		t.Fatal(err)

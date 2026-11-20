@@ -42,7 +42,7 @@ func BenchmarkParallelGetDuringStats(b *testing.B) {
 				calls = <-samples
 			}
 			after := db.Stats()
-			if after.Cache.Hits-before.Cache.Hits != uint64(b.N) || after.Cache.Misses != before.Cache.Misses {
+			if after.ValueCache.Hits-before.ValueCache.Hits != uint64(b.N) || after.ValueCache.Misses != before.ValueCache.Misses {
 				b.Fatalf("unexpected Get counts: before=%+v after=%+v N=%d", before, after, b.N)
 			}
 			b.ReportMetric(float64(calls), "scrapes")

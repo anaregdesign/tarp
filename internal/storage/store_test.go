@@ -101,7 +101,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("rotate=%v/%s", rotate, tc.point), func(t *testing.T) {
 				dir := t.TempDir()
-				cfg := Config{CacheBytes: 1 << 20, RecordBytes: 128 << 10, TargetSegmentBytes: 1 << 20, Handles: 1}
+				cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 128 << 10, TargetSegmentBytes: 1 << 20, Handles: 1}
 				if rotate {
 					cfg.TargetSegmentBytes = format.SegmentHeaderBytes + batchBytes
 				}
@@ -198,7 +198,7 @@ func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
 }
 
 func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
-	cfg := Config{CacheBytes: 4096, RecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 4096, RecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
 	s, _, err := Open(t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)

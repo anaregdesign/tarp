@@ -86,7 +86,7 @@ func TestScanKeepsUnreadValuesAcrossCompact(t *testing.T) {
 	}
 	mustPut(t, db, "new", "later")
 	result, err := db.Compact(t.Context())
-	if err != nil || result.PinnedBytes == 0 {
+	if err != nil || result.PinnedRetiredDataBytes == 0 {
 		t.Fatalf("checkpoint while paused: %+v, %v", result, err)
 	}
 	close(start)
@@ -203,7 +203,7 @@ func TestScanReleasesPartialCapture(t *testing.T) {
 func TestScanPreservesHotCache(t *testing.T) {
 	var reads atomic.Int64
 	opts := testOptions()
-	opts.CacheBytes = 2 * (128 + 1 + 1)
+	opts.ValueCacheBudgetBytes = 2 * (128 + 1 + 1)
 	db := newTestDB(t, opts, &storage.IO{Hook: func(point string) error {
 		if point == "read:before" {
 			reads.Add(1)

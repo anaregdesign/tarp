@@ -15,13 +15,12 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-// MaintenanceStatus is a snapshot of automatic maintenance since this Open.
-// UnlinkedBytes counts logical file lengths, including obsolete manifests.
-type MaintenanceStatus struct {
-	DeferredReason string
-	PinnedBytes    int64
-	UnlinkedBytes  uint64
-	LastError      error
+// AutoCompactionStatus describes the automatic compaction worker since this Open.
+type AutoCompactionStatus struct {
+	DeferredReason         string
+	PinnedRetiredDataBytes int64  // Retired DATA bytes held by leases at the last retirement pass.
+	UnlinkedBytes          uint64 // Cumulative logical lengths of files unlinked by the worker, including obsolete manifests.
+	LastError              error
 }
 
 type cleaner struct {
@@ -33,11 +32,11 @@ type cleaner struct {
 	writers atomic.Int64
 	pinned  atomic.Bool
 	mu      sync.Mutex
-	status  MaintenanceStatus
+	status  AutoCompactionStatus
 }
 
-// MaintenanceStatus returns the latest observed worker status, including after Close.
-func (db *DB) MaintenanceStatus() MaintenanceStatus {
+// AutoCompactionStatus returns the latest observed worker status, including after Close.
+func (db *DB) AutoCompactionStatus() AutoCompactionStatus {
 	w := &db.cleaner
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -202,7 +201,7 @@ func (db *DB) runCleaner(ctx context.Context) {
 		if delay > 0 {
 			timer := time.NewTimer(delay)
 			var released <-chan struct{}
-			if db.MaintenanceStatus().DeferredReason == "pinned" {
+			if db.AutoCompactionStatus().DeferredReason == "pinned" {
 				// A reader or backup can release the last pin while the DB is idle.
 				released = db.cleaner.wake
 			}
@@ -266,7 +265,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 	files, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)
 	db.writer.Unlock()
 	w.mu.Lock()
-	w.status.PinnedBytes = pinned
+	w.status.PinnedRetiredDataBytes = pinned
 	if uint64(removed) > math.MaxUint64-w.status.UnlinkedBytes {
 		w.status.UnlinkedBytes = math.MaxUint64
 	} else {

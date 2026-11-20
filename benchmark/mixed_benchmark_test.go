@@ -171,7 +171,7 @@ func TestMixedWriterAssignment(t *testing.T) {
 // use 4,096 keys, identical closed data and the VM profile's effective options.
 func BenchmarkMixedWriters(b *testing.B) {
 	keys, value, opts := measurementInput(1024, mixedOps)
-	opts.CacheBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
+	opts.ValueCacheBudgetBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
 	seed := filepath.Join(b.TempDir(), "seed")
 	db, err := engine.Open(seed, opts)
 	if err != nil {

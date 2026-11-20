@@ -27,18 +27,18 @@ var (
 )
 
 type Config struct {
-	CacheBytes, RecordBytes, TargetSegmentBytes int64
-	Handles                                     int
+	ValueCacheBudgetBytes, RecordBytes, TargetSegmentBytes int64
+	Handles                                                int
 }
 
 // RequiredLimits records the measured minima for a database image's live records.
 type RequiredLimits struct {
-	CacheBytes, RecordBytes int64
+	ValueCacheBudgetBytes, RecordBytes int64
 }
 
 // CheckLimits compares normalized settings with the live record requirements.
 func (cfg Config) CheckLimits(required RequiredLimits) error {
-	if cfg.CacheBytes < required.CacheBytes || cfg.RecordBytes < required.RecordBytes {
+	if cfg.ValueCacheBudgetBytes < required.ValueCacheBudgetBytes || cfg.RecordBytes < required.RecordBytes {
 		return &CompatibilityError{required}
 	}
 	return nil
@@ -49,7 +49,7 @@ type CompatibilityError struct {
 }
 
 func (e *CompatibilityError) Error() string {
-	return fmt.Sprintf("storage: incompatible limits: cache=%d record=%d", e.CacheBytes, e.RecordBytes)
+	return fmt.Sprintf("storage: require value cache budget >= %d bytes, max record size >= %d bytes", e.ValueCacheBudgetBytes, e.RecordBytes)
 }
 
 type File struct {

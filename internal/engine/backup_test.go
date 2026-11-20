@@ -160,7 +160,7 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 				Source:      source,
 				Destination: filepath.Join(parent, "restored"),
 				// Even when target limits are insufficient, verify the entire source first.
-				Limits: RestoreLimits{CacheBytes: 129, MaxRecordBytes: 49},
+				Limits: RestoreLimits{ValueCacheBudgetBytes: 129, MaxRecordBytes: 49},
 			})
 			var op *OpError
 			if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrUnsupportedFormat) || !errors.As(err, &op) || op.Outcome != NotApplied ||
@@ -586,11 +586,11 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 		mustPut(t, db, fmt.Sprint(i), "tail")
 	}
 	result, err := db.Compact(context.Background())
-	if err != nil || result.PinnedBytes == 0 {
+	if err != nil || result.PinnedRetiredDataBytes == 0 {
 		t.Fatalf("pinned compaction: %+v %v", result, err)
 	}
 	wantValue(t, db, "a", "new")
-	beforeRelease := db.MaintenanceStatus().UnlinkedBytes
+	beforeRelease := db.AutoCompactionStatus().UnlinkedBytes
 	if _, err := os.Stat(pinnedFile.Path); err != nil {
 		t.Fatalf("pinned source disappeared: %v", err)
 	}
@@ -622,8 +622,8 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err = db.Compact(context.Background())
-	status := db.MaintenanceStatus()
-	if err != nil || result.PinnedBytes != 0 || status.UnlinkedBytes-beforeRelease < uint64(pinnedFile.Size.Load()) {
+	status := db.AutoCompactionStatus()
+	if err != nil || result.PinnedRetiredDataBytes != 0 || status.UnlinkedBytes-beforeRelease < uint64(pinnedFile.Size.Load()) {
 		t.Fatalf("deferred cleanup: manual %+v automatic %+v error %v", result, status, err)
 	}
 }
@@ -691,7 +691,7 @@ func TestRestoreValidationAndNoReplace(t *testing.T) {
 		t.Fatalf("restored over empty existing directory: %v", err)
 	}
 	opts := testOptions()
-	opts.CacheBytes = 140
+	opts.ValueCacheBudgetBytes = 140
 	if err := Restore(context.Background(), RestoreRequest{
 		Source:      backup,
 		Destination: filepath.Join(t.TempDir(), "small"),

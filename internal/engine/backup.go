@@ -115,7 +115,7 @@ func newVerifyIndex(directory string) (index.Backend, error) { return btree.NewI
 
 func (l RestoreLimits) backupConfig() (storage.Config, error) {
 	limits, err := l.normalized()
-	return storage.Config{CacheBytes: limits.CacheBytes, RecordBytes: limits.MaxRecordBytes}, err
+	return storage.Config{ValueCacheBudgetBytes: limits.ValueCacheBudgetBytes, RecordBytes: limits.MaxRecordBytes}, err
 }
 
 // Check reports whether these destination limits can hold the measured live records.
@@ -125,7 +125,7 @@ func (l RestoreLimits) Check(required RestoreLimits) error {
 		return err
 	}
 	return publicCause(cfg.CheckLimits(storage.RequiredLimits{
-		CacheBytes: required.CacheBytes, RecordBytes: required.MaxRecordBytes,
+		ValueCacheBudgetBytes: required.ValueCacheBudgetBytes, RecordBytes: required.MaxRecordBytes,
 	}))
 }
 

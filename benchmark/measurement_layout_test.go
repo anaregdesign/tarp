@@ -172,7 +172,7 @@ func TestMeasurementLayoutAccountsForCanonicalRecords(t *testing.T) {
 	checkpoint := observedLayout(db)
 	if checkpoint.SelectedDataFiles != 2 || checkpoint.SnapshotFiles != 1 || checkpoint.EmptyCleanedIntervals != 0 ||
 		checkpoint.RetainedDeleteBytes != 0 || checkpoint.ObsoletePutBytes != 0 ||
-		checkpoint.UnselectedPinnedBytes == 0 || checkpoint.UnselectedPinnedBytes != result.PinnedBytes ||
+		checkpoint.UnselectedPinnedBytes == 0 || checkpoint.UnselectedPinnedBytes != result.PinnedRetiredDataBytes ||
 		checkpoint.RegisteredDataBytes != checkpoint.SelectedDataBytes+checkpoint.UnselectedPinnedBytes {
 		t.Fatalf("incorrect post-checkpoint inventory: %+v (Compact %+v)", checkpoint, result)
 	}

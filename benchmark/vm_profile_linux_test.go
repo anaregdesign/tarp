@@ -19,7 +19,7 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 	t.Helper()
 	guesttest.RequireDisposableGuest(t)
 	keys, value, opts := measurementInput(size, 512)
-	opts.CacheBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
+	opts.ValueCacheBudgetBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
 	hooks := &measurementHooks{}
 	db, err := engine.OpenWithIO("/mnt/tarp-data/diagnostic", opts, &storage.IO{Hook: hooks.hook})
 	if err != nil {
@@ -42,7 +42,7 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 	fixture := "/mnt/tarp-data/diagnostic-fixture"
 	measurementPrepareFixture(t, engine.Observe(db).Dir(), fixture, opts, keys, value)
 	write("diagnostic_environment", 0, map[string]any{
-		"working_keys": 512, "hot_keys": 8, "options": engine.Observe(db).Options(), "go": runtime.Version(),
+		"working_keys": 512, "hot_keys": 8, "options": measurementOptions(engine.Observe(db).Options()), "go": runtime.Version(),
 		"primary_latency_baseline": false, "mutex_build_tag": "tarpprofile",
 		"hold_scope":      "underlying Lock returned through Unlock entry; recording overhead excluded but extends actual lock hold; count/sum/max cover all observations",
 		"raw_hold_scope":  "at most 1024 evenly spaced samples from the bounded first 65536 retained spans per mutex/window",
@@ -143,7 +143,7 @@ func vmPendingMemory(t *testing.T, opts engine.Options, value []byte, callers, r
 	write("pending_owned_buffers", repetition, map[string]any{
 		"callers": callers, "foreground_writer_waiters": waiters,
 		"owned_key_value_bytes": queuedBytes, "copied_bytes_after_completion": copied.Load(),
-		"before": before, "all_callers_queued": after, "cache_limit_bytes": opts.CacheBytes,
+		"before": before, "all_callers_queued": after, "cache_limit_bytes": opts.ValueCacheBudgetBytes,
 		"scope": "observed index/cache input copies while the writer gate was held and after all Puts completed; process memory also includes caller and goroutine costs",
 	})
 }

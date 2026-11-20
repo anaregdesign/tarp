@@ -14,7 +14,7 @@ import (
 )
 
 func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
-	cfg := Config{CacheBytes: 1024, RecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64, Handles: 1}
 	store, _, err := Open(t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
 }
 
 func TestCheckpointRejectsAStaleLocationWithTheRightLiveCount(t *testing.T) {
-	cfg := Config{CacheBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
 	db, _, err := Open(t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestCheckpointSpoolsTenfoldGrowthWithinFixedPageCaches(t *testing.T) {
 				}
 				return nil
 			}}
-			cfg := Config{CacheBytes: 2 << 20, RecordBytes: 1024, TargetSegmentBytes: 64 << 10, Handles: 4}
+			cfg := Config{ValueCacheBudgetBytes: 2 << 20, RecordBytes: 1024, TargetSegmentBytes: 64 << 10, Handles: 4}
 			store, err := OpenIndexed(t.Context(), t.TempDir(), cfg, false, io, live)
 			if err != nil {
 				t.Fatal(err)

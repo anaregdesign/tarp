@@ -26,7 +26,7 @@ import (
 )
 
 func testOptions() Options {
-	return Options{CacheBytes: 1024, MaxRecordBytes: 128, TargetSegmentBytes: 256, ReadFileHandles: 2}
+	return Options{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 128, TargetSegmentBytes: 256, ReadFileHandles: 2}
 }
 
 func newTestDB(t *testing.T, opts Options, fs *storage.IO) *DB {
@@ -160,8 +160,8 @@ func TestQueuedPutDefersOwnedInput(t *testing.T) {
 
 func TestOversizedPutIsPreMutation(t *testing.T) {
 	for _, opts := range []Options{
-		{CacheBytes: 140, MaxRecordBytes: 128, ReadFileHandles: 1},
-		{CacheBytes: 1024, MaxRecordBytes: 60, ReadFileHandles: 1},
+		{ValueCacheBudgetBytes: 140, MaxRecordBytes: 128, ReadFileHandles: 1},
+		{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 60, ReadFileHandles: 1},
 	} {
 		db := newTestDB(t, opts, nil)
 		mustPut(t, db, "a", "old")
@@ -201,7 +201,7 @@ func TestMissCannotRefillStaleVersion(t *testing.T) {
 				return nil
 			}}
 			opts := testOptions()
-			opts.CacheBytes = 140
+			opts.ValueCacheBudgetBytes = 140
 			db := newTestDB(t, opts, fs)
 			mustPut(t, db, "k", "old")
 			mustPut(t, db, "x", "evict")
@@ -231,7 +231,7 @@ func TestMissCannotRefillStaleVersion(t *testing.T) {
 				t.Fatalf("racing miss: %q %v", got.value, got.err)
 			}
 			s := db.Stats()
-			if s.Cache.Hits != 0 || s.Cache.Misses != 1 || s.MissingKeys != 0 {
+			if s.ValueCache.Hits != 0 || s.ValueCache.Misses != 1 || s.MissingKeyLookups != 0 {
 				t.Fatalf("retry should count only the initial miss: %+v", s)
 			}
 		})
@@ -241,7 +241,7 @@ func TestMissCannotRefillStaleVersion(t *testing.T) {
 func TestExactCacheIntegration(t *testing.T) {
 	var reads atomic.Int64
 	opts := testOptions()
-	opts.CacheBytes = 2 * (128 + 1 + 1)
+	opts.ValueCacheBudgetBytes = 2 * (128 + 1 + 1)
 	db := newTestDB(t, opts, &storage.IO{Hook: func(p string) error {
 		if p == "read:before" {
 			reads.Add(1)
@@ -271,7 +271,7 @@ func TestExactCacheIntegration(t *testing.T) {
 		t.Fatal("wrong LRU victim")
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 2 || s.Cache.Misses != 1 || s.MissingKeys != 1 || s.Cache.Evictions != 2 {
+	if s.ValueCache.Hits != 2 || s.ValueCache.Misses != 1 || s.MissingKeyLookups != 1 || s.ValueCache.Evictions != 2 {
 		t.Fatalf("unexpected lookup/eviction counts: %+v", s)
 	}
 }
@@ -401,7 +401,7 @@ func TestReopenCompatibilityBeforeTailCleanup(t *testing.T) {
 	}
 	before := directoryBytes(t, path)
 	opts := testOptions()
-	opts.CacheBytes = 150
+	opts.ValueCacheBudgetBytes = 150
 	if _, err := Open(path, opts); !errors.Is(err, ErrIncompatibleOptions) {
 		t.Fatalf("smaller cache: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestConcurrentReadFailureBeforeFrontierLeavesPutUnapplied(t *testing.T) {
 				return nil
 			}}
 			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
-			opts := Options{CacheBytes: 140, MaxRecordBytes: 64, TargetSegmentBytes: tc.target}
+			opts := Options{ValueCacheBudgetBytes: 140, MaxRecordBytes: 64, TargetSegmentBytes: tc.target}
 			db := newTestDBWithHooks(t, opts, fs, engineHooks)
 			mustPut(t, db, "cold", "old")
 			mustPut(t, db, "key", "old") // Evicts "cold", forcing Get to read the segment.
@@ -577,7 +577,7 @@ func TestConcurrentReadFailureBeforeFrontierLeavesPutUnapplied(t *testing.T) {
 }
 
 func TestCloseRetainsBothReadAndCloseFailures(t *testing.T) {
-	opts := Options{CacheBytes: 140}
+	opts := Options{ValueCacheBudgetBytes: 140}
 	db := newTestDB(t, opts, &storage.IO{Hook: func(p string) error {
 		switch p {
 		case "read:before":
@@ -1123,7 +1123,7 @@ func TestMissSurvivesRelocationAndRetirement(t *testing.T) {
 	var armed atomic.Bool
 	started, release := make(chan struct{}), make(chan struct{})
 	opts := testOptions()
-	opts.CacheBytes = 140
+	opts.ValueCacheBudgetBytes = 140
 	db := newTestDB(t, opts, &storage.IO{Hook: func(p string) error {
 		if p == "read:after" && armed.CompareAndSwap(true, false) {
 			close(started)
@@ -1328,7 +1328,7 @@ func TestConcurrentReadFailureAfterDurablePublication(t *testing.T) {
 		return nil
 	}}
 	opts := testOptions()
-	opts.CacheBytes = 140
+	opts.ValueCacheBudgetBytes = 140
 	db := newTestDB(t, opts, fs)
 	mustPut(t, db, "k", "old")
 	mustPut(t, db, "x", "old")

@@ -28,7 +28,7 @@ collection at idle or alongside foreground Gets. The [v0.2.0 native
 results](benchmarks/v0.2.0-native.md) include workload definitions, per-key
 and per-group units, all five rounds and follow-up diagnostics.
 
-To compare `BatchReadConcurrency` limits of 1, 2, 4 and 8, run
+To compare `BatchGetReadConcurrency` limits of 1, 2, 4 and 8, run
 `go test ./benchmark -run '^$' -bench '^BenchmarkBatchGetReadConcurrency$' -benchmem -count=5`.
 Each call reads 32 distinct keys in a fixed shuffled order with 64-byte or
 64-KiB values. These are single-client measurements with a cold tarp LRU and
