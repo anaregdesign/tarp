@@ -1,7 +1,8 @@
 # Database statistics
 
 Call `db.Stats()` once per scrape. Both `DB` and `TypedDB` return a
-`tarp.Stats` value for the underlying open DB. All fields are `uint64`.
+`tarp.Stats` value for the underlying open DB. Each metric is a `uint64`.
+Cache metrics are grouped under `Stats.Cache` in a `tarp.CacheStats` value.
 The snapshot is coherent across the fields, including concurrent batch and
 catalog publications. Taking it uses a short state lock and constant work,
 performs no file I/O, and preserves LRU membership, recency and counters.

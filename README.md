@@ -5,9 +5,10 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). The examples below
-use v0.7.0. For the v0.6.0 API, see its
-[versioned documentation](https://github.com/anaregdesign/tarp/tree/v0.6.0).
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
+uses v0.7.0. The batch diagnostics and backup verification examples below
+use the API on `main`. For v0.7.0, see the
+[versioned documentation](https://github.com/anaregdesign/tarp/tree/v0.7.0).
 
 ```sh
 mkdir tarp-example
@@ -209,7 +210,11 @@ from DATA only once. Empty values and missing keys cost zero bytes. Result
 metadata and allocations inside a custom decoder are outside this limit.
 Repeated puts apply in input order. Repeated deletes
 remove a key once. If any requested delete key is missing, the whole call
-returns `ErrNotFound` before writing.
+returns an error matching `ErrNotFound` before writing. For an empty key in
+any batch or a missing key in `BatchDelete`, use `errors.As` with
+`*tarp.BatchKeyError`. Its `Index` gives the first occurrence of the offending
+encoded key in the original input. For example, deleting `[a, a, missing]`
+reports index 2 when `a` exists.
 
 `BatchGet` preserves LRU recency and reads each distinct cold, live key once.
 Concurrent `BatchGet` calls on the same DB, including typed views, share the
@@ -249,6 +254,9 @@ reopen a database and `Restore` to restore a backup offline.
   arrays until every call using them has returned, including failed writes.
 - `Get` uses an exact global LRU first. Misses read a checked indexed file record
   and cache it; updates/deletes cannot race a stale miss into visibility.
+- If `Get`, `BatchGet` or `Scan` encounters a DATA read error, the error
+  identifies the segment filename and the record's starting byte offset.
+  Use `errors.Is` or `errors.As` to inspect the underlying cause.
 - Successful writes include data, commit-frontier, and directory syncs before
   memory publication. Use `errors.As` to inspect the operation, phase and
   outcome in `*OpError`. After an uncertain database write, close and reopen
@@ -333,18 +341,23 @@ and the segment target when opening the restored DB.
 To inspect an immutable backup, use the metadata returned by its verification.
 
 ```go
-info, err := tarp.VerifyBackup(ctx, backupDir, opts.RestoreLimits())
+info, err := tarp.VerifyBackup(ctx, backupDir)
 if err != nil {
     return err
 }
 fmt.Printf("database %x, sequence %d, live keys %d\n", info.DatabaseID, info.Sequence, info.LiveKeys)
+if err := info.CheckLimits(opts.RestoreLimits()); err != nil {
+    return err
+}
 ```
 
-`VerifyBackup` checks the exact file set and digests, replays the selected
-records and validates the live size limits. `info.RequiredLimits` reports the
-largest logical cache charge and encoded record among the live entries. Both
+`VerifyBackup` checks the exact file set and digests and replays the selected
+records. `info.RequiredLimits` reports the largest logical cache charge and
+encoded record among the live entries. Both
 are zero for an empty backup. A verification error returns a zero report.
-`Restore` independently verifies the copied database before publishing it.
+`info.CheckLimits` compares these sizes with a target configuration in memory.
+`Restore` enforces the target limits and independently verifies the copied
+database before publishing it.
 Pass the restored directory to `OpenExisting`. Passing the backup directory
 itself to `Open` or `OpenExisting` returns an error and preserves the backup.
 

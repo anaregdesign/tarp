@@ -230,8 +230,11 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 		return err
 	}
 	buffer := make([]byte, 32<<10)
-	backup, err := verifyBackup(ctx, source, cfg, buffer)
+	backup, err := verifyBackup(ctx, source, buffer)
 	if err != nil {
+		return err
+	}
+	if err := cfg.CheckLimits(backup.info.Required); err != nil {
 		return err
 	}
 	stage, err := os.MkdirTemp(filepath.Dir(target), ".tarp-restore-")
@@ -249,7 +252,11 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			return fmt.Errorf("%s: %w", f.Name, err)
 		}
 	}
-	if _, err := validateBackupImage(ctx, stage, cfg); err != nil {
+	image, err := validateBackupImage(ctx, stage)
+	if err != nil {
+		return err
+	}
+	if err := cfg.CheckLimits(image.Required); err != nil {
 		return err
 	}
 	err = publishDirectory(ctx, fs, stage, target, "restore")
@@ -259,9 +266,9 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 
 // BackupInfo describes a fully verified backup. Size minima come from live records.
 type BackupInfo struct {
-	DatabaseID                              [16]byte
-	Sequence, LiveKeys                      uint64
-	RequiredCacheBytes, RequiredRecordBytes int64
+	DatabaseID         [16]byte
+	Sequence, LiveKeys uint64
+	Required           RequiredLimits
 }
 
 type verifiedBackup struct {
@@ -270,7 +277,7 @@ type verifiedBackup struct {
 }
 
 // VerifyBackup checks an immutable backup without creating a destination or acquiring a lock.
-func VerifyBackup(ctx context.Context, dir string, cfg Config) (BackupInfo, error) {
+func VerifyBackup(ctx context.Context, dir string) (BackupInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return BackupInfo{}, err
 	}
@@ -278,11 +285,11 @@ func VerifyBackup(ctx context.Context, dir string, cfg Config) (BackupInfo, erro
 	if err != nil {
 		return BackupInfo{}, err
 	}
-	backup, err := verifyBackup(ctx, source, cfg, make([]byte, 32<<10))
+	backup, err := verifyBackup(ctx, source, make([]byte, 32<<10))
 	return backup.info, err
 }
 
-func verifyBackup(ctx context.Context, source string, cfg Config, buffer []byte) (verifiedBackup, error) {
+func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBackup, error) {
 	if err := ctx.Err(); err != nil {
 		return verifiedBackup{}, err
 	}
@@ -326,7 +333,7 @@ func verifyBackup(ctx context.Context, source string, cfg Config, buffer []byte)
 	if len(entries) != len(files)+1 {
 		return verifiedBackup{}, fmt.Errorf("%w: missing BACKUP", ErrCorrupt)
 	}
-	image, err := validateBackupImage(ctx, source, cfg)
+	image, err := validateBackupImage(ctx, source)
 	if err != nil {
 		return verifiedBackup{}, err
 	}
@@ -356,15 +363,15 @@ func verifyBackup(ctx context.Context, source string, cfg Config, buffer []byte)
 		files: meta.Files,
 		info: BackupInfo{
 			DatabaseID: image.Current.UUID, Sequence: image.Current.Sequence, LiveKeys: uint64(len(image.Index)),
-			RequiredCacheBytes: image.Required.CacheBytes, RequiredRecordBytes: image.Required.RecordBytes,
+			Required: image.Required,
 		},
 	}, nil
 }
 
 // Once BACKUP is recognized, every selected object must have the canonical
 // signature. An incompatible inner CURRENT is corruption of this backup.
-func validateBackupImage(ctx context.Context, dir string, cfg Config) (*Image, error) {
-	img, err := Validate(ctx, dir, cfg)
+func validateBackupImage(ctx context.Context, dir string) (*Image, error) {
+	img, err := Validate(ctx, dir)
 	if errors.Is(err, format.ErrUnsupported) {
 		return nil, fmt.Errorf("%w: backup selected an incompatible CURRENT", ErrCorrupt)
 	}

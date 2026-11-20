@@ -27,9 +27,9 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 	if err := CheckBatchCount(len(keys)); err != nil {
 		return nil, err
 	}
-	for _, key := range keys {
+	for i, key := range keys {
 		if len(key) == 0 {
-			return nil, ErrEmptyKey
+			return nil, &BatchKeyError{Operation: "BatchGet", Index: i, Err: ErrEmptyKey}
 		}
 	}
 

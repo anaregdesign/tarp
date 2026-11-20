@@ -128,16 +128,26 @@ type BackupInfo struct {
 	RequiredLimits RestoreLimits
 }
 
-// VerifyBackup checks the file set, checksums, committed records and live record
-// limits of an immutable backup without writing files. Any error returns a zero BackupInfo.
-func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) (BackupInfo, error) {
-	info, err := engine.VerifyBackup(ctx, source, engine.RestoreLimits(limits))
+// CheckLimits checks whether a target configuration can restore this backup,
+// using the measured RequiredLimits without reading the backup again. Zero fields
+// select the same defaults as Open. Invalid limits match ErrInvalidOptions.
+// Insufficient limits match ErrIncompatibleOptions and expose *CompatibilityError
+// through errors.As.
+func (info BackupInfo) CheckLimits(limits RestoreLimits) error {
+	return engine.RestoreLimits(limits).Check(engine.RestoreLimits(info.RequiredLimits))
+}
+
+// VerifyBackup checks an immutable backup's file set, checksums and committed
+// records, and reports the limits its live records require. It does not write
+// files. Any error returns a zero BackupInfo.
+func VerifyBackup(ctx context.Context, source string) (BackupInfo, error) {
+	info, err := engine.VerifyBackup(ctx, source)
 	if err != nil {
 		return BackupInfo{}, err
 	}
 	return BackupInfo{
 		DatabaseID: info.DatabaseID, Sequence: info.Sequence, LiveKeys: info.LiveKeys,
-		RequiredLimits: RestoreLimits{CacheBytes: info.RequiredCacheBytes, MaxRecordBytes: info.RequiredRecordBytes},
+		RequiredLimits: RestoreLimits{CacheBytes: info.Required.CacheBytes, MaxRecordBytes: info.Required.RecordBytes},
 	}, nil
 }
 

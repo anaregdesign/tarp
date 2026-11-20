@@ -140,7 +140,7 @@ func TestOpenRejectsBackupWithoutChangingItsFiles(t *testing.T) {
 				t.Fatalf("backup manifest changed after open: %v", err)
 			}
 			// The manifest authenticates the exact inventory and bytes of all other files.
-			if _, err := tarp.VerifyBackup(ctx, req.Source, req.Limits); err != nil {
+			if _, err := tarp.VerifyBackup(ctx, req.Source); err != nil {
 				t.Fatalf("verify after open: %v", err)
 			}
 			if err := tarp.Restore(ctx, req); err != nil {
@@ -154,9 +154,11 @@ func TestOpenRejectsBackupWithoutChangingItsFiles(t *testing.T) {
 	}
 }
 
-func TestRestoreVerifiesOnlySelectedLimits(t *testing.T) {
-	db := openPublicDB(t, t.TempDir(), tarp.Options{})
-	if err := db.Put([]byte("k"), []byte("v")); err != nil {
+func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
+	// A record larger than the default limit must still be inspectable.
+	const valueBytes = 1 << 20
+	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxRecordBytes: 2 << 20})
+	if err := db.Put([]byte("k"), make([]byte, valueBytes)); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
@@ -164,9 +166,10 @@ func TestRestoreVerifiesOnlySelectedLimits(t *testing.T) {
 	if err := db.Backup(t.Context(), req.Source); err != nil {
 		t.Fatal(err)
 	}
-	info, err := tarp.VerifyBackup(t.Context(), req.Source, tarp.RestoreLimits{})
+	info, err := tarp.VerifyBackup(t.Context(), req.Source)
+	wantLimits := tarp.RestoreLimits{CacheBytes: 128 + 1 + valueBytes, MaxRecordBytes: 48 + 1 + valueBytes}
 	if err != nil || info.Sequence != 1 || info.LiveKeys != 1 || info.DatabaseID == ([16]byte{}) ||
-		info.RequiredLimits != (tarp.RestoreLimits{CacheBytes: 130, MaxRecordBytes: 50}) {
+		info.RequiredLimits != wantLimits {
 		t.Fatalf("verified backup = %+v, %v", info, err)
 	}
 	if _, err := os.Lstat(filepath.Join(req.Source, "LOCK")); !errors.Is(err, os.ErrNotExist) {
@@ -174,27 +177,41 @@ func TestRestoreVerifiesOnlySelectedLimits(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if got, err := tarp.VerifyBackup(ctx, req.Source, tarp.RestoreLimits{}); !errors.Is(err, context.Canceled) || got != (tarp.BackupInfo{}) {
+	if got, err := tarp.VerifyBackup(ctx, req.Source); !errors.Is(err, context.Canceled) || got != (tarp.BackupInfo{}) {
 		t.Fatalf("canceled verification: %+v, %v", got, err)
 	}
 	req.Limits.MaxRecordBytes = -1
+	if err := info.CheckLimits(req.Limits); !errors.Is(err, tarp.ErrInvalidOptions) {
+		t.Fatalf("check invalid restore limit: %v", err)
+	}
 	if err := tarp.Restore(t.Context(), req); !errors.Is(err, tarp.ErrInvalidOptions) {
 		t.Fatalf("invalid restore limit: %v", err)
 	}
-	req.Limits = tarp.RestoreLimits{CacheBytes: 129}
-	var incompatible *tarp.CompatibilityError
-	if got, err := tarp.VerifyBackup(t.Context(), req.Source, req.Limits); !errors.As(err, &incompatible) || incompatible.RequiredCacheBytes != 130 || got != (tarp.BackupInfo{}) {
-		t.Fatalf("verify live record limits: %v", err)
+	for _, limits := range []tarp.RestoreLimits{
+		{}, // The default record limit is too small.
+		{CacheBytes: wantLimits.CacheBytes - 1, MaxRecordBytes: wantLimits.MaxRecordBytes},
+	} {
+		req.Limits = limits
+		for _, err := range []error{info.CheckLimits(limits), tarp.Restore(t.Context(), req)} {
+			var incompatible *tarp.CompatibilityError
+			if !errors.Is(err, tarp.ErrIncompatibleOptions) || !errors.As(err, &incompatible) ||
+				incompatible.RequiredCacheBytes != wantLimits.CacheBytes || incompatible.RequiredRecordBytes != wantLimits.MaxRecordBytes {
+				t.Fatalf("checking limits %+v: %v", limits, err)
+			}
+		}
+		if _, err := os.Lstat(req.Destination); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("incompatible restore destination: %v", err)
+		}
 	}
-	if err := tarp.Restore(t.Context(), req); !errors.Is(err, tarp.ErrIncompatibleOptions) {
-		t.Fatalf("incompatible cache limit: %v", err)
-	}
-	opts := tarp.Options{CacheBytes: 130, MaxRecordBytes: 50, ReadFileHandles: -1, TargetSegmentBytes: -1, BatchReadConcurrency: -1}
+	opts := tarp.Options{CacheBytes: wantLimits.CacheBytes, MaxRecordBytes: wantLimits.MaxRecordBytes, ReadFileHandles: -1, TargetSegmentBytes: -1, BatchReadConcurrency: -1}
 	req.Limits = opts.RestoreLimits()
+	if err := info.CheckLimits(req.Limits); err != nil {
+		t.Fatalf("check exact live record limits: %v", err)
+	}
 	if err := tarp.Restore(t.Context(), req); err != nil {
 		t.Fatalf("restore with exact live record limits: %v", err)
 	}
-	restored := openPublicDB(t, req.Destination, tarp.Options{})
+	restored := openPublicDB(t, req.Destination, tarp.Options{MaxRecordBytes: wantLimits.MaxRecordBytes})
 	if err := restored.Delete([]byte("k")); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +219,7 @@ func TestRestoreVerifiesOnlySelectedLimits(t *testing.T) {
 	if err := restored.Backup(t.Context(), empty); err != nil {
 		t.Fatal(err)
 	}
-	got, err := tarp.VerifyBackup(t.Context(), empty, tarp.RestoreLimits{})
+	got, err := tarp.VerifyBackup(t.Context(), empty)
 	if err != nil || got != (tarp.BackupInfo{DatabaseID: info.DatabaseID, Sequence: 2}) {
 		t.Fatalf("verified empty backup of restored database = %+v, %v", got, err)
 	}
@@ -285,7 +302,7 @@ func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {
 				t.Fatalf("Compact returned %+v", result)
 			}
 			check("backup", db.Backup(tc.ctx, target))
-			info, err := tarp.VerifyBackup(tc.ctx, backup, tarp.RestoreLimits{})
+			info, err := tarp.VerifyBackup(tc.ctx, backup)
 			check("verify-backup", err)
 			if info != (tarp.BackupInfo{}) {
 				t.Fatalf("VerifyBackup returned %+v on error", info)

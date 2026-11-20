@@ -38,6 +38,9 @@ type PreparedBatch struct {
 	db      *DB
 	kind    uint8
 	records []storage.Entry
+	// Original indices of distinct delete records following the first duplicate.
+	// Earlier records have the same positions in the input and the commit.
+	deleteInputs []uint16
 }
 
 // PreparePuts checks entries as the caller produces them. A failure stops
@@ -55,6 +58,9 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		}
 		key, value := uint64(len(entry.Key)), uint64(len(entry.Value))
 		if err := db.opts.checkSize(key, value); err != nil {
+			if err == ErrEmptyKey {
+				return PreparedBatch{}, &BatchKeyError{Operation: "BatchPut", Index: i, Err: err}
+			}
 			if size, ok := err.(*SizeError); ok {
 				return PreparedBatch{}, &BatchLimitError{Kind: BatchEntrySizeLimit, Index: i, Entry: size}
 			}
@@ -66,7 +72,7 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		}
 		records[i] = storage.Entry(entry)
 	}
-	return PreparedBatch{db, format.Put, records}, nil
+	return PreparedBatch{db: db, kind: format.Put, records: records}, nil
 }
 
 // PrepareDeletes counts every input but charges only the first occurrence
@@ -81,6 +87,7 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 	var inline [2 * small]uint16
 	slots := inline[:]
 	records := make([]storage.Entry, 0, min(count, small))
+	var deleteInputs []uint16
 	var used uint64
 	for i := range count {
 		key, err := keyAt(i)
@@ -88,7 +95,7 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 			return PreparedBatch{}, err
 		}
 		if len(key) == 0 {
-			return PreparedBatch{}, ErrEmptyKey
+			return PreparedBatch{}, &BatchKeyError{Operation: "BatchDelete", Index: i, Err: ErrEmptyKey}
 		}
 		slot := deleteKeySlot(slots, records, key)
 		if slots[slot] != 0 {
@@ -115,9 +122,12 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 			slot = deleteKeySlot(slots, records, key)
 		}
 		slots[slot] = uint16(len(records) + 1)
+		if i != len(records) {
+			deleteInputs = append(deleteInputs, uint16(i))
+		}
 		records = append(records, storage.Entry{Key: key})
 	}
-	return PreparedBatch{db, format.Delete, records}, nil
+	return PreparedBatch{db: db, kind: format.Delete, records: records, deleteInputs: deleteInputs}, nil
 }
 
 // deleteKeySlot returns an empty bucket or the bucket of an equal key.
@@ -139,14 +149,6 @@ func (b PreparedBatch) Commit() error {
 	}
 	defer b.db.done()
 	return b.apply()
-}
-
-func (b PreparedBatch) apply() error {
-	op := "batch-put"
-	if b.kind == format.Delete {
-		op = "batch-delete"
-	}
-	return b.db.mutateBatch(op, b.kind, b.records)
 }
 
 // BatchPut commits all entries in input order. A repeated key retains its last value.
@@ -175,7 +177,8 @@ func (db *DB) BatchDelete(keys [][]byte) error {
 	return batch.apply()
 }
 
-func (db *DB) mutateBatch(op string, kind uint8, records []storage.Entry) error {
+func (b PreparedBatch) apply() error {
+	db, kind, records := b.db, b.kind, b.records
 	if len(records) == 0 {
 		return nil
 	}
@@ -185,12 +188,17 @@ func (db *DB) mutateBatch(op string, kind uint8, records []storage.Entry) error 
 	if err := db.health(); err != nil {
 		return err
 	}
+	op := "batch-put"
 	if kind == format.Delete {
+		op = "batch-delete"
 		db.state.Lock()
-		for _, record := range records {
+		for i, record := range records {
 			if _, ok := db.index[string(record.Key)]; !ok {
 				db.state.Unlock()
-				return ErrNotFound
+				if prefix := len(records) - len(b.deleteInputs); i >= prefix {
+					i = int(b.deleteInputs[i-prefix])
+				}
+				return &BatchKeyError{Operation: "BatchDelete", Index: i, Err: ErrNotFound}
 			}
 		}
 		db.state.Unlock()

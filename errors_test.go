@@ -2,10 +2,80 @@ package tarp_test
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/anaregdesign/tarp"
 )
+
+func TestLiveReadsReportCorruptRecordLocation(t *testing.T) {
+	for _, op := range []string{"get", "batch-get", "scan"} {
+		t.Run(op, func(t *testing.T) {
+			dir := t.TempDir()
+			db := openPublicDB(t, dir, tarp.Options{})
+			key := []byte("k")
+			if err := db.Put(key, []byte("first")); err != nil {
+				t.Fatal(err)
+			}
+			files, err := filepath.Glob(filepath.Join(dir, "DATA-*"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("expected one DATA file, got %v, %v", files, err)
+			}
+			path := files[0]
+			st, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The second Put appends the live record at the previous end of DATA.
+			want := fmt.Sprintf("%s: record at offset %d:", filepath.Base(path), st.Size())
+			if err := db.Put(key, []byte("second")); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cold, err := tarp.OpenExisting(t.Context(), dir, tarp.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cold.Close()
+
+			// Damage the live value after recovery, while the cache is cold.
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data[len(data)-1] ^= 1
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch op {
+			case "get":
+				_, err = cold.Get(key)
+			case "batch-get":
+				_, err = cold.BatchGet([][]byte{key})
+			case "scan":
+				for _, scanErr := range cold.Scan(t.Context()) {
+					if scanErr != nil {
+						err = scanErr
+						break
+					}
+				}
+			}
+			var failure *tarp.OpError
+			if !errors.Is(err, tarp.ErrCorrupt) || !errors.As(err, &failure) || failure.Operation != op ||
+				failure.Phase != "read" || failure.Outcome != tarp.NotApplied || !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected a read error at %q, got %v", want, err)
+			}
+			if _, err := cold.Get(key); !errors.Is(err, tarp.ErrUnhealthy) || !errors.Is(err, tarp.ErrCorrupt) || !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected unhealthy DB to retain the read error, got %v", err)
+			}
+		})
+	}
+}
 
 func TestPublicDBReportsSizeAndReopenLimits(t *testing.T) {
 	// A one-byte key and a three-byte value occupy a 52-byte record

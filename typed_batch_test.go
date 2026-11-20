@@ -5,10 +5,56 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/anaregdesign/tarp"
 )
+
+type trimmedKeyCodec struct {
+	tarp.StringCodec
+	calls int
+}
+
+func (c *trimmedKeyCodec) Encode(key string) ([]byte, error) {
+	c.calls++
+	return c.StringCodec.Encode(strings.TrimSpace(key))
+}
+
+func TestTypedBatchKeyErrorsUseOriginalInputsAndEncodeOnce(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	if err := db.Put([]byte("a"), []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	codec := &trimmedKeyCodec{}
+	view, err := tarp.Bind(db, codec, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"a", " a", " "}
+	entries := []tarp.TypedEntry[string, string]{{Key: keys[0]}, {Key: keys[1]}, {Key: keys[2]}}
+	before := db.Stats()
+	for _, tc := range []struct {
+		op    string
+		call  func() error
+		cause error
+		count int
+	}{
+		{"BatchGet", func() error { _, err := view.BatchGet(keys); return err }, tarp.ErrEmptyKey, 3},
+		{"BatchPut", func() error { return view.BatchPut(entries) }, tarp.ErrEmptyKey, 3},
+		{"BatchDelete", func() error { return view.BatchDelete(keys) }, tarp.ErrEmptyKey, 3},
+		{"BatchDelete", func() error { return view.BatchDelete([]string{"a", " a", "missing", " missing", "other"}) }, tarp.ErrNotFound, 5},
+	} {
+		codec.calls = 0
+		requireBatchKeyError(t, tc.call(), tc.op, 2, tc.cause)
+		if codec.calls != tc.count {
+			t.Fatalf("%s encoded %d inputs, want %d", tc.op, codec.calls, tc.count)
+		}
+	}
+	if after := db.Stats(); after != before {
+		t.Fatalf("rejected typed batch changed Stats: before %+v, after %+v", before, after)
+	}
+}
 
 func requireBatchCodecError(t *testing.T, err, cause error, op string, index int, field string) {
 	t.Helper()

@@ -7,11 +7,25 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
+
+func TestReadMissingSegmentPreservesPathErrorAndRecordOffset(t *testing.T) {
+	filename := DataName([16]byte{}, 1)
+	path := filepath.Join(t.TempDir(), filename)
+	s := &Store{readers: newHandles(1)}
+	loc := Location{File: &File{Path: path}, Offset: format.SegmentHeaderBytes}
+	_, err := s.Read(loc, "k")
+	var pathErr *os.PathError
+	want := fmt.Sprintf("%s: record at offset %d:", filename, loc.Offset)
+	if !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathErr) || pathErr.Path != path || !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected missing segment and location %q, got %v", want, err)
+	}
+}
 
 func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
 	dir := t.TempDir()

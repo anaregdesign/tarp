@@ -29,10 +29,15 @@ type Stats struct {
 
 // Stats also returns the retained final snapshot after Close.
 func (db *DB) Stats() (s Stats) {
-	db.state.Lock()
-	db.readStatsLocked(&s)
-	db.state.Unlock()
+	db.ReadStats(&s)
 	return s
+}
+
+// ReadStats fills s from a single snapshot under the DB's state lock.
+func (db *DB) ReadStats(s *Stats) {
+	db.state.Lock()
+	db.readStatsLocked(s)
+	db.state.Unlock()
 }
 
 func (db *DB) readStatsLocked(s *Stats) {

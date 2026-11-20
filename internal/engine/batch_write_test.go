@@ -46,6 +46,12 @@ func TestPrepareDeletesResolvesHashCollisionsAndTableGrowth(t *testing.T) {
 			t.Fatalf("key %d: got %x, want %x", i, batch.records[i].Key, key)
 		}
 	}
+	// Only the first key's input position equals its position in records.
+	for i := 1; i < len(distinct); i++ {
+		if got := batch.deleteInputs[i-1]; int(got) != 2*i {
+			t.Fatalf("record %d came from input %d, want %d", i, got, 2*i)
+		}
+	}
 }
 
 func TestPrepareDeletesRetainsOnlyDistinctKeysInOrder(t *testing.T) {
@@ -62,6 +68,9 @@ func TestPrepareDeletesRetainsOnlyDistinctKeysInOrder(t *testing.T) {
 		}
 		if distinct <= 16 && cap(batch.records) > 16 {
 			t.Fatalf("reserved %d descriptors for %d distinct keys", cap(batch.records), distinct)
+		}
+		if batch.deleteInputs != nil {
+			t.Fatalf("%d distinct keys in original positions needed extra indices", distinct)
 		}
 		for i, record := range batch.records {
 			if !bytes.Equal(record.Key, []byte{byte(i >> 8), byte(i)}) {

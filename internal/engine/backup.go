@@ -85,15 +85,11 @@ func Restore(ctx context.Context, req RestoreRequest) error {
 }
 
 // VerifyBackup checks the complete immutable source without writing files.
-func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) (storage.BackupInfo, error) {
+func VerifyBackup(ctx context.Context, source string) (storage.BackupInfo, error) {
 	if ctx == nil {
 		return storage.BackupInfo{}, validContextError("verify-backup")
 	}
-	cfg, err := limits.backupConfig()
-	if err != nil {
-		return storage.BackupInfo{}, err
-	}
-	info, err := storage.VerifyBackup(ctx, source, cfg)
+	info, err := storage.VerifyBackup(ctx, source)
 	if err != nil {
 		return storage.BackupInfo{}, operationError("verify-backup", "validation", err)
 	}
@@ -103,6 +99,17 @@ func VerifyBackup(ctx context.Context, source string, limits RestoreLimits) (sto
 func (l RestoreLimits) backupConfig() (storage.Config, error) {
 	limits, err := l.normalized()
 	return storage.Config{CacheBytes: limits.CacheBytes, RecordBytes: limits.MaxRecordBytes}, err
+}
+
+// Check reports whether these destination limits can hold the measured live records.
+func (l RestoreLimits) Check(required RestoreLimits) error {
+	cfg, err := l.backupConfig()
+	if err != nil {
+		return err
+	}
+	return publicCause(cfg.CheckLimits(storage.RequiredLimits{
+		CacheBytes: required.CacheBytes, RecordBytes: required.MaxRecordBytes,
+	}))
 }
 
 func restoreWithIO(ctx context.Context, req RestoreRequest, fs *storage.IO) error {
