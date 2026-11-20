@@ -22,6 +22,14 @@ func CheckBatchCount(count int) error {
 	return nil
 }
 
+// CheckBatchKey reports the original input position of an empty encoded key.
+func CheckBatchKey(operation string, i int, key []byte) error {
+	if len(key) == 0 {
+		return &BatchKeyError{Operation: operation, Index: i, Err: ErrEmptyKey}
+	}
+	return nil
+}
+
 func (db *DB) addBatchBytes(index int, used, recordBytes uint64) (uint64, error) {
 	limit := uint64(min(db.opts.TargetSegmentBytes-format.SegmentHeaderBytes, int64(math.MaxInt)))
 	// Used fits a segment minus its header; recordBytes is either a validated
@@ -44,8 +52,9 @@ type PreparedBatch struct {
 	deleteInputs []uint16
 }
 
-// PreparePuts checks entries as the caller produces them. A failure stops
-// encoding immediately. No database lock is held while calling entryAt.
+// PreparePuts checks entry and payload limits as entryAt supplies each put.
+// The caller must check each key with CheckBatchKey before supplying its value.
+// No database lock is held while calling entryAt.
 func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (PreparedBatch, error) {
 	if err := CheckBatchCount(count); err != nil {
 		return PreparedBatch{}, err
@@ -57,17 +66,11 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		if err != nil {
 			return PreparedBatch{}, err
 		}
-		key, value := uint64(len(entry.Key)), uint64(len(entry.Value))
-		if err := db.opts.checkSize(key, value); err != nil {
-			if err == ErrEmptyKey {
-				return PreparedBatch{}, &BatchKeyError{Operation: "BatchPut", Index: i, Err: err}
-			}
-			if size, ok := err.(*SizeError); ok {
-				return PreparedBatch{}, &BatchLimitError{Kind: BatchEntrySizeLimit, Index: i, Entry: size}
-			}
-			return PreparedBatch{}, err
+		keyBytes, valueBytes := uint64(len(entry.Key)), uint64(len(entry.Value))
+		if size := db.opts.checkEntryLimits(keyBytes, valueBytes); size != nil {
+			return PreparedBatch{}, &BatchLimitError{Kind: BatchEntrySizeLimit, Index: i, Entry: size}
 		}
-		used, err = db.addBatchBytes(i, used, entrysize.RecordBytes(key, value))
+		used, err = db.addBatchBytes(i, used, entrysize.RecordBytes(keyBytes, valueBytes))
 		if err != nil {
 			return PreparedBatch{}, err
 		}
@@ -77,7 +80,8 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 }
 
 // PrepareDeletes counts every input but charges only the first occurrence
-// of each encoded key. Existence is checked under the writer gate at commit.
+// of each encoded key. The caller must check each key with CheckBatchKey.
+// Existence is checked under the writer gate at commit.
 func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (PreparedBatch, error) {
 	if err := CheckBatchCount(count); err != nil {
 		return PreparedBatch{}, err
@@ -94,9 +98,6 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 		key, err := keyAt(i)
 		if err != nil {
 			return PreparedBatch{}, err
-		}
-		if len(key) == 0 {
-			return PreparedBatch{}, &BatchKeyError{Operation: "BatchDelete", Index: i, Err: ErrEmptyKey}
 		}
 		slot := deleteKeySlot(slots, records, key)
 		if slots[slot] != 0 {
@@ -158,7 +159,10 @@ func (db *DB) BatchPut(entries []Entry) error {
 		return err
 	}
 	defer db.done()
-	batch, err := db.PreparePuts(len(entries), func(i int) (Entry, error) { return entries[i], nil })
+	batch, err := db.PreparePuts(len(entries), func(i int) (Entry, error) {
+		entry := entries[i]
+		return entry, CheckBatchKey("BatchPut", i, entry.Key)
+	})
 	if err != nil {
 		return err
 	}
@@ -171,7 +175,9 @@ func (db *DB) BatchDelete(keys [][]byte) error {
 		return err
 	}
 	defer db.done()
-	batch, err := db.PrepareDeletes(len(keys), func(i int) ([]byte, error) { return keys[i], nil })
+	batch, err := db.PrepareDeletes(len(keys), func(i int) ([]byte, error) {
+		return keys[i], CheckBatchKey("BatchDelete", i, keys[i])
+	})
 	if err != nil {
 		return err
 	}

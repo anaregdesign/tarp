@@ -111,6 +111,13 @@ func (o Options) checkSize(key, value uint64) error {
 	if key == 0 {
 		return ErrEmptyKey
 	}
+	if err := o.checkEntryLimits(key, value); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o Options) checkEntryLimits(key, value uint64) *SizeError {
 	var recordBytes, cacheCharge uint64
 	overflow := !entrysize.Representable(key, value)
 	if !overflow {

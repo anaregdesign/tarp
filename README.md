@@ -239,7 +239,9 @@ request-wide count error. For count, payload and result limits,
 also exposes the underlying `*tarp.SizeError` with its record and cache charges.
 Use `errors.As` with `*tarp.BatchCodecError` to get the zero-based input
 index and the field (`key` or `value`) of a failed codec call. The error
-also wraps the codec's cause.
+also wraps the codec's cause. Typed batches encode keys in input order and
+stop as soon as one encodes to zero bytes. `BatchPut` checks each encoded key
+before calling the value codec for that entry.
 See the [runnable batch example](typed_batch_test.go).
 
 ## Contract

@@ -31,8 +31,8 @@ func TestTypedBatchKeyErrorsUseOriginalInputsAndEncodeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{"a", " a", " "}
-	entries := []tarp.TypedEntry[string, string]{{Key: keys[0]}, {Key: keys[1]}, {Key: keys[2]}}
+	keys := []string{"a", " a", " ", "later"}
+	entries := []tarp.TypedEntry[string, string]{{Key: keys[0]}, {Key: keys[1]}, {Key: keys[2]}, {Key: keys[3]}}
 	before := db.Stats()
 	for _, tc := range []struct {
 		op    string
@@ -53,6 +53,36 @@ func TestTypedBatchKeyErrorsUseOriginalInputsAndEncodeOnce(t *testing.T) {
 	}
 	if after := db.Stats(); after != before {
 		t.Fatalf("rejected typed batch changed Stats: before %+v, after %+v", before, after)
+	}
+}
+
+func TestTypedBatchesStopAtFirstEmptyEncodedKey(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	badCodec := rejectingStringCodec{errors.New("unexpected codec call")}
+	view, err := tarp.Bind(db, badCodec, badCodec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"kept", "", "rejected"}
+	entries := []tarp.TypedEntry[string, string]{
+		{Key: keys[0], Value: "new"}, {Key: keys[1], Value: "rejected"}, {Key: keys[2]},
+	}
+	if err := db.Put([]byte("kept"), []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	before := db.Stats()
+	results, err := view.BatchGet(keys)
+	requireBatchKeyError(t, err, "BatchGet", 1, tarp.ErrEmptyKey)
+	if results != nil {
+		t.Fatalf("partial read results: %+v", results)
+	}
+	requireBatchKeyError(t, view.BatchPut(entries), "BatchPut", 1, tarp.ErrEmptyKey)
+	requireBatchKeyError(t, view.BatchDelete(keys), "BatchDelete", 1, tarp.ErrEmptyKey)
+	if after := db.Stats(); after != before {
+		t.Fatalf("rejected batches changed Stats from %+v to %+v", before, after)
+	}
+	if got, err := db.Get([]byte("kept")); string(got) != "old" || err != nil {
+		t.Fatalf("value after rejected batches: %q, %v", got, err)
 	}
 }
 
@@ -215,8 +245,8 @@ func (c closeOwnerCodec) Encode(key string) ([]byte, error) {
 	return c.StringCodec.Encode(key)
 }
 
-func TestTypedBatchCodecCanCloseOwnerBeforeCommit(t *testing.T) {
-	for _, op := range []string{"put", "delete"} {
+func TestTypedBatchCodecCanCloseOwnerBeforeAdmission(t *testing.T) {
+	for _, op := range []string{"get", "put", "delete"} {
 		t.Run(op, func(t *testing.T) {
 			dir := t.TempDir()
 			owner := openPublicDB(t, dir, tarp.Options{})
@@ -228,6 +258,8 @@ func TestTypedBatchCodecCanCloseOwnerBeforeCommit(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch op {
+			case "get":
+				_, err = view.BatchGet([]string{"k"})
 			case "put":
 				err = view.BatchPut([]tarp.TypedEntry[string, string]{{Key: "k", Value: "new"}})
 			case "delete":

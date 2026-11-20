@@ -29,11 +29,24 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 		return nil, err
 	}
 	for i, key := range keys {
-		if len(key) == 0 {
-			return nil, &BatchKeyError{Operation: "BatchGet", Index: i, Err: ErrEmptyKey}
+		if err := CheckBatchKey("BatchGet", i, key); err != nil {
+			return nil, err
 		}
 	}
+	return db.readBatch(keys)
+}
 
+// BatchGetPrepared reads encoded keys after the typed caller has checked the
+// input count and each key. Admission follows all application codec calls.
+func (db *DB) BatchGetPrepared(keys [][]byte) ([]BatchResult, error) {
+	if err := db.admit(); err != nil {
+		return nil, err
+	}
+	defer db.done()
+	return db.readBatch(keys)
+}
+
+func (db *DB) readBatch(keys [][]byte) ([]BatchResult, error) {
 	results := make([]BatchResult, len(keys))
 	reads, err := db.captureBatch(keys, results)
 	if err != nil {
