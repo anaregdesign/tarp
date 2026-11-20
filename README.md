@@ -6,14 +6,14 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). The examples below
-use the API on `main`. To use the tagged v0.6.0 API, see its
+use v0.7.0. For the v0.6.0 API, see its
 [versioned documentation](https://github.com/anaregdesign/tarp/tree/v0.6.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@main
+go get github.com/anaregdesign/tarp@v0.7.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
