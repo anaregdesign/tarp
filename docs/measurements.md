@@ -12,6 +12,26 @@ Benchmarks, smoke measurement profiles, and the VM measurement workflow run only
 on a separate explicit user request. Ordinary functional and race tests provide
 the routine PR checks.
 
+## Storage scale and sustained maintenance
+
+From a checkout of the revision to measure, run the five opt-in scenarios in one campaign:
+
+```sh
+benchmark/scripts/container-storage-scale.sh /path/to/new-results
+```
+
+The runner archives committed HEAD, pins the current stable Go Bookworm image by digest, uses a private Linux Docker volume and fixes the CPU quota and GOMAXPROCS at four. It runs three rounds by default (`TARP_STORAGE_SCALE_ROUNDS` overrides the count), rotating scenario and comparison order. Each scenario starts its own process. Read `environment.txt` and `docker-context.txt` for provenance, `test.log` for checks and `results.jsonl` for one JSON observation per arm or B+tree window. A complete round contains 24 rows. Run arms sequentially. Guest filesystem pages may remain warm.
+
+| Scenario | What is timed and checked |
+| --- | --- |
+| Default-budget B+tree | Seed 196,608 shuffled 64-byte keys, then measure 1,024 distinct Value-LRU misses and four windows of 256 Get/Delete/new-Put cycles at constant live cardinality. Require index page loads, spill and eviction. Record latency distributions, throughput and logical scratch length. Reopen and check every live entry. |
+| Backup verification and restore | Time the three public APIs on the same warm, immutable backup for each of 20k, 40k and 100k distinct 16-byte keys. Count completed logical DATA replay passes and bytes, including source and stage for Restore. Hash/copy volumes follow manifest lengths. A separate invocation samples process heap and apparent scratch-file length every 2 ms; short peaks can be missed. Both restored images must match the original digest. |
+| First OpenExisting | Every arm starts from a fresh private copy of the same 4,096-key image. Vary only 0, 100 or 1,000 empty, owned, unselected DATA/MANIFEST files. Time the first Open and count storage directory listings; verify removal and the full state digest after stopping the clock. |
+| BatchPut during manual Compact | Compare a 512-entry writer on disjoint tail keys and on captured keys spaced through the checkpoint. Each key set has its own control without Compact. The timed writer runs for three seconds after installing a common tail. Record worker wall time, entries/s, batch p99, Compact duration and actual waits caused by a staged key conflict. Reopen and verify all values and the frontier. |
+| Sustained automatic cleaner | Maintain 256 live keys across 512 batches of 16 overwrites, deleting and reinserting a batch every eight steps. Compare no added delay and a 1 ms pause per step. Record a directory census every 32 steps, write latency, rotations, and time from the last write to the first worker pass at that frontier with no eligible cleaning or pending retirement. Sampled file lengths include staging files visible during the census and retainable tombstones. Verify every recovered value. |
+
+The runner builds a measurement-only Go source overlay with counters for directory listings, selected DATA scans, staged-key conflicts and the cleaner's first idle frontier. It fails if the instrumentation anchors change. The regular library and CI build use the original sources. Index page loads and logical DATA bytes can be served by the guest page cache. These workloads measure this container filesystem and do not exercise power loss.
+
 ## Selectable key indexes
 
 The [index-mode campaign](benchmarks/index-modes.md) compares Memory and B+tree

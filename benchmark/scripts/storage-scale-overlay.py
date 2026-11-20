@@ -39,6 +39,6 @@ instrument('internal/engine/cleaner.go', [
     ('files, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)',
      'observedSequence := db.store.Current.Sequence\n\tfiles, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)', 1),
     ('return pending && removed > 0, pending && removed == 0',
-     'if !pending { scaleprobe.IdleSequence.Store(observedSequence) }\n\t\treturn pending && removed > 0, pending && removed == 0', 1),
+     'if !pending { scaleprobe.CleanerIdle(observedSequence) }\n\t\treturn pending && removed > 0, pending && removed == 0', 1),
 ])
 (output / 'overlay.json').write_text(json.dumps({'Replace': replace}, indent=2))

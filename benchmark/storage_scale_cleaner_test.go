@@ -147,9 +147,9 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	drain := time.Since(lastWrite)
+	drainNS := max(int64(0), scaleprobe.IdleAtNS.Load()-lastWrite.Sub(scaleprobe.ClockStart).Nanoseconds())
 	final := sampleCleanerSpace(t, db, steps, rotations.Load()-startRotations, start)
-	if final.Rotations < 32 || final.UnlinkedBytes == 0 || final.LiveBytes == 0 || db.Stats().LiveKeys != keyCount {
+	if final.Rotations < 32 || final.UnlinkedBytes == 0 || final.DataBytes >= int64(steps*batchSize*len(value)) || final.LiveBytes == 0 || db.Stats().LiveKeys != keyCount {
 		t.Fatalf("insufficient sustained churn or wrong live set: %+v", final)
 	}
 	if err := db.Close(); err != nil {
@@ -177,6 +177,6 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 		"keys": keyCount, "target_segment_bytes": opts.TargetSegmentBytes, "batch_size": batchSize, "write_window_ns": writeWindow.Nanoseconds(),
 		"put": latency(puts, int64(len(puts)), writeWindow), "delete": latency(deletes, int64(len(deletes)), writeWindow),
 		"entries_per_second": float64(batchSize*(len(puts)+len(deletes))) / writeWindow.Seconds(),
-		"timeline":           timeline, "drained": final, "drain_observed_ns": drain.Nanoseconds(), "final_sequence": finalSequence,
+		"timeline":           timeline, "drained": final, "drain_observed_ns": drainNS, "final_sequence": finalSequence,
 	})
 }
