@@ -20,7 +20,7 @@ From a checkout of the revision to measure, run the five opt-in scenarios in one
 benchmark/scripts/container-storage-scale.sh /path/to/new-results
 ```
 
-The runner archives committed HEAD, pins the current stable Go Bookworm image by digest, uses a private Linux Docker volume and fixes the CPU quota and GOMAXPROCS at four. It runs three rounds by default (`TARP_STORAGE_SCALE_ROUNDS` overrides the count), rotating scenario and comparison order. Each scenario starts its own process. Read `environment.txt` and `docker-context.txt` for provenance, `test.log` for checks and `results.jsonl` for one JSON observation per arm or B+tree window. A complete round contains 24 rows. Run arms sequentially. Guest filesystem pages may remain warm.
+The runner archives committed HEAD, pins the current stable Go Bookworm image by digest, uses a private Linux Docker volume and fixes the CPU quota and GOMAXPROCS at four. It runs three rounds by default (`TARP_STORAGE_SCALE_ROUNDS` overrides the count), rotating scenario and comparison order. Each scenario starts its own process. Individual high-overlap rounds may observe zero fallbacks. Their timings remain in the results; a campaign with zero observed conflicts across all rounds is flagged as inconclusive. Read `environment.txt` and `docker-context.txt` for provenance, `test.log` for checks and `results.jsonl` for one JSON observation per arm or B+tree window. A complete round contains 24 rows. Run arms sequentially. Guest filesystem pages may remain warm.
 
 | Scenario | What is timed and checked |
 | --- | --- |

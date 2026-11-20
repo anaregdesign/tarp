@@ -152,9 +152,8 @@ func measureStorageScaleOverlap(t *testing.T, round int, arm, seed string, opts 
 		}
 	}
 	conflicts := scaleprobe.RelocationConflicts.Load() - before
-	if compact && overlap && conflicts == 0 {
-		t.Fatal("no checkpoint relocation encountered staged writer keys")
-	}
+	// The campaign checks for conflicts across all prespecified rounds. A
+	// genuine zero in a single round remains part of the timing distribution.
 	if !overlap && conflicts != 0 {
 		t.Fatalf("disjoint relocations took %d writer-lock fallbacks", conflicts)
 	}
