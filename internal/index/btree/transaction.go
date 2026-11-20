@@ -337,6 +337,7 @@ func (x *transaction) Commit() {
 	t.mu.Lock()
 	t.root, t.count, t.generation = x.root, x.count, t.generation+1
 	t.p.root.Store(x.root)
+	t.retiredPages.Add(uint64(x.old.n) + uint64(x.old.bytes/8))
 	t.mu.Unlock()
 	t.pending = x
 	x.done = true

@@ -71,5 +71,15 @@ type Meter interface{ Metrics() Metrics }
 
 type Metrics struct {
 	PageReads, BranchReads, LeafReads, OverflowReads uint64
-	CacheBytes, ScratchBytes                         uint64
+	// CacheBytes charges page buffers and their cache entries. ScratchBytes
+	// sums logical file sizes, including sparse regions and allocator journals.
+	CacheBytes, CachePeakBytes, ScratchBytes, ScratchPeakBytes uint64
+	// Retired pages await the next writer or the oldest pinned generation.
+	ActiveViews, PinnedGenerations, RetiredPages uint64
+	// SpillNanoseconds measures elapsed synchronous dirty-page write calls.
+	Evictions, SpillWrites, SpillNanoseconds uint64
+	// Each active read reserves room for page validation, overflow comparison
+	// and bounded routing. Suspended cursors release their reservation.
+	ReadWorkspaceBytes, ReadWorkspacePeakBytes, ReadWorkspaceLimitBytes uint64
+	ReadWaits, ReadWaitNanoseconds                                      uint64
 }

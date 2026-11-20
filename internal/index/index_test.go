@@ -2,8 +2,12 @@ package index_test
 
 import (
 	"errors"
+	"fmt"
+	"maps"
+	"math/rand"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/anaregdesign/tarp/internal/index"
@@ -95,6 +99,88 @@ func TestBackendTransactionsExposeWholeSnapshots(t *testing.T) {
 			view.Close()
 			if _, _, err := view.Lookup(key); !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("released view: %v", err)
+			}
+		})
+	}
+}
+
+func TestBackendsAgainstSameRandomizedSnapshotModel(t *testing.T) {
+	for _, name := range []string{"memory", "btree"} {
+		t.Run(name, func(t *testing.T) {
+			var backend index.Backend
+			if name == "memory" {
+				backend = memory.New()
+			} else {
+				var err error
+				backend, err = btree.NewIn(t.TempDir(), btree.MinBudget)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			defer backend.Close()
+			rng := rand.New(rand.NewSource(8081))
+			keys := make([]string, 201)
+			for i := range keys {
+				keys[i] = fmt.Sprintf("k%c%04d", byte(i), i)
+				if i%47 == 0 {
+					keys[i] = strings.Repeat("shared\x00", 1300) + keys[i]
+				}
+			}
+			check := func(v index.View, model map[string]index.Address) {
+				t.Helper()
+				observed := map[string]index.Address{}
+				if err := v.All(func(k string, a index.Address) bool {
+					if _, seen := observed[k]; seen {
+						t.Fatalf("duplicate key %q", k)
+					}
+					observed[k] = a
+					return true
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if !maps.Equal(model, observed) {
+					t.Fatalf("snapshot mismatch: got %d, want %d", len(observed), len(model))
+				}
+			}
+			model := map[string]index.Address{}
+			for epoch := range 80 {
+				before := backend.View()
+				prior := maps.Clone(model)
+				tx := backend.Begin()
+				for step := range 17 {
+					key := keys[rng.Intn(len(keys))]
+					old, found, err := tx.Lookup(key)
+					want, live := model[key]
+					if err != nil || found != live || old != want {
+						t.Fatalf("staged lookup: %v, %v", found, err)
+					}
+					if live && rng.Intn(3) == 0 {
+						if err := tx.Delete(key); err != nil {
+							t.Fatal(err)
+						}
+						delete(model, key)
+					} else {
+						a := index.Address{FileID: uint64(1 + epoch%4), Offset: int64(step) * 4096, Bytes: 64, ValueBytes: 1, Sequence: uint64(1 + epoch*17 + step)}
+						if err := tx.Put(key, a); err != nil {
+							t.Fatal(err)
+						}
+						model[key] = a
+					}
+				}
+				if epoch%5 == 0 {
+					tx.Abort()
+					model = prior
+				} else {
+					tx.Commit()
+				}
+				check(before, prior)
+				before.Close()
+				current := backend.View()
+				check(current, model)
+				current.Close()
+				if backend.Count() != len(model) {
+					t.Fatalf("count %d != %d", backend.Count(), len(model))
+				}
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"os/exec"
@@ -461,12 +462,16 @@ func FuzzDBHistory(f *testing.F) {
 	const otherKey = 1 << 3
 	f.Add([]byte{})
 	f.Add([]byte{put, put | otherKey, backup, put, removeKey | otherKey, compact, reopen, restore, get, get | otherKey})
+	f.Add([]byte{put | 0x80, backup, reopen, restore, compact, get})
 	f.Add([]byte{get, removeKey, putEmpty, get, backup, removeKey, reopen, restore, put, get})
 	f.Add([]byte{backup, put, restore, backup, putEmpty, restore, compact})
 
 	f.Fuzz(func(t *testing.T, steps []byte) {
 		// A small target rotates on the second Put. All values fit admission.
 		opts := tarp.Options{CacheBytes: 144, MaxRecordBytes: 64, TargetSegmentBytes: 128, ReadFileHandles: 1}
+		if len(steps) > 0 && steps[0]&0x80 != 0 {
+			opts.IndexMode = tarp.IndexBTree
+		}
 		dir := filepath.Join(t.TempDir(), "live")
 		db := openPublicDB(t, dir, opts)
 		live := make(map[string]string)
@@ -521,6 +526,11 @@ func FuzzDBHistory(f *testing.F) {
 			case reopen:
 				if err := db.Close(); err != nil {
 					t.Fatalf("step %d Close: %v", i, err)
+				}
+				if opts.IndexMode == tarp.IndexBTree {
+					opts.IndexMode = tarp.IndexMemory
+				} else {
+					opts.IndexMode = tarp.IndexBTree
 				}
 				db = openPublicDB(t, dir, opts)
 			case backup:
@@ -623,4 +633,38 @@ func TestIndexOptionErrorsLeaveNewDirectoryAbsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func ExampleOpen_indexMode() {
+	dir, err := os.MkdirTemp("", "tarp-index-example-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := tarp.Open(dir, tarp.Options{
+		IndexMode:        tarp.IndexBTree,
+		IndexMemoryBytes: 16 << 20,
+	})
+	if err != nil {
+		panic(err)
+	}
+	if err := db.Put([]byte("city"), []byte("Tokyo")); err != nil {
+		panic(err)
+	}
+	if err := db.Close(); err != nil {
+		panic(err)
+	}
+
+	db, err = tarp.OpenExisting(context.Background(), dir, tarp.Options{IndexMode: tarp.IndexMemory})
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	value, err := db.Get([]byte("city"))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(value))
+	// Output: Tokyo
 }

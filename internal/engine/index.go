@@ -94,33 +94,46 @@ func (db *DB) addLocation(file *storage.File) {
 	}
 }
 
-// relocateOne only moves the exact record copied from the old layout. The
-// writer gate serializes relocation with prepared but unpublished foreground writes.
-func (db *DB) relocateOne(key string, old, next storage.Location) error {
+// Relocate only records that still point at the copied source. A bounded batch
+// amortizes publication and COW without holding the writer gate over spool I/O.
+func (db *DB) relocateBatch(batch []storage.Relocation) error {
 	db.writer.Lock()
 	defer db.writer.Unlock()
 	if err := db.health(); err != nil {
 		return err
 	}
 	tx := db.keys.Begin()
-	a, found, err := tx.Lookup(key)
-	if err != nil || !found || a != old.Address() {
-		tx.Abort()
-		return err
+	var changed []storage.Relocation
+	for _, move := range batch {
+		a, found, err := tx.Lookup(move.Key)
+		if err != nil {
+			tx.Abort()
+			return err
+		}
+		if !found || a != move.Old.Address() {
+			continue
+		}
+		if err := tx.Put(move.Key, move.Next.Address()); err != nil {
+			tx.Abort()
+			return err
+		}
+		changed = append(changed, move)
 	}
-	if err := tx.Put(key, next.Address()); err != nil {
+	if len(changed) == 0 {
 		tx.Abort()
-		return err
+		return nil
 	}
 	db.indexGate.Lock()
 	defer db.indexGate.Unlock()
 	db.state.Lock()
 	defer db.state.Unlock()
 	tx.Commit()
-	db.dropLocation(old.File)
-	db.addLocation(next.File)
-	old.File.LiveBytes.Add(-old.Bytes)
-	next.File.LiveBytes.Add(next.Bytes)
+	for _, move := range changed {
+		db.dropLocation(move.Old.File)
+		db.addLocation(move.Next.File)
+		move.Old.File.LiveBytes.Add(-move.Old.Bytes)
+		move.Next.File.LiveBytes.Add(move.Next.Bytes)
+	}
 	return nil
 }
 

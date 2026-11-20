@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/platform"
@@ -22,11 +23,22 @@ const pageCharge = pageSize + 192
 // inferring host-device writes from a scratch file's apparent size.
 type countedFile struct {
 	*os.File
-	size  int64
-	total *atomic.Int64
+	size        int64
+	total, peak *atomic.Int64
 }
 
-func (f *countedFile) resize(size int64) { f.total.Add(size - f.size); f.size = size }
+func (f *countedFile) resize(size int64) {
+	if size == f.size {
+		return
+	}
+	total := f.total.Add(size - f.size)
+	f.size = size
+	for peak := f.peak.Load(); total > peak; peak = f.peak.Load() {
+		if f.peak.CompareAndSwap(peak, total) {
+			break
+		}
+	}
+}
 func (f *countedFile) Write(b []byte) (int, error) {
 	n, err := f.File.Write(b)
 	f.resize(f.size + int64(n))
@@ -52,7 +64,7 @@ func (s *pager) temp() (*countedFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &countedFile{File: file, total: &s.scratchBytes}, nil
+	return &countedFile{File: file, total: &s.scratchBytes, peak: &s.scratchPeak}, nil
 }
 
 type cachedPage struct {
@@ -67,17 +79,17 @@ type pageFile interface {
 }
 
 type pager struct {
-	budget             int64
-	scratchBytes       atomic.Int64
-	mu                 sync.Mutex
-	file               pageFile
-	dir                string
-	capacity           int
-	cache              map[uint64]*list.Element
-	branches, ordinary list.List
-	root, maxKey       atomic.Uint64
-	top                uint64
-	stats              index.Metrics
+	budget                    int64
+	scratchBytes, scratchPeak atomic.Int64
+	mu                        sync.Mutex
+	file                      pageFile
+	dir                       string
+	capacity                  int
+	cache                     map[uint64]*list.Element
+	branches, ordinary        list.List
+	root, maxKey              atomic.Uint64
+	top                       uint64
+	stats                     index.Metrics
 
 	// The writer alone owns the allocator. Freed page numbers use a bounded
 	// stack in memory with a private file for older free entries.
@@ -144,18 +156,23 @@ func (s *pager) cachePage(id uint64, p *page, owner uint64) error {
 		}
 		delete(s.cache, entry.id)
 		s.queue(entry.p).Remove(item)
+		s.stats.Evictions++
 	}
 	s.cache[id] = s.queue(p).PushFront(cachedPage{id: id, p: p, owner: owner})
+	s.stats.CachePeakBytes = max(s.stats.CachePeakBytes, uint64(len(s.cache))*pageCharge)
 	return nil
 }
 func (s *pager) flush(id uint64, p *page) error {
+	start := time.Now()
 	n, err := s.file.WriteAt(p[:], int64(id-1)*pageSize)
+	s.stats.SpillNanoseconds += uint64(time.Since(start))
 	if err != nil {
 		return err
 	}
 	if n != pageSize {
 		return io.ErrShortWrite
 	}
+	s.stats.SpillWrites++
 	return nil
 }
 func (s *pager) read(id uint64) (*page, error) {
@@ -318,6 +335,7 @@ func (s *pager) metrics() index.Metrics {
 	m := s.stats
 	m.CacheBytes = uint64(len(s.cache)) * pageCharge
 	m.ScratchBytes = uint64(s.scratchBytes.Load())
+	m.ScratchPeakBytes = uint64(s.scratchPeak.Load())
 	return m
 }
 

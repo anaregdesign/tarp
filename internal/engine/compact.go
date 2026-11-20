@@ -157,11 +157,18 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 // The replacement layout is already committed. A partial remap fail-stops the
 // instance, leaving the authoritative DATA for a fresh indexed Open.
 func (db *DB) relocate(moves *storage.Relocations, after string) {
-	err := moves.Each(func(key string, old, next storage.Location) error {
-		if err := db.relocateOne(key, old, next); err != nil {
+	err := moves.EachBatch(func(batch []storage.Relocation) error {
+		if err := db.relocateBatch(batch); err != nil {
 			return err
 		}
-		return db.store.IO.Check(after)
+		if fs := db.store.IO; fs != nil && fs.Hook != nil {
+			for range batch {
+				if err := fs.Check(after); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		db.poison(err)

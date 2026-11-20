@@ -81,3 +81,37 @@ func TestRetirementQueueReusesConsumedSpaceWithOverlappingReaders(t *testing.T) 
 		t.Fatalf("retirement log grew to %d with only two epochs live", q.end)
 	}
 }
+
+func TestMetricsTrackChargeSpillsAndPinnedGenerations(t *testing.T) {
+	tr := openTest(t)
+	x := tr.Begin()
+	if err := x.Put("old", addr(1)); err != nil {
+		t.Fatal(err)
+	}
+	x.Commit()
+	a, b := tr.View(), tr.View()
+	defer a.Close()
+	defer b.Close()
+	x = tr.Begin()
+	if err := x.Put(strings.Repeat("k", int(MinBudget)), addr(2)); err != nil {
+		t.Fatal(err)
+	}
+	x.Commit()
+	c := tr.View()
+	m := tr.Metrics()
+	if m.ActiveViews != 3 || m.PinnedGenerations != 2 || m.RetiredPages == 0 {
+		t.Fatalf("generations: %+v", m)
+	}
+	if m.CacheBytes > uint64(tr.p.budget/2) || m.CachePeakBytes < m.CacheBytes || m.ScratchBytes == 0 || m.ScratchPeakBytes < m.ScratchBytes || m.Evictions == 0 || m.SpillWrites == 0 || m.SpillNanoseconds == 0 {
+		t.Fatalf("pager: %+v", m)
+	}
+	a.Close()
+	b.Close()
+	c.Close()
+	x = tr.Begin()
+	x.Abort()
+	after := tr.Metrics()
+	if after.ActiveViews != 0 || after.PinnedGenerations != 0 || after.RetiredPages != 0 || after.ScratchPeakBytes < m.ScratchPeakBytes {
+		t.Fatalf("released: %+v", after)
+	}
+}

@@ -11,10 +11,15 @@ import (
 	"github.com/anaregdesign/tarp/internal/platform"
 )
 
-// Relocations streams the address changes owned by one maintenance operation.
-// Only one record and the referenced DATA file registry need to be resident.
-// The scratch file has no name after creation and never enters a backup.
+type Relocation struct {
+	Key       string
+	Old, Next Location
+}
+
+// Relocations keeps one small batch in memory. Larger operations spill all
+// moves into an unnamed scratch file. File registry entries remain shared.
 type Relocations struct {
+	small  []Relocation
 	fd     *os.File
 	writer *bufio.Writer
 	files  map[uint64]*File
@@ -24,7 +29,11 @@ type Relocations struct {
 	fs     *IO
 }
 
-const relocationHeader = 7*8 + 4
+const (
+	relocationHeader = 7*8 + 4
+	moveBatchCount   = 32
+	moveBatchBytes   = 8 << 10
+)
 
 func (m *Relocations) open() error {
 	fd, err := platform.OpenScratch("", "tarp-relocations-*")
@@ -39,28 +48,29 @@ func (m *Relocations) open() error {
 
 func (m *Relocations) append(key string, old, next Location) error {
 	err := m.fs.Do("index.moves.write", func() error {
+		move := Relocation{Key: key, Old: old, Next: next}
 		if m.fd == nil {
+			if m.count < moveBatchCount && int64(len(key)) <= moveBatchBytes-relocationHeader-m.bytes {
+				m.small = append(m.small, move)
+				m.bytes += relocationHeader + int64(len(key))
+				m.count++
+				return nil
+			}
 			if err := m.open(); err != nil {
 				return err
 			}
+			m.bytes = 0
+			for _, prev := range m.small {
+				if err := m.write(prev); err != nil {
+					return err
+				}
+			}
+			m.small = nil
 		}
-		var h [relocationHeader]byte
-		binary.LittleEndian.PutUint64(h[0:], old.File.ID)
-		binary.LittleEndian.PutUint64(h[8:], uint64(old.Offset))
-		binary.LittleEndian.PutUint64(h[16:], next.File.ID)
-		binary.LittleEndian.PutUint64(h[24:], uint64(next.Offset))
-		binary.LittleEndian.PutUint64(h[32:], uint64(old.Bytes))
-		binary.LittleEndian.PutUint64(h[40:], uint64(old.ValueBytes))
-		binary.LittleEndian.PutUint64(h[48:], old.Sequence)
-		size, err := writeScratchRecord(m.writer, h[:], key, m.bytes)
-		if err != nil {
+		if err := m.write(move); err != nil {
 			return err
 		}
-		m.bytes = size
-		m.files[old.File.ID] = old.File
-		m.files[next.File.ID] = next.File
 		m.count++
-		m.maxKey = max(m.maxKey, len(key))
 		return nil
 	})
 	if err != nil {
@@ -69,12 +79,39 @@ func (m *Relocations) append(key string, old, next Location) error {
 	return nil
 }
 
+func (m *Relocations) write(move Relocation) error {
+	old, next := move.Old, move.Next
+	var h [relocationHeader]byte
+	put := binary.LittleEndian.PutUint64
+	put(h[0:], old.File.ID)
+	put(h[8:], uint64(old.Offset))
+	put(h[16:], next.File.ID)
+	put(h[24:], uint64(next.Offset))
+	put(h[32:], uint64(old.Bytes))
+	put(h[40:], uint64(old.ValueBytes))
+	put(h[48:], old.Sequence)
+	size, err := writeScratchRecord(m.writer, h[:], move.Key, m.bytes)
+	if err != nil {
+		return err
+	}
+	m.bytes = size
+	m.files[old.File.ID] = old.File
+	m.files[next.File.ID] = next.File
+	m.maxKey = max(m.maxKey, len(move.Key))
+	return nil
+}
+
 // seal finishes all buffered writes before CURRENT can select the new layout.
 func (m *Relocations) seal() error {
-	if m.writer == nil {
+	if m.count == 0 {
 		return nil
 	}
-	if err := m.fs.Do("index.moves.flush", m.writer.Flush); err != nil {
+	if err := m.fs.Do("index.moves.flush", func() error {
+		if m.writer == nil {
+			return nil
+		}
+		return m.writer.Flush()
+	}); err != nil {
 		return &IndexWorkError{Err: err}
 	}
 	m.writer = nil
@@ -88,11 +125,28 @@ func (m *Relocations) Close() error {
 	return m.fd.Close()
 }
 
-// Each checks the spool before exposing each location to the conditional remap.
 func (m *Relocations) Each(visit func(key string, old, next Location) error) error {
+	return m.EachBatch(func(batch []Relocation) error {
+		for _, move := range batch {
+			if err := visit(move.Key, move.Old, move.Next); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// EachBatch streams immutable batches. A key larger than the byte threshold
+// is visited by itself. The caller must not retain the slice after returning.
+func (m *Relocations) EachBatch(visit func([]Relocation) error) error {
 	if m.count == 0 {
 		return nil
 	}
+	if m.fd == nil {
+		return visit(m.small)
+	}
+	var batch [moveBatchCount]Relocation
+	used, size := 0, 0
 	r := bufio.NewReaderSize(io.NewSectionReader(m.fd, 0, m.bytes), 32<<10)
 	left := m.bytes
 	for range m.count {
@@ -113,12 +167,19 @@ func (m *Relocations) Each(visit func(key string, old, next Location) error) err
 			return &IndexWorkError{Err: err}
 		}
 		left -= int64(len(key))
-		if err := visit(key, old, next); err != nil {
-			return err
+		if used > 0 && (used == len(batch) || len(key) > moveBatchBytes-relocationHeader-size) {
+			if err := visit(batch[:used]); err != nil {
+				return err
+			}
+			clear(batch[:used])
+			used, size = 0, 0
 		}
+		batch[used] = Relocation{Key: key, Old: old, Next: next}
+		used++
+		size += relocationHeader + len(key)
 	}
 	if left != 0 {
 		return &IndexWorkError{Err: errors.New("invalid relocation length")}
 	}
-	return nil
+	return visit(batch[:used])
 }

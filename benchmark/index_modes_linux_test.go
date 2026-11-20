@@ -23,7 +23,7 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-const indexTrialBudget = 1 << 20
+const minimumIndexTrialBudget = 1 << 20
 const indexTrialRequests = 256
 
 func indexTrialKey(n int) []byte {
@@ -46,7 +46,14 @@ func TestIndexModeCampaign(t *testing.T) {
 		opts.IndexMode = tarp.IndexMemory
 	case "btree":
 		opts.IndexMode = tarp.IndexBTree
-		opts.IndexMemoryBytes = indexTrialBudget
+		opts.IndexMemoryBytes = minimumIndexTrialBudget
+		if text := os.Getenv("TARP_INDEX_TRIAL_BUDGET"); text != "" {
+			budget, parseErr := strconv.ParseInt(text, 10, 64)
+			if parseErr != nil || budget != minimumIndexTrialBudget && budget != 16<<20 {
+				t.Fatal("TARP_INDEX_TRIAL_BUDGET must be 1048576 or 16777216")
+			}
+			opts.IndexMemoryBytes = budget
+		}
 	default:
 		t.Fatalf("unsupported index mode %q", modeName)
 	}
@@ -156,13 +163,16 @@ func TestIndexModeCampaign(t *testing.T) {
 		afterIO, e := storageIO.ReadBytes()
 		check(e)
 		afterMemory := vmProcessMemory(t)
-		if post.CacheBytes > indexTrialBudget {
-			t.Fatalf("charged page cache %d exceeds budget", post.CacheBytes)
+		if post.CachePeakBytes > uint64(opts.IndexMemoryBytes) {
+			t.Fatalf("charged page cache %d exceeds budget", post.CachePeakBytes)
+		}
+		if post.ReadWorkspacePeakBytes > post.ReadWorkspaceLimitBytes || post.CachePeakBytes+post.ReadWorkspacePeakBytes > uint64(opts.IndexMemoryBytes) {
+			t.Fatalf("page cache and read workspace peaks exceed admission budget: %+v", post)
 		}
 		if name == "hot_get" && pre.PageReads != post.PageReads {
 			t.Fatal("Value hits loaded index pages")
 		}
-		row := map[string]any{"mode": modeName, "keys": n, "go": runtime.Version(), "gomaxprocs": runtime.GOMAXPROCS(0),
+		row := map[string]any{"mode": modeName, "index_budget_bytes": opts.IndexMemoryBytes, "keys": n, "go": runtime.Version(), "gomaxprocs": runtime.GOMAXPROCS(0),
 			"workload": name, "latency": latency(durations, int64(reps), elapsed), "process_read_bytes": afterIO - beforeIO,
 			"index_before": pre, "index_after": post, "memory_before": beforeMemory, "memory_after": afterMemory,
 			"heap_objects_sampled_peak_bytes": high}

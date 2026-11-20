@@ -316,9 +316,9 @@ func (db *DB) captureResidentMisses(keys [][]byte, results []BatchResult) ([]bat
 // remaining inputs on the first distinct key. Sampling an unequal suffix byte
 // keeps common-prefix and common-suffix workloads on the cheap first probe.
 type batchKeySet struct {
-	inline               [64]uint16
-	slots                []uint16
-	firstPlusOne, sample int
+	inline                     [64]uint16
+	spill                      []uint16
+	firstPlusOne, sample, size int
 }
 
 func (s *batchKeySet) source(keys [][]byte, i, count int) int {
@@ -327,22 +327,24 @@ func (s *batchKeySet) source(keys [][]byte, i, count int) int {
 		return i
 	}
 	first := s.firstPlusOne - 1
-	if s.slots == nil {
+	slots := s.inline[:]
+	if s.size == 0 {
 		if bytes.Equal(keys[i], keys[first]) {
 			return first
 		}
-		size := 1 << bits.Len(uint(2*count-1))
-		if size <= len(s.inline) {
-			s.slots = s.inline[:size]
-		} else {
-			s.slots = make([]uint16, size)
+		s.size = 1 << bits.Len(uint(2*count-1))
+		if s.size > len(slots) {
+			s.spill = make([]uint16, s.size)
+			slots = s.spill
 		}
 		s.sample = min(len(keys[i]), len(keys[first])) - 1
 		for limit := max(0, s.sample-31); s.sample > limit && keys[i][s.sample] == keys[first][s.sample]; s.sample-- {
 		}
-		batchKeySlot(s.slots, keys, first, s.sample)
+		batchKeySlot(slots[:s.size], keys, first, s.sample)
+	} else if s.spill != nil {
+		slots = s.spill
 	}
-	return batchKeySlot(s.slots, keys, i, s.sample)
+	return batchKeySlot(slots[:s.size], keys, i, s.sample)
 }
 
 var batchKeySeed = maphash.MakeSeed()

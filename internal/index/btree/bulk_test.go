@@ -101,3 +101,32 @@ func TestUnorderedBulkAndCancellationNeverPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSortedConstructionPacksInternalLevels(t *testing.T) {
+	tr := openTest(t)
+	const count = 160000
+	if err := tr.BuildSorted(t.Context(), func(put func(string, index.Address) error) error {
+		for i := range count {
+			if err := put(fmt.Sprintf("%07d", i), addr(uint64(i))); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := tr.p.read(tr.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := tr.p.read(root.link())
+	if err != nil || root[4] != branch || child[4] != branch {
+		t.Fatalf("expected at least two internal levels: %v", err)
+	}
+	for _, i := range []int{0, 73421, count - 2, count - 1} {
+		a, ok, err := tr.Lookup(fmt.Sprintf("%07d", i))
+		if err != nil || !ok || a != addr(uint64(i)) {
+			t.Fatalf("lookup %d: %+v, %t, %v", i, a, ok, err)
+		}
+	}
+}
