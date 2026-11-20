@@ -359,9 +359,15 @@ are zero for an empty backup. A verification error returns a zero report.
 `Restore` enforces the target limits and independently verifies the copied
 database before publishing it.
 Pass the restored directory to `OpenExisting`. Passing the backup directory
-itself to `Open` or `OpenExisting` returns an error and preserves the backup.
+itself to `Open` or `OpenExisting` returns an error matching
+`tarp.ErrBackupDirectory`. Use `VerifyBackup` to check its integrity.
+When a required file cannot be read because of permissions, use
+`errors.Is(err, fs.ErrPermission)`. A missing required file or a checksum
+mismatch in the selected image matches `tarp.ErrCorrupt`.
 
-If `Backup` or `Restore` reports `ErrCommitUncertain` at destination rename
+If another caller creates the destination first, `Backup` and `Restore`
+return an error matching `fs.ErrExist` with `OpError.Outcome == tarp.NotApplied`.
+If either operation reports `ErrCommitUncertain` at destination rename
 or parent directory sync, inspect the destination before retrying. For a
 backup, validate the published image with `VerifyBackup`. For a restore,
 use `OpenExisting` to inspect the published destination. A backup destination

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/platform"
@@ -51,8 +52,18 @@ func publishDirectory(ctx context.Context, fs *IO, stage, target, point string) 
 	if err := ctx.Err(); err != nil {
 		return fault(point+".context", publication.NotApplied, false, err)
 	}
-	if err := fs.Do(point+".rename", func() error { return platform.RenameNoReplace(stage, target) }); err != nil {
-		return fault(point+".rename", publication.Unknown, false, err)
+	var renameErr error
+	if err := fs.Do(point+".rename", func() error {
+		renameErr = platform.RenameNoReplace(stage, target)
+		return renameErr
+	}); err != nil {
+		outcome := publication.Unknown
+		// Only EEXIST from the syscall proves that another destination won.
+		// A hook can return the same error after a successful rename.
+		if errors.Is(renameErr, syscall.EEXIST) {
+			outcome = publication.NotApplied
+		}
+		return fault(point+".rename", outcome, false, err)
 	}
 	if err := fs.SyncDir(filepath.Dir(target), point+".parent.sync"); err != nil {
 		return fault(point+".parent.sync", publication.Unknown, false, err)
@@ -295,7 +306,7 @@ func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBa
 	}
 	b, err := ReadRegular(filepath.Join(source, "BACKUP"))
 	if err != nil {
-		return verifiedBackup{}, fmt.Errorf("%w: backup manifest: %w", ErrCorrupt, err)
+		return verifiedBackup{}, requiredFileError("BACKUP", err)
 	}
 	meta, err := format.DecodeBackup(b)
 	if err != nil {
@@ -324,10 +335,7 @@ func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBa
 	}
 	for _, f := range meta.Files {
 		if err := verifyBackupFile(ctx, source, f, buffer); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %q: %w", ErrCorrupt, f.Name, err)
-			}
-			return verifiedBackup{}, fmt.Errorf("%s: %w", f.Name, err)
+			return verifiedBackup{}, requiredFileError(f.Name, err)
 		}
 	}
 	if len(entries) != len(files)+1 {

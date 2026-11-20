@@ -20,7 +20,10 @@ import (
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
-var ErrCorrupt = format.ErrCorrupt
+var (
+	ErrCorrupt         = format.ErrCorrupt
+	ErrBackupDirectory = errors.New("tarp: directory contains BACKUP, use Restore to create a database")
+)
 
 type Config struct {
 	CacheBytes, RecordBytes, TargetSegmentBytes int64
@@ -145,7 +148,7 @@ func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool,
 				return nil, nil, fmt.Errorf("CURRENT: %w", err)
 			}
 			if _, err := os.Lstat(filepath.Join(absolute, "BACKUP")); err == nil {
-				return nil, nil, fmt.Errorf("%w: use Restore to create a database from a directory containing BACKUP", ErrCorrupt)
+				return nil, nil, ErrBackupDirectory
 			} else if !errors.Is(err, os.ErrNotExist) {
 				return nil, nil, err
 			}

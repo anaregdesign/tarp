@@ -22,6 +22,10 @@ var (
 	ErrCommitUncertain     = engine.ErrCommitUncertain
 )
 
+// ErrBackupDirectory indicates that an open operation detected the BACKUP marker.
+// Use [VerifyBackup] to check its contents or [Restore] to create a database.
+var ErrBackupDirectory = engine.ErrBackupDirectory
+
 // Outcome describes publication of the requested operation.
 type Outcome = publication.Outcome
 

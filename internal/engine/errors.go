@@ -6,6 +6,7 @@ import (
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/publication"
+	"github.com/anaregdesign/tarp/internal/storage"
 )
 
 var (
@@ -17,6 +18,7 @@ var (
 	ErrLocked              = errors.New("tarp: directory already owned")
 	ErrClosed              = errors.New("tarp: database is closing or closed")
 	ErrUnhealthy           = errors.New("tarp: database requires close and reopen")
+	ErrBackupDirectory     = storage.ErrBackupDirectory
 	ErrCorrupt             = errors.New("tarp: corrupt storage")
 	ErrUnsupportedFormat   = errors.New("tarp: unsupported format")
 	ErrUnsupportedPlatform = errors.New("tarp: unsupported platform")

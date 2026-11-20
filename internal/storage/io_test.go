@@ -9,6 +9,21 @@ import (
 	"testing"
 )
 
+func TestRequiredFileErrorPreservesReadCause(t *testing.T) {
+	for _, tc := range []struct {
+		cause   error
+		corrupt bool
+	}{
+		{io.EOF, true}, {io.ErrUnexpectedEOF, true}, {os.ErrNotExist, true},
+		{syscall.EIO, false}, {os.ErrPermission, false},
+	} {
+		err := requiredFileError("DATA", &os.PathError{Op: "read", Path: "DATA", Err: tc.cause})
+		if !errors.Is(err, tc.cause) || errors.Is(err, ErrCorrupt) != tc.corrupt {
+			t.Errorf("cause %v: got %v, want corrupt=%t", tc.cause, err, tc.corrupt)
+		}
+	}
+}
+
 func TestWriteRetriesOnlyUnwrittenBytes(t *testing.T) {
 	const start = 17
 	for _, tc := range []struct {
