@@ -132,8 +132,10 @@ decoder verifies each record's checksum before applying it to the rebuilt index.
 An incomplete or checksum-invalid final **committed** record is corruption, not
 a torn tail to skip. Never select an older catalog, promote temporary metadata,
 or infer commitment from a plausible final CRC. Missing/truncated/extended
-selected sealed files and unknown/nonregular engine objects fail explicitly.
-Only recognized UUID-bound private names can be garbage-collected.
+selected sealed files, unrecognized directory entries and nonregular engine files
+fail explicitly.
+At the database root, cleanup identifies obsolete DATA, catalogs and temporary
+CURRENT files by their UUID-bound names.
 
 A successful new `Open` includes durable directory/lock/catalog initialization.
 The owner syncs the immediate parent even if another caller created the empty
@@ -152,6 +154,7 @@ Use `errors.Is` for category/underlying causes and `errors.As` for `*OpError`,
 | Situation | Requested operation outcome | Instance |
 | --- | --- | --- |
 | Invalid/oversized input or missing delete | `NotApplied`; no file/value/cache-order change | Healthy |
+| B+tree setup fails after `Open` publishes the first durable CURRENT | `Committed` for creation of the empty database | Fix the storage error and retry `OpenExisting` |
 | Source append/sync or frontier preparation before rename fails | `NotApplied` logically; unreachable bytes may remain | Fail-stop |
 | Frontier rename attempted or directory sync uncertain | `Unknown`, matching `ErrCommitUncertain` | Fail-stop |
 | All commit syncs finish but another read detects source failure before memory publication | Known `Committed`, unhealthy error | Fail-stop |
@@ -278,9 +281,21 @@ explicitly and does not poison an otherwise healthy source DB.
 ## Derived index and scratch space
 
 The backend is selected per Open. A B+tree stores pointer-free DATA addresses
-in process-private scratch files. Committed DATA determines the state after a
-crash. Before writing a single mutation or atomic batch, Tarp stages the new
-locations in a private index transaction. The existing DATA and CURRENT syncs
+in process-private scratch files. The database reserves `.tarp-work/` for
+B+tree pages, replay sort runs, and indexes used by compaction and online
+backup. Compaction also uses this directory when its relocation list spills
+in either index mode. These files share the database volume.
+
+Tarp unlinks each scratch file after opening it. A process exit between
+creation and unlink can leave a name behind. On reopen, Tarp validates the
+selected DATA and option limits before removing recognized leftover scratch
+files. On close, it also removes the empty workspace before releasing the
+database lock. Both operations check every workspace entry before removing any.
+Unexpected entries, including symlinks, cause `ErrCorrupt` and are preserved.
+
+Committed DATA determines the state after a crash. Before writing a single
+mutation or atomic batch, Tarp stages the new locations in a private index
+transaction. The existing DATA and CURRENT syncs
 then establish the commit. Publication switches the index, cache and counters
 together. A failure preparing scratch leaves the selected frontier intact.
 After an uncertain durable publication, reopen to rebuild the selected index.

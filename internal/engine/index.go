@@ -19,17 +19,21 @@ type memoryCheckpointRemap struct {
 	staged map[string]struct{}
 }
 
-func openIndex(mode IndexMode, budget int64) (index.Backend, error) {
+func openIndex(store *storage.Store, mode IndexMode, budget int64) (index.Backend, error) {
 	if mode == IndexMemory {
 		return memory.New(), nil
 	}
-	return btree.New(budget)
+	dir, err := store.WorkspaceDir()
+	if err != nil {
+		return nil, err
+	}
+	return btree.NewIn(dir, budget)
 }
 
 // Reserve one quarter for backup and another for compaction so that both can
 // run concurrently with the foreground index.
 func (db *DB) newIndex() (index.Backend, error) {
-	return openIndex(db.opts.IndexMode, db.opts.BTreeMemoryBudgetBytes/4)
+	return openIndex(db.store, db.opts.IndexMode, db.opts.BTreeMemoryBudgetBytes/4)
 }
 
 func (db *DB) indexView() index.View { return db.keys.View() }

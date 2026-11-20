@@ -33,22 +33,32 @@ func Validate(ctx context.Context, dir string) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := image.replay(ctx, nil); err != nil {
+		return nil, err
+	}
+	return image, nil
+}
+
+func (image *Image) replay(ctx context.Context, keys index.Backend) error {
+	if keys != nil {
+		return image.replayIndexed(ctx, keys)
+	}
 	image.Index = make(map[string]Location)
-	err = image.scan(ctx, func(file *File, off int64, r format.Record, key string) error {
+	err := image.scan(ctx, func(file *File, off int64, r format.Record, key string) error {
 		return applyRecord(image.Index, file, image.Catalog.PrunedThrough, off, r, key)
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for key, loc := range image.Index {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		if err := image.measure(key, loc.Bytes, loc.ValueBytes); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return image, ctx.Err()
+	return ctx.Err()
 }
 
 // readImage decodes the exact frontier and catalog before any index is built.
@@ -152,17 +162,13 @@ func (image *Image) measure(key string, recordBytes, valueBytes int64) error {
 	return nil
 }
 
-func validateIndexed(ctx context.Context, dir string, backend index.Backend) (*Image, error) {
-	image, err := readImage(ctx, dir)
-	if err != nil {
-		return nil, err
-	}
+func (image *Image) replayIndexed(ctx context.Context, backend index.Backend) error {
 	builder := newReplayBuilder(ctx, backend, image.Catalog.PrunedThrough)
 	defer builder.abort()
 	if err := image.scan(ctx, builder.apply); err != nil {
-		return nil, err
+		return err
 	}
-	err = builder.finishWith(func(key string, addr index.Address) error {
+	return builder.finishWith(func(key string, addr index.Address) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -171,10 +177,6 @@ func validateIndexed(ctx context.Context, dir string, backend index.Backend) (*I
 		file.LiveKeys.Add(1)
 		return image.measure(key, addr.Bytes, addr.ValueBytes)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return image, nil
 }
 
 func applyIndexedRecord(tx index.Mutations, file *File, pruned uint64, off int64, r format.Record, key string) error {

@@ -107,13 +107,11 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 		return nil, err
 	}
 	cfg := storage.Config{ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
-	keys, err := openIndex(opts.IndexMode, opts.BTreeMemoryBudgetBytes/2)
+	s, keys, err := storage.OpenIndexed(ctx, dir, cfg, existingOnly, fs, func(s *storage.Store) (index.Backend, error) {
+		return openIndex(s, opts.IndexMode, opts.BTreeMemoryBudgetBytes/2)
+	})
 	if err != nil {
-		return nil, operationError("open", "index", err)
-	}
-	s, err := storage.OpenIndexed(ctx, dir, cfg, existingOnly, fs, keys)
-	if err != nil {
-		return nil, operationError("open", "recovery", errors.Join(err, keys.Close()))
+		return nil, operationError("open", "recovery", err)
 	}
 	db := &DB{opts: opts, store: s, keys: keys, files: make(map[uint64]*storage.File), cache: cache.New(opts.ValueCacheBudgetBytes), closed: make(chan struct{}), hooks: hooks}
 	db.resident, _ = keys.(index.ResidentLookup)
@@ -131,7 +129,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	// Finish opening a fresh, empty database once initialization has published
 	// CURRENT. Only recovery has a cancellable index to hand off to the worker.
 	if err := ctx.Err(); err != nil && !s.Created {
-		return nil, operationError("open", "recovery", errors.Join(err, s.Close(), keys.Close()))
+		return nil, operationError("open", "recovery", errors.Join(err, keys.Close(), s.Close()))
 	}
 	db.startCleaner()
 	return db, nil

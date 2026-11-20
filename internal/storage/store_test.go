@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
+	"github.com/anaregdesign/tarp/internal/index/btree"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
@@ -77,6 +79,95 @@ func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
 	defer reopened.Close()
 	if _, err := os.Stat(owned.Name()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recognized temporary file after valid Open: %v", err)
+	}
+}
+
+func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 256, TargetSegmentBytes: 1024, Handles: 1}
+	s, _, err := Open(dir, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(format.Put, []byte("k"), []byte("saved"), func() error { return nil }); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	data := s.Files[s.Current.ActiveID].Path
+	end := s.Current.ActiveEnd
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(data, end+1); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(dir, workspaceName)
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	owned := filepath.Join(workspace, "tarp-index-123")
+	if err := os.WriteFile(owned, []byte("scratch"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	newBTree := func(s *Store) (index.Backend, error) {
+		dir, err := s.WorkspaceDir()
+		if err != nil {
+			return nil, err
+		}
+		return btree.NewIn(dir, btree.MinBudget)
+	}
+	checkUnrecovered := func() {
+		t.Helper()
+		if got, err := os.ReadFile(owned); err != nil || string(got) != "scratch" {
+			t.Fatalf("scratch after failed Open: %q, %v", got, err)
+		}
+		if st, err := os.Stat(data); err != nil || st.Size() != end+1 {
+			t.Fatalf("DATA tail after failed Open: %v, %v", st, err)
+		}
+	}
+
+	tooSmall := cfg
+	tooSmall.RecordBytes = 1
+	rejected, keys, err := OpenIndexed(t.Context(), dir, tooSmall, true, nil, newBTree)
+	var limits *CompatibilityError
+	if rejected != nil || keys != nil || !errors.As(err, &limits) {
+		t.Fatalf("Open with incompatible limits: %v, %v, %v", rejected, keys, err)
+	}
+	checkUnrecovered()
+
+	unknown := filepath.Join(workspace, "unknown")
+	if err := os.WriteFile(unknown, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rejected, keys, err = OpenIndexed(t.Context(), dir, cfg, true, nil, newBTree)
+	if rejected != nil || keys != nil || !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open with unknown workspace file: %v, %v, %v", rejected, keys, err)
+	}
+	checkUnrecovered()
+	if got, err := os.ReadFile(unknown); err != nil || string(got) != "keep" {
+		t.Fatalf("unknown file after failed Open: %q, %v", got, err)
+	}
+
+	if err := os.Remove(unknown); err != nil {
+		t.Fatal(err)
+	}
+	reopened, live, err := Open(dir, cfg, nil)
+	if err != nil {
+		t.Fatalf("retry Open: %v", err)
+	}
+	defer reopened.Close()
+	loc, ok := live["k"]
+	if !ok {
+		t.Fatal("committed key missing after retry")
+	}
+	if got, err := reopened.Read(loc, "k"); err != nil || string(got) != "saved" {
+		t.Fatalf("retry read: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(owned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scratch after retry: %v", err)
+	}
+	if st, err := os.Stat(data); err != nil || st.Size() != end {
+		t.Fatalf("DATA tail after retry: %v, %v", st, err)
 	}
 }
 

@@ -677,6 +677,85 @@ func TestIndexModesShareDataSnapshotsAndBackups(t *testing.T) {
 	}
 }
 
+func TestBTreeWorkspaceFollowsDatabaseDirectory(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("TMPDIR", filepath.Join(parent, "missing-temp"))
+	dir := filepath.Join(parent, "live")
+	opts := tarp.Options{IndexMode: tarp.IndexBTree, BTreeMemoryBudgetBytes: 1 << 20}
+	db := openPublicDB(t, dir, opts)
+	if info, err := os.Lstat(filepath.Join(dir, ".tarp-work")); err != nil || !info.IsDir() {
+		t.Fatalf("database workspace: %v, %v", info, err)
+	}
+
+	// This key history exceeds the replay sort budget; checkpointing also spills relocations.
+	suffix := strings.Repeat("k", 2048)
+	entries := make([]tarp.Entry, 64)
+	for i := range entries {
+		entries[i] = tarp.Entry{Key: []byte(fmt.Sprintf("%02d%s", i, suffix)), Value: []byte{byte(i)}}
+	}
+	if err := db.BatchPut(entries); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	backup := filepath.Join(parent, "backup")
+	if err := db.Backup(t.Context(), backup); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a process exit between CreateTemp and unlink on the live DB.
+	workspace := filepath.Join(dir, ".tarp-work")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(workspace, "tarp-index-123")
+	if err := os.WriteFile(leftover, []byte("incomplete page"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if other, err := tarp.OpenExisting(t.Context(), backup, opts); !errors.Is(err, tarp.ErrBackupDirectory) || other != nil {
+		t.Fatalf("OpenExisting on backup: %v, %v", other, err)
+	}
+	// VerifyBackup checks the exact inventory, including after the refused Open.
+	if info, err := tarp.VerifyBackup(t.Context(), backup); err != nil || info.LiveKeys != uint64(len(entries)) {
+		t.Fatalf("VerifyBackup: %+v, %v", info, err)
+	}
+	restored := filepath.Join(parent, "restored")
+	if err := tarp.Restore(t.Context(), tarp.RestoreRequest{Source: backup, Destination: restored}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, restored} {
+		image, err := tarp.OpenExisting(t.Context(), path, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer image.Close()
+		for _, entry := range entries {
+			if got, err := image.Get(entry.Key); err != nil || !bytes.Equal(got, entry.Value) {
+				t.Fatalf("%s: Get key %q: %x, %v", path, entry.Key[:2], got, err)
+			}
+		}
+	}
+	if _, err := os.Lstat(leftover); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scratch file after reopen: %v", err)
+	}
+}
+
+func TestBTreeOpenRespectsCurrentOwnerBeforeCreatingWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	openPublicDB(t, dir, tarp.Options{IndexMode: tarp.IndexMemory})
+	t.Setenv("TMPDIR", filepath.Join(dir, "missing-temp"))
+	other, err := tarp.Open(dir, tarp.Options{IndexMode: tarp.IndexBTree})
+	if other != nil || !errors.Is(err, tarp.ErrLocked) {
+		t.Fatalf("locked Open: %v, %v", other, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".tarp-work")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace after rejected Open: %v", err)
+	}
+}
+
 func TestIndexOptionErrorsLeaveNewDirectoryAbsent(t *testing.T) {
 	for _, o := range []tarp.Options{
 		{IndexMode: 99},

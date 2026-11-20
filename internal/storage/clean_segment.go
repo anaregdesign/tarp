@@ -109,7 +109,6 @@ func (w pacedOutput) Write(b []byte) (int, error) {
 // Copy streams each source in catalog order into the same output. Every
 // tombstone is retained until the next complete checkpoint.
 func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, history index.Backend, yield func() error, keep func(string, Location) (bool, error)) (result error) {
-	moves.fs = fs
 	writer := &outputWriter{fs: fs, offset: format.SegmentHeaderBytes, point: "clean.copy"}
 	defer func() {
 		if writer.fd != nil {

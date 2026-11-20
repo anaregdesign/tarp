@@ -101,7 +101,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		}
 		return db.store.ReserveSnapshotFile()
 	}
-	var moves storage.Relocations
+	moves := db.store.NewRelocations()
 	defer func() {
 		if err := moves.Close(); err != nil {
 			if returned != nil {
@@ -117,7 +117,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		if err != nil {
 			return &storage.IndexWorkError{Err: err}
 		}
-		copyErr := checkpoint.Copy(ctx, history, live, &moves, reserve)
+		copyErr := checkpoint.Copy(ctx, history, live, moves, reserve)
 		if err := history.Close(); err != nil {
 			return errors.Join(copyErr, &storage.IndexWorkError{Err: err})
 		}
@@ -147,7 +147,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	db.relocate(&moves, maxBatch, "compact.remap:after")
+	db.relocate(moves, maxBatch, "compact.remap:after")
 	capture.Release()
 	released = true
 	db.writer.Lock()
