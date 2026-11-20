@@ -6,14 +6,14 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses v0.8.0. The API reference below describes `main`. For the release API,
-see the [v0.8.0 documentation](https://github.com/anaregdesign/tarp/tree/v0.8.0).
+uses v0.9.0. For the previous release, see the
+[v0.8.0 documentation](https://github.com/anaregdesign/tarp/tree/v0.8.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.8.0
+go get github.com/anaregdesign/tarp@v0.9.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -285,9 +285,9 @@ records, or total disk quota is provided.
 
 ## Choosing the key index
 
-On `main`, `Options{}` uses an in-memory hash index for fast random lookups.
+`Options{}` uses an in-memory hash index for fast random lookups.
 For datasets whose keys would consume too much heap, choose the disk index
-when opening the database. The index options below were added after v0.8.0.
+when opening the database. The index options below are available from v0.9.0.
 
 ```go
 db, err := tarp.Open(dir, tarp.Options{
@@ -356,9 +356,9 @@ files. If a live entry exceeds the new cache or record limit, they return
 `ErrIncompatibleOptions`. Minimum settings are 129 cache bytes, 49 record
 bytes and one read handle.
 
-### Updating Go callers to main
+### Updating Go callers to v0.9.0
 
-When updating from v0.8.0 to `main`, use the names below. You can reopen
+When updating from v0.8.0 to v0.9.0, use the names below. You can reopen
 v0.8.0 databases and restore v0.8.0 backups with the same limits.
 
 | Previously | Now |
