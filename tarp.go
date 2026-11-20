@@ -27,11 +27,15 @@ const (
 type Options struct {
 	// IndexMode selects a paged B+tree or in-memory hash map for this handle.
 	IndexMode IndexMode
-	// IndexMemoryBytes budgets the paged index and its maintenance workspaces.
-	// Zero selects 16 MiB in B+tree mode. The minimum is 1 MiB.
-	IndexMemoryBytes int64
-	// CacheBytes is the logical LRU budget. Each live entry must fit. Zero selects 64 MiB.
-	CacheBytes int64
+	// BTreeMemoryBudgetBytes sets the working-memory budget for IndexBTree,
+	// shared by the foreground index and its maintenance workspaces.
+	// Zero selects 16 MiB in IndexBTree mode. An explicit budget must be at
+	// least 1 MiB and requires IndexBTree.
+	BTreeMemoryBudgetBytes int64
+	// ValueCacheBudgetBytes sets the logical budget for the value LRU in
+	// either index mode. Each live key, value and its entry metadata must fit
+	// together within the budget. Zero selects 64 MiB.
+	ValueCacheBudgetBytes int64
 	// MaxRecordBytes limits the encoded header, key and value of one record. Zero selects 1 MiB.
 	MaxRecordBytes int64
 	// TargetSegmentBytes sizes new logs and checkpoints and caps repack input.
@@ -39,12 +43,12 @@ type Options struct {
 	TargetSegmentBytes int64
 	// ReadFileHandles bounds the pool of reusable DATA handles. Zero selects 64.
 	ReadFileHandles int
-	// BatchReadConcurrency limits simultaneous DATA reads across BatchGet calls on this DB. Zero selects 8.
-	BatchReadConcurrency int
-	// MaxBatchResultBytes limits the sum of encoded value bytes in one BatchGet
+	// BatchGetReadConcurrency limits simultaneous DATA reads across BatchGet calls on this DB. Zero selects 8.
+	BatchGetReadConcurrency int
+	// MaxBatchGetValueBytes limits the sum of encoded value bytes in one BatchGet
 	// result, including duplicates. Missing keys and empty values cost zero.
 	// It excludes result metadata and allocations by application codecs. Zero selects 64 MiB.
-	MaxBatchResultBytes int64
+	MaxBatchGetValueBytes int64
 }
 
 // RestoreLimits returns the limits used to verify live records for restore.
@@ -111,11 +115,12 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	return (*engine.DB)(db).Backup(ctx, destination)
 }
 
-// RestoreLimits bounds the logical cache charge and encoded size of each live
+// RestoreLimits bounds the logical value-cache charge and encoded size of each live
 // record in a restored image. Zero fields select the same defaults as Open.
 type RestoreLimits struct {
-	// CacheBytes bounds the logical cache charge of the largest live entry. Zero selects 64 MiB.
-	CacheBytes int64
+	// ValueCacheBudgetBytes must cover the largest live entry's value-cache
+	// charge (key, value and entry metadata). Zero selects 64 MiB.
+	ValueCacheBudgetBytes int64
 	// MaxRecordBytes bounds the largest live encoded record, including its header. Zero selects 1 MiB.
 	MaxRecordBytes int64
 }
@@ -146,7 +151,7 @@ type BackupInfo struct {
 	DatabaseID [16]byte // Database UUID, shared by its backups and restored copies.
 	Sequence   uint64   // Last committed user sequence in the backup.
 	LiveKeys   uint64   // Number of keys present at Sequence.
-	// RequiredLimits gives the largest live cache charge and encoded record size.
+	// RequiredLimits gives the largest live value-cache charge and encoded record size.
 	// Both are zero for an empty image. Zero option fields select defaults.
 	RequiredLimits RestoreLimits
 }
@@ -177,11 +182,19 @@ func publicBackupInfo(info storage.BackupInfo, err error) (BackupInfo, error) {
 	if err != nil {
 		return BackupInfo{}, err
 	}
-	return BackupInfo{DatabaseID: info.DatabaseID, Sequence: info.Sequence, LiveKeys: info.LiveKeys,
-		RequiredLimits: RestoreLimits{CacheBytes: info.Required.CacheBytes, MaxRecordBytes: info.Required.RecordBytes}}, nil
+	return BackupInfo{
+		DatabaseID: info.DatabaseID,
+		Sequence:   info.Sequence,
+		LiveKeys:   info.LiveKeys,
+		RequiredLimits: RestoreLimits{
+			ValueCacheBudgetBytes: info.Required.ValueCacheBudgetBytes,
+			MaxRecordBytes:        info.Required.RecordBytes,
+		},
+	}, nil
 }
 
-// CompactResult counts reclaimed file bytes and retired bytes still held by leases.
+// CompactResult reports the logical size of files unlinked by this Compact
+// call and the size of retired DATA files still held by leases at cleanup.
 type CompactResult = engine.CompactResult
 
 // Compact replaces the complete committed prefix with an online checkpoint.
@@ -190,12 +203,12 @@ func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	return (*engine.DB)(db).Compact(ctx)
 }
 
-// MaintenanceStatus reports automatic maintenance activity since Open.
-type MaintenanceStatus = engine.MaintenanceStatus
+// AutoCompactionStatus reports the background compaction worker's activity since Open.
+type AutoCompactionStatus = engine.AutoCompactionStatus
 
-// MaintenanceStatus returns the worker's latest status, including after Close.
-func (db *DB) MaintenanceStatus() MaintenanceStatus {
-	return (*engine.DB)(db).MaintenanceStatus()
+// AutoCompactionStatus returns the worker's latest status, including after Close.
+func (db *DB) AutoCompactionStatus() AutoCompactionStatus {
+	return (*engine.DB)(db).AutoCompactionStatus()
 }
 
 // Close rejects new calls and waits for admitted operations before releasing

@@ -162,7 +162,7 @@ func TestPublicDBReportsSizeAndReopenLimits(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			opts := tarp.Options{CacheBytes: tc.cache, MaxRecordBytes: tc.record}
+			opts := tarp.Options{ValueCacheBudgetBytes: tc.cache, MaxRecordBytes: tc.record}
 			db := openPublicDB(t, dir, opts)
 			key := []byte("k")
 			if err := db.Put(key, []byte("old")); err != nil {
@@ -173,24 +173,24 @@ func TestPublicDBReportsSizeAndReopenLimits(t *testing.T) {
 			if !errors.Is(err, tarp.ErrTooLarge) || !errors.As(err, &size) {
 				t.Fatalf("oversized Put = %v", err)
 			}
-			if size.KeyBytes != 1 || size.ValueBytes != 4 || size.RecordBytes != 53 || size.CacheCharge != 133 ||
-				size.CacheBytes != tc.cache || size.MaxRecordBytes != tc.record || size.Overflow {
+			if size.KeyBytes != 1 || size.ValueBytes != 4 || size.RecordBytes != 53 || size.ValueCacheChargeBytes != 133 ||
+				size.ValueCacheBudgetBytes != tc.cache || size.MaxRecordBytes != tc.record || size.Overflow {
 				t.Fatalf("incorrect admission costs or limits: %+v", size)
 			}
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			opts.CacheBytes--
+			opts.ValueCacheBudgetBytes--
 			opts.MaxRecordBytes--
 			failed, err := tarp.Open(dir, opts)
 			var required *tarp.CompatibilityError
 			if failed != nil || !errors.Is(err, tarp.ErrIncompatibleOptions) || !errors.As(err, &required) {
 				t.Fatalf("Open with smaller limits = %v, %v", failed, err)
 			}
-			if required.RequiredCacheBytes != 132 || required.RequiredRecordBytes != 52 {
+			if required.RequiredValueCacheBudgetBytes != 132 || required.RequiredRecordBytes != 52 {
 				t.Fatalf("wrong reopen minima: %+v", required)
 			}
-			exact := tarp.Options{CacheBytes: required.RequiredCacheBytes, MaxRecordBytes: required.RequiredRecordBytes}
+			exact := tarp.Options{ValueCacheBudgetBytes: required.RequiredValueCacheBudgetBytes, MaxRecordBytes: required.RequiredRecordBytes}
 			if value, err := openPublicDB(t, dir, exact).Get(key); string(value) != "old" || err != nil {
 				t.Fatalf("Get after reopen at reported minima = %q, %v", value, err)
 			}
@@ -199,7 +199,7 @@ func TestPublicDBReportsSizeAndReopenLimits(t *testing.T) {
 }
 
 func TestBatchLimitsReportOriginalInputAndPreserveSizeCause(t *testing.T) {
-	opts := tarp.Options{CacheBytes: 132, MaxRecordBytes: 52, TargetSegmentBytes: 164}
+	opts := tarp.Options{ValueCacheBudgetBytes: 132, MaxRecordBytes: 52, TargetSegmentBytes: 164}
 	db := openPublicDB(t, t.TempDir(), opts) // 100-byte segment payload
 	view, err := tarp.Bind(db, tarp.StringCodec{}, tarp.StringCodec{})
 	if err != nil {
@@ -241,7 +241,7 @@ func TestBatchLimitsReportOriginalInputAndPreserveSizeCause(t *testing.T) {
 			var entry *tarp.SizeError
 			if tc.kind == tarp.BatchEntrySizeLimit {
 				if !errors.As(err, &entry) || entry != limit.Entry || entry.KeyBytes != 1 || entry.ValueBytes != 4 ||
-					entry.RecordBytes != 53 || entry.CacheCharge != 133 || entry.MaxRecordBytes != 52 || entry.CacheBytes != 132 {
+					entry.RecordBytes != 53 || entry.ValueCacheChargeBytes != 133 || entry.MaxRecordBytes != 52 || entry.ValueCacheBudgetBytes != 132 {
 					t.Fatalf("lost entry size details: %+v", entry)
 				}
 			} else if errors.As(err, &entry) || limit.Entry != nil {

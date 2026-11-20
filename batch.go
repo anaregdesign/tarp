@@ -12,7 +12,7 @@ type BatchResult = engine.BatchResult
 // BatchGet reads all keys at one point in time and returns one result per input,
 // in order. Repeated keys receive independent value slices. Like Scan, it
 // preserves cache recency. Distinct uncached records can be read concurrently,
-// up to Options.BatchReadConcurrency across the DB. MaxBatchResultBytes
+// up to Options.BatchGetReadConcurrency across the DB. MaxBatchGetValueBytes
 // limits the combined value bytes, counting duplicates. Exceeding it returns
 // a BatchLimitError before reading or copying values. An error discards the entire result.
 func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {

@@ -164,7 +164,7 @@ func measurePausedScan(t testing.TB, f repackFixture) pausedScanResult {
 		t.Fatal(err)
 	}
 	result.CheckpointNS = time.Since(start).Nanoseconds()
-	result.PinnedDataBytes = checkpoint.PinnedBytes
+	result.PinnedDataBytes = checkpoint.PinnedRetiredDataBytes
 	dir := engine.Observe(db).Dir()
 	var oldPaths []string
 	var sealedBytes int64
@@ -177,8 +177,8 @@ func measurePausedScan(t testing.TB, f repackFixture) pausedScanResult {
 		sealedBytes += source.Bytes
 	}
 	result.SealedSourcesRetained = len(oldPaths)
-	if checkpoint.PinnedBytes < sealedBytes {
-		t.Fatalf("checkpoint reports %d pinned bytes, want at least %d", checkpoint.PinnedBytes, sealedBytes)
+	if checkpoint.PinnedRetiredDataBytes < sealedBytes {
+		t.Fatalf("checkpoint reports %d pinned bytes, want at least %d", checkpoint.PinnedRetiredDataBytes, sealedBytes)
 	}
 
 	close(startCleaner)

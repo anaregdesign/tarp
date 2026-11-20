@@ -176,9 +176,9 @@ func (db *TypedDB[K, V]) Compact(ctx context.Context) (CompactResult, error) {
 	return db.core.Compact(ctx)
 }
 
-// MaintenanceStatus returns the underlying DB's automatic maintenance status.
-func (db *TypedDB[K, V]) MaintenanceStatus() MaintenanceStatus {
-	return db.core.MaintenanceStatus()
+// AutoCompactionStatus returns the underlying DB's automatic maintenance status.
+func (db *TypedDB[K, V]) AutoCompactionStatus() AutoCompactionStatus {
+	return db.core.AutoCompactionStatus()
 }
 
 // Close closes the underlying DB, including any other views of it.

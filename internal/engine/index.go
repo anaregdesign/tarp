@@ -21,7 +21,7 @@ func openIndex(mode IndexMode, budget int64) (index.Backend, error) {
 // Reserve one quarter for backup and another for compaction so that both can
 // run concurrently with the foreground index.
 func (db *DB) newIndex() (index.Backend, error) {
-	return openIndex(db.opts.IndexMode, db.opts.IndexMemoryBytes/4)
+	return openIndex(db.opts.IndexMode, db.opts.BTreeMemoryBudgetBytes/4)
 }
 
 func (db *DB) indexView() index.View { return db.keys.View() }

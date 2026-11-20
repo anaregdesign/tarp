@@ -59,18 +59,18 @@ func (e *OpError) Is(target error) bool {
 
 // SizeError reports admission costs. Overflow means costs exceed uint64.
 type SizeError struct {
-	KeyBytes, ValueBytes, RecordBytes, CacheCharge uint64
-	Overflow                                       bool
+	KeyBytes, ValueBytes, RecordBytes, ValueCacheChargeBytes uint64
+	Overflow                                                 bool
 	// MaxRecordBytes limits RecordBytes, including the encoded header.
 	MaxRecordBytes int64
-	// CacheBytes limits CacheCharge, including logical cache metadata.
-	CacheBytes int64
+	// ValueCacheBudgetBytes limits ValueCacheChargeBytes, including logical value cache metadata.
+	ValueCacheBudgetBytes int64
 }
 
 func (e *SizeError) Error() string {
-	return fmt.Sprintf("%v: key=%d value=%d record=%d cache=%d overflow=%t; limits record=%d cache=%d",
-		ErrTooLarge, e.KeyBytes, e.ValueBytes, e.RecordBytes, e.CacheCharge, e.Overflow,
-		e.MaxRecordBytes, e.CacheBytes)
+	return fmt.Sprintf("%v: key=%d bytes, value=%d bytes, record=%d bytes (max %d), value cache charge=%d bytes (budget %d), overflow=%t",
+		ErrTooLarge, e.KeyBytes, e.ValueBytes, e.RecordBytes, e.MaxRecordBytes,
+		e.ValueCacheChargeBytes, e.ValueCacheBudgetBytes, e.Overflow)
 }
 
 func (e *SizeError) Unwrap() error { return ErrTooLarge }
@@ -92,10 +92,10 @@ func (e *BatchKeyError) Unwrap() error { return e.Err }
 type BatchLimitKind string
 
 const (
-	BatchInputCountLimit  BatchLimitKind = "input-count"
-	BatchEntrySizeLimit   BatchLimitKind = "entry-size"
-	BatchPayloadLimit     BatchLimitKind = "payload-bytes"
-	BatchResultBytesLimit BatchLimitKind = "result-bytes"
+	BatchInputCountLimit    BatchLimitKind = "input-count"
+	BatchEntrySizeLimit     BatchLimitKind = "entry-size"
+	BatchPayloadLimit       BatchLimitKind = "payload-bytes"
+	BatchGetValueBytesLimit BatchLimitKind = "result-bytes"
 )
 
 // BatchLimitError reports an oversized batch before publication. Index is the
@@ -105,9 +105,9 @@ type BatchLimitError struct {
 	Index int
 	// Actual and Limit are input counts for BatchInputCountLimit, or encoded
 	// record bytes for BatchPayloadLimit, or returned value bytes for
-	// BatchResultBytesLimit. Actual includes the offending input
+	// BatchGetValueBytesLimit. Actual includes the offending input
 	// and counts each distinct delete key once. Both fields are zero for
-	// BatchEntrySizeLimit, whose Entry reports both record and cache limits.
+	// BatchEntrySizeLimit, whose Entry reports both record and value cache limits.
 	Actual, Limit uint64
 	Entry         *SizeError
 }
@@ -118,8 +118,8 @@ func (e *BatchLimitError) Error() string {
 		return fmt.Sprintf("%v: batch has %d inputs, limit %d", ErrTooLarge, e.Actual, e.Limit)
 	case BatchEntrySizeLimit:
 		return fmt.Sprintf("tarp: batch input[%d]: %v", e.Index, e.Entry)
-	case BatchResultBytesLimit:
-		return fmt.Sprintf("%v: batch input[%d] raises the result to %d value bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
+	case BatchGetValueBytesLimit:
+		return fmt.Sprintf("%v: BatchGet input[%d] raises the encoded value total to %d bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
 	default:
 		return fmt.Sprintf("%v: batch input[%d] raises the encoded payload to %d bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
 	}
@@ -134,12 +134,12 @@ func (e *BatchLimitError) Unwrap() error {
 
 // CompatibilityError reports minima derived from the validated existing image.
 type CompatibilityError struct {
-	RequiredCacheBytes, RequiredRecordBytes int64
+	RequiredValueCacheBudgetBytes, RequiredRecordBytes int64
 }
 
 func (e *CompatibilityError) Error() string {
-	return fmt.Sprintf("%v: require cache >= %d, record >= %d",
-		ErrIncompatibleOptions, e.RequiredCacheBytes, e.RequiredRecordBytes)
+	return fmt.Sprintf("%v: require value cache budget >= %d bytes, max record size >= %d bytes",
+		ErrIncompatibleOptions, e.RequiredValueCacheBudgetBytes, e.RequiredRecordBytes)
 }
 
 func (e *CompatibilityError) Unwrap() error { return ErrIncompatibleOptions }

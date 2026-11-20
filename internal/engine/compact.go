@@ -9,11 +9,10 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-// CompactResult counts logical removed file bytes and retired bytes still
-// protected by leases. ReclaimedBytes is not a net filesystem-free-space delta.
+// CompactResult reports the outcome of this Compact call's cleanup.
 type CompactResult struct {
-	ReclaimedBytes int64
-	PinnedBytes    int64
+	UnlinkedBytes          int64 // Logical lengths of files unlinked during cleanup.
+	PinnedRetiredDataBytes int64 // Logical lengths of retired DATA files still held by leases during cleanup.
 }
 
 // Compact replaces the complete committed prefix with an online checkpoint.
@@ -55,7 +54,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if db.store.Current.Sequence == db.store.Catalog.Cutoff {
 		n, pinned, err := db.store.Cleanup()
 		db.writer.Unlock()
-		return CompactResult{ReclaimedBytes: n, PinnedBytes: pinned}, compactCleanupError(err)
+		return CompactResult{UnlinkedBytes: n, PinnedRetiredDataBytes: pinned}, compactCleanupError(err)
 	}
 	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
 		if err := db.sealActive(); err != nil {
@@ -150,7 +149,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if err := db.health(); err != nil {
 		return result, &OpError{Operation: "compact", Phase: "post-publication", Outcome: Committed, Err: err}
 	}
-	result.ReclaimedBytes, result.PinnedBytes, err = db.store.Cleanup()
+	result.UnlinkedBytes, result.PinnedRetiredDataBytes, err = db.store.Cleanup()
 	return result, compactCleanupError(err)
 }
 

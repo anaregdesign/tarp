@@ -25,7 +25,7 @@ func TestMaintenanceForeground(t *testing.T) {
 		t.Skip("set TARP_MAINTENANCE_BENCH=1 to measure foreground Put")
 	}
 	keys, value, opts := measurementInput(4096, 4096)
-	opts.CacheBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
+	opts.ValueCacheBudgetBytes, opts.TargetSegmentBytes, opts.ReadFileHandles = 64<<10, 1<<20, 4
 	fixture := os.Getenv("TARP_MAINTENANCE_FIXTURE")
 	if fixture == "" {
 		dir := filepath.Join(t.TempDir(), "working")

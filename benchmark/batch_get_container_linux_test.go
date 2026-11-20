@@ -137,7 +137,7 @@ func measureContainerBatchLimit(t *testing.T, fixture *containerBatchFixture, st
 				trace = traces[scenario]
 			}
 			row := containerBatchTrial{Kind: "trial", Round: round + 1, Seed: seed, ValueBytes: size,
-				Clients: n, Option: option, Limit: options.BatchReadConcurrency, Scenario: scenario}
+				Clients: n, Option: option, Limit: options.BatchGetReadConcurrency, Scenario: scenario}
 			row.measure(t, db, storage, trace)
 			write(t, row)
 		}

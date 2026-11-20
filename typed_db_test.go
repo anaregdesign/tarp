@@ -41,7 +41,7 @@ func TestBoundViewSharesRecordsAndOwnerControlsLifetime(t *testing.T) {
 	if err := db.Put(nil, 1); !errors.Is(err, tarp.ErrEmptyKey) {
 		t.Fatalf("Put empty key = %v", err)
 	}
-	for _, method := range []string{"Close", "Backup", "Compact", "Stats", "MaintenanceStatus"} {
+	for _, method := range []string{"Close", "Backup", "Compact", "Stats", "AutoCompactionStatus"} {
 		if _, present := reflect.TypeOf(db).MethodByName(method); present {
 			t.Fatalf("bound view exposes owner method %s", method)
 		}
@@ -216,7 +216,7 @@ func TestTypedDBScanStopsOnCodecErrorOrBreak(t *testing.T) {
 	if read != 1 {
 		t.Fatal("Scan yielded no entry")
 	}
-	if result, err := raw.Compact(t.Context()); err != nil || result.PinnedBytes != 0 {
+	if result, err := raw.Compact(t.Context()); err != nil || result.PinnedRetiredDataBytes != 0 {
 		t.Fatalf("Compact after break = %+v, %v", result, err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())

@@ -15,13 +15,13 @@ import (
 )
 
 func TestReadCountersSaturate(t *testing.T) {
-	db := newTestDB(t, Options{CacheBytes: 130}, nil)
+	db := newTestDB(t, Options{ValueCacheBudgetBytes: 130}, nil)
 	mustPut(t, db, "a", "A")
 	mustPut(t, db, "b", "B")
 	db.state.Lock()
-	db.stats.Cache.Hits = math.MaxUint64 - 1
-	db.stats.Cache.Misses = math.MaxUint64 - 1
-	db.stats.MissingKeys = math.MaxUint64 - 1
+	db.stats.ValueCache.Hits = math.MaxUint64 - 1
+	db.stats.ValueCache.Misses = math.MaxUint64 - 1
+	db.stats.MissingKeyLookups = math.MaxUint64 - 1
 	db.stats.BatchGetDuplicateInputs = math.MaxUint64 - 1
 	db.state.Unlock()
 	for range 2 {
@@ -30,8 +30,8 @@ func TestReadCountersSaturate(t *testing.T) {
 		}
 	}
 	s := db.Stats()
-	if s.Cache.Hits != math.MaxUint64 || s.Cache.Misses != math.MaxUint64 ||
-		s.MissingKeys != math.MaxUint64 || s.BatchGetDuplicateInputs != math.MaxUint64 {
+	if s.ValueCache.Hits != math.MaxUint64 || s.ValueCache.Misses != math.MaxUint64 ||
+		s.MissingKeyLookups != math.MaxUint64 || s.BatchGetDuplicateInputs != math.MaxUint64 {
 		t.Fatalf("read counters wrapped: %+v", s)
 	}
 }
@@ -39,7 +39,7 @@ func TestReadCountersSaturate(t *testing.T) {
 func TestBatchGetPreservesOrderOwnershipAndCache(t *testing.T) {
 	var reads atomic.Int64
 	opts := testOptions()
-	opts.CacheBytes = 260 // Two one-byte keys and values fit.
+	opts.ValueCacheBudgetBytes = 260 // Two one-byte keys and values fit.
 	db := newTestDB(t, opts, &storage.IO{Hook: func(p string) error {
 		if p == "read:before" {
 			reads.Add(1)
@@ -61,7 +61,7 @@ func TestBatchGetPreservesOrderOwnershipAndCache(t *testing.T) {
 		t.Fatal(got)
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 3 || s.Cache.Misses != 1 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 2 {
+	if s.ValueCache.Hits != 3 || s.ValueCache.Misses != 1 || s.MissingKeyLookups != 1 || s.BatchGetDuplicateInputs != 2 {
 		t.Fatalf("unexpected counts for one Get and four distinct BatchGet keys: %+v", s)
 	}
 	got[1].Value[0] = 'B'
@@ -81,7 +81,7 @@ func TestBatchGetPreservesOrderOwnershipAndCache(t *testing.T) {
 }
 
 func TestBatchGetCountsDistinctKeysInEachCall(t *testing.T) {
-	db := newTestDB(t, Options{CacheBytes: 130}, nil)
+	db := newTestDB(t, Options{ValueCacheBudgetBytes: 130}, nil)
 	mustPut(t, db, "a", "A")
 	mustPut(t, db, "b", "B") // Only b fits in the LRU.
 	const distinct = 64
@@ -94,7 +94,7 @@ func TestBatchGetCountsDistinctKeysInEachCall(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := db.Stats()
-		if s.Cache.Hits != call || s.Cache.Misses != call || s.MissingKeys != call*(distinct-2) ||
+		if s.ValueCache.Hits != call || s.ValueCache.Misses != call || s.MissingKeyLookups != call*(distinct-2) ||
 			s.BatchGetDuplicateInputs != call*(MaxBatchEntries-distinct) {
 			t.Fatalf("after BatchGet call %d: %+v", call, s)
 		}
@@ -102,7 +102,7 @@ func TestBatchGetCountsDistinctKeysInEachCall(t *testing.T) {
 }
 
 func TestBatchGetDistinguishesKeysWithMatchingSuffixes(t *testing.T) {
-	db := newTestDB(t, Options{CacheBytes: 132}, nil)
+	db := newTestDB(t, Options{ValueCacheBudgetBytes: 132}, nil)
 	mustPut(t, db, "axx", "A")
 	mustPut(t, db, "bxx", "B") // Only bxx fits in the LRU.
 	for _, first := range []string{"xxx", "bxx"} {
@@ -126,8 +126,8 @@ func TestBatchGetDistinguishesKeysWithMatchingSuffixes(t *testing.T) {
 			}
 		}
 		after := db.Stats()
-		if after.Cache.Hits-before.Cache.Hits != 1 || after.Cache.Misses-before.Cache.Misses != 1 ||
-			after.MissingKeys-before.MissingKeys != 127 || after.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != 129 {
+		if after.ValueCache.Hits-before.ValueCache.Hits != 1 || after.ValueCache.Misses-before.ValueCache.Misses != 1 ||
+			after.MissingKeyLookups-before.MissingKeyLookups != 127 || after.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != 129 {
 			t.Fatalf("first key %q: before %+v, after %+v", first, before, after)
 		}
 	}
@@ -161,14 +161,14 @@ func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 		t.Fatalf("closed empty batch: %v", err)
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 0 || s.Cache.Misses != 0 || s.MissingKeys != 0 || s.BatchGetDuplicateInputs != 0 {
+	if s.ValueCache.Hits != 0 || s.ValueCache.Misses != 0 || s.MissingKeyLookups != 0 || s.BatchGetDuplicateInputs != 0 {
 		t.Fatalf("rejected or empty batches counted lookups: %+v", s)
 	}
 }
 
 func TestBatchGetLimitsSnapshotValueBytesBeforeReading(t *testing.T) {
 	var reads atomic.Int64
-	opts := Options{CacheBytes: 132, MaxBatchResultBytes: 7}
+	opts := Options{ValueCacheBudgetBytes: 132, MaxBatchGetValueBytes: 7}
 	db := newTestDB(t, opts, &storage.IO{Hook: func(point string) error {
 		if point == "read:before" {
 			reads.Add(1)
@@ -193,7 +193,7 @@ func TestBatchGetLimitsSnapshotValueBytesBeforeReading(t *testing.T) {
 		got, err := db.BatchGet(tc.keys)
 		var limit *BatchLimitError
 		if got != nil || !errors.Is(err, ErrTooLarge) || !errors.As(err, &limit) ||
-			limit.Kind != BatchResultBytesLimit || limit.Actual != tc.actual || limit.Limit != 7 || limit.Index != tc.index {
+			limit.Kind != BatchGetValueBytesLimit || limit.Actual != tc.actual || limit.Limit != 7 || limit.Index != tc.index {
 			t.Fatalf("keys %q: got %+v, err %+v", tc.keys, got, err)
 		}
 	}
@@ -219,14 +219,14 @@ func TestBatchGetSizeBoundCannotWrap(t *testing.T) {
 }
 
 func TestBatchGetSizeBoundTracksPublishedAndRecoveredValues(t *testing.T) {
-	opts := Options{MaxBatchResultBytes: 4}
+	opts := Options{MaxBatchGetValueBytes: 4}
 	db := newTestDB(t, opts, nil)
 	a, b := []byte("a"), []byte("b")
 	checkTooLarge := func(db *DB, keys [][]byte, index int, actual uint64) {
 		t.Helper()
 		got, err := db.BatchGet(keys)
 		var limit *BatchLimitError
-		if got != nil || !errors.As(err, &limit) || limit.Kind != BatchResultBytesLimit ||
+		if got != nil || !errors.As(err, &limit) || limit.Kind != BatchGetValueBytesLimit ||
 			limit.Index != index || limit.Actual != actual || limit.Limit != 4 {
 			t.Fatalf("BatchGet(%q) = %+v, %v; want %d bytes at index %d", keys, got, err, actual, index)
 		}
@@ -311,9 +311,9 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		defer release()
 		var started atomic.Int32
 		opts := testOptions()
-		opts.CacheBytes = 260
-		opts.BatchReadConcurrency = 2
-		opts.MaxBatchResultBytes = 5 // The original keys fit; the concurrent replacements do not.
+		opts.ValueCacheBudgetBytes = 260
+		opts.BatchGetReadConcurrency = 2
+		opts.MaxBatchGetValueBytes = 5 // The original keys fit; the concurrent replacements do not.
 		ioHooks := &storage.IO{Hook: func(p string) error {
 			if p == "read:before" && started.Add(1) <= 2 {
 				<-resume
@@ -332,7 +332,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		if got := started.Load(); got != 2 {
 			t.Fatalf("in-flight reads = %d, want 2", got)
 		}
-		if s := db.Stats(); s.Cache.Hits != 1 || s.Cache.Misses != 2 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 3 {
+		if s := db.Stats(); s.ValueCache.Hits != 1 || s.ValueCache.Misses != 2 || s.MissingKeyLookups != 1 || s.BatchGetDuplicateInputs != 3 {
 			t.Fatalf("Stats while both record reads are paused: %+v", s)
 		}
 		mustPut(t, db, "a", "updated")
@@ -340,7 +340,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 			t.Fatal(err)
 		}
 		mustPut(t, db, "c", "later")
-		if result, err := db.Compact(t.Context()); err != nil || result.PinnedBytes == 0 {
+		if result, err := db.Compact(t.Context()); err != nil || result.PinnedRetiredDataBytes == 0 {
 			t.Fatalf("compact with batch reads in flight: %+v, %v", result, err)
 		}
 		release()
@@ -357,7 +357,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 
 func TestBatchGetReadFailureDiscardsResultsAndPins(t *testing.T) {
 	var reads atomic.Int64
-	db := newTestDB(t, Options{CacheBytes: 130}, &storage.IO{Hook: func(p string) error {
+	db := newTestDB(t, Options{ValueCacheBudgetBytes: 130}, &storage.IO{Hook: func(p string) error {
 		if p == "read:after" && reads.Add(1) == 2 {
 			return format.ErrCorrupt
 		}
@@ -380,7 +380,7 @@ func TestBatchGetReadFailureDiscardsResultsAndPins(t *testing.T) {
 		t.Fatalf("next read: %v", err)
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 1 || s.Cache.Misses != 3 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 2 {
+	if s.ValueCache.Hits != 1 || s.ValueCache.Misses != 3 || s.MissingKeyLookups != 1 || s.BatchGetDuplicateInputs != 2 {
 		t.Fatalf("failed I/O should retain probe counts: %+v", s)
 	}
 }

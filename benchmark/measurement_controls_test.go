@@ -98,7 +98,7 @@ func TestMeasurementMaintenanceCopyAndOverlap(t *testing.T) {
 			if mode == pinnedBackupMode {
 				pins := result["pinned_backup"].(pinnedBackupMeasurement)
 				t.Logf("backup pin verification: %+v", pins)
-				if pins.RetiredFilesHeld <= 16 || pins.RetiredBytesHeld != result["compact"].(engine.CompactResult).PinnedBytes ||
+				if pins.RetiredFilesHeld <= 16 || pins.RetiredBytesHeld != result["compact"].(measurementCompactResult).PinnedRetiredDataBytes ||
 					pins.ReleasedFilesUnlinked != pins.RetiredFilesHeld || pins.ReleasedBytesUnlinked != pins.RetiredBytesHeld ||
 					pins.BackupGateWaitNS <= 0 || pins.WorkerReclaimNS <= 0 {
 					t.Fatalf("incomplete backup pin witness: %+v", pins)

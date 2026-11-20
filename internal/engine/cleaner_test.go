@@ -100,7 +100,7 @@ func waitForUnlink(t *testing.T, db *DB, file string) {
 		}
 		select {
 		case <-deadline.C:
-			t.Fatalf("source still selected or pinned: %+v", db.MaintenanceStatus())
+			t.Fatalf("source still selected or pinned: %+v", db.AutoCompactionStatus())
 		default:
 			runtime.Gosched()
 		}
@@ -204,8 +204,8 @@ func TestWorkerDefersForHeadroomAndRecovers(t *testing.T) {
 	// Direct a single pass through the private seam so the deferral observation
 	// cannot race the worker's successful retry.
 	_, retry := db.cleanPass(context.Background())
-	if !retry || db.MaintenanceStatus().DeferredReason != "space" || db.health() != nil {
-		t.Fatalf("expected healthy space deferral: %+v", db.MaintenanceStatus())
+	if !retry || db.AutoCompactionStatus().DeferredReason != "space" || db.health() != nil {
+		t.Fatalf("expected healthy space deferral: %+v", db.AutoCompactionStatus())
 	}
 	<-deferral
 	if _, err := os.Stat(source); err != nil {
@@ -268,7 +268,7 @@ func TestManualCheckpointPreemptsCleanerDuringBackup(t *testing.T) {
 	}()
 	close(resumeScan)
 	deadline := time.After(5 * time.Second)
-	for db.MaintenanceStatus().DeferredReason != "backup" {
+	for db.AutoCompactionStatus().DeferredReason != "backup" {
 		select {
 		case <-deadline:
 			t.Fatal("worker did not yield to backup")
@@ -279,7 +279,7 @@ func TestManualCheckpointPreemptsCleanerDuringBackup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result, err := db.Compact(ctx)
-	if err != nil || result.PinnedBytes == 0 {
+	if err != nil || result.PinnedRetiredDataBytes == 0 {
 		t.Fatalf("manual checkpoint while backup is pinned: %+v, %v", result, err)
 	}
 }
@@ -298,7 +298,7 @@ func waitForDataFiles(t *testing.T, db *DB, want int) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("found %d DATA files, want %d; worker status %+v", len(files), want, db.MaintenanceStatus())
+			t.Fatalf("found %d DATA files, want %d; worker status %+v", len(files), want, db.AutoCompactionStatus())
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -521,8 +521,8 @@ func TestCleanerCrashChild(t *testing.T) {
 	}
 	select {
 	case <-db.cleaner.done:
-		t.Fatalf("worker stopped before cut %s: %+v", point, db.MaintenanceStatus())
+		t.Fatalf("worker stopped before cut %s: %+v", point, db.AutoCompactionStatus())
 	case <-time.After(4 * time.Second):
-		t.Fatalf("cut %s not reached: %+v", point, db.MaintenanceStatus())
+		t.Fatalf("cut %s not reached: %+v", point, db.AutoCompactionStatus())
 	}
 }

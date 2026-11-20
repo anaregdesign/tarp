@@ -104,8 +104,8 @@ func TestTypedBatchesUseEncodedIdentityAndPreserveCodecErrors(t *testing.T) {
 		t.Fatalf("partial results after value decode failure: %+v", r)
 	}
 	want := before
-	want.Cache.Hits += 2
-	want.MissingKeys++
+	want.ValueCache.Hits += 2
+	want.MissingKeyLookups++
 	want.BatchGetDuplicateInputs++
 	if s := db.Stats(); s != want {
 		t.Fatalf("value decode failure left Stats %+v, want %+v", s, want)
@@ -142,7 +142,7 @@ func TestTypedBatchGetClassifiesEncodedFloatKeys(t *testing.T) {
 		t.Fatalf("unexpected results: %+v", results)
 	}
 	s := db.Stats()
-	if s.Cache.Hits != 2 || s.Cache.Misses != 0 || s.MissingKeys != 1 || s.BatchGetDuplicateInputs != 2 {
+	if s.ValueCache.Hits != 2 || s.ValueCache.Misses != 0 || s.MissingKeyLookups != 1 || s.BatchGetDuplicateInputs != 2 {
 		t.Fatalf("unexpected counts for three distinct encoded keys: %+v", s)
 	}
 }
@@ -184,7 +184,7 @@ func TestTypedBatchBounds(t *testing.T) {
 }
 
 func TestTypedBatchGetChargesEncodedBytesBeforeDecoding(t *testing.T) {
-	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxBatchResultBytes: 7})
+	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxBatchGetValueBytes: 7})
 	if err := db.Put([]byte("key"), []byte("invalid")); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestTypedBatchGetChargesEncodedBytesBeforeDecoding(t *testing.T) {
 	got, err := view.BatchGet([]string{"key", "absent", "key"})
 	var limit *tarp.BatchLimitError
 	if got != nil || !errors.Is(err, tarp.ErrTooLarge) || !errors.As(err, &limit) ||
-		limit.Kind != tarp.BatchResultBytesLimit || limit.Index != 2 || limit.Actual != 14 || limit.Limit != 7 {
+		limit.Kind != tarp.BatchGetValueBytesLimit || limit.Index != 2 || limit.Actual != 14 || limit.Limit != 7 {
 		t.Fatalf("oversized typed result: %+v, %v", got, err)
 	}
 	_, err = view.BatchGet([]string{"key"})

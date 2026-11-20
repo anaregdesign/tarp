@@ -6,8 +6,8 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses v0.8.0. For v0.7.0, see the
-[versioned documentation](https://github.com/anaregdesign/tarp/tree/v0.7.0).
+uses v0.8.0. The API reference below describes `main`. For the release API,
+see the [v0.8.0 documentation](https://github.com/anaregdesign/tarp/tree/v0.8.0).
 
 ```sh
 mkdir tarp-example
@@ -203,7 +203,7 @@ return db.BatchDelete(keys)
 The byte API takes `[]tarp.Entry` for writes and `[][]byte` for reads and
 deletes. Results follow input order. A missing key has `Found == false`,
 and the caller owns a separate value slice for each occurrence of a found
-key. A single read can return up to `Options.MaxBatchResultBytes` encoded value
+key. One `BatchGet` can return up to `Options.MaxBatchGetValueBytes` encoded value
 bytes (64 MiB by default). Each occurrence counts, even when the key is read
 from DATA only once. Empty values and missing keys cost zero bytes. Result
 metadata and allocations inside a custom decoder are outside this limit.
@@ -217,8 +217,8 @@ reports index 2 when `a` exists.
 
 `BatchGet` preserves LRU recency and reads each distinct cold, live key once.
 Concurrent `BatchGet` calls on the same DB, including typed views, share the
-DATA read limit set by `Options.BatchReadConcurrency`. The default is 8.
-For example, `tarp.Options{BatchReadConcurrency: 16}` allows up to 16 reads,
+DATA read limit set by `Options.BatchGetReadConcurrency`. The default is 8.
+For example, `tarp.Options{BatchGetReadConcurrency: 16}` allows up to 16 reads,
 and a value of 1 serializes them. When reads of small records complete quickly,
 the caller can read them sequentially. If reads slow down, the batch can use available workers
 for the remaining records. A fully cached batch uses no read slots or workers. `Get` runs
@@ -232,8 +232,9 @@ All put entries count, including repeated keys. For deletes, only distinct
 keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
 before publication. Each nonempty write batch has one commit outcome.
 Use `errors.As` with `*tarp.BatchLimitError` to distinguish input count,
-per-entry size, total encoded write payload and total read result bytes. Its `Index` is the original input
-position, or -1 for a request-wide count error. For count, payload and result limits,
+per-entry size, total encoded write payload and total encoded value bytes returned
+by `BatchGet`. Its `Index` is the original input position, or -1 for a
+request-wide count error. For count, payload and result limits,
 `Actual` and `Limit` report inputs or bytes respectively. A per-entry error
 also exposes the underlying `*tarp.SizeError` with its record and cache charges.
 Use `errors.As` with `*tarp.BatchCodecError` to get the zero-based input
@@ -244,7 +245,7 @@ See the [runnable batch example](typed_batch_test.go).
 ## Contract
 
 `DB` provides `Get`, `Scan`, `Keys`, upserting `Put`, `Delete`, `Close`, online `Backup`,
-`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `MaintenanceStatus`. Use `Open` to create or
+`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `AutoCompactionStatus`. Use `Open` to create or
 reopen a database and `Restore` to restore a backup offline.
 
 - Keys and values are `[]byte`. Empty keys are rejected; empty values are valid.
@@ -290,8 +291,8 @@ when opening the database. The index options below were added after v0.8.0.
 
 ```go
 db, err := tarp.Open(dir, tarp.Options{
-	IndexMode:        tarp.IndexBTree,
-	IndexMemoryBytes: 16 << 20,
+	IndexMode:              tarp.IndexBTree,
+	BTreeMemoryBudgetBytes: 16 << 20,
 })
 ```
 
@@ -305,8 +306,9 @@ scratch file is released by the OS after its final descriptor closes.
 The configured budget is split between the foreground index (one half),
 compaction and backup (one quarter each). It limits page-cache and index work
 capacity. Decoded keys, request/iterator buffers, the file registry, Go's
-allocator and the OS page cache also consume memory. Returned values use the
-separate `CacheBytes` and batch-result policies. Long-running readers can
+allocator and the OS page cache also consume memory. `ValueCacheBudgetBytes`
+limits entries kept in the value LRU. `MaxBatchGetValueBytes` limits encoded
+value bytes returned by one batch read. Long-running readers can
 hold previous page generations and DATA files on disk.
 
 Both modes use the same DATA, MANIFEST, CURRENT and backup formats. Switch
@@ -324,13 +326,13 @@ the commit sync protocol.
 | Option | Default | What the limit applies to |
 | --- | ---: | --- |
 | `IndexMode` | `IndexMemory` | Selects a built-in key index for this Open. |
-| `IndexMemoryBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
-| `CacheBytes` | 64 MiB | Total logical charge of entries in this DB's LRU cache. A Put must fit as a single entry. |
+| `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
+| `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
 | `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Also bounds the total DATA bytes read in one automatic repack. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
-| `BatchReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
-| `MaxBatchResultBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
+| `BatchGetReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
+| `MaxBatchGetValueBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
 
 For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
 bytes and `128 + K + V` cache bytes. An entry that exceeds either limit returns
@@ -353,6 +355,26 @@ Lowering the target still allows `Open` and `Restore` to read larger existing
 files. If a live entry exceeds the new cache or record limit, they return
 `ErrIncompatibleOptions`. Minimum settings are 129 cache bytes, 49 record
 bytes and one read handle.
+
+### Updating Go callers to main
+
+When updating from v0.8.0 to `main`, use the names below. You can reopen
+v0.8.0 databases and restore v0.8.0 backups with the same limits.
+
+| Previously | Now |
+| --- | --- |
+| `Options.IndexMemoryBytes` (introduced on `main` after v0.8.0) | `Options.BTreeMemoryBudgetBytes` |
+| `CacheBytes` on `Options`, `RestoreLimits`, and `SizeError` | `ValueCacheBudgetBytes` |
+| `CompatibilityError.RequiredCacheBytes` | `CompatibilityError.RequiredValueCacheBudgetBytes` |
+| `SizeError.CacheCharge` | `SizeError.ValueCacheChargeBytes` |
+| `Stats.Cache` of type `CacheStats` | `Stats.ValueCache` of type `ValueCacheStats` |
+| `Stats.MissingKeys` | `Stats.MissingKeyLookups` |
+| `Options.BatchReadConcurrency` | `Options.BatchGetReadConcurrency` |
+| `Options.MaxBatchResultBytes` | `Options.MaxBatchGetValueBytes` |
+| `BatchResultBytesLimit` | `BatchGetValueBytesLimit` |
+| `MaintenanceStatus` type and method | `AutoCompactionStatus` |
+| `CompactResult.ReclaimedBytes` | `CompactResult.UnlinkedBytes` |
+| `PinnedBytes` on `CompactResult` and the worker status | `PinnedRetiredDataBytes` |
 
 ## Backup, restore, and maintenance
 
@@ -429,7 +451,7 @@ Both operations run in the background, yield for foreground writers and backup,
 and defer when temporary space is scarce. A replaced file can remain on disk
 while a reader or backup uses it.
 
-`db.MaintenanceStatus()` reports the worker's deferral reason, most recent
+`db.AutoCompactionStatus()` reports the worker's deferral reason, most recent
 maintenance error, pinned retired bytes, and cumulative logical bytes actually
 unlinked by this worker since `Open`. Filesystem allocation and staging writes
 also affect free space. Provision room for current data, temporary replacements,
@@ -439,7 +461,9 @@ Call `Compact(ctx)` for a full checkpoint through a captured sequence. It can
 discard tombstones covered by that checkpoint and preserves all concurrent
 tail writes. It serializes with the worker and can overlap one online backup.
 Duplicate manual checkpoints or duplicate backups return `ErrBusy`. Its
-`CompactResult` reports bytes reclaimed or still pinned by that operation.
+`CompactResult.UnlinkedBytes` counts the logical lengths of files removed by
+that call. `PinnedRetiredDataBytes` reports the retired DATA file bytes still
+held by leases at cleanup.
 If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.

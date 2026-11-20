@@ -31,7 +31,7 @@ func prepareContainerBatchFixture(t *testing.T, dir string, valueBytes, requests
 	coldKeys := containerBatchSlots * requests
 	f := &containerBatchFixture{
 		dir:      dir,
-		opts:     tarp.Options{CacheBytes: max(4<<20, int64(containerBatchSlots*(valueBytes+128))), ReadFileHandles: 16},
+		opts:     tarp.Options{ValueCacheBudgetBytes: max(4<<20, int64(containerBatchSlots*(valueBytes+128))), ReadFileHandles: 16},
 		keys:     make([][]byte, coldKeys+containerBatchSlots),
 		tails:    make([][]byte, 256),
 		requests: requests,
@@ -92,7 +92,7 @@ func prepareContainerBatchFixture(t *testing.T, dir string, valueBytes, requests
 func (f *containerBatchFixture) open(t *testing.T, limit int) *tarp.DB {
 	t.Helper()
 	opts := f.opts
-	opts.BatchReadConcurrency = limit
+	opts.BatchGetReadConcurrency = limit
 	db, err := tarp.Open(f.dir, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -259,9 +259,9 @@ func runContainerBatchRequests(db *tarp.DB, requests []containerBatchRequest, cl
 	}
 	after := db.Stats()
 	run.StatsDelta = containerBatchStats{
-		Hits:            after.Cache.Hits - before.Cache.Hits,
-		Misses:          after.Cache.Misses - before.Cache.Misses,
-		MissingKeys:     after.MissingKeys - before.MissingKeys,
+		Hits:            after.ValueCache.Hits - before.ValueCache.Hits,
+		Misses:          after.ValueCache.Misses - before.ValueCache.Misses,
+		MissingKeys:     after.MissingKeyLookups - before.MissingKeyLookups,
 		DuplicateInputs: after.BatchGetDuplicateInputs - before.BatchGetDuplicateInputs,
 	}
 	if run.StatsDelta != want {

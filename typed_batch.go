@@ -30,7 +30,7 @@ type TypedBatchResult[V any] struct {
 
 // BatchGet reads keys at one point in time, preserving input order. A codec
 // or DB error discards the entire result. Only found values are decoded.
-// MaxBatchResultBytes applies to encoded value bytes before decoding.
+// MaxBatchGetValueBytes applies to encoded value bytes before decoding.
 func (db *View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 	if err := engine.CheckBatchCount(len(keys)); err != nil {
 		return nil, err

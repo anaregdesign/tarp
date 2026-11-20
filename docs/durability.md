@@ -227,9 +227,11 @@ After an unlink, a failed directory sync stays pending. The next manual cleanup
 or worker retirement pass retries it, even if there are no more files to remove.
 Leased read descriptors close after their final release. Pin release performs
 no disk I/O. The worker revisits its pending retirements, and full checkpoint
-and validated reopen can also clean eligible files. `DB.MaintenanceStatus`
-reports the worker's deferral reason, most recent error, pinned retired byte
-count and logical bytes unlinked by the worker during this DB lifetime.
+and validated reopen can also clean eligible files. `DB.AutoCompactionStatus`
+reports the worker's deferral reason and most recent error. Its
+`PinnedRetiredDataBytes` records the retired DATA bytes held by leases at the
+latest retirement check. Its `UnlinkedBytes` counts the logical file bytes
+unlinked by the worker during this DB lifetime.
 
 Provision space for current data, copied live records and tombstones, headers,
 catalogs, backup files, pinned generations, concurrent tail growth and allocation

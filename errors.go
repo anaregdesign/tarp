@@ -41,9 +41,9 @@ const (
 // destination. A destination error alone allows continued use of a backup source.
 type OpError = engine.OpError
 
-// SizeError reports entry sizes and their limits. RecordBytes and CacheCharge
-// are the calculated costs. MaxRecordBytes and CacheBytes are the respective
-// configured budgets. Overflow means the costs do not fit in uint64.
+// SizeError compares the encoded RecordBytes with MaxRecordBytes and the
+// logical ValueCacheChargeBytes with ValueCacheBudgetBytes. Overflow means
+// the costs do not fit in uint64.
 type SizeError = engine.SizeError
 
 // BatchKeyError identifies the first empty input key in BatchGet, BatchPut or
@@ -58,16 +58,16 @@ type BatchKeyError = engine.BatchKeyError
 type BatchLimitKind = engine.BatchLimitKind
 
 const (
-	BatchInputCountLimit  = engine.BatchInputCountLimit
-	BatchEntrySizeLimit   = engine.BatchEntrySizeLimit
-	BatchPayloadLimit     = engine.BatchPayloadLimit
-	BatchResultBytesLimit = engine.BatchResultBytesLimit
+	BatchInputCountLimit    = engine.BatchInputCountLimit
+	BatchEntrySizeLimit     = engine.BatchEntrySizeLimit
+	BatchPayloadLimit       = engine.BatchPayloadLimit
+	BatchGetValueBytesLimit = engine.BatchGetValueBytesLimit
 )
 
 // BatchLimitError matches ErrTooLarge. Index is the original zero-based input
 // position, or -1 for a request-wide count failure. Actual and Limit are
 // counts for BatchInputCountLimit or encoded bytes through Index for
-// BatchPayloadLimit. For BatchResultBytesLimit they describe encoded value
+// BatchPayloadLimit. For BatchGetValueBytesLimit they describe encoded value
 // bytes, counting each requested occurrence of a found key. For
 // BatchEntrySizeLimit both are zero and errors.As can
 // also retrieve the underlying *SizeError with its record and cache charges.

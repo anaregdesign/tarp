@@ -345,10 +345,10 @@ func TestPowerCutGuest(t *testing.T) {
 		put("oracle", "possible")
 		remove("k0")
 		result, compactErr := db.Compact(context.Background())
-		if compactErr != nil || result.PinnedBytes == 0 {
+		if compactErr != nil || result.PinnedRetiredDataBytes == 0 {
 			t.Fatalf("overlap did not preserve pinned generations: %+v %v", result, compactErr)
 		}
-		fmt.Printf("TARP_PINNED %d\n", result.PinnedBytes)
+		fmt.Printf("TARP_PINNED %d\n", result.PinnedRetiredDataBytes)
 		close(releaseBackup)
 		err = <-done
 	}

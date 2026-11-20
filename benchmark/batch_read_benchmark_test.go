@@ -125,9 +125,9 @@ func openBatchReadFixture(b *testing.B, size, slots int, cold bool, limit int) (
 	b.Helper()
 	// The last key fills the one-entry cache in the cold cases.
 	keys, value, opts := measurementInput(size, slots+1)
-	opts.BatchReadConcurrency = limit
+	opts.BatchGetReadConcurrency = limit
 	if cold {
-		opts.CacheBytes /= int64(len(keys))
+		opts.ValueCacheBudgetBytes /= int64(len(keys))
 	}
 	recordBytes := int64(format.RecordHeaderBytes + len(keys[0]) + size)
 	opts.MaxRecordBytes = max(opts.MaxRecordBytes, recordBytes)
@@ -213,9 +213,9 @@ func measureBatchReads[K, V any, R ~struct {
 		}
 	}
 	n := uint64(b.N)
-	if after.Cache.Hits-before.Cache.Hits != hits*n ||
-		after.Cache.Misses-before.Cache.Misses != misses*n ||
-		after.MissingKeys-before.MissingKeys != missing*n ||
+	if after.ValueCache.Hits-before.ValueCache.Hits != hits*n ||
+		after.ValueCache.Misses-before.ValueCache.Misses != misses*n ||
+		after.MissingKeyLookups-before.MissingKeyLookups != missing*n ||
 		after.BatchGetDuplicateInputs-before.BatchGetDuplicateInputs != duplicates*n {
 		b.Fatalf("unexpected cache classification: before %+v, after %+v", before, after)
 	}

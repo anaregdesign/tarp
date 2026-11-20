@@ -224,12 +224,12 @@ func TestCompactRetriesPendingCleanupSync(t *testing.T) {
 			result, err := db.Compact(t.Context())
 			var op *OpError
 			if !errors.As(err, &op) || op.Operation != "compact" || op.Phase != "cleanup" ||
-				op.Outcome != Committed || !errors.Is(err, syscall.EIO) || result.ReclaimedBytes != tc.removed {
+				op.Outcome != Committed || !errors.Is(err, syscall.EIO) || result.UnlinkedBytes != tc.removed {
 				t.Fatalf("interrupted cleanup: result %+v, error %v", result, err)
 			}
 			syncsBefore := syncs
 			result, err = db.Compact(t.Context())
-			if err != nil || result.ReclaimedBytes != 8-tc.removed || syncs != syncsBefore+1 {
+			if err != nil || result.UnlinkedBytes != 8-tc.removed || syncs != syncsBefore+1 {
 				t.Fatalf("retry: result %+v, additional syncs %d, error %v", result, syncs-syncsBefore, err)
 			}
 			result, err = db.Compact(t.Context())
@@ -261,12 +261,12 @@ func TestCompactCanFinishCleanupAfterWorkerSyncFailure(t *testing.T) {
 	mustPut(t, db, "k", "acknowledged")
 	first, err := db.Compact(t.Context())
 	var op *OpError
-	if !errors.As(err, &op) || op.Outcome != Committed || !errors.Is(err, syscall.EIO) || first.ReclaimedBytes == 0 {
+	if !errors.As(err, &op) || op.Outcome != Committed || !errors.Is(err, syscall.EIO) || first.UnlinkedBytes == 0 {
 		t.Fatalf("checkpoint cleanup: result %+v, error %v", first, err)
 	}
 	// Drive one worker pass while its background goroutine is paused.
 	_, retry := db.cleanPass(t.Context())
-	status := db.MaintenanceStatus()
+	status := db.AutoCompactionStatus()
 	if !retry || workerSyncs != 1 || !errors.Is(status.LastError, ErrNoSpace) || status.UnlinkedBytes != 0 {
 		t.Fatalf("worker retry %t after %d syncs, status %+v", retry, workerSyncs, status)
 	}
@@ -480,7 +480,7 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 	}
 	cutoff := db.store.Current.Sequence
 	result, err := db.Compact(context.Background())
-	if err != nil || result.ReclaimedBytes == 0 || db.store.Catalog.Cutoff != cutoff {
+	if err != nil || result.UnlinkedBytes == 0 || db.store.Catalog.Cutoff != cutoff {
 		t.Fatalf("compact: %+v %v", result, err)
 	}
 	for i := 1; i < 4; i++ {
