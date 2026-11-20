@@ -50,13 +50,13 @@ func (db *View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 		encoded = make([][]byte, len(keys))
 	}
 	for i, key := range keys {
-		k, err := db.keyCodec.Encode(key)
+		k, err := db.encodeBatchKey("BatchGet", i, key)
 		if err != nil {
-			return nil, &BatchCodecError{Operation: "BatchGet", Index: i, Field: "key", Err: err}
+			return nil, err
 		}
 		encoded[i] = k
 	}
-	raw, err := db.core.BatchGet(encoded)
+	raw, err := (*engine.DB)(db.core).BatchGetPrepared(encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -78,9 +78,9 @@ func (db *View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 func (db *View[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
 	batch, err := (*engine.DB)(db.core).PreparePuts(len(entries), func(i int) (Entry, error) {
 		entry := entries[i]
-		key, err := db.keyCodec.Encode(entry.Key)
+		key, err := db.encodeBatchKey("BatchPut", i, entry.Key)
 		if err != nil {
-			return Entry{}, &BatchCodecError{Operation: "BatchPut", Index: i, Field: "key", Err: err}
+			return Entry{}, err
 		}
 		value, err := db.valueCodec.Encode(entry.Value)
 		if err != nil {
@@ -98,14 +98,18 @@ func (db *View[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
 // returns a BatchKeyError matching ErrNotFound before publication.
 func (db *View[K, V]) BatchDelete(keys []K) error {
 	batch, err := (*engine.DB)(db.core).PrepareDeletes(len(keys), func(i int) ([]byte, error) {
-		key, err := db.keyCodec.Encode(keys[i])
-		if err != nil {
-			return nil, &BatchCodecError{Operation: "BatchDelete", Index: i, Field: "key", Err: err}
-		}
-		return key, nil
+		return db.encodeBatchKey("BatchDelete", i, keys[i])
 	})
 	if err != nil {
 		return err
 	}
 	return batch.Commit()
+}
+
+func (db *View[K, V]) encodeBatchKey(operation string, i int, key K) ([]byte, error) {
+	encoded, err := db.keyCodec.Encode(key)
+	if err != nil {
+		return nil, &BatchCodecError{Operation: operation, Index: i, Field: "key", Err: err}
+	}
+	return encoded, engine.CheckBatchKey(operation, i, encoded)
 }

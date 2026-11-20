@@ -196,11 +196,11 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	names, err := os.ReadDir(absolute)
+	entries, err := os.ReadDir(absolute)
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(names) == 1 && names[0].Name() == "LOCK" {
+	if len(entries) == 1 && entries[0].Name() == "LOCK" {
 		if existingOnly {
 			return nil, nil, &os.PathError{Op: "open", Path: filepath.Join(absolute, "CURRENT"), Err: os.ErrNotExist}
 		}
@@ -230,7 +230,7 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	}
 	s.Current, s.Catalog, s.Manifest, s.Files = image.Current, image.Catalog, image.Manifest, image.Files
 	s.MaxValueBytes = image.MaxValueBytes
-	if err := s.inspectNames(ctx); err != nil {
+	if err := s.inspectNames(ctx, entries); err != nil {
 		return nil, nil, err
 	}
 	s.active, err = os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
@@ -246,7 +246,7 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 		}
 		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveEnd)
 	}
-	if _, _, err := s.cleanup(ctx); err != nil {
+	if _, _, err := s.cleanupValidated(ctx, entries); err != nil {
 		return nil, nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -555,21 +555,13 @@ func (loc Location) readError(err error) error {
 	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.Offset, err)
 }
 
-func (s *Store) inspectNames(ctx context.Context) error {
-	entries, err := os.ReadDir(s.Dir)
-	if err != nil {
-		return err
-	}
+func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry) error {
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		name := e.Name()
-		info, err := e.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
+		if !e.Type().IsRegular() {
 			return fmt.Errorf("%w: non-regular engine object %s", ErrCorrupt, name)
 		}
 		if name == "LOCK" || name == "CURRENT" {
@@ -594,22 +586,24 @@ func (s *Store) ownedTemp(name string) bool {
 
 // Cleanup only runs under the writer gate; release pins never performs I/O.
 func (s *Store) Cleanup() (removed, pinned int64, result error) {
-	return s.cleanup(context.Background())
-}
-
-func (s *Store) cleanup(ctx context.Context) (removed, pinned int64, result error) {
-	if err := s.inspectNames(ctx); err != nil {
+	entries, err := os.ReadDir(s.Dir)
+	if err != nil {
 		return 0, 0, err
 	}
+	ctx := context.Background()
+	if err := s.inspectNames(ctx, entries); err != nil {
+		return 0, 0, err
+	}
+	return s.cleanupValidated(ctx, entries)
+}
+
+// The caller validates the entire listing before truncating or unlinking any file.
+func (s *Store) cleanupValidated(ctx context.Context, entries []os.DirEntry) (removed, pinned int64, result error) {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
 	for _, f := range s.Catalog.Files {
 		if f.HasPhysicalFile() {
 			selected[f.ID] = true
 		}
-	}
-	entries, err := os.ReadDir(s.Dir)
-	if err != nil {
-		return 0, 0, err
 	}
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
@@ -624,10 +618,7 @@ func (s *Store) cleanup(ctx context.Context) (removed, pinned int64, result erro
 		}
 		if id, ok := parseID(name, "DATA", s.Current.UUID); ok && !selected[id] {
 			if f := s.Files[id]; f != nil && f.References() != 0 {
-				if s.retired == nil {
-					s.retired = make(map[uint64]*File)
-				}
-				s.retired[id] = f
+				s.retireData(f)
 				pinned += f.Size.Load()
 				continue
 			}

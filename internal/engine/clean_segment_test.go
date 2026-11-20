@@ -253,6 +253,57 @@ func TestCleanStagingFailuresLeaveSelectionAndContentsIntact(t *testing.T) {
 	}
 }
 
+func TestCleanerRetriesFailedStagingDiscard(t *testing.T) {
+	for _, point := range []string{"clean.discard:before", "clean.discard:after", "clean.discard.dirsync:before"} {
+		t.Run(point, func(t *testing.T) {
+			var armed bool
+			var retireSyncs int
+			fs := &storage.IO{Hook: func(p string) error {
+				if armed {
+					switch p {
+					case "clean.copy:after":
+						return syscall.EDQUOT
+					case point:
+						return syscall.EACCES
+					case "clean.retire.dirsync:before":
+						retireSyncs++
+						if retireSyncs == 1 {
+							return syscall.EIO
+						}
+					}
+				}
+				return nil
+			}}
+			db := newTestDBWithHooks(t, Options{}, fs, &Hooks{CleanerStart: make(chan struct{})})
+			mustPut(t, db, "live", "value")
+			entry := sealForCleaning(t, db)
+			db.cleanPass(t.Context()) // Retire the old manifest before injecting faults.
+			before := directoryBytes(t, db.store.Dir)
+			armed = true
+			err := db.cleanSegment(t.Context(), entry)
+			if !errors.Is(err, ErrNoSpace) || !errors.Is(err, syscall.EACCES) || db.health() != nil {
+				t.Fatalf("failed staging discard: %v; health %v", err, db.health())
+			}
+			if point == "clean.discard:before" && len(directoryBytes(t, db.store.Dir)) != len(before)+1 {
+				t.Fatal("expected an unpublished file awaiting deletion")
+			}
+
+			// No segment qualifies for cleaning. An idle worker must still
+			// finish the unlink and retry its directory sync after a failure.
+			if _, retry := db.cleanPass(t.Context()); !retry || retireSyncs != 1 {
+				t.Fatalf("discard sync failure: retry=%t syncs=%d", retry, retireSyncs)
+			}
+			if again, retry := db.cleanPass(t.Context()); again || retry || retireSyncs != 2 {
+				t.Fatalf("discard completion: again=%t retry=%t syncs=%d", again, retry, retireSyncs)
+			}
+			if !reflect.DeepEqual(before, directoryBytes(t, db.store.Dir)) {
+				t.Fatal("retry changed selected files or left an unpublished output")
+			}
+			wantValue(t, db, "live", "value")
+		})
+	}
+}
+
 func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testing.T) {
 	db := newTestDBWithHooks(t, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "unrelated", "keep")

@@ -8,6 +8,21 @@ import (
 	"path/filepath"
 )
 
+func (s *Store) retireData(f *File) {
+	if s.retired == nil {
+		s.retired = make(map[uint64]*File)
+	}
+	s.retired[f.ID] = f
+}
+
+// QueueFailedCleanDiscard runs under the writer gate after an unpublished
+// output failed to discard. An unlink can have succeeded before the error,
+// so the directory still needs syncing even if the path is already gone.
+func (s *Store) QueueFailedCleanDiscard(c *CleanSegment) {
+	s.retireData(c.output)
+	s.retireSyncPending = true
+}
+
 func (s *Store) retireManifest(id uint64) {
 	if id != 0 {
 		if s.retiredCatalogs == nil {

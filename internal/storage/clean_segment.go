@@ -259,11 +259,8 @@ func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error
 	if c.created {
 		s.Files[c.output.ID] = c.output
 	}
-	if s.retired == nil {
-		s.retired = make(map[uint64]*File)
-	}
 	for _, source := range c.sources {
-		s.retired[source.File.ID] = source.File
+		s.retireData(source.File)
 	}
 	return nil
 }
