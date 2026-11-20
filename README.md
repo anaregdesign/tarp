@@ -6,14 +6,14 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses v0.9.0. For the previous release, see the
-[v0.8.0 documentation](https://github.com/anaregdesign/tarp/tree/v0.8.0).
+uses v0.9.1. For the previous release, see the
+[v0.9.0 documentation](https://github.com/anaregdesign/tarp/tree/v0.9.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.9.0
+go get github.com/anaregdesign/tarp@v0.9.1
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -361,6 +361,13 @@ Lowering the target still allows `Open` and `Restore` to read larger existing
 files. If a live entry exceeds the new cache or record limit, they return
 `ErrIncompatibleOptions`. Minimum settings are 129 cache bytes, 49 record
 bytes and one read handle.
+
+### Upgrading from v0.9.0 to v0.9.1
+
+Existing Go callers, databases and backups are compatible. If you provisioned
+space in the OS temporary directory for the B+tree, allow that space on the
+database volume before upgrading. The index is rebuilt under `.tarp-work/`
+when the database opens.
 
 ### Updating Go callers to v0.9.0
 
