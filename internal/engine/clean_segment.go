@@ -64,7 +64,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	})
 	if err != nil {
 		var fault *storage.Fault
-		if errors.As(err, &fault) && fault.Outcome == string(Unknown) {
+		if errors.As(err, &fault) && fault.Outcome == Unknown {
 			keepOutput = true
 		}
 		// An unpublished staging-space failure is retryable. A doubtful

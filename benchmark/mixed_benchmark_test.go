@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"maps"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -58,6 +59,51 @@ func overlappingWrites(spans []mixedWriteSpan) int {
 type mixedMeasurement struct {
 	all, reads, puts sampledLatency
 	schedule         mixedSchedule
+}
+
+// Keep one value per window for each percentile. Workload throughput uses
+// total calls divided by total worker wall time, excluding setup and analysis.
+type mixedMetrics struct {
+	calls, wallNS                  int64
+	getP50, getP99, putP50, putP99 []int64
+}
+
+func (s *mixedMetrics) add(m mixedMeasurement) {
+	s.calls += m.all.Operations
+	s.wallNS += m.all.WallNS
+	s.getP50 = append(s.getP50, m.reads.P50NS)
+	s.getP99 = append(s.getP99, m.reads.P99NS)
+	s.putP50 = append(s.putP50, m.puts.P50NS)
+	s.putP99 = append(s.putP99, m.puts.P99NS)
+}
+
+func (s *mixedMetrics) report(metric func(float64, string)) {
+	median := func(values []int64) float64 {
+		slices.Sort(values)
+		return (float64(values[(len(values)-1)/2]) + float64(values[len(values)/2])) / 2
+	}
+	metric(float64(s.calls)*float64(time.Second)/float64(s.wallNS), "calls/s")
+	metric(median(s.getP50), "ns/get-p50")
+	metric(median(s.getP99), "ns/get-p99")
+	metric(median(s.putP50), "ns/put-p50")
+	metric(median(s.putP99), "ns/put-p99")
+}
+
+func TestMixedMetricsReportAcrossWindows(t *testing.T) {
+	var stats mixedMetrics
+	for _, scale := range []int64{3, 1, 4, 2} {
+		stats.add(mixedMeasurement{
+			all:   sampledLatency{Operations: 100, WallNS: scale * int64(time.Second)},
+			reads: sampledLatency{P50NS: scale, P99NS: 2 * scale},
+			puts:  sampledLatency{P50NS: 10 * scale, P99NS: 20 * scale},
+		})
+	}
+	got := make(map[string]float64)
+	stats.report(func(value float64, unit string) { got[unit] = value })
+	want := map[string]float64{"calls/s": 40, "ns/get-p50": 2.5, "ns/get-p99": 5, "ns/put-p50": 25, "ns/put-p99": 50}
+	if !maps.Equal(got, want) {
+		t.Fatalf("metrics = %v, want %v", got, want)
+	}
 }
 
 func measureMixed(t testing.TB, db *engine.DB, keys [][]byte, value []byte, multiWriter bool) mixedMeasurement {
@@ -142,6 +188,7 @@ func BenchmarkMixedWriters(b *testing.B) {
 	for _, mode := range []string{"single-writer", "multi-writer"} {
 		b.Run(mode, func(b *testing.B) {
 			b.StopTimer()
+			var metrics mixedMetrics
 			for i := 0; i < b.N; i++ {
 				dir := filepath.Join(b.TempDir(), "db")
 				measurementCloneClosed(b, seed, dir)
@@ -152,6 +199,7 @@ func BenchmarkMixedWriters(b *testing.B) {
 				b.StartTimer()
 				m := measureMixed(b, db, keys, value, mode == "multi-writer")
 				b.StopTimer()
+				metrics.add(m)
 				if err := db.Close(); err != nil {
 					b.Fatal(err)
 				}
@@ -159,6 +207,7 @@ func BenchmarkMixedWriters(b *testing.B) {
 					m.schedule.GetCounts, m.schedule.PutCounts, m.schedule.OverlappingPuts, time.Duration(m.all.WallNS),
 					time.Duration(m.reads.P50NS), time.Duration(m.reads.P99NS), time.Duration(m.puts.P50NS), time.Duration(m.puts.P99NS))
 			}
+			metrics.report(b.ReportMetric)
 		})
 	}
 }

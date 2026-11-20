@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 // Checkpoint owns the private snapshot files until Install attempts publication.
@@ -48,7 +49,7 @@ func (c *Checkpoint) Copy(ctx context.Context, moves []Relocation, reserve func(
 		err := errors.Join(fs.Sync(fd, "compact.sync"), fd.Close())
 		fd = nil
 		if err != nil {
-			return fault("output-sync", "not-applied", false, err)
+			return fault("output-sync", publication.NotApplied, false, err)
 		}
 		file.Size.Store(offset)
 		c.entries = append(c.entries, format.File{ID: file.ID, Bytes: offset, Kind: format.Snapshot})
@@ -56,7 +57,7 @@ func (c *Checkpoint) Copy(ctx context.Context, moves []Relocation, reserve func(
 	}
 	defer func() {
 		if err := reader.close(); err != nil {
-			result = errors.Join(result, fault("source-close", "not-applied", false, err))
+			result = errors.Join(result, fault("source-close", publication.NotApplied, false, err))
 		}
 		if fd != nil {
 			result = errors.Join(result, fd.Close())
@@ -75,11 +76,11 @@ func (c *Checkpoint) Copy(ctx context.Context, moves []Relocation, reserve func(
 			var err error
 			file, err = reserve()
 			if err != nil {
-				return fault("output-create", "not-applied", false, err)
+				return fault("output-create", publication.NotApplied, false, err)
 			}
 			fd, err = file.create(c.capture.Current.UUID, fs, "compact.segment", appendData{})
 			if err != nil {
-				return fault("output-create", "not-applied", false, err)
+				return fault("output-create", publication.NotApplied, false, err)
 			}
 			c.files = append(c.files, file)
 			offset = format.SegmentHeaderBytes
@@ -92,7 +93,7 @@ func (c *Checkpoint) Copy(ctx context.Context, moves []Relocation, reserve func(
 		offset += move.Old.Bytes
 	}
 	if err := reader.close(); err != nil {
-		return fault("source-close", "not-applied", false, err)
+		return fault("source-close", publication.NotApplied, false, err)
 	}
 	return finish()
 }
@@ -151,7 +152,7 @@ func (r *snapshotReader) copyRecord(ctx context.Context, fs *IO, old Location, k
 func (c *Checkpoint) Install() error {
 	s := c.store
 	if s.Current.Generation == math.MaxUint64 {
-		return fault("compact.generation", "not-applied", false, errors.New("storage: publication generation exhausted"))
+		return fault("compact.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
 	catalog := format.Catalog{
 		UUID: s.Current.UUID, Cutoff: c.capture.Current.Sequence, PrunedThrough: c.capture.Current.Sequence,

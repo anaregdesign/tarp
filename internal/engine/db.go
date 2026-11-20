@@ -56,6 +56,10 @@ type DB struct {
 	batchReadSlots      chan struct{} // shared by BatchGet calls on this DB
 	fastSmallBatchReads atomic.Bool   // last sampled small DATA reads completed quickly
 	hooks               *Hooks
+
+	// Upper bound on live encoded value lengths, guarded by state. Deleting or
+	// shrinking a value can leave it high until the next Open.
+	maxSeenValueBytes int64
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
@@ -110,6 +114,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 		loc.File.Pin()
 		loc.File.LiveBytes.Add(loc.Bytes)
 		db.stats.LiveRecordBytes += uint64(loc.Bytes)
+		db.maxSeenValueBytes = max(db.maxSeenValueBytes, loc.ValueBytes)
 	}
 	db.initDataStats()
 	// Finish opening a fresh, empty database once initialization has published
@@ -354,6 +359,9 @@ func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc storage.Locatio
 		loc.File.LiveBytes.Add(loc.Bytes)
 		db.stats.LiveRecordBytes += uint64(loc.Bytes)
 		db.index[entry.key] = loc
+		if loc.ValueBytes > db.maxSeenValueBytes {
+			db.maxSeenValueBytes = loc.ValueBytes
+		}
 		db.cache.Put(entry.key, entry.value)
 	}
 	db.stats.WrittenRecords++
@@ -426,7 +434,7 @@ func operationError(op, phase string, err error) *OpError {
 	outcome := NotApplied
 	var fault *storage.Fault
 	if errors.As(err, &fault) {
-		phase, outcome = fault.Phase, Outcome(fault.Outcome)
+		phase, outcome = fault.Phase, fault.Outcome
 	}
 	return &OpError{Operation: op, Phase: phase, Outcome: outcome, Err: publicCause(err)}
 }

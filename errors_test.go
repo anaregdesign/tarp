@@ -32,7 +32,7 @@ func TestPublicDBReportsSizeAndReopenLimits(t *testing.T) {
 				t.Fatalf("oversized Put = %v", err)
 			}
 			if size.KeyBytes != 1 || size.ValueBytes != 4 || size.RecordBytes != 53 || size.CacheCharge != 133 ||
-				size.Limits.CacheBytes != tc.cache || size.Limits.MaxRecordBytes != tc.record || size.Overflow {
+				size.CacheBytes != tc.cache || size.MaxRecordBytes != tc.record || size.Overflow {
 				t.Fatalf("incorrect admission costs or limits: %+v", size)
 			}
 			if err := db.Close(); err != nil {
@@ -99,7 +99,7 @@ func TestBatchLimitsReportOriginalInputAndPreserveSizeCause(t *testing.T) {
 			var entry *tarp.SizeError
 			if tc.kind == tarp.BatchEntrySizeLimit {
 				if !errors.As(err, &entry) || entry != limit.Entry || entry.KeyBytes != 1 || entry.ValueBytes != 4 ||
-					entry.RecordBytes != 53 || entry.CacheCharge != 133 || entry.Limits.MaxRecordBytes != 52 || entry.Limits.CacheBytes != 132 {
+					entry.RecordBytes != 53 || entry.CacheCharge != 133 || entry.MaxRecordBytes != 52 || entry.CacheBytes != 132 {
 					t.Fatalf("lost entry size details: %+v", entry)
 				}
 			} else if errors.As(err, &entry) || limit.Entry != nil {

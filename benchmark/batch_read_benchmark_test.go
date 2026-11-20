@@ -132,7 +132,7 @@ func openBatchReadFixture(b *testing.B, size, slots int, cold bool, limit int) (
 	recordBytes := int64(format.RecordHeaderBytes + len(keys[0]) + size)
 	opts.MaxRecordBytes = max(opts.MaxRecordBytes, recordBytes)
 	opts.TargetSegmentBytes = max(opts.TargetSegmentBytes, format.SegmentHeaderBytes+int64(len(keys))*recordBytes)
-	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), opts)
+	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), tarp.Options(opts))
 	if err != nil {
 		b.Fatal(err)
 	}

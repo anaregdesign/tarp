@@ -20,6 +20,9 @@ type Options struct {
 	// BatchReadConcurrency limits concurrent DATA reads across BatchGet calls
 	// on this DB. Zero selects 8. One runs the reads serially.
 	BatchReadConcurrency int
+	// MaxBatchResultBytes limits encoded value bytes returned by one BatchGet.
+	// Each occurrence of a found key counts. Zero selects 64 MiB.
+	MaxBatchResultBytes int64
 }
 
 // RestoreLimits bounds the logical cache charge and encoded size of each live
@@ -49,7 +52,7 @@ func (l RestoreLimits) normalized() (RestoreLimits, error) {
 }
 
 func (o Options) normalized() (Options, error) {
-	if o.ReadFileHandles < 0 || o.TargetSegmentBytes < 0 || o.BatchReadConcurrency < 0 {
+	if o.ReadFileHandles < 0 || o.TargetSegmentBytes < 0 || o.BatchReadConcurrency < 0 || o.MaxBatchResultBytes < 0 {
 		return o, fmt.Errorf("%w: negative setting", ErrInvalidOptions)
 	}
 	limits, err := o.RestoreLimits().normalized()
@@ -63,6 +66,9 @@ func (o Options) normalized() (Options, error) {
 	if o.BatchReadConcurrency == 0 {
 		o.BatchReadConcurrency = 8
 	}
+	if o.MaxBatchResultBytes == 0 {
+		o.MaxBatchResultBytes = 64 << 20
+	}
 	if o.TargetSegmentBytes == 0 {
 		o.TargetSegmentBytes = 4 << 20
 	}
@@ -74,15 +80,17 @@ func (o Options) checkSize(key, value uint64) error {
 	if key == 0 {
 		return ErrEmptyKey
 	}
-	e := &SizeError{KeyBytes: key, ValueBytes: value, Limits: o}
-	if !entrysize.Representable(key, value) {
-		e.Overflow = true
-		return e
+	var recordBytes, cacheCharge uint64
+	overflow := !entrysize.Representable(key, value)
+	if !overflow {
+		recordBytes = entrysize.RecordBytes(key, value)
+		cacheCharge = entrysize.CacheCharge(key, value)
+		if recordBytes <= uint64(o.MaxRecordBytes) && recordBytes <= math.MaxInt && cacheCharge <= uint64(o.CacheBytes) {
+			return nil
+		}
 	}
-	e.RecordBytes = entrysize.RecordBytes(key, value)
-	e.CacheCharge = entrysize.CacheCharge(key, value)
-	if e.RecordBytes > uint64(o.MaxRecordBytes) || e.RecordBytes > math.MaxInt || e.CacheCharge > uint64(o.CacheBytes) {
-		return e
+	return &SizeError{
+		KeyBytes: key, ValueBytes: value, RecordBytes: recordBytes, CacheCharge: cacheCharge,
+		MaxRecordBytes: o.MaxRecordBytes, CacheBytes: o.CacheBytes, Overflow: overflow,
 	}
-	return nil
 }

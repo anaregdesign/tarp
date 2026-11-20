@@ -14,7 +14,8 @@ import (
 // single segment, keeping rotation and reclamation out of this comparison.
 func BenchmarkBatchWrite(b *testing.B) {
 	for _, count := range []int{1, 16} {
-		keys, payload, opts := measurementInput(1024, count)
+		keys, payload, config := measurementInput(1024, count)
+		opts := tarp.Options(config)
 		seed := filepath.Join(b.TempDir(), "seed")
 		db, err := tarp.Open(seed, opts)
 		if err != nil {

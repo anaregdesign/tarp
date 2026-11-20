@@ -54,7 +54,7 @@ func benchmarkDB(b *testing.B, size int, miss bool) (*tarp.DB, [][]byte, []byte)
 	if miss {
 		opts.CacheBytes /= 16
 	}
-	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), opts)
+	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), tarp.Options(opts))
 	if err != nil {
 		b.Fatal(err)
 	}

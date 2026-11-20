@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 // IO is a private testing seam. Hooks must themselves support concurrent calls.
@@ -109,7 +111,7 @@ func (i *IO) NewFile(name string, b []byte, point string) error {
 
 type Fault struct {
 	Phase   string
-	Outcome string
+	Outcome publication.Outcome
 	Unsafe  bool
 	Err     error
 }
@@ -117,6 +119,6 @@ type Fault struct {
 func (e *Fault) Error() string { return fmt.Sprintf("storage: %s (%s): %v", e.Phase, e.Outcome, e.Err) }
 func (e *Fault) Unwrap() error { return e.Err }
 
-func fault(phase, outcome string, unsafe bool, err error) error {
+func fault(phase string, outcome publication.Outcome, unsafe bool, err error) error {
 	return &Fault{Phase: phase, Outcome: outcome, Unsafe: unsafe, Err: err}
 }

@@ -16,7 +16,7 @@ import (
 func statsBenchmarkDB(b *testing.B, count int) (*tarp.DB, [][]byte, []byte) {
 	b.Helper()
 	keys, value, opts := measurementInput(64, count)
-	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), opts)
+	db, err := tarp.Open(filepath.Join(b.TempDir(), "db"), tarp.Options(opts))
 	if err != nil {
 		b.Fatal(err)
 	}

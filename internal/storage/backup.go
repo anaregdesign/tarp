@@ -13,6 +13,7 @@ import (
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/platform"
+	"github.com/anaregdesign/tarp/internal/publication"
 )
 
 func destinationPath(source, destination string) (string, error) {
@@ -42,19 +43,19 @@ func destinationPath(source, destination string) (string, error) {
 
 func publishDirectory(ctx context.Context, fs *IO, stage, target, point string) error {
 	if err := ctx.Err(); err != nil {
-		return fault(point+".context", "not-applied", false, err)
+		return fault(point+".context", publication.NotApplied, false, err)
 	}
 	if err := fs.SyncDir(stage, point+".stage.sync"); err != nil {
-		return fault(point+".stage.sync", "not-applied", false, err)
+		return fault(point+".stage.sync", publication.NotApplied, false, err)
 	}
 	if err := ctx.Err(); err != nil {
-		return fault(point+".context", "not-applied", false, err)
+		return fault(point+".context", publication.NotApplied, false, err)
 	}
 	if err := fs.Do(point+".rename", func() error { return platform.RenameNoReplace(stage, target) }); err != nil {
-		return fault(point+".rename", "unknown", false, err)
+		return fault(point+".rename", publication.Unknown, false, err)
 	}
 	if err := fs.SyncDir(filepath.Dir(target), point+".parent.sync"); err != nil {
-		return fault(point+".parent.sync", "unknown", false, err)
+		return fault(point+".parent.sync", publication.Unknown, false, err)
 	}
 	return nil
 }
@@ -182,16 +183,16 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, l
 		if err != nil {
 			var destination *destinationError
 			if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				err = &SourceError{Err: err}
+				err = &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)}
 			}
 			return entry, err
 		}
 		if err := span.Accept(r); err != nil {
-			return entry, &SourceError{Err: err}
+			return entry, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)}
 		}
 		_, present := liveKeys[key]
 		if err := validateKey(captured.File.Kind, r, present, capture.Catalog.PrunedThrough); err != nil {
-			return entry, &SourceError{Err: err}
+			return entry, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)}
 		}
 		if r.Kind == format.Delete {
 			delete(liveKeys, key)
@@ -201,7 +202,7 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, l
 		offset += r.Bytes()
 	}
 	if err := span.Finish(); err != nil {
-		return entry, &SourceError{Err: err}
+		return entry, &SourceError{Err: fmt.Errorf("%s: %w", name, err)}
 	}
 	if err := fs.Sync(dst, "backup.file.sync"); err != nil {
 		return entry, err
@@ -229,7 +230,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 		return err
 	}
 	buffer := make([]byte, 32<<10)
-	files, err := verifyBackup(ctx, source, cfg, buffer)
+	backup, err := verifyBackup(ctx, source, cfg, buffer)
 	if err != nil {
 		return err
 	}
@@ -243,9 +244,9 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			returned = errors.Join(returned, cleanStage(fs, stage, "restore"))
 		}
 	}()
-	for _, f := range files {
+	for _, f := range backup.files {
 		if err := copyBackupFile(ctx, source, stage, f, fs, buffer); err != nil {
-			return err
+			return fmt.Errorf("%s: %w", f.Name, err)
 		}
 	}
 	if _, err := validateBackupImage(ctx, stage, cfg); err != nil {
@@ -256,81 +257,108 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	return err
 }
 
+// BackupInfo describes a fully verified backup. Size minima come from live records.
+type BackupInfo struct {
+	DatabaseID                              [16]byte
+	Sequence, LiveKeys                      uint64
+	RequiredCacheBytes, RequiredRecordBytes int64
+}
+
+type verifiedBackup struct {
+	files []format.BackupFile
+	info  BackupInfo
+}
+
 // VerifyBackup checks an immutable backup without creating a destination or acquiring a lock.
-func VerifyBackup(ctx context.Context, dir string, cfg Config) error {
+func VerifyBackup(ctx context.Context, dir string, cfg Config) (BackupInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return BackupInfo{}, err
 	}
 	source, err := backupSourcePath(dir)
 	if err != nil {
-		return err
+		return BackupInfo{}, err
 	}
-	_, err = verifyBackup(ctx, source, cfg, make([]byte, 32<<10))
-	return err
+	backup, err := verifyBackup(ctx, source, cfg, make([]byte, 32<<10))
+	return backup.info, err
 }
 
-// verifyBackup returns only the files selected by the verified snapshot.
-func verifyBackup(ctx context.Context, source string, cfg Config, buffer []byte) ([]format.BackupFile, error) {
+func verifyBackup(ctx context.Context, source string, cfg Config, buffer []byte) (verifiedBackup, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return verifiedBackup{}, err
 	}
 	b, err := ReadRegular(filepath.Join(source, "BACKUP"))
 	if err != nil {
-		return nil, fmt.Errorf("%w: backup manifest: %w", ErrCorrupt, err)
+		return verifiedBackup{}, fmt.Errorf("%w: backup manifest: %w", ErrCorrupt, err)
 	}
 	meta, err := format.DecodeBackup(b)
 	if err != nil {
-		return nil, err
+		return verifiedBackup{}, fmt.Errorf("BACKUP: %w", err)
 	}
-	files := make(map[string]format.BackupFile, len(meta.Files))
+	files := make(map[string]struct{}, len(meta.Files))
 	for _, f := range meta.Files {
 		_, data := parseID(f.Name, "DATA", meta.UUID)
 		_, manifest := parseID(f.Name, "MANIFEST", meta.UUID)
 		if f.Name != "CURRENT" && !data && !manifest {
-			return nil, fmt.Errorf("%w: unsafe backup entry", ErrCorrupt)
+			return verifiedBackup{}, fmt.Errorf("BACKUP: %w: unsafe entry %q", ErrCorrupt, f.Name)
 		}
-		files[f.Name] = f
+		files[f.Name] = struct{}{}
 	}
 	entries, err := os.ReadDir(source)
 	if err != nil {
-		return nil, err
-	}
-	if len(entries) != len(files)+1 {
-		return nil, fmt.Errorf("%w: unexpected/missing backup objects", ErrCorrupt)
+		return verifiedBackup{}, err
 	}
 	for _, entry := range entries {
 		if entry.Name() == "BACKUP" {
 			continue
 		}
-		f, listed := files[entry.Name()]
-		if !listed {
-			return nil, fmt.Errorf("%w: unlisted backup object", ErrCorrupt)
+		if _, listed := files[entry.Name()]; !listed {
+			return verifiedBackup{}, fmt.Errorf("BACKUP: %w: unlisted file %q", ErrCorrupt, entry.Name())
 		}
+	}
+	for _, f := range meta.Files {
 		if err := verifyBackupFile(ctx, source, f, buffer); err != nil {
-			return nil, err
+			if errors.Is(err, os.ErrNotExist) {
+				return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %q: %w", ErrCorrupt, f.Name, err)
+			}
+			return verifiedBackup{}, fmt.Errorf("%s: %w", f.Name, err)
 		}
+	}
+	if len(entries) != len(files)+1 {
+		return verifiedBackup{}, fmt.Errorf("%w: missing BACKUP", ErrCorrupt)
 	}
 	image, err := validateBackupImage(ctx, source, cfg)
 	if err != nil {
-		return nil, err
+		return verifiedBackup{}, err
 	}
-	if image.Current.UUID != meta.UUID || image.Current.Sequence != meta.Sequence || image.Catalog.Cutoff != meta.Cutoff ||
-		image.Files[image.Current.ActiveID].Size.Load() != image.Current.ActiveEnd ||
-		len(files) != len(image.Files)+2 {
-		return nil, fmt.Errorf("%w: backup image identity or committed length", ErrCorrupt)
+	if image.Current.UUID != meta.UUID || image.Current.Sequence != meta.Sequence || image.Catalog.Cutoff != meta.Cutoff {
+		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: identity, sequence or cutoff differs from the selected image", ErrCorrupt)
+	}
+	if image.Files[image.Current.ActiveID].Size.Load() != image.Current.ActiveEnd {
+		return verifiedBackup{}, fmt.Errorf("%s: %w: length differs from committed end", DataName(meta.UUID, image.Current.ActiveID), ErrCorrupt)
+	}
+	if len(files) != len(image.Files)+2 {
+		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: number of files differs from selected image", ErrCorrupt)
 	}
 	if _, ok := files["CURRENT"]; !ok {
-		return nil, fmt.Errorf("%w: missing backup frontier", ErrCorrupt)
+		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing CURRENT entry", ErrCorrupt)
 	}
-	if _, ok := files[ManifestName(image.Current.UUID, image.Current.ManifestID)]; !ok {
-		return nil, fmt.Errorf("%w: missing backup catalog", ErrCorrupt)
+	name := ManifestName(image.Current.UUID, image.Current.ManifestID)
+	if _, ok := files[name]; !ok {
+		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %s entry", ErrCorrupt, name)
 	}
 	for id := range image.Files {
-		if _, ok := files[DataName(meta.UUID, id)]; !ok {
-			return nil, fmt.Errorf("%w: missing selected backup segment", ErrCorrupt)
+		name := DataName(meta.UUID, id)
+		if _, ok := files[name]; !ok {
+			return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %s entry", ErrCorrupt, name)
 		}
 	}
-	return meta.Files, nil
+	return verifiedBackup{
+		files: meta.Files,
+		info: BackupInfo{
+			DatabaseID: image.Current.UUID, Sequence: image.Current.Sequence, LiveKeys: uint64(len(image.Index)),
+			RequiredCacheBytes: image.Required.CacheBytes, RequiredRecordBytes: image.Required.RecordBytes,
+		},
+	}, nil
 }
 
 // Once BACKUP is recognized, every selected object must have the canonical

@@ -11,7 +11,9 @@
 //
 // One process owns a directory. Its DB supports concurrent goroutines and
 // linearizable single-key operations. BatchPut and BatchDelete commit atomically.
-// BatchGet reads the requested keys at one point in time. Successful writes sync the data and
+// BatchGet reads the requested keys at one point in time and bounds their total
+// encoded value bytes. Keys iterates the live keys without reading values.
+// Successful writes sync the data and
 // commit frontier before acknowledgment. Inspect OpError for the outcome of
 // failed writes. See the durability contract for storage assumptions.
 //
@@ -26,6 +28,6 @@
 //
 // Open and Restore accept one unversioned format. A database or backup from
 // the previous implementation is unsupported. Use Backup for a consistent
-// image. VerifyBackup verifies an immutable backup in place. Restore publishes
+// image. VerifyBackup returns metadata for a fully verified immutable backup. Restore publishes
 // a new closed DB. See README.md and docs/ for limits, recovery and qualification evidence.
 package tarp

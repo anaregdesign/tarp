@@ -5,15 +5,15 @@ tests, and measurement tools use the Go standard library only.
 
 ## Quick start
 
-Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). To try v0.6.0
-in a new module, run the commands below. In an existing module, run just
-the `go get` command.
+Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). The examples below
+use the API on `main`. To use the tagged v0.6.0 API, see its
+[versioned documentation](https://github.com/anaregdesign/tarp/tree/v0.6.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.6.0
+go get github.com/anaregdesign/tarp@main
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -203,8 +203,11 @@ return db.BatchDelete(keys)
 The byte API takes `[]tarp.Entry` for writes and `[][]byte` for reads and
 deletes. Results follow input order. A missing key has `Found == false`,
 and the caller owns a separate value slice for each occurrence of a found
-key. The result uses memory proportional to all returned values, including
-duplicates. Repeated puts apply in input order. Repeated deletes
+key. A single read can return up to `Options.MaxBatchResultBytes` encoded value
+bytes (64 MiB by default). Each occurrence counts, even when the key is read
+from DATA only once. Empty values and missing keys cost zero bytes. Result
+metadata and allocations inside a custom decoder are outside this limit.
+Repeated puts apply in input order. Repeated deletes
 remove a key once. If any requested delete key is missing, the whole call
 returns `ErrNotFound` before writing.
 
@@ -225,8 +228,8 @@ All put entries count, including repeated keys. For deletes, only distinct
 keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
 before publication. Each nonempty write batch has one commit outcome.
 Use `errors.As` with `*tarp.BatchLimitError` to distinguish input count,
-per-entry size and total encoded payload. Its `Index` is the original input
-position, or -1 for a request-wide count error. For count and payload limits,
+per-entry size, total encoded write payload and total read result bytes. Its `Index` is the original input
+position, or -1 for a request-wide count error. For count, payload and result limits,
 `Actual` and `Limit` report inputs or bytes respectively. A per-entry error
 also exposes the underlying `*tarp.SizeError` with its record and cache charges.
 Use `errors.As` with `*tarp.BatchCodecError` to get the zero-based input
@@ -236,7 +239,7 @@ See the [runnable batch example](typed_batch_test.go).
 
 ## Contract
 
-`DB` provides `Get`, `Scan`, upserting `Put`, `Delete`, `Close`, online `Backup`,
+`DB` provides `Get`, `Scan`, `Keys`, upserting `Put`, `Delete`, `Close`, online `Backup`,
 `BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `MaintenanceStatus`. Use `Open` to create or
 reopen a database and `Restore` to restore a backup offline.
 
@@ -255,6 +258,11 @@ reopen a database and `Restore` to restore a backup offline.
   values, or cache order. Ordinary fullness evicts LRU.
 - `Close` rejects new calls, cancels and joins the worker, and waits for admitted calls. Repeated/concurrent
   closes return the same retained result. It is not the first durability barrier.
+
+Use `for key, err := range db.Keys(ctx)` to list the live keys. Each iteration
+captures its own index snapshot in unspecified order and returns caller-owned
+keys. Capture takes O(live keys) time and memory. This operation reads no DATA
+files, holds no file pins and only invokes the key codec on a typed view.
 
 `for entry, err := range db.Scan(ctx)` reads a point-in-time snapshot in
 unspecified order. Each new iteration captures the live index and reads one
@@ -281,6 +289,7 @@ the commit sync protocol.
 | `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Also bounds the total DATA bytes read in one automatic repack. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
 | `BatchReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
+| `MaxBatchResultBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
 
 For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
 bytes and `128 + K + V` cache bytes. An entry that exceeds either limit returns
@@ -321,11 +330,22 @@ return tarp.Restore(ctx, tarp.RestoreRequest{
 `Limits: opts.RestoreLimits()`. Configure handles, batch read concurrency
 and the segment target when opening the restored DB.
 
-To check an immutable backup without writing a second copy, call
-`tarp.VerifyBackup(ctx, backupDir, opts.RestoreLimits())`. It verifies the exact
-file set and digests, replays the selected records, and checks the live size
-limits. `Restore` performs these checks and independently validates the copied
-database before publishing it. Use `OpenExisting` to open that database.
+To inspect an immutable backup, use the metadata returned by its verification.
+
+```go
+info, err := tarp.VerifyBackup(ctx, backupDir, opts.RestoreLimits())
+if err != nil {
+    return err
+}
+fmt.Printf("database %x, sequence %d, live keys %d\n", info.DatabaseID, info.Sequence, info.LiveKeys)
+```
+
+`VerifyBackup` checks the exact file set and digests, replays the selected
+records and validates the live size limits. `info.RequiredLimits` reports the
+largest logical cache charge and encoded record among the live entries. Both
+are zero for an empty backup. A verification error returns a zero report.
+`Restore` independently verifies the copied database before publishing it.
+Use `OpenExisting` to open the restored database.
 
 If `Backup` or `Restore` reports `ErrCommitUncertain` at destination rename
 or parent directory sync, inspect the destination before retrying. For a

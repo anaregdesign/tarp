@@ -11,6 +11,13 @@ func TestOptionsAdmission(t *testing.T) {
 	if _, err := o.normalized(); err != nil {
 		t.Fatal(err)
 	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		if err := o.checkSize(1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs != 0 {
+		t.Fatalf("successful entry admission allocated %v times", allocs)
+	}
 	for _, tc := range []struct {
 		k, v uint64
 		want error
@@ -19,9 +26,18 @@ func TestOptionsAdmission(t *testing.T) {
 			t.Fatalf("size %d/%d: %v", tc.k, tc.v, err)
 		}
 	}
-	for _, invalid := range []Options{{CacheBytes: -1}, {CacheBytes: 128}, {MaxRecordBytes: 48}, {ReadFileHandles: -1}, {MaxRecordBytes: math.MaxInt64 - 63}} {
+	for _, invalid := range []Options{{CacheBytes: -1}, {CacheBytes: 128}, {MaxRecordBytes: 48}, {ReadFileHandles: -1}, {MaxRecordBytes: math.MaxInt64 - 63}, {MaxBatchResultBytes: -1}} {
 		if _, err := invalid.normalized(); !errors.Is(err, ErrInvalidOptions) {
 			t.Fatalf("options %#v: %v", invalid, err)
+		}
+	}
+}
+
+func TestMaxBatchResultBytesNormalization(t *testing.T) {
+	for _, tc := range []struct{ input, want int64 }{{0, 64 << 20}, {1, 1}, {math.MaxInt64, math.MaxInt64}} {
+		got, err := (Options{MaxBatchResultBytes: tc.input}).normalized()
+		if err != nil || got.MaxBatchResultBytes != tc.want {
+			t.Fatalf("MaxBatchResultBytes %d: got %d, %v", tc.input, got.MaxBatchResultBytes, err)
 		}
 	}
 }

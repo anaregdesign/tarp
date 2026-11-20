@@ -34,22 +34,23 @@ func Validate(ctx context.Context, dir string, cfg Config) (*Image, error) {
 	}
 	current, err := format.DecodeFrontier(b)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("CURRENT: %w", err)
 	}
-	b, err = ReadRegular(filepath.Join(dir, ManifestName(current.UUID, current.ManifestID)))
+	manifestName := ManifestName(current.UUID, current.ManifestID)
+	b, err = ReadRegular(filepath.Join(dir, manifestName))
 	if err != nil {
 		return nil, fmt.Errorf("%w: selected catalog: %w", ErrCorrupt, err)
 	}
 	if sha256.Sum256(b) != current.ManifestHash {
-		return nil, fmt.Errorf("%w: selected catalog digest", ErrCorrupt)
+		return nil, fmt.Errorf("%s: %w: selected catalog digest", manifestName, ErrCorrupt)
 	}
 	catalog, err := format.DecodeCatalog(b)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", manifestName, err)
 	}
 	active, err := catalog.ActiveFile(current)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s and CURRENT: %w", manifestName, err)
 	}
 	image := &Image{Current: current, Catalog: catalog, Manifest: b, Files: make(map[uint64]*File), Index: make(map[string]Location)}
 	for _, entry := range append(append([]format.File(nil), catalog.Files...), active) {
@@ -81,7 +82,7 @@ func Validate(ctx context.Context, dir string, cfg Config) (*Image, error) {
 			scanErr = span.Finish()
 		}
 		if err := errors.Join(scanErr, fd.Close()); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
 		}
 		image.Files[file.ID] = file
 	}
@@ -123,7 +124,7 @@ func openSelected(path string, uuid [16]byte, entry format.File, mayGrow bool) (
 	opened := fd
 	defer func() {
 		if result != nil {
-			result = errors.Join(result, opened.Close())
+			result = fmt.Errorf("%s: %w", filepath.Base(path), errors.Join(result, opened.Close()))
 		}
 	}()
 	st, err := fd.Stat()
