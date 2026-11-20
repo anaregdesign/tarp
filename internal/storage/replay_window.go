@@ -132,13 +132,15 @@ func (e *IndexWorkError) Unwrap() error { return e.Err }
 // replayBuilder makes small private transactions so even a very large image
 // can be replayed without buffering an image-sized pending transaction.
 type replayBuilder struct {
-	bulk    index.SortedBuilder
-	sort    *sortedReplay
-	backend index.Backend
-	tx      index.Tx
-	size    int64
-	count   int
-	pruned  uint64
+	direct   index.InitialBuild
+	buildErr error
+	bulk     index.SortedBuilder
+	sort     *sortedReplay
+	backend  index.Backend
+	tx       index.Tx
+	size     int64
+	count    int
+	pruned   uint64
 }
 
 func newReplayBuilder(ctx context.Context, backend index.Backend, pruned uint64) replayBuilder {
@@ -146,6 +148,8 @@ func newReplayBuilder(ctx context.Context, backend index.Backend, pruned uint64)
 	if bulk, ok := backend.(index.SortedBuilder); ok {
 		dir, limit := bulk.BulkWorkspace()
 		b.bulk, b.sort = bulk, &sortedReplay{ctx: ctx, dir: dir, limit: limit}
+	} else if builder, ok := backend.(index.InitialBuilder); ok {
+		b.direct, b.buildErr = builder.BeginBuild()
 	}
 	return b
 }
@@ -165,6 +169,12 @@ func (b *replayBuilder) apply(f *File, off int64, r format.Record, key string) e
 	if b.sort != nil {
 		a := index.Address{FileID: f.ID, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 		return replayWorkError(b.sort.add(replayEvent{key: key, addr: a, fileKind: f.Kind, recordKind: r.Kind}))
+	}
+	if b.direct != nil {
+		return applyIndexedRecord(b.direct, f, b.pruned, off, r, key)
+	}
+	if b.buildErr != nil {
+		return &IndexWorkError{Err: b.buildErr}
 	}
 	if b.tx == nil {
 		b.tx = b.backend.Begin()
@@ -192,8 +202,7 @@ func (b *replayBuilder) finishValidation() error {
 	if b.sort != nil {
 		return replayWorkError(b.sort.reduce(b.pruned, nil))
 	}
-	b.flushTx()
-	return nil
+	return b.finish()
 }
 
 func (b *replayBuilder) finish() error {
@@ -215,6 +224,14 @@ func (b *replayBuilder) finishWith(measure func(string, index.Address) error) er
 			})
 		}))
 	}
+	if b.buildErr != nil {
+		return &IndexWorkError{Err: b.buildErr}
+	}
+	if b.direct != nil {
+		err := b.direct.Finish(measure)
+		b.direct = nil
+		return err
+	}
 	b.flushTx()
 	if measure == nil {
 		return nil
@@ -230,6 +247,10 @@ func (b *replayBuilder) finishWith(measure func(string, index.Address) error) er
 }
 
 func (b *replayBuilder) abort() {
+	if b.direct != nil {
+		b.direct.Abort()
+		b.direct = nil
+	}
 	if b.sort != nil {
 		b.sort.close()
 	}

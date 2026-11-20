@@ -43,9 +43,7 @@ func LookupMany(v View, keys []string, set func(int, Address, bool)) error {
 // mutations. A writer must call exactly one of Commit or Abort. Commit makes
 // the prepared state visible without further fallible I/O.
 type Tx interface {
-	Lookup(key string) (Address, bool, error)
-	Put(key string, loc Address) error
-	Delete(key string) error
+	Mutations
 	Commit()
 	Abort()
 }

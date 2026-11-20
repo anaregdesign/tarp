@@ -177,7 +177,7 @@ func validateIndexed(ctx context.Context, dir string, backend index.Backend) (*I
 	return image, nil
 }
 
-func applyIndexedRecord(tx index.Tx, file *File, pruned uint64, off int64, r format.Record, key string) error {
+func applyIndexedRecord(tx index.Mutations, file *File, pruned uint64, off int64, r format.Record, key string) error {
 	// Ordinary Put overwrites any prior location. Only snapshot and Delete
 	// records need to read the previous state for validation.
 	if file.Kind == format.Snapshot || r.Kind == format.Delete {
