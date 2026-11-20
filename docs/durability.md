@@ -241,7 +241,9 @@ Provision space for current data, copied live records and tombstones, headers,
 catalogs, backup files, pinned generations, concurrent tail growth and allocation
 overhead. Free-space inspection is advisory. Insufficient scratch space defers
 incremental work. Recoverable staging ENOSPC/EDQUOT leaves selected sources
-intact. Maintain enough free space for concurrent foreground writes.
+intact. If discarding the cleaner's unpublished DATA file fails, the worker
+retries the unlink and directory sync on a later retirement pass. Maintain
+enough free space for concurrent foreground writes.
 
 Online backup captures metadata bytes and exact committed prefixes at S under
 the writer gate, pins them, and copies outside it. The active file can grow;

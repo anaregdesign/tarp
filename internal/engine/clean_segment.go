@@ -29,8 +29,14 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	defer work.Release()
 	keepOutput := false
 	defer func() {
-		if !keepOutput {
-			result = errors.Join(result, work.Discard(db.store.IO))
+		if keepOutput {
+			return
+		}
+		if err := work.Discard(db.store.IO); err != nil {
+			db.writer.Lock()
+			db.store.QueueFailedCleanDiscard(work)
+			db.writer.Unlock()
+			result = errors.Join(result, err)
 		}
 	}()
 
