@@ -111,51 +111,61 @@ func (v *view) Close() {
 	v.mu.Unlock()
 }
 
-type change struct {
-	key     string
-	value   index.Address
-	deleted bool
-}
-
 type transaction struct {
 	owner *store
 	// Single-key writes do not allocate a change map.
-	first    change
+	first    index.Mutation
 	hasFirst bool
-	rest     map[string]change
+	rest     map[string]index.Mutation
 }
 
 func (tx *transaction) Lookup(key string) (index.Address, bool, error) {
 	if tx.owner.closed.Load() {
 		return index.Address{}, false, os.ErrClosed
 	}
-	if tx.hasFirst && tx.first.key == key {
-		return tx.first.value, !tx.first.deleted, nil
+	if tx.hasFirst && tx.first.Key == key {
+		return tx.first.Address, !tx.first.Delete, nil
 	}
 	if c, ok := tx.rest[key]; ok {
-		return c.value, !c.deleted, nil
+		return c.Address, !c.Delete, nil
 	}
 	return tx.owner.Lookup(key)
 }
 
 func (tx *transaction) Put(key string, addr index.Address) error {
-	return tx.stage(change{key: key, value: addr})
+	return tx.stage(index.Mutation{Key: key, Address: addr})
 }
-func (tx *transaction) Delete(key string) error { return tx.stage(change{key: key, deleted: true}) }
+func (tx *transaction) Delete(key string) error {
+	return tx.stage(index.Mutation{Key: key, Delete: true})
+}
 
-func (tx *transaction) stage(c change) error {
+func (tx *transaction) Apply(m index.Mutation) (index.Address, bool, error) {
+	old, found, err := tx.Lookup(m.Key)
+	if err != nil {
+		return index.Address{}, false, &index.LookupError{Err: err}
+	}
+	if m.Delete {
+		if !found {
+			return old, false, nil
+		}
+		m.Address = index.Address{}
+	}
+	return old, found, tx.stage(m)
+}
+
+func (tx *transaction) stage(c index.Mutation) error {
 	if tx.owner.closed.Load() {
 		return os.ErrClosed
 	}
-	if !tx.hasFirst || tx.first.key == c.key {
+	if !tx.hasFirst || tx.first.Key == c.Key {
 		tx.first = c
 		tx.hasFirst = true
 		return nil
 	}
 	if tx.rest == nil {
-		tx.rest = make(map[string]change)
+		tx.rest = make(map[string]index.Mutation)
 	}
-	tx.rest[c.key] = c
+	tx.rest[c.Key] = c
 	return nil
 }
 
@@ -172,11 +182,11 @@ func (tx *transaction) Commit() {
 	s.writer.Unlock()
 }
 
-func (s *store) apply(c change) {
-	if c.deleted {
-		delete(s.entries, c.key)
+func (s *store) apply(c index.Mutation) {
+	if c.Delete {
+		delete(s.entries, c.Key)
 	} else {
-		s.entries[c.key] = c.value
+		s.entries[c.Key] = c.Address
 	}
 }
 

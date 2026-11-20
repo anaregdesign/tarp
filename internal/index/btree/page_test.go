@@ -2,10 +2,43 @@ package btree
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/anaregdesign/tarp/internal/index"
 )
+
+func TestPackedCellBytesAtMergeBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		extra       int
+		groupPrefix bool
+	}{
+		{"exact fit", 0, false},
+		{"one byte over", 1, false},
+		{"sibling prefixes lost on merge", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := node{kind: leaf}
+			for i := range 180 {
+				key := string([]byte{byte(i), 'z'})
+				if tc.groupPrefix {
+					key = string([]byte{byte(i / 90)}) + key
+				}
+				if i == 0 {
+					key += strings.Repeat("x", 60+tc.extra)
+				}
+				n.cells = append(n.cells, cell{key: keyRef{inline: key, length: uint64(len(key))}})
+			}
+			a := node{kind: leaf, cells: n.cells[:90]}
+			b := node{kind: leaf, cells: n.cells[90:]}
+			bound := header + a.encode(1).packedCellBytes() + b.encode(2).packedCellBytes()
+			if bound != pageSize+tc.extra || bound > n.size() || (!tc.groupPrefix && bound != n.size()) {
+				t.Fatalf("merged page lower bound %d, encoded size %d", bound, n.size())
+			}
+		})
+	}
+}
 
 func TestPageRejectsOutOfOrderAndDamagedSlots(t *testing.T) {
 	n := node{kind: leaf, cells: []cell{{key: keyRef{inline: "ab", length: 2}, address: addr(1)}, {key: keyRef{inline: "ac", length: 2}, address: addr(2)}}}

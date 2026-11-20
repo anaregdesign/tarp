@@ -5,8 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/anaregdesign/tarp/internal/index"
-	"github.com/anaregdesign/tarp/internal/index/btree"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -98,20 +96,18 @@ func VerifyBackup(ctx context.Context, source string) (storage.BackupInfo, error
 	return info, nil
 }
 
-// VerifyBackupWithScratch builds a disposable disk index outside the backup
+// VerifyBackupWithScratch sorts the key history using scratch outside the backup
 // to avoid repeated DATA passes on high-cardinality images.
 func VerifyBackupWithScratch(ctx context.Context, source, scratch string) (storage.BackupInfo, error) {
 	if ctx == nil {
 		return storage.BackupInfo{}, validContextError("verify-backup")
 	}
-	info, err := storage.VerifyBackupWithIndex(ctx, source, scratch, newVerifyIndex)
+	info, err := storage.VerifyBackupWithScratch(ctx, source, scratch)
 	if err != nil {
 		return storage.BackupInfo{}, operationError("verify-backup", "validation", err)
 	}
 	return info, nil
 }
-
-func newVerifyIndex(directory string) (index.Backend, error) { return btree.NewIn(directory, 16<<20) }
 
 func (l RestoreLimits) backupConfig() (storage.Config, error) {
 	limits, err := l.normalized()
@@ -137,7 +133,7 @@ func restoreWithIO(ctx context.Context, req RestoreRequest, fs *storage.IO) erro
 	if err != nil {
 		return err
 	}
-	if err := storage.RestoreWithIndex(ctx, req.Source, req.Destination, cfg, fs, newVerifyIndex); err != nil {
+	if err := storage.Restore(ctx, req.Source, req.Destination, cfg, fs); err != nil {
 		return operationError("restore", "validation/copy", err)
 	}
 	return nil

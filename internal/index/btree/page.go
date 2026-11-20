@@ -41,6 +41,11 @@ func (p *page) initialize(kind byte, id uint64) {
 func (p *page) seal()        { order.PutUint32(p[:4], crc32.Checksum(p[4:], crcTable)) }
 func (p *page) link() uint64 { return order.Uint64(p[24:32]) }
 func (p *page) count() int   { return int(order.Uint16(p[6:8])) }
+
+// packedCellBytes excludes the page header and the shared key prefix.
+func (p *page) packedCellBytes() int {
+	return 2*p.count() + pageSize - int(order.Uint16(p[10:12]))
+}
 func (p *page) offset(i int) int {
 	o := header + int(p[5]) + 2*i
 	return int(order.Uint16(p[o : o+2]))

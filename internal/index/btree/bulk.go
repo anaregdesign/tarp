@@ -167,9 +167,6 @@ func (t *tree) BuildSorted(ctx context.Context, produce func(put func(string, in
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if uint64(len(key)) > t.p.maxKey.Load() {
-			t.p.maxKey.Store(uint64(len(key)))
-		}
 		k, err := x.key(key)
 		if err != nil {
 			return err

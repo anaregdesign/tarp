@@ -30,25 +30,135 @@ func TestCleanerRanksNetSavings(t *testing.T) {
 		f.DeleteBytes.Store(64)
 		s.Files[e.ID] = f
 		s.Catalog.Files = []format.File{e}
-		got, needed := nextCandidate(s)
-		if (got.ID == e.ID) != (n >= 1024) || got.ID != 0 && needed != 512 {
+		got, needed := nextCandidate(s, 4096)
+		if (len(got) != 0) != (n >= 1024) || len(got) != 0 && (got[0].ID != e.ID || needed != 512) {
 			t.Fatalf("source %d: selected %+v, staging %d", n, got, needed)
 		}
 	}
 	s.Files[3] = &storage.File{}
 	s.Catalog.Files = append(s.Catalog.Files, format.File{ID: 3, Kind: format.Cleaned, Bytes: 1025, First: 4, Last: 7})
-	if got, _ := nextCandidate(s); got.ID != 3 {
+	if got, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 3 {
 		t.Fatal("higher net savings should win", got)
 	}
 	s.Catalog.Files[1].Bytes = math.MaxInt64
 	s.Files[3].LiveBytes.Store(math.MaxInt64 - 64)
-	if got, _ := nextCandidate(s); got.ID != 2 {
+	if got, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("large low-benefit file should be skipped", got)
 	}
 	s.Catalog.Files[1].Bytes = s.Catalog.Files[0].Bytes
 	s.Files[3].LiveBytes.Store(256)
-	if got, _ := nextCandidate(s); got.ID != 2 {
+	if got, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("oldest covered interval should win the tie", got)
+	}
+}
+
+func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
+	type segment struct {
+		kind                uint32
+		size, live, deleted int64
+	}
+	stale := segment{kind: format.Log, size: 512}
+	put := segment{kind: format.Log, size: 512, live: 32}
+	del := segment{kind: format.Cleaned, size: 512, deleted: 32}
+	empty := segment{kind: format.Cleaned}
+	full := segment{kind: format.Log, size: 1024, live: 300}
+	huge := segment{kind: format.Log, size: math.MaxInt64, live: math.MaxInt64/2 - 200}
+	for _, tc := range []struct {
+		name         string
+		target       int64
+		segments     []segment
+		first, count int
+		staging      uint64
+	}{
+		{"exact benefit across empty interval", 1024, []segment{put, empty, del}, 0, 3, 512},
+		{"one byte above benefit", 1024, []segment{put, {format.Cleaned, 512, 0, 33}}, 0, 0, 0},
+		{"empty output needs no header", 1024, []segment{stale, stale}, 0, 2, 384},
+		{"later single wins", 1024, []segment{put, del, {format.Log, 1024, 0, 0}}, 2, 1, 384},
+		{"snapshot boundary", 1024, []segment{stale, {format.Snapshot, 512, 0, 0}, stale}, 0, 0, 0},
+		{"oversized input", 1024, []segment{stale, {format.Log, 1025, 200, 0}}, 0, 0, 0},
+		{"live separator", 1024, []segment{stale, {format.Log, 512, 300, 0}, stale}, 0, 0, 0},
+		{"bounded output", 1024, []segment{full, full, full, full}, 0, 3, 1348},
+		{"bounded scan", 1024, slices.Repeat([]segment{stale}, 10), 0, 8, 384},
+		{"bounded scan including empty intervals", 1024, append(append([]segment{stale}, slices.Repeat([]segment{empty}, 7)...), stale), 0, 0, 0},
+		{"source size overflow", math.MaxInt64, []segment{huge, huge, huge}, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &storage.Store{Files: map[uint64]*storage.File{}, Manifest: make([]byte, 256)}
+			for i, seg := range tc.segments {
+				entry := format.File{Kind: seg.kind, Bytes: seg.size}
+				if seg.size > 0 {
+					entry.ID = uint64(i + 1)
+					f := &storage.File{}
+					f.LiveBytes.Store(seg.live)
+					f.DeleteBytes.Store(seg.deleted)
+					s.Files[entry.ID] = f
+				}
+				s.Catalog.Files = append(s.Catalog.Files, entry)
+			}
+			got, staging := nextCandidate(s, tc.target)
+			want := s.Catalog.Files[tc.first : tc.first+tc.count]
+			if !slices.Equal(got, want) || staging != tc.staging {
+				t.Fatalf("selected %+v staging %d, want %+v staging %d", got, staging, want, tc.staging)
+			}
+		})
+	}
+}
+
+func TestCleanerPublishesAdjacentObsoleteLogsAndReopens(t *testing.T) {
+	opts := Options{MaxRecordBytes: 512, TargetSegmentBytes: 1024}
+	parked := &Hooks{CleanerStart: make(chan struct{})}
+	var noSpace atomic.Bool
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "clean.headroom:before" && noSpace.Swap(false) {
+			return syscall.ENOSPC
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, opts, fs, parked)
+	stale := strings.Repeat("x", 350)
+	mustPut(t, db, "gone", stale)
+	mustPut(t, db, "one", "1")
+	first := sealForCleaning(t, db)
+	if err := db.Delete([]byte("gone")); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, db, "hot", stale)
+	last := sealForCleaning(t, db)
+	mustPut(t, db, "hot", "tail")
+	before := db.store.Current
+
+	// Neither source covers its own catalog publication. Preserve both if
+	// staging space is unavailable, then rewrite them together on retry.
+	noSpace.Store(true)
+	if again, retry := db.cleanPass(t.Context()); again || !retry || db.store.Current != before {
+		t.Fatalf("headroom deferral changed the source: %+v", db.AutoCompactionStatus())
+	}
+	if again, retry := db.cleanPass(t.Context()); !again || retry {
+		t.Fatalf("group did not publish on retry: %+v", db.AutoCompactionStatus())
+	}
+	db.cleanPass(t.Context()) // Retire the sources before validating recovery.
+	dir := db.store.Dir
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	image, err := OpenWithHooks(dir, opts, nil, parked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer image.Close()
+	files := image.store.Catalog.Files
+	if len(files) != 1 || files[0].Kind != format.Cleaned || files[0].First != first.First || files[0].Last != last.Last ||
+		files[0].ID == first.ID || files[0].ID == last.ID || image.store.Current.Generation != before.Generation+1 ||
+		image.store.Current.ActiveID != before.ActiveID || image.store.Current.Sequence != before.Sequence {
+		t.Fatalf("unexpected recovered group: %+v, frontier %+v", files, image.store.Current)
+	}
+	if image.store.Files[files[0].ID].DeleteBytes.Load() == 0 {
+		t.Fatal("cleaned group dropped its tombstone")
+	}
+	wantValue(t, image, "one", "1")
+	wantValue(t, image, "hot", "tail")
+	if _, err := image.Get([]byte("gone")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted key after reopen: %v", err)
 	}
 }
 

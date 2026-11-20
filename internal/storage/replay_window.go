@@ -82,7 +82,7 @@ func validateReadOnly(ctx context.Context, dir string, limit int64) (*Image, err
 	return validateWindows(ctx, dir, limit, nil)
 }
 
-func validateWindows(ctx context.Context, dir string, limit int64, spill func() (index.Backend, error)) (*Image, error) {
+func validateWindows(ctx context.Context, dir string, limit int64, spill imageVerifier) (*Image, error) {
 	image, err := readImage(ctx, dir)
 	if err != nil {
 		return nil, err
@@ -94,6 +94,9 @@ func validateWindows(ctx context.Context, dir string, limit int64, spill func() 
 			return w.apply(f.Kind, image.Catalog.PrunedThrough, r, key)
 		}); err != nil {
 			return nil, err
+		}
+		if w.more && spill != nil {
+			return spill(ctx, dir)
 		}
 		for key, rec := range w.live {
 			if err := ctx.Err(); err != nil {
@@ -107,17 +110,6 @@ func validateWindows(ctx context.Context, dir string, limit int64, spill func() 
 		}
 		if !w.more {
 			return image, ctx.Err()
-		}
-		if spill != nil {
-			backend, err := spill()
-			if err != nil {
-				return nil, &IndexWorkError{Err: err}
-			}
-			result, validationErr := validateIndexed(ctx, dir, backend)
-			if err := errors.Join(validationErr, backend.Close()); err != nil {
-				return nil, err
-			}
-			return result, nil
 		}
 		after = w.keys[0]
 	}
@@ -167,8 +159,7 @@ func replayWorkError(err error) error {
 
 func (b *replayBuilder) apply(f *File, off int64, r format.Record, key string) error {
 	if b.sort != nil {
-		a := index.Address{FileID: f.ID, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
-		return replayWorkError(b.sort.add(replayEvent{key: key, addr: a, fileKind: f.Kind, recordKind: r.Kind}))
+		return b.sort.apply(f, off, r, key)
 	}
 	if b.direct != nil {
 		return applyIndexedRecord(b.direct, f, b.pruned, off, r, key)

@@ -16,6 +16,32 @@ import (
 	"github.com/anaregdesign/tarp/internal/index/btree"
 )
 
+func TestSortedReplayClosesRemainingRunsAfterOneCloseFails(t *testing.T) {
+	dir := t.TempDir()
+	closed, err := newReplayRun(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.fd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	other, err := newReplayRun(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sortedReplay{pending: closed}
+	s.levels[0] = other
+	if err := s.close(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := other.fd.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("second run: %v", err)
+	}
+	if err := s.close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+}
+
 func TestSortedReplayKeepsBinaryKeysAndStableHistoryAcrossRuns(t *testing.T) {
 	dir := t.TempDir()
 	keys := []string{"a", "a\x00", "a\xff", "\x00", "\xff", strings.Repeat("large key", 1024)}

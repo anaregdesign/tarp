@@ -211,9 +211,9 @@ func (f scaleBackup) verifyArm(t *testing.T, round int, arm string) {
 	case "with_scratch":
 		wantPasses = 1
 	case "restore":
-		// Verify source and stage independently. Each switches to a fresh
-		// external index after the first window detects more keys.
-		wantPasses = 2 * min(windows, 2)
+		// The source can retry with scratch. The stage independently replays
+		// all records once using the strategy established by the source.
+		wantPasses = min(windows, 2) + 1
 		copyBytes = f.dataBytes
 	}
 	if passes != uint64(wantPasses) || readBytes != passes*f.dataBytes {

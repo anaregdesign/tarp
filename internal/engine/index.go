@@ -60,7 +60,7 @@ func (db *DB) lookupLocation(key string) (storage.Location, bool, error) {
 }
 
 // stage runs under the writer gate, before the first selected DATA byte can
-// change. Earlier entries of a repeated-key batch are visible to this lookup.
+// change. Apply returns the previous location, including earlier staged entries.
 func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) (storage.Location, error) {
 	if err := db.store.IO.Check("index.prepare:before"); err != nil {
 		return storage.Location{}, err
@@ -71,10 +71,17 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 		defer db.indexGate.Unlock()
 		db.memoryRemap.staged[key] = struct{}{}
 	}
-	a, found, err := tx.Lookup(key)
+	mutation := index.Mutation{Key: key, Delete: kind == format.Delete}
+	if !mutation.Delete {
+		mutation.Address = next.Address()
+	}
+	a, found, err := tx.Apply(mutation)
 	if err != nil {
-		db.poison(err)
-		return storage.Location{}, err
+		var lookupErr *index.LookupError
+		if errors.As(err, &lookupErr) {
+			db.poison(lookupErr.Err)
+			return storage.Location{}, err
+		}
 	}
 	var old storage.Location
 	if found {
@@ -89,13 +96,8 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 		}
 		old = storage.At(file, a)
 	}
-	if kind == format.Delete {
-		if !found {
-			return old, ErrNotFound
-		}
-		err = tx.Delete(key)
-	} else {
-		err = tx.Put(key, next.Address())
+	if err == nil && mutation.Delete && !found {
+		return old, ErrNotFound
 	}
 	return old, err
 }

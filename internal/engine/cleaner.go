@@ -124,23 +124,25 @@ func (db *DB) cleanYield(ctx context.Context) error {
 // nextCandidate inspects committed per-file accounting under the writer gate.
 // With source bytes S and estimated output bytes W, (S-W)/(S+W) >= 1/3
 // simplifies to W <= S/2. Ranking this ratio is equivalent to minimizing W/S.
-func nextCandidate(s *storage.Store) (best format.File, staging uint64) {
+func nextCandidate(s *storage.Store, target int64) (inputs []format.File, staging uint64) {
 	metadata := uint64(len(s.Manifest)) + format.FrontierBytes
-	for _, entry := range s.Catalog.Files {
+	var best format.File
+	for i, entry := range s.Catalog.Files {
 		if !entry.HasPhysicalFile() {
 			continue
 		}
-		f := s.Files[entry.ID]
-		output := uint64(f.LiveBytes.Load()) + uint64(f.DeleteBytes.Load())
-		if output > uint64(entry.Bytes) {
+		records := retainedBytes(s.Files[entry.ID])
+		half := uint64(entry.Bytes) / 2
+		if records > half {
 			continue
 		}
-		if output != 0 {
-			output += format.SegmentHeaderBytes
-		}
-		// Reject before adding overhead so large signed file limits cannot overflow.
-		half := uint64(entry.Bytes) / 2
+		output := replacementBytes(records)
 		if output > half || metadata > half-output {
+			if len(inputs) == 0 && entry.Kind != format.Snapshot && entry.Bytes <= target {
+				// Save the oldest eligible group as a fallback. Any qualifying
+				// single file, including later in the catalog, takes priority.
+				inputs, staging = obsoleteGroupAt(s, s.Catalog.Files[i:], uint64(target), metadata)
+			}
 			continue
 		}
 		output += metadata
@@ -152,8 +154,52 @@ func nextCandidate(s *storage.Store) (best format.File, staging uint64) {
 			}
 		}
 		best, staging = entry, output
+		inputs = s.Catalog.Files[i : i+1]
 	}
-	return best, staging
+	return inputs, staging
+}
+
+func retainedBytes(f *storage.File) uint64 {
+	return uint64(f.LiveBytes.Load()) + uint64(f.DeleteBytes.Load())
+}
+
+func replacementBytes(records uint64) uint64 {
+	if records == 0 {
+		return 0
+	}
+	return format.SegmentHeaderBytes + records
+}
+
+// obsoleteGroupAt shares the cost of one publication across adjacent sealed
+// logs. Bound both the catalog lookahead under the writer gate and the amount
+// of DATA scanned off the gate: at most eight entries, each at most one target.
+// Sealed live bytes only decrease as writers advance. Include every tombstone
+// and keep the resulting DATA file within one target even at its estimate.
+func obsoleteGroupAt(s *storage.Store, files []format.File, target, metadata uint64) (group []format.File, staging uint64) {
+	const maxEntries = 8
+	var source, retained uint64
+	var count int
+	for i, entry := range files[:min(len(files), maxEntries)] {
+		if entry.Kind == format.Snapshot || uint64(entry.Bytes) > target {
+			break
+		}
+		if !entry.HasPhysicalFile() {
+			continue // Preserve intermediate metadata-only sequence coverage.
+		}
+		size := uint64(entry.Bytes)
+		records := retainedBytes(s.Files[entry.ID])
+		if records > size/2 || records > target-format.SegmentHeaderBytes-retained || size > math.MaxInt64-source {
+			break
+		}
+		count++
+		source += size
+		retained += records
+		output := replacementBytes(retained)
+		if count >= 2 && output <= source/2 && metadata <= source/2-output {
+			group, staging = files[:i+1], output+metadata
+		}
+	}
+	return group, staging
 }
 
 // repackGroup picks the oldest eligible run from the immutable catalog. Try at
@@ -257,10 +303,10 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		return false, false
 	}
 	removed, pinned, pending, err := db.store.RetireCleaned()
-	var victim format.File
+	var inputs []format.File
 	var staging uint64
 	if err == nil {
-		victim, staging = nextCandidate(db.store)
+		inputs, staging = nextCandidate(db.store, db.opts.TargetSegmentBytes)
 	}
 	files, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)
 	db.writer.Unlock()
@@ -277,10 +323,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		db.deferCleaning("retirement", compactCleanupError(err))
 		return false, true
 	}
-	var inputs []format.File
-	if victim.HasPhysicalFile() {
-		inputs = []format.File{victim}
-	} else {
+	if len(inputs) == 0 {
 		// Foreground rotations publish a new catalog slice. Inspect this one
 		// outside the writer gate; BeginClean rechecks the selection.
 		var inputBytes int64

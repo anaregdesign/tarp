@@ -38,7 +38,8 @@ type Options struct {
 	ValueCacheBudgetBytes int64
 	// MaxRecordBytes limits the encoded header, key and value of one record. Zero selects 1 MiB.
 	MaxRecordBytes int64
-	// TargetSegmentBytes sizes new logs and checkpoints and caps repack input.
+	// TargetSegmentBytes sizes new logs and checkpoints. It caps the total
+	// input to a small-file repack and the output of grouped log cleaning.
 	// The default is 4 MiB. The target grows to fit one maximum record and a segment header.
 	TargetSegmentBytes int64
 	// ReadFileHandles bounds the pool of reusable DATA handles. Zero selects 64.
@@ -172,8 +173,8 @@ func VerifyBackup(ctx context.Context, source string) (BackupInfo, error) {
 	return publicBackupInfo(engine.VerifyBackup(ctx, source))
 }
 
-// VerifyBackupWithScratch verifies an immutable backup using a disposable
-// disk index in a caller-selected directory outside the backup.
+// VerifyBackupWithScratch verifies an immutable backup using temporary sort
+// files in a caller-selected directory outside the backup.
 func VerifyBackupWithScratch(ctx context.Context, source, scratch string) (BackupInfo, error) {
 	return publicBackupInfo(engine.VerifyBackupWithScratch(ctx, source, scratch))
 }
