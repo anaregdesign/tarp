@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -104,24 +105,30 @@ func verifyDatabase(dir string, events []entry) (result error) {
 	if err != nil {
 		return err
 	}
-	st, err := os.Stat(dir)
-	if err != nil {
-		return err
-	}
-	if !st.IsDir() {
-		return errors.New("recovered database must be an existing directory")
-	}
-	db, err := tarp.Open(dir, tarp.Options{})
+	db, err := tarp.OpenExisting(context.Background(), dir, tarp.Options{})
 	if err != nil {
 		return fmt.Errorf("file-only recovery failed: %w", err)
 	}
 	defer func() { result = errors.Join(result, db.Close()) }()
+	// Verify visits each witnessed key once and accepts either permitted
+	// outcome for the pending mutation. Count the outcome that actually exists.
+	var witnessedLive uint64
 	_, err = oracle.Verify(func(key []byte) ([]byte, bool, error) {
 		value, err := db.Get(key)
 		if errors.Is(err, tarp.ErrNotFound) {
 			return nil, false, nil
 		}
-		return value, err == nil, err
+		if err != nil {
+			return nil, false, err
+		}
+		witnessedLive++
+		return value, true, nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if live := db.Stats().LiveKeys; live != witnessedLive {
+		return fmt.Errorf("recovered live index cardinality %d != witnessed %d", live, witnessedLive)
+	}
+	return nil
 }

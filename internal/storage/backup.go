@@ -223,7 +223,10 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, l
 	return entry, nil
 }
 
-func backupSourcePath(source string) (string, error) {
+func backupSourcePath(ctx context.Context, source string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	absolute, err := filepath.Abs(source)
 	if err != nil {
 		return "", err
@@ -232,7 +235,7 @@ func backupSourcePath(source string) (string, error) {
 }
 
 func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) (returned error) {
-	source, err := backupSourcePath(source)
+	source, err := backupSourcePath(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -289,11 +292,11 @@ type verifiedBackup struct {
 
 // VerifyBackup checks an immutable backup without creating a destination or acquiring a lock.
 func VerifyBackup(ctx context.Context, dir string) (BackupInfo, error) {
-	if err := ctx.Err(); err != nil {
+	source, err := backupSourcePath(ctx, dir)
+	if err != nil {
 		return BackupInfo{}, err
 	}
-	source, err := backupSourcePath(dir)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return BackupInfo{}, err
 	}
 	backup, err := verifyBackup(ctx, source, make([]byte, 32<<10))
@@ -301,9 +304,6 @@ func VerifyBackup(ctx context.Context, dir string) (BackupInfo, error) {
 }
 
 func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBackup, error) {
-	if err := ctx.Err(); err != nil {
-		return verifiedBackup{}, err
-	}
 	b, err := ReadRegular(filepath.Join(source, "BACKUP"))
 	if err != nil {
 		return verifiedBackup{}, requiredFileError("BACKUP", err)

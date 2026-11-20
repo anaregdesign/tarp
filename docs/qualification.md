@@ -352,10 +352,12 @@ verification location outside the engine directory, then run in the guest:
   -dir /mnt/disposable-tests/case-001-db
 ```
 
-The engine first recovers from its files alone. The oracle then checks every
-observed acknowledgment, allowing only old/absent or whole new state for one
-pending Put. It is test evidence, never recovery input. The supplied protocol
-is deliberately phase-controlled: it is not a general distributed workload
+The verifier opens an existing, initialized database and runs file-only recovery.
+A missing or uninitialized directory fails verification even if the oracle
+expects zero live keys. The oracle then checks the live key count and every
+observed acknowledgment, allowing the prior state or the whole result of one
+pending Put or Delete. It is test evidence, never recovery input. The supplied
+protocol is deliberately phase-controlled: it is not a general distributed workload
 controller and does not claim arbitrary random-cut intent handshakes.
 
 Sweep before/after points for `data.write`, `data.sync`, `current.write`,

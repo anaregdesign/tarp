@@ -115,6 +115,7 @@ type RestoreRequest struct {
 
 // Restore verifies a completed backup and publishes a new, closed database.
 // The source must remain immutable and the destination must be new.
+// After validating Limits, Restore checks for cancellation before resolving either path.
 // A destination collision matches fs.ErrExist and has outcome [NotApplied].
 func Restore(ctx context.Context, req RestoreRequest) error {
 	return engine.Restore(ctx, engine.RestoreRequest{
