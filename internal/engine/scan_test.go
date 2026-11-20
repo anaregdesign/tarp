@@ -65,7 +65,7 @@ func TestScanKeepsUnreadValuesAcrossCompact(t *testing.T) {
 	for _, k := range []string{"a", "b", "c", "d"} {
 		want[k] = strings.Repeat(k, 64)
 		mustPut(t, db, k, want[k])
-		old[k] = db.index[k].File // Each pair of these records exceeds the target.
+		old[k] = testLoc(t, db, k).File // Each pair of these records exceeds the target.
 	}
 	next, stop := iter.Pull2(db.Scan(t.Context()))
 	defer stop()
@@ -123,10 +123,11 @@ func TestScanStopsWithoutExtraReadsOrLeases(t *testing.T) {
 	}})
 	mustPut(t, db, "one", "1")
 	mustPut(t, db, "two", "2")
-	file := db.index["one"].File
+	file := testLoc(t, db, "one").File
+	baseline := file.References()
 	check := func(wantReads int64) {
 		t.Helper()
-		if reads.Load() != wantReads || file.References() != 2 || db.active != 0 {
+		if reads.Load() != wantReads || file.References() != baseline || db.active != 0 {
 			t.Fatalf("reads %d, refs %d, active %d", reads.Load(), file.References(), db.active)
 		}
 	}
@@ -189,11 +190,12 @@ func TestScanReleasesPartialCapture(t *testing.T) {
 	db := newTestDB(t, Options{}, nil)
 	mustPut(t, db, "a", "1")
 	mustPut(t, db, "b", "2")
-	file := db.index["a"].File
+	file := testLoc(t, db, "a").File
+	baseline := file.References()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	requireScanError(t, db.Scan(cancelOnScanPin{ctx, file, 2, cancel}), context.Canceled)
-	if file.References() != 2 || db.active != 0 {
+	requireScanError(t, db.Scan(cancelOnScanPin{ctx, file, baseline, cancel}), context.Canceled)
+	if file.References() != baseline || db.active != 0 {
 		t.Fatal("partial capture retained resources")
 	}
 }
@@ -241,17 +243,18 @@ func TestScanCancellationAndReadFailure(t *testing.T) {
 	}})
 	mustPut(t, db, "a", "A")
 	mustPut(t, db, "b", "B")
-	file := db.index["a"].File
+	file := testLoc(t, db, "a").File
+	baseline := file.References()
 	requireScanError(t, db.Scan(nil), nil)
 	requireScanError(t, db.Scan(ctx), context.Canceled) // Canceled after OS read.
 	requireScanError(t, db.Scan(ctx), context.Canceled) // Already canceled.
-	if file.References() != 2 || db.active != 0 {
+	if file.References() != baseline || db.active != 0 {
 		t.Fatal("canceled scan retained resources")
 	}
 	inject.Store(true)
 	requireScanError(t, db.Scan(t.Context()), ErrCorrupt)
 	requireScanError(t, db.Scan(t.Context()), ErrUnhealthy)
-	if file.References() != 2 || db.active != 0 {
+	if file.References() != baseline || db.active != 0 {
 		t.Fatal("failed scan retained resources")
 	}
 }
@@ -266,7 +269,7 @@ func TestScanCloseFromConsumer(t *testing.T) {
 	}})
 	mustPut(t, db, "one", "1")
 	mustPut(t, db, "two", "2")
-	file := db.index["one"].File
+	file := testLoc(t, db, "one").File
 	next, stop := iter.Pull2(db.Scan(t.Context()))
 	defer stop()
 	if _, err, ok := next(); !ok || err != nil {

@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -12,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anaregdesign/tarp/internal/cache"
 	"github.com/anaregdesign/tarp/internal/engine"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
@@ -132,29 +132,51 @@ func measurementOpenClone(t *testing.T, source string, opts engine.Options) (*en
 
 func measurementState(t testing.TB, db *engine.DB) (string, int) {
 	t.Helper()
-	var keys []string
-	engine.Observe(db).State(func(index map[string]storage.Location, _ *cache.Cache) {
-		keys = make([]string, 0, len(index))
-		for key := range index {
-			keys = append(keys, key)
-		}
-	})
-	sort.Strings(keys)
 	hash := sha256.New()
 	var length [8]byte
-	for _, key := range keys {
-		value, err := db.Get([]byte(key))
+	count := 0
+	record := func(key []byte) {
+		value, err := db.Get(key)
 		if err != nil {
 			t.Fatal(err)
 		}
 		binary.LittleEndian.PutUint64(length[:], uint64(len(key)))
 		hash.Write(length[:])
-		io.WriteString(hash, key)
+		hash.Write(key)
 		binary.LittleEndian.PutUint64(length[:], uint64(len(value)))
 		hash.Write(length[:])
 		hash.Write(value)
+		count++
 	}
-	return hex.EncodeToString(hash.Sum(nil)), len(keys)
+	// The historical measurement digest orders the encoded keys. The B+tree
+	// cursor already traverses ordered leaves, so stream it without a key list.
+	// Ordering is a property of this backend, not part of the public Keys API.
+	if engine.Observe(db).Options().IndexMode == engine.IndexBTree {
+		var last []byte
+		for key, err := range db.Keys(t.Context()) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if last != nil && bytes.Compare(key, last) <= 0 {
+				t.Fatal("unordered B+tree keys in measurement digest")
+			}
+			record(key)
+			last = key
+		}
+	} else {
+		var keys []string
+		for key, err := range db.Keys(t.Context()) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, string(key))
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			record([]byte(key))
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), count
 }
 
 type measurementCapture struct {

@@ -74,6 +74,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		db.writer.Unlock()
 		return result, operationError("compact", "capture", err)
 	}
+	live := db.indexView()
 	db.writer.Unlock()
 	released := false
 	defer func() {
@@ -81,11 +82,6 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 			capture.Release()
 		}
 	}()
-	moves, err := capture.Replay(ctx, db.store.IO)
-	if err != nil {
-		db.compactFailure(err)
-		return result, operationError("compact", "scan", err)
-	}
 	checkpoint := db.store.NewCheckpoint(capture)
 	defer func() {
 		if returned != nil && db.health() == nil {
@@ -105,7 +101,29 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		}
 		return db.store.ReserveSnapshotFile()
 	}
-	if err := checkpoint.Copy(ctx, moves, reserve); err != nil {
+	var moves storage.Relocations
+	defer func() {
+		if err := moves.Close(); err != nil {
+			if returned != nil {
+				returned = errors.Join(returned, err)
+			} else {
+				returned = compactCleanupError(err)
+			}
+		}
+	}()
+	err = func() error {
+		defer live.Close()
+		history, err := db.newIndex()
+		if err != nil {
+			return &storage.IndexWorkError{Err: err}
+		}
+		copyErr := checkpoint.Copy(ctx, history, live, &moves, reserve)
+		if err := history.Close(); err != nil {
+			return errors.Join(copyErr, &storage.IndexWorkError{Err: err})
+		}
+		return copyErr
+	}()
+	if err != nil {
 		db.compactFailure(err)
 		return result, operationError("compact", "copy", err)
 	}
@@ -124,7 +142,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	db.relocate(moves, "compact.remap:after")
+	db.relocate(&moves, "compact.remap:after")
 	capture.Release()
 	released = true
 	db.writer.Lock()
@@ -136,22 +154,17 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	return result, compactCleanupError(err)
 }
 
-// relocate moves index ownership only while it still names the copied record.
-// Each change holds the state lock briefly; concurrent puts and deletes win.
-func (db *DB) relocate(moves []storage.Relocation, after string) {
-	for _, move := range moves {
-		db.state.Lock()
-		if db.index[move.Key] == move.Old {
-			move.New.File.Pin()
-			move.New.File.LiveBytes.Add(move.New.Bytes)
-			db.index[move.Key] = move.New
-			move.Old.File.LiveBytes.Add(-move.Old.Bytes)
-			move.Old.File.Unpin()
+// The replacement layout is already committed. A partial remap fail-stops the
+// instance, leaving the authoritative DATA for a fresh indexed Open.
+func (db *DB) relocate(moves *storage.Relocations, after string) {
+	err := moves.Each(func(key string, old, next storage.Location) error {
+		if err := db.relocateOne(key, old, next); err != nil {
+			return err
 		}
-		db.state.Unlock()
-		if err := db.store.IO.Check(after); err != nil {
-			db.poison(err)
-		}
+		return db.store.IO.Check(after)
+	})
+	if err != nil {
+		db.poison(err)
 	}
 }
 
@@ -171,8 +184,9 @@ func (db *DB) storageFailure(err error) {
 
 func (db *DB) compactFailure(err error) {
 	var source *storage.SourceError
-	if errors.As(err, &source) || errors.Is(err, format.ErrCorrupt) ||
-		errors.Is(err, format.ErrUnsupported) || errors.Is(err, syscall.EIO) {
+	var work *storage.IndexWorkError
+	if errors.As(err, &source) || !errors.As(err, &work) && (errors.Is(err, format.ErrCorrupt) ||
+		errors.Is(err, format.ErrUnsupported) || errors.Is(err, syscall.EIO)) {
 		db.poison(err)
 	}
 }

@@ -2,8 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"iter"
+	"os"
 
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -13,97 +17,111 @@ type Entry struct {
 	Value []byte
 }
 
-type scanRecord struct {
-	key string
-	loc storage.Location
-}
-
 // Scan captures a new point-in-time view each time iteration begins.
 func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
-		if err := db.scan(ctx, yield); err != nil {
+		err := db.walkSnapshot(ctx, true, func(k string, value []byte) bool { return yield(Entry{Key: []byte(k), Value: value}, nil) })
+		if err != nil {
 			yield(Entry{}, err)
 		}
 	}
 }
 
-func (db *DB) scan(ctx context.Context, yield func(Entry, error) bool) error {
-	files := make(map[*storage.File][]scanRecord)
+// walkSnapshot pins the DATA layout only for a value scan. Index cursors never
+// hold a DB lock or admission across user code, which may close or mutate it.
+func (db *DB) walkSnapshot(ctx context.Context, values bool, yield func(string, []byte) bool) error {
+	op := "keys"
+	if values {
+		op = "scan"
+	}
+	if err := db.admit(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		db.done()
+		return validContextError(op)
+	}
+	if err := ctx.Err(); err != nil {
+		db.done()
+		return operationError(op, "context", err)
+	}
+	db.indexGate.RLock()
+	v := db.keys.View()
+	var layout map[uint64]*storage.File
+	if values {
+		layout = make(map[uint64]*storage.File, len(db.files))
+		for id, f := range db.files {
+			f.Pin()
+			layout[id] = f
+		}
+	}
+	db.indexGate.RUnlock()
+	db.done()
+	defer v.Close()
 	defer func() {
-		for file := range files {
-			db.releaseScanPin(file)
+		for _, f := range layout {
+			db.releaseScanPin(f)
 		}
 	}()
-	if err := db.captureScan(ctx, files); err != nil {
-		return err
-	}
-	for file, records := range files {
-		for i, record := range records {
-			value, err := db.readScan(ctx, record)
-			if err != nil {
-				return err
-			}
-			if i == len(records)-1 {
-				delete(files, file)
-				db.releaseScanPin(file)
-			}
-			if !yield(Entry{Key: []byte(record.key), Value: value}, nil) {
-				return nil
-			}
-		}
-	}
-	return nil
-}
 
-func (db *DB) captureScan(ctx context.Context, files map[*storage.File][]scanRecord) error {
-	if err := db.admit(); err != nil {
-		return err
-	}
-	defer db.done()
-	if ctx == nil {
-		return validContextError("scan")
-	}
-	if err := ctx.Err(); err != nil {
-		return operationError("scan", "context", err)
-	}
-	db.state.Lock()
-	defer db.state.Unlock()
-	if err := db.health(); err != nil {
-		return err
-	}
-	for key, loc := range db.index {
+	check := func() error {
+		db.life.Lock()
+		closing := db.closing
+		db.life.Unlock()
+		if closing {
+			return ErrClosed
+		}
 		if err := ctx.Err(); err != nil {
-			return operationError("scan", "context", err)
+			return operationError(op, "context", err)
 		}
-		records := files[loc.File]
-		if len(records) == 0 {
-			loc.File.Pin()
-		}
-		files[loc.File] = append(records, scanRecord{key, loc})
+		return db.health()
 	}
-	if err := ctx.Err(); err != nil {
-		return operationError("scan", "context", err)
+	if err := check(); err != nil {
+		return err
+	}
+	var result error
+	err := v.All(func(k string, a index.Address) bool {
+		if result = check(); result != nil {
+			return false
+		}
+		var value []byte
+		if values {
+			f := layout[a.FileID]
+			if f == nil {
+				result = fmt.Errorf("index references unknown DATA file %d", a.FileID)
+				db.poison(result)
+				return false
+			}
+			if result = db.admit(); result != nil {
+				return false
+			}
+			value, result = db.store.Read(storage.At(f, a), k)
+			if result != nil {
+				db.poison(result)
+				db.done()
+				result = operationError(op, "read", result)
+				return false
+			}
+			db.done()
+			if result = check(); result != nil {
+				return false
+			}
+		}
+		return yield(k, value)
+	})
+	if result != nil {
+		return result
+	}
+	if err != nil {
+		if errors.Is(err, os.ErrClosed) {
+			if lifeErr := check(); lifeErr != nil {
+				return lifeErr
+			}
+		}
+		db.poison(err)
+		return operationError(op, "index", err)
 	}
 	return nil
-}
-
-func (db *DB) readScan(ctx context.Context, record scanRecord) ([]byte, error) {
-	if err := db.admit(); err != nil {
-		return nil, err
-	}
-	defer db.done()
-	if err := ctx.Err(); err != nil {
-		return nil, operationError("scan", "context", err)
-	}
-	value, err := db.store.Read(record.loc, record.key)
-	if err != nil {
-		db.poison(err)
-		return nil, operationError("scan", "read", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, operationError("scan", "context", err)
-	}
-	return value, db.health()
 }
 
 func (db *DB) releaseScanPin(file *storage.File) {

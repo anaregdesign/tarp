@@ -1,6 +1,6 @@
 # tarp
 
-A standalone, file-backed, hash-indexed Go key-value library. The published module,
+A standalone, file-backed Go key-value library. The published module,
 tests, and measurement tools use the Go standard library only.
 
 ## Quick start
@@ -268,20 +268,52 @@ reopen a database and `Restore` to restore a backup offline.
 
 Use `for key, err := range db.Keys(ctx)` to list the live keys. Each iteration
 captures its own index snapshot in unspecified order and returns caller-owned
-keys. Capture takes O(live keys) time and memory. This operation reads no DATA
-files, holds no file pins and only invokes the key codec on a typed view.
+keys. Keys reads no DATA files. Memory mode captures a copy of the live index.
+B+tree mode captures a root and visits index pages on demand.
 
 `for entry, err := range db.Scan(ctx)` reads a point-in-time snapshot in
-unspecified order. Each new iteration captures the live index and reads one
-value at a time, preserving LRU recency. The caller owns each key and value.
-Capturing the index takes O(live keys) time and memory. During capture,
-`Get` and the final stage of `Put` can wait for the state lock. A slow consumer can delay retirement of old files.
+unspecified order. Each iteration protects the DATA files referenced by the
+captured index and reads one value at a time, preserving LRU recency. The
+caller owns each key and value. A paused scan can retain old files on disk.
 Break to release the snapshot early. When using `iter.Pull2`, defer `stop()`.
 After an error, prior entries remain valid. Calling `Close` in the loop is
 supported. A subsequent read yields `ErrClosed`.
 
 No ordered scans, TTL, general read/write transactions, cross-file
 records, or total disk quota is provided.
+
+## Choosing the key index
+
+On `main`, `Options{}` uses an in-memory hash index for fast random lookups.
+For datasets whose keys would consume too much heap, choose the disk index
+when opening the database. The index options below were added after v0.8.0.
+
+```go
+db, err := tarp.Open(dir, tarp.Options{
+	IndexMode:        tarp.IndexBTree,
+	IndexMemoryBytes: 16 << 20,
+})
+```
+
+`IndexBTree` stores encoded keys and DATA addresses in private 8 KiB pages
+on the OS temporary filesystem. The root and frequently used routing pages
+get priority in the cache. Value LRU hits bypass the index. On a Value miss,
+cold routing, leaf and overflow pages can add reads before loading DATA.
+Use a disk-backed temporary filesystem with enough free space. An unlinked
+scratch file is released by the OS after its final descriptor closes.
+
+The configured budget is split between the foreground index (one half),
+compaction and backup (one quarter each). It limits page-cache and index work
+capacity. Decoded keys, request/iterator buffers, the file registry, Go's
+allocator and the OS page cache also consume memory. Returned values use the
+separate `CacheBytes` and batch-result policies. Long-running readers can
+hold previous page generations and DATA files on disk.
+
+Both modes use the same DATA, MANIFEST, CURRENT and backup formats. Switch
+by closing the DB and reopening with `IndexMemory` or `IndexBTree`. Open
+revalidates the selected DATA and rebuilds the index. A B+tree workspace
+needs no additional durability sync on the foreground commit path.
+See the [measured memory and latency trade-offs](docs/benchmarks/index-modes.md).
 
 ## Limits
 
@@ -291,6 +323,8 @@ the commit sync protocol.
 
 | Option | Default | What the limit applies to |
 | --- | ---: | --- |
+| `IndexMode` | `IndexMemory` | Selects a built-in key index for this Open. |
+| `IndexMemoryBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
 | `CacheBytes` | 64 MiB | Total logical charge of entries in this DB's LRU cache. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
 | `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Also bounds the total DATA bytes read in one automatic repack. |
@@ -302,7 +336,7 @@ For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
 bytes and `128 + K + V` cache bytes. An entry that exceeds either limit returns
 `ErrTooLarge`. For example, the default record limit permits a 1,048,512-byte
 value with a 16-byte key. When several individually admissible entries fill the
-cache, the least recently used entries are evicted. The full key index, Go
+cache, the least recently used entries are evicted. The selected index, Go
 runtime overhead, in-flight operations and OS page cache use additional memory.
 
 The effective target is at least `64 + MaxRecordBytes` so a whole record fits.

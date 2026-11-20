@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -265,20 +264,18 @@ func resourceSample(t *testing.T, db *engine.DB) map[string]any {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	probe := engine.Observe(db)
-	var copyIndex map[string]storage.Location
-	var logicalIndex, cacheBytes int64
-	probe.State(func(index map[string]storage.Location, c *cache.Cache) {
-		copyIndex = make(map[string]storage.Location, len(index))
-		for key, loc := range index {
-			copyIndex[strings.Clone(key)] = loc
-			logicalIndex += int64(len(key)) + int64(unsafe.Sizeof(key)) + int64(unsafe.Sizeof(loc))
-		}
-		cacheBytes = c.Bytes()
-	})
-	liveKeys := len(copyIndex)
-	runtime.GC()
-	runtime.ReadMemStats(&after)
-	runtime.KeepAlive(copyIndex)
+	liveKeys := probe.LiveKeys()
+	cacheBytes := db.Stats().Cache.UsedBytes
+	copyIndex := probe.CloneMemoryIndex()
+	var logicalIndex int64
+	for key, loc := range copyIndex {
+		logicalIndex += int64(len(key)) + int64(unsafe.Sizeof(key)) + int64(unsafe.Sizeof(loc))
+	}
+	if copyIndex != nil {
+		runtime.GC()
+		runtime.ReadMemStats(&after)
+		runtime.KeepAlive(copyIndex)
+	}
 	var rss syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rss); err != nil {
 		t.Fatal(err)
@@ -303,18 +300,23 @@ func resourceSample(t *testing.T, db *engine.DB) map[string]any {
 	if err := syscall.Statfs(probe.Dir(), &filesystem); err != nil {
 		t.Fatal(err)
 	}
-	count := max(1, liveKeys)
-	return map[string]any{
+	result := map[string]any{
 		"heap_alloc_bytes": before.HeapAlloc, "runtime_sys_bytes": before.Sys, "process_peak_rss_bytes": peakRSS,
 		"cache_logical_bytes": cacheBytes, "cache_limit_bytes": probe.Options().CacheBytes,
-		"live_keys": liveKeys, "index_logical_bytes_per_key": float64(logicalIndex) / float64(count),
-		"index_clone_retained_heap_delta_per_key": float64(int64(after.HeapAlloc)-int64(before.HeapAlloc)) / float64(count),
-		"open_process_fds_including_sampler":      len(fds), "read_handle_limit": probe.Options().ReadFileHandles,
+		"live_keys": liveKeys, "index_mode": probe.Options().IndexMode, "index_metrics": probe.IndexMetrics(),
+		"open_process_fds_including_sampler": len(fds), "read_handle_limit": probe.Options().ReadFileHandles,
 		"directory_logical_file_bytes": logical, "directory_allocated_bytes": allocated, "layout": observedLayout(db),
 		"filesystem_type_number": fmt.Sprintf("0x%x", filesystem.Type), "filesystem_block_bytes": filesystem.Bsize,
 		"filesystem_flags": fmt.Sprintf("0x%x", filesystem.Flags),
-		"pending_calls":    0, "index_clone_note": "isolated map/key clone; shared file metadata excluded; GC delta is noisy, not a process limit",
+		"pending_calls":    0,
 	}
+	if copyIndex != nil {
+		count := float64(max(1, liveKeys))
+		result["index_logical_bytes_per_key"] = float64(logicalIndex) / count
+		result["index_clone_retained_heap_delta_per_key"] = float64(int64(after.HeapAlloc)-int64(before.HeapAlloc)) / count
+		result["index_clone_note"] = "memory mode: cloned keys and record addresses; shared file metadata excluded"
+	}
+	return result
 }
 
 type measurementOverlap struct {
@@ -772,7 +774,7 @@ func TestMeasurementProfiles(t *testing.T) {
 				})
 				holds := make([]int64, 2048)
 				for i := range holds {
-					engine.Observe(db).State(func(_ map[string]storage.Location, c *cache.Cache) {
+					engine.Observe(db).Cache(func(c *cache.Cache) {
 						now := time.Now()
 						_, ok := c.Get(keys[i%len(keys)])
 						holds[i] = time.Since(now).Nanoseconds()

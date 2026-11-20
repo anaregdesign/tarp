@@ -196,3 +196,31 @@ func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
 		t.Fatalf("sequence overflow returned %v", err)
 	}
 }
+
+func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
+	cfg := Config{CacheBytes: 4096, RecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
+	s, _, err := Open(t.TempDir(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	healthy := func() error { return nil }
+	value := bytes.Repeat([]byte{'v'}, 175)
+	if _, err := s.Append(format.Put, []byte("before"), value, healthy); err != nil {
+		t.Fatal(err)
+	}
+	before, lastID, files := s.Current, s.nextID, len(s.Files)
+	rejected := errors.New("reject staged index")
+	var candidate uint64
+	_, err = s.AppendPrepared(format.Put, []byte("after"), value, healthy, func(loc Location) error {
+		candidate = loc.File.ID
+		return rejected
+	})
+	if !errors.Is(err, rejected) || s.Current != before || s.nextID != lastID || len(s.Files) != files {
+		t.Fatalf("rejected rotation: error %v, frontier %+v, last ID %d (was %d), files %d (was %d)", err, s.Current, s.nextID, lastID, len(s.Files), files)
+	}
+	loc, err := s.Append(format.Put, []byte("after"), value, healthy)
+	if err != nil || candidate == before.ActiveID || loc.File.ID != candidate || loc.Sequence != before.Sequence+1 {
+		t.Fatalf("retry used location %+v, wanted file %d, error %v", loc, candidate, err)
+	}
+}

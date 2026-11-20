@@ -482,7 +482,7 @@ func TestCleanerPublicationCrashMatrix(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer db.Close()
-				if db.store.Current.Sequence != 9 || len(db.index) != 3 {
+				if db.store.Current.Sequence != 9 || db.Stats().LiveKeys != 3 {
 					t.Fatal("lost the acknowledged frontier or key set")
 				}
 				for k, v := range map[string][]byte{"hot": bytes.Repeat([]byte{5}, 3000), "keep": make([]byte, 3000), "again": []byte("new")} {

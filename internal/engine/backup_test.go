@@ -339,7 +339,7 @@ func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 	end := db.store.Current.ActiveEnd
 	seq := db.store.Current.Sequence
 	// An uncommitted active-file suffix is outside the permitted read window.
-	fd, err := os.OpenFile(db.index["last"].File.Path, os.O_WRONLY, 0)
+	fd, err := os.OpenFile(testLoc(t, db, "last").File.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestBackupPayloadWriteFailureLeavesSourceHealthy(t *testing.T) {
 func TestBackupRejectsCorruptionInFinalBlock(t *testing.T) {
 	db := newTestDB(t, Options{}, nil)
 	mustPut(t, db, "multi-block", strings.Repeat("v", 80<<10))
-	file := db.index["multi-block"].File
+	file := testLoc(t, db, "multi-block").File
 	fd, err := os.OpenFile(file.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -570,7 +570,7 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 	mustPut(t, db, "a", "old")
 	mustPut(t, db, "d", "keep-in-backup")
 	target := filepath.Join(t.TempDir(), "backup")
-	pinnedFile := db.index["a"].File
+	pinnedFile := testLoc(t, db, "a").File
 	armed.Store(true)
 	done := make(chan error, 1)
 	go func() { done <- db.Backup(context.Background(), target) }()
@@ -723,4 +723,30 @@ func TestRestoreValidationAndNoReplace(t *testing.T) {
 	}); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("restore accepted corruption: %v", err)
 	}
+}
+
+func TestVerifyBackupWithScratchMatchesReadOnlyAndRejectsSourceAlias(t *testing.T) {
+	source := makeRestoreBackup(t)
+	before := directoryBytes(t, source)
+	want, err := VerifyBackup(t.Context(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := t.TempDir()
+	got, err := VerifyBackupWithScratch(t.Context(), source, scratch)
+	if err != nil || got != want {
+		t.Fatalf("scratch report %+v, %v; want %+v", got, err, want)
+	}
+	names, err := os.ReadDir(scratch)
+	if err != nil || len(names) != 0 {
+		t.Fatalf("scratch after return: %v %v", names, err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(source, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBackupWithScratch(t.Context(), source, alias); !errors.Is(err, os.ErrInvalid) {
+		t.Fatalf("scratch alias: %v", err)
+	}
+	checkBackupUnchanged(t, source, before)
 }

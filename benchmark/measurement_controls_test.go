@@ -142,3 +142,32 @@ func TestMeasurementCountsOnlyNewMaintenanceOutput(t *testing.T) {
 		t.Fatalf("no-op checkpoint or backup counted the wrong bytes: manual=%d backup=%d", hooks.manualBytes.Load(), hooks.backupBytes.Load())
 	}
 }
+
+func TestMeasurementStateDigestRemainsStableAcrossIndexes(t *testing.T) {
+	// Historical framing hashes each key/value length as a little-endian uint64
+	// followed by its bytes. Ordering is lexicographic on the full binary key.
+	const want = "2a6cccdae98dd72e8eb821527958fe667ceeb75e916fce456bf9267823e117c7"
+	for _, mode := range []engine.IndexMode{engine.IndexMemory, engine.IndexBTree} {
+		opts := engine.Options{IndexMode: mode}
+		db := newTestDB(t, opts, nil)
+		for _, kv := range []struct{ key, value string }{
+			{"a\x00", "\x00"}, {"\xff", "\x01\xff"}, {"remove", "x"}, {"a", "old"}, {"\x00", ""}, {"a", "last"},
+		} {
+			if err := db.Put([]byte(kv.key), []byte(kv.value)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := db.Delete([]byte("remove")); err != nil {
+			t.Fatal(err)
+		}
+		if sum, n := measurementState(t, db); sum != want || n != 4 {
+			t.Fatalf("mode %d: digest %s, %d entries", mode, sum, n)
+		}
+		if _, err := db.Compact(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if sum, n := measurementState(t, db); sum != want || n != 4 {
+			t.Fatalf("mode %d after compact: digest %s, %d entries", mode, sum, n)
+		}
+	}
+}

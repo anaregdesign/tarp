@@ -127,7 +127,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	db := newTestDBWithHooks(t, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "a", "old")
 	before := db.store.Current
-	oldFile := db.index["a"].File
+	oldFile := testLoc(t, db, "a").File
 	newEntry := func(key, value string) Entry {
 		return Entry{[]byte(key), []byte(strings.Repeat(value, 15))}
 	}
@@ -144,7 +144,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 		entry.Key[0] = 'x'
 		entry.Value[0] = 'x'
 	}
-	file := db.index["a"].File
+	file := testLoc(t, db, "a").File
 	if oldFile.LiveBytes.Load() != 0 || oldFile.References() != 0 || file.LiveBytes.Load() != 128 || file.References() != 2 {
 		t.Fatalf("live bytes/pins: old %d/%d, new %d/%d", oldFile.LiveBytes.Load(), oldFile.References(), file.LiveBytes.Load(), file.References())
 	}
@@ -161,7 +161,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	requireWriteStats(t, db, 3, 6, 0)
 	tombstones := db.store.Files[db.store.Current.ActiveID]
 	if db.store.Current.Sequence != after.Sequence+2 || db.store.Current.Generation != after.Generation+1 ||
-		tombstones.DeleteBytes.Load() != 98 || file.LiveBytes.Load() != 0 || file.References() != 0 || len(db.index) != 0 || db.cache.Bytes() != 0 {
+		tombstones.DeleteBytes.Load() != 98 || file.LiveBytes.Load() != 0 || file.References() != 0 || db.keys.Count() != 0 || db.cache.Bytes() != 0 {
 		t.Fatalf("delete accounting: frontier %+v, tombstones %d, live %d, refs %d", db.store.Current, tombstones.DeleteBytes.Load(), file.LiveBytes.Load(), file.References())
 	}
 }

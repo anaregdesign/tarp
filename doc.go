@@ -1,8 +1,12 @@
-// Package tarp implements a file-backed, hash-indexed key-value store.
+// Package tarp implements a file-backed key-value store with selectable key indexes.
 //
 // Keys and values are bytes. Empty keys are invalid and empty values are valid.
 // Retained inputs and returned values are copied. Keep input backing arrays
 // stable until all calls using them have returned.
+//
+// Options.IndexMode selects an in-memory hash index (the default) or a paged
+// copy-on-write B+tree. Reopening a DB with a different index mode rebuilds
+// key locations from the same committed DATA. Both modes share the Value LRU.
 //
 // Use OpenTyped with a Codec for each of the key and value types to work with
 // Go values. NewCodec derives a codec for scalar types and their combinations

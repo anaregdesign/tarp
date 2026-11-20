@@ -12,6 +12,7 @@ import (
 
 	"github.com/anaregdesign/tarp/internal/cache"
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/platform"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
@@ -36,9 +37,14 @@ type DB struct {
 	store   *storage.Store
 	writer  engineMutex
 	state   engineMutex
-	index   map[string]storage.Location
-	cache   *cache.Cache
-	failed  atomic.Pointer[failure]
+	keys    index.Backend
+	// indexGate coordinates point/batch lookup and DATA lease acquisition with publication.
+	// Neither DATA reads nor caller callbacks run under this lock.
+	indexGate sync.RWMutex
+	files     map[uint64]*storage.File
+	revision  uint64 // protected by state
+	cache     *cache.Cache
+	failed    atomic.Pointer[failure]
 
 	life     engineMutex
 	cond     *sync.Cond
@@ -53,8 +59,9 @@ type DB struct {
 	// Its placement affects parallel cache-hit throughput.
 	stats Stats // guarded by state
 
-	batchReadSlots      chan struct{} // shared by BatchGet calls on this DB
-	fastSmallBatchReads atomic.Bool   // last sampled small DATA reads completed quickly
+	resident            index.ResidentLookup // usable under state, which excludes index publication
+	batchReadSlots      chan struct{}        // shared by BatchGet calls on this DB
+	fastSmallBatchReads atomic.Bool          // last sampled small DATA reads completed quickly
 	hooks               *Hooks
 
 	// Upper bound on live encoded value lengths, guarded by state. Deleting or
@@ -96,31 +103,31 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 		return nil, err
 	}
 	cfg := storage.Config{CacheBytes: opts.CacheBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
-	s, index, err := storage.OpenContext(ctx, dir, cfg, existingOnly, fs)
+	keys, err := openIndex(opts.IndexMode, opts.IndexMemoryBytes/2)
 	if err != nil {
-		return nil, operationError("open", "recovery", err)
+		return nil, operationError("open", "index", err)
 	}
-	db := &DB{opts: opts, store: s, index: index, cache: cache.New(opts.CacheBytes), closed: make(chan struct{}), hooks: hooks}
+	s, err := storage.OpenIndexed(ctx, dir, cfg, existingOnly, fs, keys)
+	if err != nil {
+		return nil, operationError("open", "recovery", errors.Join(err, keys.Close()))
+	}
+	db := &DB{opts: opts, store: s, keys: keys, files: make(map[uint64]*storage.File), cache: cache.New(opts.CacheBytes), closed: make(chan struct{}), hooks: hooks}
+	db.resident, _ = keys.(index.ResidentLookup)
 	db.batchReadSlots = make(chan struct{}, opts.BatchReadConcurrency)
 	db.cond = sync.NewCond(&db.life)
-	remaining := len(index)
-	for _, loc := range index {
-		if remaining%256 == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, operationError("open", "recovery", errors.Join(err, s.Close()))
-			}
+	for id, f := range s.Files {
+		if live := f.LiveBytes.Load(); live != 0 {
+			db.files[id] = f
+			db.stats.LiveRecordBytes += uint64(live)
 		}
-		remaining--
-		loc.File.Pin()
-		loc.File.LiveBytes.Add(loc.Bytes)
-		db.stats.LiveRecordBytes += uint64(loc.Bytes)
-		db.maxSeenValueBytes = max(db.maxSeenValueBytes, loc.ValueBytes)
 	}
+	db.maxSeenValueBytes = s.MaxValueBytes
+	db.stats.LiveKeys = uint64(keys.Count())
 	db.initDataStats()
 	// Finish opening a fresh, empty database once initialization has published
 	// CURRENT. Only recovery has a cancellable index to hand off to the worker.
 	if err := ctx.Err(); err != nil && !s.Created {
-		return nil, operationError("open", "recovery", errors.Join(err, s.Close()))
+		return nil, operationError("open", "recovery", errors.Join(err, s.Close(), keys.Close()))
 	}
 	db.startCleaner()
 	return db, nil
@@ -173,36 +180,62 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, ErrEmptyKey
 	}
-	var k string
-	for firstLookup := true; ; firstLookup = false {
+	for first := true; ; first = false {
 		db.state.Lock()
 		if err := db.health(); err != nil {
 			db.state.Unlock()
 			return nil, err
 		}
 		if value, ok := db.cache.Get(key); ok {
-			if firstLookup {
+			if first {
 				countLookup(&db.stats.Cache.Hits)
 			}
 			db.state.Unlock()
 			return bytes.Clone(value), nil
 		}
-		loc, ok := db.index[string(key)]
-		if !ok {
-			if firstLookup {
+		if int64(len(key)) > db.opts.MaxRecordBytes-format.RecordHeaderBytes {
+			if first {
 				countLookup(&db.stats.MissingKeys)
 			}
 			db.state.Unlock()
 			return nil, ErrNotFound
 		}
-		if firstLookup {
-			countLookup(&db.stats.Cache.Misses)
+		var loc storage.Location
+		var found bool
+		if db.resident != nil {
+			addr, ok := db.resident.LookupResident(key)
+			if ok {
+				loc = storage.At(db.files[addr.FileID], addr)
+			}
+			found = ok
+		} else {
+			db.state.Unlock()
+			db.indexGate.RLock()
+			var err error
+			loc, found, err = db.locationLocked(string(key))
+			if err != nil {
+				db.indexGate.RUnlock()
+				return nil, err
+			}
+			db.state.Lock()
+			db.indexGate.RUnlock()
 		}
-		loc.File.Pin()
+		if first {
+			if found {
+				countLookup(&db.stats.Cache.Misses)
+			} else {
+				countLookup(&db.stats.MissingKeys)
+			}
+		}
+		revision := db.revision
+		if found {
+			loc.File.Pin()
+		}
 		db.state.Unlock()
-		if firstLookup {
-			k = string(key)
+		if !found {
+			return nil, ErrNotFound
 		}
+		k := string(key)
 		value, err := db.store.Read(loc, k)
 		loc.File.Unpin()
 		if db.cleaner.pinned.Load() {
@@ -217,13 +250,32 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 			db.state.Unlock()
 			return nil, err
 		}
-		current, exists := db.index[k]
-		if !exists || current.Sequence != loc.Sequence {
+		if db.revision == revision {
+			db.cache.Put(k, value)
 			db.state.Unlock()
+			return bytes.Clone(value), nil
+		}
+		db.state.Unlock()
+		db.indexGate.RLock()
+		current, found, err := db.locationLocked(k)
+		if err != nil {
+			db.indexGate.RUnlock()
+			return nil, err
+		}
+		if !found || current.Sequence != loc.Sequence {
+			db.indexGate.RUnlock()
 			continue
 		}
-		db.cache.Put(k, value)
+		db.state.Lock()
+		err = db.health()
+		if err == nil {
+			db.cache.Put(k, value)
+		}
 		db.state.Unlock()
+		db.indexGate.RUnlock()
+		if err != nil {
+			return nil, err
+		}
 		return bytes.Clone(value), nil
 	}
 }
@@ -290,32 +342,52 @@ func (db *DB) mutate(kind uint8, key, value []byte) error {
 	if err := db.health(); err != nil {
 		return err
 	}
-	if kind == format.Delete {
-		db.state.Lock()
-		_, exists := db.index[string(key)]
-		db.state.Unlock()
-		if !exists {
-			return ErrNotFound
+	tx := db.keys.Begin()
+	finished := false
+	defer func() {
+		if !finished {
+			tx.Abort()
 		}
+	}()
+	entry := ownedMutation{key: string(key)}
+	var old storage.Location
+	prepare := func(loc storage.Location) error {
+		var err error
+		old, err = db.stage(tx, kind, entry.key, loc)
+		return err
 	}
-	loc, err := db.store.Append(kind, key, value, db.health)
+	if kind == format.Delete {
+		if err := prepare(storage.Location{}); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return ErrNotFound
+			}
+			return operationError(op, "index-prepare", err)
+		}
+		prepare = nil
+	}
+	loc, err := db.store.AppendPrepared(kind, key, value, db.health, prepare)
 	if err != nil {
 		db.storageFailure(err)
 		return operationError(op, "commit", err)
 	}
-	entry := db.ownMutation(kind, key, value)
+	db.copyPutValue(kind, &entry, value)
+	db.indexGate.Lock()
+	defer db.indexGate.Unlock()
 	db.state.Lock()
 	defer db.state.Unlock()
 	if err := db.health(); err != nil {
 		return &OpError{Operation: op, Phase: "memory-publication", Outcome: Committed, Err: err}
 	}
-	invalidatedSealed = db.applyMutation(kind, entry, loc)
+	tx.Commit()
+	finished = true
+	invalidatedSealed = db.applyMutation(kind, entry, loc, old)
 	db.countWriteCommit(previousActive)
 	return nil
 }
 
 // countWriteCommit runs once per published single or batch write under state.
 func (db *DB) countWriteCommit(previousActive uint64) {
+	db.revision++
 	db.stats.WriteCommits++
 	if db.store.Current.ActiveID != previousActive {
 		db.stats.SelectedSegments++
@@ -328,37 +400,37 @@ type ownedMutation struct {
 	value []byte
 }
 
-// Copy outside the state lock, only after the append succeeds.
-func (db *DB) ownMutation(kind uint8, key, value []byte) ownedMutation {
-	entry := ownedMutation{key: string(key)}
+// The index and Value LRU share the owned key. Copy the value after the append.
+func (db *DB) copyPutValue(kind uint8, entry *ownedMutation, value []byte) {
 	if kind == format.Put {
 		entry.value = bytes.Clone(value)
 		if hooks := db.hooks; hooks != nil && hooks.PutCopied != nil {
-			hooks.PutCopied(len(key), len(value))
+			hooks.PutCopied(len(entry.key), len(value))
 		}
 	}
-	return entry
 }
 
 // applyMutation requires the state lock and reports obsolete data in a sealed file.
-func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc storage.Location) bool {
+func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc, old storage.Location) bool {
 	invalidatedSealed := false
-	if old, exists := db.index[entry.key]; exists {
+	if old.File != nil {
 		invalidatedSealed = old.File != loc.File
 		old.File.LiveBytes.Add(-old.Bytes)
 		db.stats.LiveRecordBytes -= uint64(old.Bytes)
-		old.File.Unpin()
+		db.dropLocation(old.File)
 	}
 	if kind == format.Delete {
 		loc.File.DeleteBytes.Add(loc.Bytes)
 		db.stats.TombstoneBytes += uint64(loc.Bytes)
-		delete(db.index, entry.key)
+		db.stats.LiveKeys--
 		db.cache.Delete(entry.key)
 	} else {
-		loc.File.Pin()
+		if old.File == nil {
+			db.stats.LiveKeys++
+		}
+		db.addLocation(loc.File)
 		loc.File.LiveBytes.Add(loc.Bytes)
 		db.stats.LiveRecordBytes += uint64(loc.Bytes)
-		db.index[entry.key] = loc
 		if loc.ValueBytes > db.maxSeenValueBytes {
 			db.maxSeenValueBytes = loc.ValueBytes
 		}
@@ -387,14 +459,14 @@ func (db *DB) Close() error {
 	}
 	db.life.Unlock()
 	<-db.cleaner.done
-	for _, loc := range db.index {
-		loc.File.Unpin()
+	for _, file := range db.files {
+		file.LiveKeys.Store(0)
 	}
 	db.state.Lock()
 	db.readStatsLocked(&db.stats)
-	db.index, db.cache = nil, nil
+	db.files, db.cache = nil, nil
 	db.state.Unlock()
-	err := publicCause(db.store.Close())
+	err := publicCause(errors.Join(db.keys.Close(), db.store.Close()))
 	if f := db.failed.Load(); f != nil {
 		err = errors.Join(f.err, err)
 	}

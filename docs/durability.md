@@ -62,7 +62,7 @@ Generated directories/files use 0700/0600, subject to a stricter umask.
 A writer gate serializes durable publications. The short state mutex orders
 index/cache visibility and exact global MRU updates. Disk I/O, waiting for a
 writer/read handle, and full-value copying do not happen under the state mutex.
-BatchGet captures all requested keys under one state lock. It returns results
+BatchGet captures the Value LRU and index under the publication gate. Cold index lookups execute outside the state mutex. It returns results
 in input order and preserves cache recency. BatchPut and BatchDelete publish
 all index and cache updates under one state lock. Each separate API call has
 its own linearization point.
@@ -83,11 +83,11 @@ duplicate-value redo WAL. A backup is not a WAL.
 For an ordinary mutation:
 
 1. Reject invalid or oversized input. The caller keeps the input stable through return.
-2. Under the writer gate, append a whole record at the known active end.
+2. Under the writer gate, own the key and stage its index change at the intended DATA address. Append the record at that address.
 3. Sync the data file.
 4. Completely write and sync a private replacement `CURRENT`.
 5. Rename it over `CURRENT` and sync the directory.
-6. For a Put, copy the key and value for the index and cache. Publish the update
+6. For a Put, copy the value for the Value LRU. Publish the prepared index and cache update
    under the state lock, then return nil. Writers waiting for the gate retain
    their callers' input slices.
 
@@ -114,8 +114,7 @@ An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
 supported layout, recovery locks the directory and validates the selected `CURRENT`, its
 SHA-256-bound catalog, every selected segment header/identity, every committed
-record/checksum/sequence, and all live option minima. It rebuilds the full index
-with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
+record/checksum/sequence, and all live option minima. It rebuilds the selected key index from that replay and starts with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
 preserve coverage even when they have zero records. Deletes through the catalog
 pruning boundary may refer to a Put removed by cleaning. All selected physical
 files must exist. See the [replay rules](format.md#catalog-payload).
@@ -219,7 +218,7 @@ open at a time, and writes snapshot files using the same size target as log appe
 preserving record sequences. Tombstones can
 be dropped only because all earlier history is replaced. Publication combines the
 checkpoint with **all** current tail files after C, then remaps each still-unchanged
-index location under short state locks. Later Put/Delete wins.
+index location using its exact prior address under the writer gate. Later Put/Delete wins.
 
 Old paths remain until they are unselected, have no index references, and have
 no reader/backup/compaction pins. The compaction releases its own capture pins
@@ -260,3 +259,20 @@ Restore enforces the target limits before staging, then independently validates
 the staged image and its size requirements before publishing a new closed
 database. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
 explicitly and does not poison an otherwise healthy source DB.
+
+
+## Derived index and scratch space
+
+The backend is selected per Open. A B+tree stores pointer-free DATA addresses
+in process-private scratch files. Committed DATA determines the state after a
+crash. Before writing a single mutation or atomic batch, Tarp stages the new
+locations in a private index transaction. The existing DATA and CURRENT syncs
+then establish the commit. Publication switches the index, cache and counters
+together. A failure preparing scratch leaves the selected frontier intact.
+After an uncertain durable publication, reopen to rebuild the selected index.
+
+`VerifyBackup` verifies the immutable directory with bounded key windows. A
+large backup can take multiple sequential DATA passes. Use
+`VerifyBackupWithScratch(ctx, source, scratchDir)` to verify with a disposable
+paged index on an existing external directory. Restore validates both its source
+and the published candidate before the destination rename.

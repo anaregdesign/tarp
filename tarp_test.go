@@ -550,3 +550,77 @@ func FuzzDBHistory(f *testing.F) {
 		}
 	})
 }
+
+func TestIndexModesShareDataSnapshotsAndBackups(t *testing.T) {
+	for _, source := range []struct {
+		name         string
+		source, dest tarp.IndexMode
+	}{
+		{"memory to disk", tarp.IndexMemory, tarp.IndexBTree}, {"disk to memory", tarp.IndexBTree, tarp.IndexMemory},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "source")
+			db := openPublicDB(t, dir, tarp.Options{IndexMode: source.source})
+			key := append(bytes.Repeat([]byte{0, 0x80, 0xff}, 4000), 1)
+			if err := db.BatchPut([]tarp.Entry{{Key: key, Value: []byte("first")}, {Key: []byte("empty")}, {Key: key, Value: []byte("last")}}); err != nil {
+				t.Fatal(err)
+			}
+			check := func(db *tarp.DB) {
+				t.Helper()
+				got, err := db.BatchGet([][]byte{key, []byte("absent"), []byte("empty"), key})
+				if err != nil || len(got) != 4 || string(got[0].Value) != "last" || got[1].Found || !got[2].Found || len(got[2].Value) != 0 || string(got[3].Value) != "last" {
+					t.Fatalf("batch = %v, %v", got, err)
+				}
+			}
+			check(db)
+			backup := filepath.Join(t.TempDir(), "backup")
+			if err := db.Backup(t.Context(), backup); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			other, err := tarp.OpenExisting(t.Context(), dir, tarp.Options{IndexMode: source.dest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer other.Close()
+			check(other)
+			info, err := tarp.VerifyBackup(t.Context(), backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scratch := t.TempDir()
+			withScratch, err := tarp.VerifyBackupWithScratch(t.Context(), backup, scratch)
+			if err != nil || info != withScratch || info.LiveKeys != 2 {
+				t.Fatalf("verify = %+v %+v, %v", info, withScratch, err)
+			}
+			files, err := os.ReadDir(scratch)
+			if err != nil || len(files) != 0 {
+				t.Fatalf("scratch: %v %v", files, err)
+			}
+			restored := filepath.Join(t.TempDir(), "restored")
+			if err := tarp.Restore(t.Context(), tarp.RestoreRequest{Source: backup, Destination: restored}); err != nil {
+				t.Fatal(err)
+			}
+			cloned, err := tarp.OpenExisting(t.Context(), restored, tarp.Options{IndexMode: source.dest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cloned.Close()
+			check(cloned)
+		})
+	}
+}
+
+func TestIndexOptionErrorsLeaveNewDirectoryAbsent(t *testing.T) {
+	for _, o := range []tarp.Options{{IndexMode: 99}, {IndexMode: tarp.IndexMemory, IndexMemoryBytes: 1 << 20}, {IndexMode: tarp.IndexBTree, IndexMemoryBytes: 1}, {IndexMode: tarp.IndexBTree, IndexMemoryBytes: -1}} {
+		dir := filepath.Join(t.TempDir(), "new")
+		if db, err := tarp.Open(dir, o); db != nil || !errors.Is(err, tarp.ErrInvalidOptions) {
+			t.Fatalf("Open(%+v) = %v, %v", o, db, err)
+		}
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+}

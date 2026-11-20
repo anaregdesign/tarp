@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anaregdesign/tarp/internal/cache"
 	"github.com/anaregdesign/tarp/internal/engine"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
@@ -38,14 +37,12 @@ func observedLayout(db *engine.DB) measurementLayout {
 	var result measurementLayout
 	probe := engine.Observe(db)
 	probe.Store(func(s *storage.Store) {
-		probe.State(func(index map[string]storage.Location, _ *cache.Cache) {
-			result = measureLayout(s, index)
-		})
+		result = measureLayout(s, int64(db.Stats().LiveRecordBytes))
 	})
 	return result
 }
 
-func measureLayout(s *storage.Store, index map[string]storage.Location) measurementLayout {
+func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 	layout := measurementLayout{
 		Sequence: s.Current.Sequence, CheckpointCutoff: s.Catalog.Cutoff, PrunedThrough: s.Catalog.PrunedThrough,
 		SelectedDataFiles: 1, SelectedDataBytes: s.Current.ActiveEnd,
@@ -72,9 +69,7 @@ func measureLayout(s *storage.Store, index map[string]storage.Location) measurem
 		layout.RetainedDeleteBytes += s.Files[e.ID].DeleteBytes.Load()
 	}
 	layout.SelectedRecordBytes = layout.SelectedDataBytes - int64(layout.SelectedDataFiles)*format.SegmentHeaderBytes
-	for _, loc := range index {
-		layout.LivePutBytes += loc.Bytes
-	}
+	layout.LivePutBytes = liveBytes
 	layout.ObsoletePutBytes = layout.SelectedRecordBytes - layout.LivePutBytes - layout.RetainedDeleteBytes
 	for id, file := range s.Files {
 		size := file.Size.Load()
