@@ -330,6 +330,8 @@ func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {
 				t.Fatalf("VerifyBackup returned %+v on error", info)
 			}
 			check("restore", tarp.Restore(tc.ctx, tarp.RestoreRequest{Source: backup, Destination: target}))
+			check("restore", tarp.Restore(tc.ctx, tarp.RestoreRequest{Source: filepath.Join(parent, "missing-source"), Destination: target}))
+			check("restore", tarp.Restore(tc.ctx, tarp.RestoreRequest{Source: backup, Destination: parent}))
 			if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("unexpected destination: %v", err)
 			}
@@ -345,6 +347,13 @@ func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {
 				t.Fatalf("Scan yielded %d times; want one error", count)
 			}
 		})
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "source" {
+		t.Fatalf("unexpected restore output: %v, %v", entries, err)
+	}
+	if _, err := tarp.VerifyBackup(t.Context(), backup); err != nil {
+		t.Fatalf("verify source after canceled restores: %v", err)
 	}
 	if value, err := db.Get([]byte("k")); string(value) != "value" || err != nil {
 		t.Fatalf("Get after context errors = %q, %v", value, err)

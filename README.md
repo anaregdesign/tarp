@@ -6,15 +6,14 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses v0.7.0. The batch diagnostics and backup verification examples below
-use the API on `main`. For v0.7.0, see the
+uses v0.8.0. For v0.7.0, see the
 [versioned documentation](https://github.com/anaregdesign/tarp/tree/v0.7.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.7.0
+go get github.com/anaregdesign/tarp@v0.8.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
