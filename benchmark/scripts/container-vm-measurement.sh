@@ -3,7 +3,8 @@
 set -euo pipefail
 [[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted &&
    ${RUNNER_OS:-} == Linux && ${RUNNER_ARCH:-} == X64 &&
-   ${TARP_QUAL_MODE:-} == measure && ${TARP_QUAL_CONFIRM:-} == disposable-vm-only ]]
+   ( ${TARP_QUAL_MODE:-} == measure || ${TARP_QUAL_MODE:-} == compact-compare ) &&
+   ${TARP_QUAL_CONFIRM:-} == disposable-vm-only ]]
 version=$(go env GOVERSION)
 if [[ -n ${TARP_MEASUREMENT_DIGEST:-} ]]; then
     [[ $TARP_MEASUREMENT_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -24,6 +25,7 @@ retain_evidence() {
         mkdir -p "$RUNNER_TEMP/$run_name"
         mv "$scratch/$run_name/evidence" "$RUNNER_TEMP/$run_name/"
         printf '%s\n' "$image" > "$RUNNER_TEMP/$run_name/evidence/container-image.txt"
+        printf '%s\n' "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" > "$RUNNER_TEMP/$run_name/evidence/workflow-run.txt"
     fi
 }
 trap retain_evidence EXIT

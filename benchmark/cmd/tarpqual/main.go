@@ -30,6 +30,7 @@ func run(args []string, output io.Writer) error {
 	campaignDir := flags.String("campaign", "", "prepared disposable hosted-runner work directory")
 	runtimeDir := flags.String("runtime-suite", "", "prepared disposable hosted-runner full-suite work directory")
 	measurementDir := flags.String("measurements", "", "prepared disposable hosted-runner measurement work directory")
+	compareDir := flags.String("compact-compare", "", "compare v0.8.0 and v0.9.0 Compact in one disposable guest")
 	valueBytes := flags.Int("value-bytes", 0, "measurement value size: 64, 1024 or 4096")
 	group := flags.String("group", "", "bounded campaign group (default smoke)")
 	selected := flags.String("case", "", "one exact case name within the selected group")
@@ -42,6 +43,12 @@ func run(args []string, output io.Writer) error {
 		return errors.New("qualification: unexpected arguments")
 	}
 	idle := *probe == "" && *initrd == "" && *init == "" && *target == ""
+	if *compareDir != "" {
+		if !idle || *controls != "" || *campaignDir != "" || *runtimeDir != "" || *measurementDir != "" || *valueBytes != 0 || *group != "" || *selected != "" || *list != "" {
+			return errors.New("compact comparison cannot be combined with another mode")
+		}
+		return compactComparison(*compareDir, *confirm, output)
+	}
 	if *measurementDir != "" {
 		if !idle || *controls != "" || *campaignDir != "" || *runtimeDir != "" || *group != "" || *selected != "" || *list != "" {
 			return errors.New("measurement-only arguments used with another mode")
