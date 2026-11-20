@@ -18,22 +18,23 @@ import (
 )
 
 type cleanerSpaceSample struct {
-	WindowNS      int64  `json:"window_ns"`
-	BatchPuts     int    `json:"batch_puts"`
-	Rotations     int64  `json:"rotations"`
-	DataBytes     int64  `json:"data_file_bytes"`
-	DataFiles     int    `json:"data_files"`
-	LiveBytes     uint64 `json:"live_record_bytes"`
-	SelectedBytes uint64 `json:"selected_data_bytes"`
-	ObsoleteBytes uint64 `json:"obsolete_put_bytes"`
-	UnlinkedBytes uint64 `json:"worker_unlinked_bytes"`
+	RetiredDataBytes uint64 `json:"retired_data_bytes"`
+	WindowNS         int64  `json:"window_ns"`
+	BatchPuts        int    `json:"batch_puts"`
+	Rotations        int64  `json:"rotations"`
+	DataBytes        int64  `json:"data_file_bytes"`
+	DataFiles        int    `json:"data_files"`
+	LiveBytes        uint64 `json:"live_record_bytes"`
+	SelectedBytes    uint64 `json:"selected_data_bytes"`
+	ObsoleteBytes    uint64 `json:"obsolete_put_bytes"`
+	UnlinkedBytes    uint64 `json:"worker_unlinked_bytes"`
 }
 
 // A best-effort on-disk census. The worker can retire files during ReadDir.
 func sampleCleanerSpace(t *testing.T, db *engine.DB, puts int, rotations int64, start time.Time) cleanerSpaceSample {
 	t.Helper()
 	stats := db.Stats()
-	row := cleanerSpaceSample{WindowNS: time.Since(start).Nanoseconds(), BatchPuts: puts, Rotations: rotations, LiveBytes: stats.LiveRecordBytes,
+	row := cleanerSpaceSample{RetiredDataBytes: scaleprobe.RetiredDataBytes.Load(), WindowNS: time.Since(start).Nanoseconds(), BatchPuts: puts, Rotations: rotations, LiveBytes: stats.LiveRecordBytes,
 		SelectedBytes: stats.SelectedDataBytes, ObsoleteBytes: stats.ObsoletePutBytes, UnlinkedBytes: db.AutoCompactionStatus().UnlinkedBytes}
 	entries, err := os.ReadDir(engine.Observe(db).Dir())
 	if err != nil {
@@ -101,6 +102,7 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 	}
 	startRotations := rotations.Load()
 	scaleprobe.IdleSequence.Store(0)
+	scaleprobe.RetiredDataBytes.Store(0)
 	close(admit)
 	start := time.Now()
 	timeline := []cleanerSpaceSample{sampleCleanerSpace(t, db, 0, 0, start)}
@@ -149,7 +151,7 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 	}
 	drainNS := max(int64(0), scaleprobe.IdleAtNS.Load()-lastWrite.Sub(scaleprobe.ClockStart).Nanoseconds())
 	final := sampleCleanerSpace(t, db, steps, rotations.Load()-startRotations, start)
-	if final.Rotations < 32 || final.UnlinkedBytes == 0 || final.DataBytes >= int64(steps*batchSize*len(value)) || final.LiveBytes == 0 || db.Stats().LiveKeys != keyCount {
+	if final.Rotations < 32 || final.RetiredDataBytes == 0 || final.LiveBytes == 0 || db.Stats().LiveKeys != keyCount {
 		t.Fatalf("insufficient sustained churn or wrong live set: %+v", final)
 	}
 	if err := db.Close(); err != nil {

@@ -12,6 +12,7 @@ const Enabled = false
 
 var (
 	DirectoryReads      atomic.Uint64
+	RetiredDataBytes    atomic.Uint64
 	RelocationConflicts atomic.Uint64
 	ReplayPasses        atomic.Uint64
 	ReplayBytes         atomic.Uint64

@@ -25,6 +25,10 @@ instrument('benchmark/scaleprobe/probe.go', [
     ('const Enabled = false', 'const Enabled = true', 1),
 ], False)
 instrument('internal/storage/store.go', [('os.ReadDir(', 'scaleprobe.ReadDir(', 3)])
+instrument('internal/storage/clean_retire.go', [
+    ('removed, err := remove(f.Path)',
+     'previous := unlinked\n\t\tremoved, err := remove(f.Path)\n\t\tscaleprobe.RetiredDataBytes.Add(uint64(unlinked-previous))', 1),
+])
 instrument('internal/storage/recovery.go', [
     ('scan(ctx context.Context, visit recordVisitor) error {',
      'scan(ctx context.Context, visit recordVisitor) error {\n\tscaleprobe.ReplayPasses.Add(1)', 1),
