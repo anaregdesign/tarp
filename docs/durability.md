@@ -119,6 +119,9 @@ with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
 preserve coverage even when they have zero records. Deletes through the catalog
 pruning boundary may refer to a Put removed by cleaning. All selected physical
 files must exist. See the [replay rules](format.md#catalog-payload).
+Missing required files and invalid checksums match `ErrCorrupt`.
+Read failures such as permission or device errors preserve the filesystem
+cause for `errors.Is` and `errors.As`.
 Only after that validation may recovery truncate/sync the active suffix
 strictly beyond the committed frontier or delete recognized unselected objects.
 
@@ -154,7 +157,8 @@ Use `errors.Is` for category/underlying causes and `errors.As` for `*OpError`,
 | Frontier rename attempted or directory sync uncertain | `Unknown`, matching `ErrCommitUncertain` | Fail-stop |
 | All commit syncs finish but another read detects source failure before memory publication | Known `Committed`, unhealthy error | Fail-stop |
 | Source read/checksum failure | Explicit original error, no cache fallback | Fail-stop |
-| Backup or restore destination rename or parent directory sync fails | `Unknown`, matching `ErrCommitUncertain` for the destination | Inspect the destination before retry. A backup source can continue serving requests after a destination failure |
+| Backup or restore finds an existing destination, including an `EEXIST` from the no-replace rename | `NotApplied`, matching `fs.ErrExist` | Choose a new destination to retry |
+| Other backup or restore destination rename failures, or a parent directory sync failure after rename | `Unknown`, matching `ErrCommitUncertain` for the destination | Inspect the destination before retry. A backup source can continue serving requests after a destination failure |
 | Preliminary log rotation fails during `Compact` | `NotApplied` for the checkpoint, even if the rotation selected a new active log | An I/O failure during publication requires close/reopen |
 | Unpublished checkpoint ENOSPC/EDQUOT | Selected sources retained; cleanup errors joined | May remain healthy |
 | Cleanup after a durable checkpoint | Committed maintenance error | Valid logical image; retry cleanup |

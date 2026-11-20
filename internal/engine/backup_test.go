@@ -242,6 +242,7 @@ func TestRestoreReportsPublicationOutcome(t *testing.T) {
 		{"restore.stage.sync:after", context.Canceled, NotApplied, false},
 		{"restore.rename:before", syscall.EIO, Unknown, false},
 		{"restore.rename:after", syscall.EIO, Unknown, true},
+		{"restore.rename:after", syscall.EEXIST, Unknown, true},
 		{"restore.parent.sync:before", syscall.EIO, Unknown, true},
 		{"restore.parent.sync:after", syscall.EIO, Unknown, true},
 	} {
@@ -421,6 +422,51 @@ func TestBackupRejectsCorruptionInFinalBlock(t *testing.T) {
 	}
 }
 
+func TestDestinationCreatedDuringPublicationIsNotApplied(t *testing.T) {
+	source := makeRestoreBackup(t)
+	for _, name := range []string{"backup", "restore"} {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			target := filepath.Join(parent, "target")
+			fs := &storage.IO{Hook: func(point string) error {
+				if point != name+".rename:before" {
+					return nil
+				}
+				// A second publisher wins after the initial destination check.
+				if err := os.Mkdir(target, 0700); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(target, "winner"), []byte("original"), 0600)
+			}}
+			var err error
+			if name == "backup" {
+				db := newTestDB(t, testOptions(), fs)
+				mustPut(t, db, "key", "value")
+				err = db.Backup(t.Context(), target)
+				wantValue(t, db, "key", "value")
+			} else {
+				err = restoreWithIO(t.Context(), RestoreRequest{Source: source, Destination: target}, fs)
+				if _, verifyErr := VerifyBackup(t.Context(), source); verifyErr != nil {
+					t.Fatal(verifyErr)
+				}
+			}
+			var op *OpError
+			var link *os.LinkError
+			if !errors.As(err, &op) || op.Operation != name || op.Phase != name+".rename" || op.Outcome != NotApplied ||
+				!errors.Is(err, os.ErrExist) || !errors.As(err, &link) || errors.Is(err, ErrCommitUncertain) {
+				t.Fatalf("destination collision: %v", err)
+			}
+			if got := directoryBytes(t, target); !maps.Equal(got, map[string]string{"winner": "original"}) {
+				t.Fatalf("competing destination changed: %v", got)
+			}
+			entries, err := os.ReadDir(parent)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "target" {
+				t.Fatalf("publication left unexpected output: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestConcurrentPublishersNeverReplace(t *testing.T) {
 	a := newTestDB(t, testOptions(), nil)
 	b := newTestDB(t, testOptions(), nil)
@@ -443,8 +489,11 @@ func TestConcurrentPublishersNeverReplace(t *testing.T) {
 	for err := range results {
 		if err == nil {
 			success++
-		} else if !errors.Is(err, os.ErrExist) {
-			t.Fatal(err)
+			continue
+		}
+		var op *OpError
+		if !errors.Is(err, os.ErrExist) || !errors.As(err, &op) || op.Outcome != NotApplied || errors.Is(err, ErrCommitUncertain) {
+			t.Fatalf("losing publisher: %v", err)
 		}
 	}
 	if success != 1 {
@@ -582,10 +631,14 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 func TestBackupDestinationFailuresDoNotPoisonSource(t *testing.T) {
 	for _, point := range []string{"backup.copy:before", "backup.file.sync:before", "backup.rename:after", "backup.parent.sync:before"} {
 		t.Run(point, func(t *testing.T) {
+			cause := syscall.EIO
+			if point == "backup.rename:after" {
+				cause = syscall.EEXIST // The rename itself succeeded.
+			}
 			var armed atomic.Bool
 			db := newTestDB(t, testOptions(), &storage.IO{Hook: func(p string) error {
 				if p == point && armed.CompareAndSwap(true, false) {
-					return syscall.EIO
+					return cause
 				}
 				return nil
 			}})
@@ -593,7 +646,7 @@ func TestBackupDestinationFailuresDoNotPoisonSource(t *testing.T) {
 			target := filepath.Join(t.TempDir(), "backup")
 			armed.Store(true)
 			err := db.Backup(context.Background(), target)
-			if !errors.Is(err, syscall.EIO) {
+			if !errors.Is(err, cause) {
 				t.Fatal(err)
 			}
 			uncertain := point == "backup.rename:after" || point == "backup.parent.sync:before"

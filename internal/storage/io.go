@@ -97,6 +97,19 @@ func ReadRegular(name string) ([]byte, error) {
 	return b, errors.Join(readErr, f.Close())
 }
 
+// A missing or truncated required file is evidence of corruption. Other I/O
+// errors leave the contents unknown and retain their original cause.
+func requiredFileError(name string, err error) error {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("%s: %w: missing required file: %w", name, ErrCorrupt, err)
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return fmt.Errorf("%s: %w: truncated: %w", name, ErrCorrupt, err)
+	default:
+		return fmt.Errorf("%s: %w", name, err)
+	}
+}
+
 func (i *IO) NewFile(name string, b []byte, point string) error {
 	f, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {

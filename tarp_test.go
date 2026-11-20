@@ -132,7 +132,7 @@ func TestOpenRejectsBackupWithoutChangingItsFiles(t *testing.T) {
 				db.Close()
 				t.Fatal("opened a backup as a database")
 			}
-			if !errors.Is(err, tarp.ErrCorrupt) || !strings.Contains(err.Error(), "Restore") {
+			if !errors.Is(err, tarp.ErrBackupDirectory) || errors.Is(err, tarp.ErrCorrupt) || !strings.Contains(err.Error(), "Restore") {
 				t.Errorf("opening backup: %v", err)
 			}
 			after, err := os.ReadFile(manifest)
@@ -151,6 +151,28 @@ func TestOpenRejectsBackupWithoutChangingItsFiles(t *testing.T) {
 				t.Fatalf("restored value: %q, %v", got, err)
 			}
 		})
+	}
+}
+
+func TestOpenDetectsBackupMarkerBeforeVerifyingItsContents(t *testing.T) {
+	source := openPublicDB(t, t.TempDir(), tarp.Options{})
+	backup := filepath.Join(t.TempDir(), "backup")
+	if err := source.Backup(t.Context(), backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(filepath.Join(backup, "BACKUP"), 0); err != nil {
+		t.Fatal(err)
+	}
+	db, err := tarp.OpenExisting(t.Context(), backup, tarp.Options{})
+	if db != nil {
+		db.Close()
+		t.Fatal("opened a backup as a database")
+	}
+	if !errors.Is(err, tarp.ErrBackupDirectory) || errors.Is(err, tarp.ErrCorrupt) {
+		t.Fatalf("open with damaged BACKUP: %v", err)
+	}
+	if _, err := tarp.VerifyBackup(t.Context(), backup); !errors.Is(err, tarp.ErrCorrupt) || errors.Is(err, tarp.ErrBackupDirectory) {
+		t.Fatalf("verify with damaged BACKUP: %v", err)
 	}
 }
 

@@ -36,6 +36,7 @@ func (o Options) RestoreLimits() RestoreLimits {
 
 // Open creates or reopens a database and starts automatic incremental compaction.
 // The parent directory must exist. Incompatible options leave existing data intact.
+// Opening a backup directory returns an error matching [ErrBackupDirectory].
 func Open(dir string, opts Options) (*DB, error) {
 	return OpenContext(context.Background(), dir, opts)
 }
@@ -50,7 +51,8 @@ func OpenContext(ctx context.Context, dir string, opts Options) (*DB, error) {
 
 // OpenExisting reopens an initialized database with cancellable recovery.
 // An absent or empty directory returns an error matching fs.ErrNotExist.
-// It also accepts a database just published by Restore.
+// It accepts a database just published by [Restore]. Opening the source backup
+// returns an error matching [ErrBackupDirectory].
 func OpenExisting(ctx context.Context, dir string, opts Options) (*DB, error) {
 	db, err := engine.OpenContext(ctx, dir, engine.Options(opts), true)
 	return (*DB)(db), err
@@ -86,6 +88,7 @@ func (db *DB) Delete(key []byte) error {
 
 // Backup publishes a consistent point-in-time copy while writes continue.
 // The destination must be new and its parent must already exist.
+// A destination collision matches fs.ErrExist and has outcome [NotApplied].
 func (db *DB) Backup(ctx context.Context, destination string) error {
 	return (*engine.DB)(db).Backup(ctx, destination)
 }
@@ -112,6 +115,7 @@ type RestoreRequest struct {
 
 // Restore verifies a completed backup and publishes a new, closed database.
 // The source must remain immutable and the destination must be new.
+// A destination collision matches fs.ErrExist and has outcome [NotApplied].
 func Restore(ctx context.Context, req RestoreRequest) error {
 	return engine.Restore(ctx, engine.RestoreRequest{
 		Source: req.Source, Destination: req.Destination, Limits: engine.RestoreLimits(req.Limits),

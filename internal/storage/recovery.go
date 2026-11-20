@@ -31,7 +31,7 @@ func Validate(ctx context.Context, dir string) (*Image, error) {
 	}
 	b, err := readCurrent(filepath.Join(dir, "CURRENT"))
 	if err != nil {
-		return nil, fmt.Errorf("%w: missing or unreadable CURRENT: %w", ErrCorrupt, err)
+		return nil, requiredFileError("CURRENT", err)
 	}
 	current, err := format.DecodeFrontier(b)
 	if err != nil {
@@ -40,7 +40,7 @@ func Validate(ctx context.Context, dir string) (*Image, error) {
 	manifestName := ManifestName(current.UUID, current.ManifestID)
 	b, err = ReadRegular(filepath.Join(dir, manifestName))
 	if err != nil {
-		return nil, fmt.Errorf("%w: selected catalog: %w", ErrCorrupt, err)
+		return nil, requiredFileError(manifestName, err)
 	}
 	if sha256.Sum256(b) != current.ManifestHash {
 		return nil, fmt.Errorf("%s: %w: selected catalog digest", manifestName, ErrCorrupt)
@@ -117,7 +117,7 @@ func Validate(ctx context.Context, dir string) (*Image, error) {
 func openSelected(path string, uuid [16]byte, entry format.File, mayGrow bool) (fd *os.File, header []byte, physical int64, result error) {
 	fd, err := OpenRegular(path)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("%w: selected segment: %w", ErrCorrupt, err)
+		return nil, nil, 0, requiredFileError(filepath.Base(path), err)
 	}
 	opened := fd
 	defer func() {
@@ -134,7 +134,7 @@ func openSelected(path string, uuid [16]byte, entry format.File, mayGrow bool) (
 	}
 	header = make([]byte, format.SegmentHeaderBytes)
 	if _, err := fd.ReadAt(header, 0); err != nil {
-		return nil, nil, 0, fmt.Errorf("%w: segment header: %w", ErrCorrupt, err)
+		return nil, nil, 0, requiredFileError("segment header", err)
 	}
 	decoded, err := format.DecodeSegment(header)
 	if err != nil {
