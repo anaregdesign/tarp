@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
 	"iter"
 	"os"
 
@@ -88,8 +87,9 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, yield func(string, 
 		if values {
 			f := layout[a.FileID]
 			if f == nil {
-				result = fmt.Errorf("index references unknown DATA file %d", a.FileID)
-				db.poison(result)
+				err := missingIndexFile(a.FileID)
+				db.poison(err)
+				result = operationError(op, "index", err)
 				return false
 			}
 			if result = db.admit(); result != nil {

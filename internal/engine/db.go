@@ -205,7 +205,14 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		if db.resident != nil {
 			addr, ok := db.resident.LookupResident(key)
 			if ok {
-				loc = storage.At(db.files[addr.FileID], addr)
+				file := db.files[addr.FileID]
+				if file == nil {
+					err := missingIndexFile(addr.FileID)
+					db.poison(err)
+					db.state.Unlock()
+					return nil, operationError("get", "index", err)
+				}
+				loc = storage.At(file, addr)
 			}
 			found = ok
 		} else {

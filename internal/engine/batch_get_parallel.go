@@ -12,15 +12,16 @@ const (
 	fastBatchReadLimit    = 4 * time.Microsecond
 )
 
-func (db *DB) readBatchMisses(keys [][]byte, results []BatchResult, reads []batchRead) error {
-	defer func() {
-		for _, r := range reads {
-			if r.loc.File != nil {
-				db.releaseScanPin(r.loc.File)
-			}
+func (db *DB) releaseBatchPins(reads []batchRead) {
+	for _, r := range reads {
+		if r.loc.File != nil {
+			db.releaseScanPin(r.loc.File)
 		}
-	}()
+	}
+}
 
+func (db *DB) readBatchMisses(keys [][]byte, results []BatchResult, reads []batchRead) error {
+	defer db.releaseBatchPins(reads)
 	if err := db.readBatchData(keys, results, reads); err != nil {
 		return err
 	}

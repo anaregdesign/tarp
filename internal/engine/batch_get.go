@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"fmt"
 	"hash/maphash"
 	"math"
 	"math/bits"
@@ -154,12 +153,20 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 			return nil
 		}
 		if many, ok := db.keys.(index.BatchView); ok {
+			var invalid error
 			if err := many.LookupMany(group, func(i int, loc index.Address, found bool) {
 				if found {
+					if loc.FileID == 0 {
+						invalid = missingIndexFile(0)
+						return
+					}
 					addresses[positions[i]] = loc
 				}
 			}); err != nil {
 				return err
+			}
+			if invalid != nil {
+				return invalid
 			}
 		} else {
 			for i, k := range group {
@@ -168,6 +175,9 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 					return err
 				}
 				if ok {
+					if a.FileID == 0 {
+						return missingIndexFile(0)
+					}
 					addresses[positions[i]] = a
 				}
 			}
@@ -230,14 +240,7 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		if int(source[i]) == i {
 			file := db.files[a.FileID]
 			if file == nil {
-				for _, prev := range reads {
-					if prev.loc.File != nil {
-						db.releaseScanPin(prev.loc.File)
-					}
-				}
-				err := fmt.Errorf("index references unknown DATA file %d", a.FileID)
-				db.poison(err)
-				return nil, operationError("batch-get", "index", err)
+				return nil, db.rejectBatchFile(reads, a.FileID)
 			}
 			file.Pin()
 			r.loc = storage.At(file, a)
@@ -249,6 +252,13 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 	db.batchCounts(hits, misses, distinct-misses, len(keys)-distinct-hits)
 	db.state.Unlock()
 	return reads, nil
+}
+
+func (db *DB) rejectBatchFile(reads []batchRead, id uint64) error {
+	db.releaseBatchPins(reads)
+	err := missingIndexFile(id)
+	db.poison(err)
+	return operationError("batch-get", "index", err)
 }
 
 // captureResidentMisses runs entirely under state. A missing first key favors
@@ -301,6 +311,9 @@ func (db *DB) captureResidentMisses(keys [][]byte, results []BatchResult) ([]bat
 		}
 		misses++
 		file := db.files[addr.FileID]
+		if file == nil {
+			return nil, db.rejectBatchFile(reads, addr.FileID)
+		}
 		file.Pin()
 		results[i] = BatchResult{Found: true}
 		if reads == nil {

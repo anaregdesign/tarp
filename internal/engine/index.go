@@ -26,10 +26,14 @@ func (db *DB) newIndex() (index.Backend, error) {
 
 func (db *DB) indexView() index.View { return db.keys.View() }
 
+func missingIndexFile(id uint64) error {
+	return fmt.Errorf("%w: index references absent DATA file %d", format.ErrCorrupt, id)
+}
+
 func (db *DB) locationLocked(key string) (storage.Location, bool, error) {
 	a, ok, err := db.keys.Lookup(key)
 	if err == nil && ok && db.files[a.FileID] == nil {
-		err = fmt.Errorf("%w: index references absent DATA file %d", format.ErrCorrupt, a.FileID)
+		err = missingIndexFile(a.FileID)
 	}
 	if err != nil {
 		db.poison(err)
@@ -65,7 +69,7 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 			file = db.files[a.FileID]
 		}
 		if file == nil {
-			err := fmt.Errorf("%w: missing indexed DATA %d", format.ErrCorrupt, a.FileID)
+			err := missingIndexFile(a.FileID)
 			db.poison(err)
 			return old, err
 		}
