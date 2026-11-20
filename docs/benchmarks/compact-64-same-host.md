@@ -38,6 +38,8 @@ Four additional pairs ran with stage timers. The table shows median wall time in
 
 The first optimization to test is coalescing bounded relocation batches before taking the writer lock for the memory index. Retain the byte bound, the old-address check and the atomic index/file-accounting update. Compare Compact duration *and* foreground Put latency and lock hold times; larger batches could make individual writers wait longer. The disk-index path was outside this comparison. [Optimization follow-up](https://github.com/anaregdesign/tarp/issues/108)
 
+The [follow-up measurements](compact-memory-relocation.md) compare larger batches and a version that can relocate unrelated keys while a foreground write syncs.
+
 ## Controls and reproduction
 
 - All Compact calls copied **4,097 records / 524,480 bytes**. Both releases reopened every clone with the expected UUID, state digest, 4,097 live keys and a final sequence matching the acknowledged foreground Puts. In the pinned-backup control, each release restored its backup and unlinked every witnessed retired file after the lease was released.

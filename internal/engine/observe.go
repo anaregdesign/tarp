@@ -38,12 +38,16 @@ func (o Observer) LiveKeys() int {
 	return int(o.db.stats.LiveKeys)
 }
 
-// Store observes a consistent catalog, frontier and file registry under the
-// writer gate. The callback may sample Stats. It must not mutate store state
-// or retain live references after returning.
+// Store observes a consistent catalog, frontier and file registry, excluding
+// foreground writes and checkpoint remaps. The callback may sample Stats.
+// It must not otherwise reenter the DB, mutate storage or retain live references.
 func (o Observer) Store(inspect func(*storage.Store)) {
 	o.db.writer.Lock()
 	defer o.db.writer.Unlock()
+	if o.db.memoryRemap != nil {
+		o.db.indexGate.RLock()
+		defer o.db.indexGate.RUnlock()
+	}
 	inspect(o.db.store)
 }
 
@@ -67,6 +71,8 @@ func (o Observer) IndexMetrics() index.Metrics {
 func (o Observer) CloneMemoryIndex() map[string]index.Address {
 	o.db.writer.Lock()
 	defer o.db.writer.Unlock()
+	o.db.indexGate.RLock()
+	defer o.db.indexGate.RUnlock()
 	entries := o.memoryEntries()
 	if entries == nil {
 		return nil
@@ -78,7 +84,8 @@ func (o Observer) CloneMemoryIndex() map[string]index.Address {
 	return copied
 }
 
-// memoryEntries is observed only with the writer gate held or after Close.
+// memoryEntries borrows the index map. Its caller must exclude publications
+// while iterating it.
 func (o Observer) memoryEntries() map[string]index.Address {
 	m, ok := o.db.keys.(interface {
 		RetainedEntries() map[string]index.Address

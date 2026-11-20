@@ -67,6 +67,10 @@ type DB struct {
 	// Upper bound on live encoded value lengths, guarded by state. Deleting or
 	// shrinking a value can leave it high until the next Open.
 	maxSeenValueBytes int64
+
+	// Only Compact sets or clears this under writer while it owns the cleaner
+	// gate. indexGate guards the staged keys during that interval.
+	memoryRemap *memoryCheckpointRemap
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
@@ -329,6 +333,11 @@ func (db *DB) lockMutation() uint64 {
 
 func (db *DB) unlockMutation(previousActive uint64, invalidatedSealed bool) {
 	rotated := previousActive != db.store.Current.ActiveID
+	if db.memoryRemap != nil {
+		db.indexGate.Lock()
+		clear(db.memoryRemap.staged)
+		db.indexGate.Unlock()
+	}
 	db.writer.Unlock()
 	if db.cleaner.writers.Add(-1) == 0 {
 		db.resumeCleaner()

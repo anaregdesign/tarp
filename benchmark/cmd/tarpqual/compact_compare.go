@@ -22,18 +22,24 @@ type compactTrial struct {
 
 // Check the schedule independently of the guest process. Each measured pair
 // uses the same control, and both control order and release order rotate.
-func compactTrials() []compactTrial {
+func compactTrials(fixed bool) []compactTrial {
 	trials := []compactTrial{{"base", "seed", 0}}
 	for round := 1; round <= 6; round++ {
-		arms, modes := [2]string{"base", "next"}, [2]string{"overlap", "parked"}
+		arms, modes := [2]string{"base", "next"}, []string{"overlap", "parked"}
 		if round%2 == 0 {
-			arms, modes = [2]string{"next", "base"}, [2]string{"parked", "overlap"}
+			arms, modes = [2]string{"next", "base"}, []string{"parked", "overlap"}
+		}
+		if fixed {
+			modes = []string{"fixed"}
 		}
 		for _, mode := range modes {
 			for _, arm := range arms {
 				trials = append(trials, compactTrial{arm, mode, round})
 			}
 		}
+	}
+	if fixed {
+		return trials
 	}
 	trials = append(trials, compactTrial{"base", "baseline", 0}, compactTrial{"next", "baseline", 0},
 		compactTrial{"next", "pinned", 0}, compactTrial{"base", "pinned", 0})
@@ -71,7 +77,12 @@ func compactComparison(work, confirm string, output io.Writer) (result error) {
 	defer func() { result = errors.Join(result, disk.Close()) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	schedule := compactTrials()
+	pair := os.Getenv("TARP_COMPACT_PAIR")
+	if pair == "" {
+		pair = "releases"
+	}
+	fixed := pair == "candidate-fixed"
+	schedule := compactTrials(fixed)
 	rows := 0
 	environment, passed := false, false
 	vm, err := qualification.RunVM(ctx, qualification.VMConfig{
@@ -114,8 +125,12 @@ func compactComparison(work, confirm string, output io.Writer) (result error) {
 	if err := os.Remove(diskPath); err != nil {
 		return err
 	}
+	diagnosticRounds := 4
+	if fixed {
+		diagnosticRounds = 0
+	}
 	return json.NewEncoder(output).Encode(map[string]any{
-		"compact_comparison": "pass", "rows": rows, "paired_rounds": 6, "diagnostic_rounds": 4, "value_bytes": 64,
+		"compact_comparison": "pass", "pair": pair, "rows": rows, "paired_rounds": 6, "diagnostic_rounds": diagnosticRounds, "value_bytes": 64,
 		"vm": vm, "device": disk.Stats(),
 	})
 }

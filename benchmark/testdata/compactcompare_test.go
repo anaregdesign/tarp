@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -19,9 +20,10 @@ import (
 )
 
 // The diagnostic-only binary supplies timings for individual Compact stages.
-var compactDiagnostic = func() any { return nil }
+var compactDiagnostic = func() map[string]int64 { return nil }
+var compactGateSamples = func() map[string][]int64 { return nil }
 
-// TestCompactCompare is compiled into each released benchmark package. A single
+// TestCompactCompare is compiled into each arm's benchmark package. A single
 // seed invocation prepares the closed disk image used by both binaries.
 func TestCompactCompare(t *testing.T) {
 	mode := os.Getenv("TARP_COMPARE_MODE")
@@ -102,32 +104,70 @@ func TestCompactCompare(t *testing.T) {
 		row["compact_records_copied"] = hooks.manualRecords.Load()
 		row["compact_copy_bytes"] = hooks.manualBytes.Load()
 		row["compact_copy_source_opens"] = hooks.manualSourceOpens.Load()
-	case "overlap", "diagnostic", "baseline", "pinned":
+	case "overlap", "fixed", "diagnostic", "baseline", "pinned":
 		originalMode := "compact"
+		minimum := 500 * time.Millisecond
 		switch mode {
+		case "fixed":
+			minimum = 5 * time.Second
 		case "baseline":
 			originalMode = "baseline"
 		case "pinned":
 			originalMode = pinnedBackupMode
 		}
-		// Use the release's original 5 ms sampler and 500 ms foreground window.
-		row = measureInterferenceFor(t, db, hooks, keys[:8], value, originalMode, 500*time.Millisecond)
+		// The fixed window continues the same traffic after Compact returns.
+		row = measureInterferenceFor(t, db, hooks, keys[:8], value, originalMode, minimum)
+		if mode == "fixed" && row["maintenance_ns"].(int64) >= minimum.Nanoseconds() {
+			t.Fatal("Compact exceeded the fixed foreground window")
+		}
 		for _, worker := range []string{"read", "durable_put"} {
 			sample := row[worker].(sampledLatency)
-			if sample.Operations <= 0 {
-				t.Fatalf("%s completed no foreground operations", worker)
+			if sample.Operations <= 0 || sample.P99NS <= 0 {
+				t.Fatalf("%s missing foreground latency measurements", worker)
+			}
+			if mode == "fixed" && sample.WallNS < minimum.Nanoseconds() {
+				t.Fatalf("%s ran for %d ns of the %v window", worker, sample.WallNS, minimum)
 			}
 			if worker == "durable_put" {
 				puts = sample.Operations
+				if mode == "fixed" && int64(len(sample.SamplesNS)) != puts {
+					t.Fatalf("fixed window retained %d of %d Put latencies", len(sample.SamplesNS), puts)
+				}
+				slices.Sort(sample.SamplesNS)
+			} else {
+				sample.SamplesNS = nil // Keep the much smaller Put sample for pooled tails.
 			}
-			sample.SamplesNS = nil
 			row[worker] = sample
 		}
 		if mode == "diagnostic" {
-			row["stages"] = compactDiagnostic()
-			if row["stages"] == nil {
+			stages := compactDiagnostic()
+			if stages == nil {
 				t.Fatal("missing per-stage instrumentation in diagnostic binary")
 			}
+			gateSamples := compactGateSamples()
+			for _, gate := range []string{"relocation_writer", "relocation_index_gate"} {
+				calls := stages[gate+"_acquires"]
+				for _, event := range []string{"_wait_ns", "_hold_ns"} {
+					intervals, ok := gateSamples[gate+event]
+					var total int64
+					for _, ns := range intervals {
+						total += ns
+					}
+					if !ok || int64(len(intervals)) != calls || total != stages[gate+event] || !slices.IsSorted(intervals) {
+						t.Fatalf("invalid %s%s intervals for %d acquisitions", gate, event, calls)
+					}
+				}
+				holds := gateSamples[gate+"_hold_ns"]
+				var longest int64
+				if len(holds) > 0 {
+					longest = holds[len(holds)-1]
+				}
+				if calls != stages[gate+"_hold_calls"] || longest != stages[gate+"_max_hold_ns"] {
+					t.Fatalf("invalid %s hold measurements: %+v", gate, stages)
+				}
+			}
+			row["stages"] = stages
+			row["relocation_gate_samples"] = gateSamples
 		}
 	default:
 		t.Fatalf("unknown comparison mode %q", mode)

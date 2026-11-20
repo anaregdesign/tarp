@@ -11,6 +11,14 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+// During a memory checkpoint, staged holds the keys whose old location the
+// active writer will use for file accounting at commit. It borrows the owned
+// key strings from that single mutation or batch.
+type memoryCheckpointRemap struct {
+	index  index.ResidentRelocator
+	staged map[string]struct{}
+}
+
 func openIndex(mode IndexMode, budget int64) (index.Backend, error) {
 	if mode == IndexMemory {
 		return memory.New(), nil
@@ -57,6 +65,12 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 	if err := db.store.IO.Check("index.prepare:before"); err != nil {
 		return storage.Location{}, err
 	}
+	if db.memoryRemap != nil {
+		// Keep the prepared file address stable until this writer publishes or aborts.
+		db.indexGate.Lock()
+		defer db.indexGate.Unlock()
+		db.memoryRemap.staged[key] = struct{}{}
+	}
 	a, found, err := tx.Lookup(key)
 	if err != nil {
 		db.poison(err)
@@ -101,6 +115,11 @@ func (db *DB) addLocation(file *storage.File) {
 // Relocate only records that still point at the copied source. A bounded batch
 // amortizes publication and COW without holding the writer gate over spool I/O.
 func (db *DB) relocateBatch(batch []storage.Relocation) error {
+	if db.memoryRemap != nil {
+		if done, err := db.relocateUnstaged(batch); done {
+			return err
+		}
+	}
 	db.writer.Lock()
 	defer db.writer.Unlock()
 	if err := db.health(); err != nil {
@@ -133,12 +152,42 @@ func (db *DB) relocateBatch(batch []storage.Relocation) error {
 	defer db.state.Unlock()
 	tx.Commit()
 	for _, move := range changed {
-		db.dropLocation(move.Old.File)
-		db.addLocation(move.Next.File)
-		move.Old.File.LiveBytes.Add(-move.Old.Bytes)
-		move.Next.File.LiveBytes.Add(move.Next.Bytes)
+		db.accountRelocation(move)
 	}
 	return nil
+}
+
+func (db *DB) accountRelocation(move storage.Relocation) {
+	db.dropLocation(move.Old.File)
+	db.addLocation(move.Next.File)
+	move.Old.File.LiveBytes.Add(-move.Old.Bytes)
+	move.Next.File.LiveBytes.Add(move.Next.Bytes)
+}
+
+// A durable writer has already captured file addresses for its staged keys.
+// If the batch overlaps, release indexGate before taking the writer lock.
+// Otherwise publish under indexGate, then state, in the usual commit order.
+func (db *DB) relocateUnstaged(batch []storage.Relocation) (bool, error) {
+	db.indexGate.Lock()
+	defer db.indexGate.Unlock()
+	if len(db.memoryRemap.staged) != 0 {
+		for _, move := range batch {
+			if _, busy := db.memoryRemap.staged[move.Key]; busy {
+				return false, nil
+			}
+		}
+	}
+	db.state.Lock()
+	defer db.state.Unlock()
+	if err := db.health(); err != nil {
+		return true, err
+	}
+	for _, move := range batch {
+		if db.memoryRemap.index.Relocate(move.Key, move.Old.Address(), move.Next.Address()) {
+			db.accountRelocation(move)
+		}
+	}
+	return true, nil
 }
 
 // indexMutationError preserves the original input number in a failed batch delete.

@@ -1,12 +1,12 @@
-"""Add stage timing only to archived v0.8.0 and v0.9.0 diagnostic builds."""
+"""Add stage timing only to diagnostic builds of the compared archives."""
 from pathlib import Path
 import shutil
 import sys
 
 root = Path(sys.argv[1])
-arm = sys.argv[2]
-if arm not in ("base", "next"):
-    raise ValueError(arm)
+layout = sys.argv[2]
+if layout not in ("v08", "v09"):
+    raise ValueError(layout)
 clock_import = '"github.com/anaregdesign/tarp/internal/compareclock"'
 
 
@@ -35,19 +35,42 @@ def writer_wait(timer):
             f' compareclock.{timer}.Add(start)\n}}')
 
 
+def probe_relocation_index_gate(source):
+    # The foreground staging path can also take this gate. Only measure the
+    # relocation functions, including the fallback after a staged-key conflict.
+    before = 'db.indexGate.Lock()\n\tdefer db.indexGate.Unlock()'
+    after = ('gateStart := compareclock.Now()\n\tdb.indexGate.Lock()\n'
+             '\tcompareclock.RelocateIndexWait.Add(gateStart)\n\tdefer db.indexGate.Unlock()\n'
+             '\tdefer compareclock.RelocateIndexHold.Add(compareclock.Now())')
+    functions = source.split('\nfunc ')
+    count = 0
+    for i, fn in enumerate(functions):
+        if fn.startswith(('(db *DB) relocateBatch(', '(db *DB) relocateUnstaged(')):
+            if fn.count(before) != 1:
+                raise ValueError('missing index gate in ' + fn.splitlines()[0])
+            functions[i] = fn.replace(before, after)
+            count += 1
+    if count == 0:
+        raise ValueError('missing gated relocation')
+    return '\nfunc '.join(functions)
+
+
 clock_dir = root / 'internal/compareclock'
 clock_dir.mkdir()
 shutil.copyfile(Path(__file__).resolve().parents[1] / 'testdata/compact_compare_clock.go',
                 clock_dir / 'clock.go')
 (root / 'benchmark/compact_compare_clock_test.go').write_text(
     'package benchmark\nimport ' + clock_import +
-    '\nfunc init() { compactDiagnostic = compareclock.Report }\n')
+    '\nfunc init() {\n compactDiagnostic = compareclock.Report\n compactGateSamples = compareclock.GateSamples\n}\n')
 
-moves = 'moves []storage.Relocation' if arm == 'base' else 'moves *storage.Relocations'
+compact = (root / 'internal/engine/compact.go').read_text()
+# Relocation has different parameters in each revision. Time the full method.
+relocate, = (line.removesuffix(' {') for line in compact.splitlines()
+             if line.startswith('func (db *DB) relocate(') and line.endswith(' {'))
 edit('internal/engine/compact.go', [
     on_entry('func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error)',
              'compareclock.BeginCompact()\n\tdefer compareclock.EndCompact()'),
-    timed(f'func (db *DB) relocate({moves}, after string)', 'Relocate'),
+    timed(relocate, 'Relocate'),
     ('db.writer.Lock()', writer_wait('OtherWriterWait'), 4),
 ])
 edit('internal/engine/db.go', [
@@ -69,7 +92,7 @@ edit('internal/storage/io.go', [(old_sync, '''func (i *IO) Sync(f *os.File, poin
     return i.Do(point, f.Sync)
 }''', 1)])
 
-if arm == 'base':
+if layout == 'v08':
     replay = 'func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error)'
     checkpoint_args = 'moves []Relocation'
     copy_record = 'func (r *snapshotReader) copyRecord(ctx context.Context, fs *IO, old Location, key string, dst *os.File, offset int64, buffer []byte) error'
@@ -81,7 +104,10 @@ else:
     callback_changes = [timed('func(src *os.File, key string, old Location) error', 'Emit')]
     edit('internal/engine/index.go', [
         ('db.writer.Lock()', writer_wait('RelocateWait'), 1),
+        ('defer db.writer.Unlock()', 'defer db.writer.Unlock()\n\tdefer compareclock.RelocateHold.Add(compareclock.Now())', 1),
     ])
+    index_file = root / 'internal/engine/index.go'
+    index_file.write_text(probe_relocation_index_gate(index_file.read_text()))
 edit('internal/storage/snapshot.go', [timed(replay, 'Replay')])
 edit('internal/storage/checkpoint.go', [
     timed('func (c *Checkpoint) Copy(ctx context.Context, ' + checkpoint_args +

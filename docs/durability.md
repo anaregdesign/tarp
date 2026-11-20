@@ -217,8 +217,12 @@ Put records by source file, reads them in offset order with one source descripto
 open at a time, and writes snapshot files using the same size target as log appends,
 preserving record sequences. Tombstones can
 be dropped only because all earlier history is replaced. Publication combines the
-checkpoint with **all** current tail files after C, then remaps each still-unchanged
-index location using its exact prior address under the writer gate. Later Put/Delete wins.
+checkpoint with **all** current tail files after C. Each relocation checks the exact
+prior address and publishes the new address and its file accounting together.
+For the in-memory index, a batch can move while a foreground write syncs if their
+keys are disjoint. A batch that overlaps a staged key waits for the writer to
+commit or abort, then checks the addresses again. The B+tree takes the writer gate
+for each relocation batch. Later Put/Delete wins.
 
 Old paths remain until they are unselected, have no index references, and have
 no reader/backup/compaction pins. The compaction releases its own capture pins

@@ -49,9 +49,15 @@ type Tx interface {
 }
 
 // ResidentLookup optionally serves an infallible memory-only lookup while the
-// caller excludes Commit and Close. Borrowing key bytes avoids copies for misses.
+// caller excludes Commit, Relocate and Close. Borrowing key bytes avoids copies for misses.
 type ResidentLookup interface {
 	LookupResident(key []byte) (Address, bool)
+}
+
+// ResidentRelocator conditionally changes a published physical address in memory.
+// The caller excludes commits, close, resident reads and staged mutations of key.
+type ResidentRelocator interface {
+	Relocate(key string, old, next Address) bool
 }
 
 // Backend has one writer and permits concurrent readers. Lookup reads the
