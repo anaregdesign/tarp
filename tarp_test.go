@@ -105,6 +105,60 @@ func TestOpenExistingAcceptsRestoredDatabaseWithoutLockFile(t *testing.T) {
 	}
 }
 
+func TestBackupOperationsRejectSourceDirectoryAliases(t *testing.T) {
+	for _, aliasKind := range []string{"symlink", "case"} {
+		t.Run(aliasKind, func(t *testing.T) {
+			root := t.TempDir()
+			parent := filepath.Join(root, "Source")
+			if err := os.Mkdir(parent, 0700); err != nil {
+				t.Fatal(err)
+			}
+			alias := filepath.Join(root, "SOURCE")
+			if aliasKind == "symlink" {
+				alias = filepath.Join(root, "alias")
+				if err := os.Symlink(parent, alias); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := os.Stat(alias); errors.Is(err, os.ErrNotExist) {
+				t.Skip("filesystem is case-sensitive")
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := t.Context()
+			dir := filepath.Join(parent, "db")
+			db := openPublicDB(t, dir, tarp.Options{})
+			if err := db.Put([]byte("k"), []byte("v")); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Backup(ctx, filepath.Join(alias, "db", "nested")); err == nil {
+				t.Error("Backup accepted a destination inside its source")
+			}
+			backup := filepath.Join(parent, "backup")
+			if err := db.Backup(ctx, backup); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			backupAlias := filepath.Join(alias, "backup")
+			if _, err := tarp.VerifyBackupWithScratch(ctx, backup, backupAlias); !errors.Is(err, os.ErrInvalid) {
+				t.Errorf("verification with scratch inside source: %v", err)
+			}
+			if err := tarp.Restore(ctx, tarp.RestoreRequest{Source: backup, Destination: filepath.Join(backupAlias, "nested")}); err == nil {
+				t.Error("Restore accepted a destination inside its source")
+			}
+			if info, err := tarp.VerifyBackup(ctx, backup); err != nil || info.LiveKeys != 1 {
+				t.Errorf("backup after rejected operations = %+v, %v", info, err)
+			}
+			reopened := openPublicDB(t, dir, tarp.Options{})
+			if got, err := reopened.Get([]byte("k")); err != nil || string(got) != "v" {
+				t.Fatalf("reopened value = %q, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestOpenRejectsBackupWithoutChangingItsFiles(t *testing.T) {
 	source := openPublicDB(t, t.TempDir(), tarp.Options{})
 	if err := source.Put([]byte("k"), []byte("v")); err != nil {

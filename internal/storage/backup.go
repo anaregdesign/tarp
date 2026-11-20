@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
@@ -33,14 +32,37 @@ func destinationPath(source, destination string) (string, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	relative, err := filepath.Rel(source, absolute)
+	inside, err := directoryWithin(source, parent)
 	if err != nil {
 		return "", err
 	}
-	if relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	if inside {
 		return "", fmt.Errorf("storage: destination must be outside source")
 	}
 	return absolute, nil
+}
+
+// Both paths exist and dir is absolute with symlinks resolved. Compare the
+// actual directories because one directory can have multiple case spellings.
+func directoryWithin(source, dir string) (bool, error) {
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		return false, err
+	}
+	for {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return false, err
+		}
+		if os.SameFile(sourceInfo, info) {
+			return true, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false, nil
+		}
+		dir = parent
+	}
 }
 
 func publishDirectory(ctx context.Context, fs *IO, stage, target, point string) error {
@@ -369,11 +391,11 @@ func VerifyBackupWithIndex(ctx context.Context, dir, scratch string, newIndex fu
 	if err != nil {
 		return BackupInfo{}, err
 	}
-	relative, err := filepath.Rel(source, scratch)
+	inside, err := directoryWithin(source, scratch)
 	if err != nil {
 		return BackupInfo{}, err
 	}
-	if relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	if inside {
 		return BackupInfo{}, fmt.Errorf("storage: verification scratch directory must be outside source: %w", os.ErrInvalid)
 	}
 	if err := ctx.Err(); err != nil {
