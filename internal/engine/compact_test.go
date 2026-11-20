@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -15,6 +16,97 @@ import (
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
+
+// Hold the writer until the maintenance call passes its initial context check.
+func cancelMaintenanceWaitingForWriter(t *testing.T, db *DB, waiting func() bool, run func(context.Context) error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	db.writer.Lock()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !waiting() && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	started := waiting()
+	cancel()
+	db.writer.Unlock()
+	err := <-done
+	if !started {
+		t.Fatalf("maintenance did not reach the writer: %v", err)
+	}
+	var op *OpError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &op) || op.Outcome != NotApplied {
+		t.Fatalf("expected a canceled, unapplied operation, got %v", err)
+	}
+}
+
+func TestCompactCanceledWaitingForWriterPreservesFrontier(t *testing.T) {
+	for _, state := range []string{"at cutoff", "nonempty log"} {
+		t.Run(state, func(t *testing.T) {
+			db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
+			if state == "nonempty log" {
+				mustPut(t, db, "key", "value")
+			}
+			before := db.store.Current
+			unselected := filepath.Join(db.store.Dir, storage.DataName(before.UUID, 100))
+			if err := os.WriteFile(unselected, []byte("leftover"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cancelMaintenanceWaitingForWriter(t, db, func() bool {
+				// Only this Compact can acquire the maintenance slot.
+				return len(db.cleaner.gate) == 0
+			}, func(ctx context.Context) error {
+				_, err := db.Compact(ctx)
+				return err
+			})
+			if db.store.Current != before {
+				t.Fatalf("canceled Compact changed CURRENT from %+v to %+v", before, db.store.Current)
+			}
+			if _, err := os.Stat(unselected); err != nil {
+				t.Fatalf("unselected file after canceled Compact: %v", err)
+			}
+			mustPut(t, db, "key", "retry")
+			if _, err := db.Compact(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(unselected); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unselected file after successful Compact: %v", err)
+			}
+			wantValue(t, db, "key", "retry")
+		})
+	}
+}
+
+func TestCompactCanceledBetweenOutputFiles(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var headers int
+	fs := &storage.IO{Hook: func(point string) error {
+		switch point {
+		case "compact.segment.write:before":
+			headers++
+		case "compact.sync:after":
+			cancel()
+		}
+		return nil
+	}}
+	// Each live record fits in a separate checkpoint output.
+	opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64}
+	db := newTestDBWithHooks(t, opts, fs, &Hooks{CleanerStart: make(chan struct{})})
+	mustPut(t, db, "a", "one")
+	mustPut(t, db, "b", "two")
+	_, err := db.Compact(ctx)
+	var op *OpError
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &op) || op.Outcome != NotApplied || headers != 1 {
+		t.Fatalf("Compact wrote %d snapshot headers and returned %v", headers, err)
+	}
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	wantValue(t, db, "a", "one")
+	wantValue(t, db, "b", "two")
+}
 
 func TestCompactReportsCheckpointPublicationOutcome(t *testing.T) {
 	// With a nonempty active log the first CURRENT replacement seals it.

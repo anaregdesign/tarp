@@ -345,7 +345,8 @@ records and validates the live size limits. `info.RequiredLimits` reports the
 largest logical cache charge and encoded record among the live entries. Both
 are zero for an empty backup. A verification error returns a zero report.
 `Restore` independently verifies the copied database before publishing it.
-Use `OpenExisting` to open the restored database.
+Pass the restored directory to `OpenExisting`. Passing the backup directory
+itself to `Open` or `OpenExisting` returns an error and preserves the backup.
 
 If `Backup` or `Restore` reports `ErrCommitUncertain` at destination rename
 or parent directory sync, inspect the destination before retrying. For a
@@ -384,7 +385,9 @@ discard tombstones covered by that checkpoint and preserves all concurrent
 tail writes. It serializes with the worker and can overlap one online backup.
 Duplicate manual checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult` reports bytes reclaimed or still pinned by that operation.
-Supply cancellable contexts for manual maintenance and backup.
+If the context is canceled while `Compact` or `Backup` waits for the initial
+writer lock, the call returns an error matching `ctx.Err()` once it acquires
+the lock, before starting checkpoint or backup work.
 
 ## Metrics
 

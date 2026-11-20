@@ -123,13 +123,18 @@ func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool,
 	if err != nil {
 		return nil, nil, err
 	}
-	// A restored database has no LOCK inode. Probe CURRENT without creating one
-	// in a foreign store. All authoritative validation is repeated under lock.
+	// Restored databases and backups both have CURRENT but no LOCK. Reject a
+	// foreign format or backup before creating LOCK. Validate the DB under lock.
 	if _, err := os.Lstat(filepath.Join(absolute, "LOCK")); errors.Is(err, os.ErrNotExist) {
 		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
 		if err == nil {
 			if _, err := format.DecodeFrontier(b); err != nil {
 				return nil, nil, fmt.Errorf("CURRENT: %w", err)
+			}
+			if _, err := os.Lstat(filepath.Join(absolute, "BACKUP")); err == nil {
+				return nil, nil, fmt.Errorf("%w: use Restore to create a database from a directory containing BACKUP", ErrCorrupt)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, nil, err
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, err

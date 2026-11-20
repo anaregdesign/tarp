@@ -30,6 +30,10 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 		db.notifyCleaner()
 	}()
 	db.writer.Lock()
+	if err := ctx.Err(); err != nil {
+		db.writer.Unlock()
+		return operationError("backup", "wait", err)
+	}
 	if err := db.health(); err != nil {
 		db.writer.Unlock()
 		return err
