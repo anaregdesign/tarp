@@ -331,7 +331,7 @@ the commit sync protocol.
 | `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
 | `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
-| `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Also bounds the total DATA bytes read in one automatic repack. |
+| `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Bounds the total input to a small-file repack and the output of grouped log cleaning. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
 | `BatchGetReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 | `MaxBatchGetValueBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |

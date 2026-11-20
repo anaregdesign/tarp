@@ -183,7 +183,14 @@ metadata), the initial eligibility rule is `W <= S/2`. This gives estimated
 net savings of at least one third of read-plus-write bytes. The worker ranks
 eligible files by highest savings per I/O byte, with stable tie breaks.
 
-When no single file qualifies, the worker looks in catalog order for 4–8
+When no single file qualifies, the worker can clean adjacent sealed logs
+with one catalog publication. It considers up to eight catalog entries,
+including empty intervals. Each physical input must fit within one segment
+target and retain at most half its bytes. The combined replacement DATA must
+also fit within one target. The same savings threshold applies to the whole
+group, charging metadata once and retaining all tombstones.
+
+If neither a single file nor such a group qualifies, the worker looks for 4–8
 adjacent physical files of the same family (snapshots or sealed logs). Each
 may occupy up to one quarter of the effective segment target. Their combined
 size including headers must fit within one target, and the largest must be
@@ -285,6 +292,8 @@ Backup uses the same reducer to validate its captured history.
 
 `VerifyBackup` verifies the immutable directory with bounded key windows. A
 large backup can take multiple sequential DATA passes. Use
-`VerifyBackupWithScratch(ctx, source, scratchDir)` to verify with a disposable
-paged index on an existing external directory. Restore validates both its source
-and the staged copy before the destination rename.
+`VerifyBackupWithScratch(ctx, source, scratchDir)` to sort the key history in
+bounded runs using an existing external directory. The reducer verifies that
+history and computes the live-record limits directly. Restore validates both
+its source and the staged copy before the destination rename. If the source
+exceeds the first key window, the stage starts its own replay with fresh scratch.

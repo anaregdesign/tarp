@@ -296,13 +296,8 @@ func backupSourcePath(ctx context.Context, source string) (string, error) {
 	return filepath.EvalSymlinks(absolute)
 }
 
-func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) error {
-	return RestoreWithIndex(ctx, source, destination, cfg, fs, nil)
-}
-
-// RestoreWithIndex can spill validation state for large images into the
-// destination parent. Each verification builds an independent private index.
-func RestoreWithIndex(ctx context.Context, source, destination string, cfg Config, fs *IO, spill func(string) (index.Backend, error)) (returned error) {
+// Restore verifies the source and staged copy using independent replay state.
+func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) (returned error) {
 	source, err := backupSourcePath(ctx, source)
 	if err != nil {
 		return err
@@ -311,12 +306,7 @@ func RestoreWithIndex(ctx context.Context, source, destination string, cfg Confi
 	if err != nil {
 		return err
 	}
-	var verify imageVerifier
-	if spill != nil {
-		verify = func(ctx context.Context, dir string) (*Image, error) {
-			return validateWindows(ctx, dir, verifyWindowBytes, func() (index.Backend, error) { return spill(filepath.Dir(target)) })
-		}
-	}
+	verify := restoreVerifier(filepath.Dir(target), verifyWindowBytes)
 	buffer := make([]byte, 32<<10)
 	backup, err := verifyBackup(ctx, source, buffer, verify)
 	if err != nil {
@@ -377,9 +367,9 @@ func VerifyBackup(ctx context.Context, dir string) (BackupInfo, error) {
 	return backup.info, err
 }
 
-// VerifyBackupWithIndex places its optional disposable index in an existing
+// VerifyBackupWithScratch places its temporary sort runs in an existing
 // caller-selected directory outside the immutable backup.
-func VerifyBackupWithIndex(ctx context.Context, dir, scratch string, newIndex func(string) (index.Backend, error)) (BackupInfo, error) {
+func VerifyBackupWithScratch(ctx context.Context, dir, scratch string) (BackupInfo, error) {
 	source, err := backupSourcePath(ctx, dir)
 	if err != nil {
 		return BackupInfo{}, err
@@ -401,18 +391,62 @@ func VerifyBackupWithIndex(ctx context.Context, dir, scratch string, newIndex fu
 	if err := ctx.Err(); err != nil {
 		return BackupInfo{}, err
 	}
-	backend, err := newIndex(scratch)
-	if err != nil {
-		return BackupInfo{}, err
-	}
-	backup, verifyErr := verifyBackup(ctx, source, make([]byte, 32<<10), func(ctx context.Context, dir string) (*Image, error) { return validateIndexed(ctx, dir, backend) })
-	if err := errors.Join(verifyErr, backend.Close()); err != nil {
-		return BackupInfo{}, err
-	}
-	return backup.info, nil
+	backup, err := verifyBackup(ctx, source, make([]byte, 32<<10), func(ctx context.Context, dir string) (*Image, error) {
+		return verifySorted(ctx, dir, scratch, verifyWindowBytes)
+	})
+	return backup.info, err
 }
 
 type imageVerifier func(context.Context, string) (*Image, error)
+
+// Only the choice of verifier carries over from the source to the stage.
+// Each scratch replay starts from the staged or source files with a fresh workspace.
+func restoreVerifier(scratch string, windowBytes int64) imageVerifier {
+	var spilled bool
+	withScratch := func(ctx context.Context, dir string) (*Image, error) {
+		spilled = true
+		return verifySorted(ctx, dir, scratch, windowBytes)
+	}
+	return func(ctx context.Context, dir string) (*Image, error) {
+		if spilled {
+			return withScratch(ctx, dir)
+		}
+		return validateWindows(ctx, dir, windowBytes, withScratch)
+	}
+}
+
+func verifySorted(ctx context.Context, dir, scratch string, limit int64) (verified *Image, result error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Reserve the first sort run so even a small backup checks the supplied
+	// directory. Larger backups use this file for their first spilled chunk.
+	run, err := newReplayRun(scratch)
+	if err != nil {
+		return nil, &IndexWorkError{Err: err}
+	}
+	history := sortedReplay{ctx: ctx, dir: scratch, limit: limit, pending: run}
+	defer func() {
+		if err := history.close(); err != nil {
+			verified = nil
+			result = errors.Join(result, &IndexWorkError{Err: err})
+		}
+	}()
+	image, err := readImage(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := image.scan(ctx, history.apply); err != nil {
+		return nil, err
+	}
+	err = history.reduce(image.Catalog.PrunedThrough, func(key string, addr index.Address) error {
+		return image.measure(key, addr.Bytes, addr.ValueBytes)
+	})
+	if err != nil {
+		return nil, replayWorkError(err)
+	}
+	return image, ctx.Err()
+}
 
 func verifyBackup(ctx context.Context, source string, buffer []byte, verify imageVerifier) (verifiedBackup, error) {
 	b, err := ReadRegular(filepath.Join(source, "BACKUP"))

@@ -38,6 +38,11 @@ type sortedReplay struct {
 	levels  [64]*replayRun
 }
 
+func (s *sortedReplay) apply(f *File, off int64, r format.Record, key string) error {
+	addr := index.Address{FileID: f.ID, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: f.Kind, recordKind: r.Kind}))
+}
+
 func (s *sortedReplay) add(e replayEvent) error {
 	charge := int64(len(e.key)) + replayKeyCharge
 	if s.used != 0 && charge > s.limit-s.used {
@@ -127,21 +132,24 @@ func (s *sortedReplay) merge(old, newer *replayRun) (result *replayRun, err erro
 	return result, err
 }
 
-func (s *sortedReplay) close() {
+func (s *sortedReplay) close() (err error) {
 	if s.pending != nil {
-		_ = s.pending.fd.Close()
+		err = s.pending.fd.Close()
 		s.pending = nil
 	}
 	for i, run := range s.levels {
 		if run != nil {
-			_ = run.fd.Close()
+			err = errors.Join(err, run.fd.Close())
 			s.levels[i] = nil
 		}
 	}
+	return err
 }
 
 func (s *sortedReplay) each(visit func(replayEvent) error) error {
-	if s.pending == nil {
+	// Verification may have reserved its first run to check the scratch directory.
+	// Keep the final reduction in memory if no chunk ever spilled into that file.
+	if s.pending == nil || s.pending.bytes == 0 {
 		orderEvents(s.chunk)
 		for _, e := range s.chunk {
 			if err := s.ctx.Err(); err != nil {
