@@ -12,7 +12,7 @@ on:
         required: true
         default: probe
         type: choice
-        options: [probe, controls, campaign, runtime, measure]
+        options: [probe, controls, campaign, runtime, measure, compact-compare]
       value-bytes:
         description: One bounded measurement profile; unused by other modes
         required: true
@@ -57,10 +57,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: ${{ inputs.mode == 'compact-compare' && '0' || '1' }}
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: ${{ inputs.mode == 'measure' && 'stable' || inputs.go-version }}
+          go-version: ${{ (inputs.mode == 'measure' || inputs.mode == 'compact-compare') && 'stable' || inputs.go-version }}
           check-latest: true
           cache: false
       - name: Run bounded disposable Ubuntu guest
@@ -72,7 +73,7 @@ jobs:
           TARP_QUAL_VALUE_BYTES: ${{ inputs.value-bytes }}
           TARP_MEASUREMENT_DIGEST: ${{ inputs.measurement-digest }}
         run: |
-          if [[ "$TARP_QUAL_MODE" == measure ]]; then
+          if [[ "$TARP_QUAL_MODE" == measure || "$TARP_QUAL_MODE" == compact-compare ]]; then
             exec bash benchmark/scripts/container-vm-measurement.sh
           fi
           exec bash benchmark/scripts/probe.sh

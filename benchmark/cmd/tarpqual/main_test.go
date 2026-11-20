@@ -9,7 +9,7 @@ import (
 
 func TestVMCommandsRefuseNonHostedExecutionBeforeMutation(t *testing.T) {
 	t.Setenv("GITHUB_ACTIONS", "")
-	for _, mode := range []string{"-block-controls", "-campaign", "-runtime-suite", "-measurements"} {
+	for _, mode := range []string{"-block-controls", "-campaign", "-runtime-suite", "-measurements", "-compact-compare"} {
 		t.Run(mode, func(t *testing.T) {
 			work := filepath.Join(t.TempDir(), "must-not-be-created")
 			if err := run([]string{mode, work, "-confirm", "disposable-vm-only"}, io.Discard); err == nil {

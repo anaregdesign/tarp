@@ -8,7 +8,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux ||
   exit 1
 fi
 mode="${TARP_QUAL_MODE:-probe}"
-[[ "$mode" == probe || "$mode" == controls || "$mode" == campaign || "$mode" == runtime || "$mode" == measure ]]
+[[ "$mode" == probe || "$mode" == controls || "$mode" == campaign || "$mode" == runtime || "$mode" == measure || "$mode" == compact-compare ]]
 [[ "$RUNNER_TEMP" == /* && "$GITHUB_RUN_ID" =~ ^[0-9]+$ &&
    "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
 test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 8388608
@@ -69,13 +69,37 @@ sha256sum "$work/vmlinuz" "$work/ubuntu-initrd" "$work/initrd" "$work/tarp-init"
   >"$work/evidence/boot.sha256"
 # Bound generated files in both probe and controller modes.
 ulimit -f 4194304
-if [[ "$mode" == controls || "$mode" == campaign || "$mode" == runtime || "$mode" == measure ]]; then
+if [[ "$mode" != probe ]]; then
   cp benchmark/scripts/controls-guest.sh "$work/input/guest.sh"
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$work/input/tarp.test" ./internal/engine
   sha256sum "$work/input/tarp.test" >"$work/evidence/guest-binary.sha256"
   "$work/tarpqual" -block-controls "$work" -confirm disposable-vm-only \
     >"$work/evidence/control-verdict.json"
   cat "$work/evidence/control-verdict.json"
+  if [[ "$mode" == compact-compare ]]; then
+    driver=benchmark/testdata/compactcompare_test.go
+    instrument=benchmark/scripts/compact-compare-instrument.py
+    sha256sum "$driver" "$instrument" benchmark/testdata/compact_compare_clock.go benchmark/scripts/compact-compare-guest.sh \
+      >"$work/evidence/compact-compare-driver.sha256"
+    build_comparison_arm() {
+      local arm=$1 tag=$2 commit=$3 source="$work/$1-src"
+      test "$(git rev-parse "$tag^{commit}")" = "$commit"
+      mkdir "$source"
+      git archive --format=tar "$commit" | tar -xf - -C "$source"
+      cp "$driver" "$source/benchmark/"
+      (cd "$source" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -buildvcs=false -o "$work/input/$arm.test" ./benchmark)
+      python3 "$instrument" "$source" "$arm"
+      (cd "$source" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -buildvcs=false -o "$work/input/$arm.diag.test" ./benchmark)
+      printf '%s\t%s\t%s\n' "$arm" "$tag" "$commit" >>"$work/evidence/compact-compare-releases.tsv"
+      go version -m "$work/input/$arm.test" "$work/input/$arm.diag.test" >>"$work/evidence/compact-compare-builds.txt"
+      sha256sum "$work/input/$arm.test" "$work/input/$arm.diag.test" >>"$work/evidence/compact-compare-binaries.sha256"
+    }
+    build_comparison_arm base v0.8.0 dbb553eac61142352b4d7b757d8079ff4b161287
+    build_comparison_arm next v0.9.0 d09d79239a6182f1c4933d32e14f3ffe00e38924
+    cp benchmark/scripts/compact-compare-guest.sh "$work/input/guest.sh"
+    "$work/tarpqual" -compact-compare "$work" -confirm disposable-vm-only >"$work/evidence/compact-compare-verdict.json"
+    cat "$work/evidence/compact-compare-verdict.json"
+  fi
   if [[ "$mode" == measure ]]; then
     GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o "$work/input/measurement.test" ./benchmark
     GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -tags=tarpprofile -o "$work/input/tarp.profile.test" ./benchmark
