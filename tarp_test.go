@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"os/exec"
@@ -461,12 +462,16 @@ func FuzzDBHistory(f *testing.F) {
 	const otherKey = 1 << 3
 	f.Add([]byte{})
 	f.Add([]byte{put, put | otherKey, backup, put, removeKey | otherKey, compact, reopen, restore, get, get | otherKey})
+	f.Add([]byte{put | 0x80, backup, reopen, restore, compact, get})
 	f.Add([]byte{get, removeKey, putEmpty, get, backup, removeKey, reopen, restore, put, get})
 	f.Add([]byte{backup, put, restore, backup, putEmpty, restore, compact})
 
 	f.Fuzz(func(t *testing.T, steps []byte) {
 		// A small target rotates on the second Put. All values fit admission.
 		opts := tarp.Options{CacheBytes: 144, MaxRecordBytes: 64, TargetSegmentBytes: 128, ReadFileHandles: 1}
+		if len(steps) > 0 && steps[0]&0x80 != 0 {
+			opts.IndexMode = tarp.IndexBTree
+		}
 		dir := filepath.Join(t.TempDir(), "live")
 		db := openPublicDB(t, dir, opts)
 		live := make(map[string]string)
@@ -522,6 +527,11 @@ func FuzzDBHistory(f *testing.F) {
 				if err := db.Close(); err != nil {
 					t.Fatalf("step %d Close: %v", i, err)
 				}
+				if opts.IndexMode == tarp.IndexBTree {
+					opts.IndexMode = tarp.IndexMemory
+				} else {
+					opts.IndexMode = tarp.IndexBTree
+				}
 				db = openPublicDB(t, dir, opts)
 			case backup:
 				backupPath = filepath.Join(t.TempDir(), "backup")
@@ -549,4 +559,112 @@ func FuzzDBHistory(f *testing.F) {
 			checkScan(db, live)
 		}
 	})
+}
+
+func TestIndexModesShareDataSnapshotsAndBackups(t *testing.T) {
+	for _, source := range []struct {
+		name         string
+		source, dest tarp.IndexMode
+	}{
+		{"memory to disk", tarp.IndexMemory, tarp.IndexBTree}, {"disk to memory", tarp.IndexBTree, tarp.IndexMemory},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "source")
+			db := openPublicDB(t, dir, tarp.Options{IndexMode: source.source})
+			key := append(bytes.Repeat([]byte{0, 0x80, 0xff}, 4000), 1)
+			if err := db.BatchPut([]tarp.Entry{{Key: key, Value: []byte("first")}, {Key: []byte("empty")}, {Key: key, Value: []byte("last")}}); err != nil {
+				t.Fatal(err)
+			}
+			check := func(db *tarp.DB) {
+				t.Helper()
+				got, err := db.BatchGet([][]byte{key, []byte("absent"), []byte("empty"), key})
+				if err != nil || len(got) != 4 || string(got[0].Value) != "last" || got[1].Found || !got[2].Found || len(got[2].Value) != 0 || string(got[3].Value) != "last" {
+					t.Fatalf("batch = %v, %v", got, err)
+				}
+			}
+			check(db)
+			backup := filepath.Join(t.TempDir(), "backup")
+			if err := db.Backup(t.Context(), backup); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			other, err := tarp.OpenExisting(t.Context(), dir, tarp.Options{IndexMode: source.dest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer other.Close()
+			check(other)
+			info, err := tarp.VerifyBackup(t.Context(), backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scratch := t.TempDir()
+			withScratch, err := tarp.VerifyBackupWithScratch(t.Context(), backup, scratch)
+			if err != nil || info != withScratch || info.LiveKeys != 2 {
+				t.Fatalf("verify = %+v %+v, %v", info, withScratch, err)
+			}
+			files, err := os.ReadDir(scratch)
+			if err != nil || len(files) != 0 {
+				t.Fatalf("scratch: %v %v", files, err)
+			}
+			restored := filepath.Join(t.TempDir(), "restored")
+			if err := tarp.Restore(t.Context(), tarp.RestoreRequest{Source: backup, Destination: restored}); err != nil {
+				t.Fatal(err)
+			}
+			cloned, err := tarp.OpenExisting(t.Context(), restored, tarp.Options{IndexMode: source.dest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cloned.Close()
+			check(cloned)
+		})
+	}
+}
+
+func TestIndexOptionErrorsLeaveNewDirectoryAbsent(t *testing.T) {
+	for _, o := range []tarp.Options{{IndexMode: 99}, {IndexMode: tarp.IndexMemory, IndexMemoryBytes: 1 << 20}, {IndexMode: tarp.IndexBTree, IndexMemoryBytes: 1}, {IndexMode: tarp.IndexBTree, IndexMemoryBytes: -1}} {
+		dir := filepath.Join(t.TempDir(), "new")
+		if db, err := tarp.Open(dir, o); db != nil || !errors.Is(err, tarp.ErrInvalidOptions) {
+			t.Fatalf("Open(%+v) = %v, %v", o, db, err)
+		}
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+}
+
+func ExampleOpen_indexMode() {
+	dir, err := os.MkdirTemp("", "tarp-index-example-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+
+	db, err := tarp.Open(dir, tarp.Options{
+		IndexMode:        tarp.IndexBTree,
+		IndexMemoryBytes: 16 << 20,
+	})
+	if err != nil {
+		panic(err)
+	}
+	if err := db.Put([]byte("city"), []byte("Tokyo")); err != nil {
+		panic(err)
+	}
+	if err := db.Close(); err != nil {
+		panic(err)
+	}
+
+	db, err = tarp.OpenExisting(context.Background(), dir, tarp.Options{IndexMode: tarp.IndexMemory})
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	value, err := db.Get([]byte("city"))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(value))
+	// Output: Tokyo
 }

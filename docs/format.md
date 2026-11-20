@@ -153,3 +153,21 @@ prefixes, and validates staged bytes.
 
 Independent fixed hex vectors for all five codecs and cleaned-interval variants, per-byte bit flips,
 truncations, and decoder fuzzing live in `internal/format/format_test.go`.
+
+## Private B+tree files
+
+Opening with `IndexBTree` rebuilds a process-private index from the checked
+DATA stream. The in-process root descriptor identifies a generation and its
+root page. A zero root represents an empty tree. Private files use 8 KiB
+pages with one-based IDs. The page header records its CRC-32C, kind, page ID,
+slot count, byte boundaries and leftmost child or next overflow page.
+A leaf stores sorted suffixes under a common binary prefix, together with
+DATA file ID, offset, record length, value length and sequence. Branch
+separators route equal keys to the right. Long keys keep a prefix inline
+and their remaining bytes in checked overflow pages.
+
+Readers validate offsets, lengths, links, checksums and key ordering before
+using pages loaded from disk. A snapshot retains its original root while a
+writer copies changed paths. The OS releases the unlinked scratch files
+when their descriptors close. Only the durable files described above take
+part in recovery, backup and format compatibility.

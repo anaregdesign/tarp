@@ -29,6 +29,15 @@ func sealForCleaning(t *testing.T, db *DB) format.File {
 }
 
 func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
+	opts := Options{}
+	opts.IndexMode = IndexMemory
+	t.Run("memory", func(t *testing.T) { testSegmentCleaningRebasesOnConcurrentTail(t, opts) })
+	opts.IndexMode = IndexBTree
+	t.Run("btree", func(t *testing.T) { testSegmentCleaningRebasesOnConcurrentTail(t, opts) })
+}
+
+func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
+	t.Helper()
 	ctx := context.Background()
 	paused, resume := make(chan struct{}), make(chan struct{})
 	fs := &storage.IO{Hook: func(p string) error {
@@ -39,7 +48,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 		return nil
 	}}
 	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
-	db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
+	db := newTestDBWithHooks(t, opts, fs, engineHooks)
 	mustPut(t, db, "raw", "old")
 	mustPut(t, db, "del", "old")
 	if err := db.Delete([]byte("del")); err != nil {
@@ -79,7 +88,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 	wantValue(t, db, "keep", "stable")
 	wantValue(t, db, "del", "reinserted")
 	wantValue(t, db, "update", "new")
-	if db.index["keep"].File.ID != clean.ID || db.index["update"].File.ID == clean.ID ||
+	if testLoc(t, db, "keep").File.ID != clean.ID || testLoc(t, db, "update").File.ID == clean.ID ||
 		db.store.Files[clean.ID].DeleteBytes.Load() == 0 || old.LiveBytes.Load() != 0 {
 		t.Fatal("stale remap or missing accounting")
 	}
@@ -105,7 +114,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 	if err := Restore(ctx, RestoreRequest{Source: backupDir, Destination: restoreDir}); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := OpenWithHooks(restoreDir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
+	restored, err := OpenWithHooks(restoreDir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +132,7 @@ func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
+	reopened, err := OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +313,7 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := db.store.Catalog.Files[0]
-	if snapshot.Kind != format.Snapshot || db.index["stable"].File.ID != snapshot.ID {
+	if snapshot.Kind != format.Snapshot || testLoc(t, db, "stable").File.ID != snapshot.ID {
 		t.Fatal("snapshot was not replaced by a snapshot")
 	}
 	if err := db.cleanSegment(ctx, log); err != nil {
@@ -505,7 +514,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, ok := db.index["deleted"]; ok || db.index["updated"].File.ID != tail.ID {
+				if _, ok := testLookup(t, db, "deleted"); ok || testLoc(t, db, "updated").File.ID != tail.ID {
 					t.Fatal("repacking overwrote newer index locations")
 				}
 			}

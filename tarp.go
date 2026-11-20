@@ -5,13 +5,31 @@ import (
 	"iter"
 
 	"github.com/anaregdesign/tarp/internal/engine"
+	"github.com/anaregdesign/tarp/internal/storage"
 )
 
 // DB owns its directory until Close finishes. Do not copy a DB.
 type DB engine.DB
 
+// IndexMode selects the key index built from DATA on each Open.
+type IndexMode = engine.IndexMode
+
+const (
+	// IndexDefault selects the in-memory hash index.
+	IndexDefault = engine.IndexDefault
+	// IndexMemory keeps all key locations in memory.
+	IndexMemory = engine.IndexMemory
+	// IndexBTree keeps key locations in a disposable paged disk index.
+	IndexBTree = engine.IndexBTree
+)
+
 // Options configures one database. Zero fields select their defaults.
 type Options struct {
+	// IndexMode selects a paged B+tree or in-memory hash map for this handle.
+	IndexMode IndexMode
+	// IndexMemoryBytes budgets the paged index and its maintenance workspaces.
+	// Zero selects 16 MiB in B+tree mode. The minimum is 1 MiB.
+	IndexMemoryBytes int64
 	// CacheBytes is the logical LRU budget. Each live entry must fit. Zero selects 64 MiB.
 	CacheBytes int64
 	// MaxRecordBytes limits the encoded header, key and value of one record. Zero selects 1 MiB.
@@ -146,14 +164,21 @@ func (info BackupInfo) CheckLimits(limits RestoreLimits) error {
 // records, and reports the limits its live records require. It does not write
 // files. Any error returns a zero BackupInfo.
 func VerifyBackup(ctx context.Context, source string) (BackupInfo, error) {
-	info, err := engine.VerifyBackup(ctx, source)
+	return publicBackupInfo(engine.VerifyBackup(ctx, source))
+}
+
+// VerifyBackupWithScratch verifies an immutable backup using a disposable
+// disk index in a caller-selected directory outside the backup.
+func VerifyBackupWithScratch(ctx context.Context, source, scratch string) (BackupInfo, error) {
+	return publicBackupInfo(engine.VerifyBackupWithScratch(ctx, source, scratch))
+}
+
+func publicBackupInfo(info storage.BackupInfo, err error) (BackupInfo, error) {
 	if err != nil {
 		return BackupInfo{}, err
 	}
-	return BackupInfo{
-		DatabaseID: info.DatabaseID, Sequence: info.Sequence, LiveKeys: info.LiveKeys,
-		RequiredLimits: RestoreLimits{CacheBytes: info.Required.CacheBytes, MaxRecordBytes: info.Required.RecordBytes},
-	}, nil
+	return BackupInfo{DatabaseID: info.DatabaseID, Sequence: info.Sequence, LiveKeys: info.LiveKeys,
+		RequiredLimits: RestoreLimits{CacheBytes: info.Required.CacheBytes, MaxRecordBytes: info.Required.RecordBytes}}, nil
 }
 
 // CompactResult counts reclaimed file bytes and retired bytes still held by leases.

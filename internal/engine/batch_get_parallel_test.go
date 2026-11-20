@@ -153,7 +153,7 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 		for _, k := range []string{"a", "b", "c", "z"} {
 			mustPut(t, db, k, k)
 		}
-		file := db.index["a"].File
+		file := testLoc(t, db, "a").File
 		refs := file.References()
 		done := startBatchGet(db, [][]byte{[]byte("a"), []byte("b"), []byte("a"), []byte("c"), []byte("?")})
 		synctest.Wait()

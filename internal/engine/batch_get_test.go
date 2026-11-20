@@ -179,7 +179,7 @@ func TestBatchGetLimitsSnapshotValueBytesBeforeReading(t *testing.T) {
 	mustPut(t, db, "e", "")
 	mustPut(t, db, "h", "45") // Only h fits in the cache now.
 	c, e, h, missing := []byte("c"), []byte("e"), []byte("h"), []byte("absent")
-	file := db.index["c"].File
+	file := testLoc(t, db, "c").File
 	refs, stats := file.References(), db.Stats()
 	for _, tc := range []struct {
 		keys   [][]byte
@@ -211,14 +211,8 @@ func TestBatchGetSizeBoundCannotWrap(t *testing.T) {
 	// Four maximum values would wrap to four bytes in uint64. The second
 	// result already exceeds the limit. No payload allocation is necessary.
 	const size = 1<<62 + 1
-	db := DB{
-		opts:              Options{MaxBatchResultBytes: math.MaxInt64},
-		index:             map[string]storage.Location{"k": {ValueBytes: size}},
-		maxSeenValueBytes: size,
-	}
-	key := []byte("k")
 	var limit *BatchLimitError
-	err := db.checkBatchResultSize([][]byte{key, key, key, key})
+	err := checkBatchBytes(4, math.MaxInt64, size, func(int) int64 { return size })
 	if !errors.As(err, &limit) || limit.Index != 1 || limit.Actual != 2*uint64(size) || limit.Limit != math.MaxInt64 {
 		t.Fatalf("large result: %+v", err)
 	}
@@ -331,7 +325,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		mustPut(t, db, "b", "B")
 		mustPut(t, db, "z", "Z")
 		mustPut(t, db, "w", "W") // a and b are cold while z stays cached.
-		oldA, oldB := db.index["a"].File, db.index["b"].File
+		oldA, oldB := testLoc(t, db, "a").File, testLoc(t, db, "b").File
 		keys := [][]byte{[]byte("b"), []byte("a"), []byte("z"), []byte("b"), []byte("c"), []byte("a"), []byte("c")}
 		done := startBatchGet(db, keys)
 		synctest.Wait()
@@ -373,7 +367,7 @@ func TestBatchGetReadFailureDiscardsResultsAndPins(t *testing.T) {
 	mustPut(t, db, "b", "B")
 	mustPut(t, db, "c", "C")
 	mustPut(t, db, "d", "D")
-	file := db.index["a"].File
+	file := testLoc(t, db, "a").File
 	refs := file.References()
 	keys := [][]byte{[]byte("d"), []byte("a"), []byte("b"), []byte("c"), []byte("a"), []byte("x"), []byte("x")}
 	if got, err := db.BatchGet(keys); got != nil || !errors.Is(err, ErrCorrupt) {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/anaregdesign/tarp/benchmark/guesttest"
 	"github.com/anaregdesign/tarp/benchmark/qualification"
-	"github.com/anaregdesign/tarp/internal/cache"
 	"github.com/anaregdesign/tarp/internal/engine"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
@@ -222,9 +221,9 @@ func vmResources(t *testing.T, db *engine.DB) map[string]any {
 		t.Fatal(err)
 	}
 	sample["layout"] = observedLayout(db)
-	engine.Observe(db).State(func(index map[string]storage.Location, c *cache.Cache) {
-		sample["live_keys"], sample["cache_logical_bytes"] = len(index), c.Bytes()
-	})
+	stats := db.Stats()
+	sample["live_keys"], sample["cache_logical_bytes"] = stats.LiveKeys, stats.Cache.UsedBytes
+	sample["index_mode"], sample["index_metrics"] = engine.Observe(db).Options().IndexMode, engine.Observe(db).IndexMetrics()
 	sample["cache_limit_bytes"], sample["read_handle_limit"] = engine.Observe(db).Options().CacheBytes, engine.Observe(db).Options().ReadFileHandles
 	sample["process_fds_including_sampler"], sample["read_data_fds"], sample["write_data_fds"] = len(fds), readFDs, writeFDs
 	sample["directory_logical_file_bytes"], sample["directory_allocated_bytes"] = logical, allocated
@@ -234,7 +233,15 @@ func vmResources(t *testing.T, db *engine.DB) map[string]any {
 
 func vmCompleteIndexRelease(t *testing.T, db *engine.DB) map[string]any {
 	t.Helper()
-	index, registry, err := engine.Observe(db).CloseAndRetainIndex()
+	probe := engine.Observe(db)
+	if probe.Options().IndexMode == engine.IndexBTree {
+		result := map[string]any{"index_mode": probe.Options().IndexMode, "index_metrics": probe.IndexMetrics(), "live_keys": probe.LiveKeys(), "scope": "B+tree charged pages and scratch file space sampled before Close"}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	index, registry, err := probe.CloseAndRetainMemoryIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +262,7 @@ func vmCompleteIndexRelease(t *testing.T, db *engine.DB) map[string]any {
 		bytesPerLiveKey = &perKey
 	}
 	return map[string]any{
-		"live_keys": keys, "source_file_metadata_entries": files,
+		"index_mode": probe.Options().IndexMode, "live_keys": keys, "source_file_metadata_entries": files,
 		"before_heap_bytes": before.HeapAlloc, "after_heap_bytes": after.HeapAlloc,
 		"complete_index_and_registry_retained_heap_delta_bytes": delta,
 		"complete_index_and_registry_bytes_per_live_key":        bytesPerLiveKey,

@@ -365,7 +365,7 @@ func TestPartialWriteAndCommittedCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantValue(t, db2, "k", "old")
-	active := db2.index["k"].File.Path
+	active := testLoc(t, db2, "k").File.Path
 	end := db2.store.Current.ActiveEnd
 	if err := db2.Close(); err != nil {
 		t.Fatal(err)
@@ -385,7 +385,7 @@ func TestPartialWriteAndCommittedCorruption(t *testing.T) {
 func TestReopenCompatibilityBeforeTailCleanup(t *testing.T) {
 	db := newTestDB(t, testOptions(), nil)
 	mustPut(t, db, "k", strings.Repeat("v", 50))
-	path, active := db.store.Dir, db.index["k"].File.Path
+	path, active := db.store.Dir, testLoc(t, db, "k").File.Path
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +629,7 @@ func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 	mustPut(t, db, "sealed", "first")
 	mustPut(t, db, "active", "second")
 	frontier := db.store.Current
-	sealed := filepath.Base(db.index["sealed"].File.Path)
+	sealed := filepath.Base(testLoc(t, db, "sealed").File.Path)
 	active := storage.DataName(frontier.UUID, frontier.ActiveID)
 	if sealed == active {
 		t.Fatal("fixture did not seal the first segment")
@@ -764,7 +764,7 @@ func TestInitializationFailureNeverInventsAHistory(t *testing.T) {
 				}
 				return
 			}
-			if len(db.index) != 0 {
+			if db.keys.Count() != 0 {
 				t.Fatal("invented initial state")
 			}
 			if err := db.Close(); err != nil {
@@ -886,7 +886,7 @@ func TestOpenCancellationDuringReplayAllowsRetry(t *testing.T) {
 	if err := db.Put([]byte("key"), value); err != nil {
 		t.Fatal(err)
 	}
-	dir, active := db.store.Dir, db.index["key"].File.Path
+	dir, active := db.store.Dir, testLoc(t, db, "key").File.Path
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -965,7 +965,7 @@ func TestRecoveryBoundaryFailureReleasesOwnershipAndPreservesAcknowledgment(t *t
 			t.Run(point+"/"+cause.Error(), func(t *testing.T) {
 				db := newTestDB(t, testOptions(), nil)
 				mustPut(t, db, "k", "acknowledged")
-				dir, path, end := db.store.Dir, db.index["k"].File.Path, db.store.Current.ActiveEnd
+				dir, path, end := db.store.Dir, testLoc(t, db, "k").File.Path, db.store.Current.ActiveEnd
 				if err := db.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -1496,5 +1496,33 @@ func TestLinearizabilityOracleRejectsImpossiblePutResult(t *testing.T) {
 	calls := []observedCall{{kind: "put", value: "v", missing: true, start: 1, end: 2}}
 	if linearizable(calls) {
 		t.Fatal("an impossible Put ErrNotFound response was accepted")
+	}
+}
+
+func TestMissingDeletePrecedesExhaustedCountersAndPreservesBatch(t *testing.T) {
+	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
+		db := newTestDBWithHooks(t, Options{IndexMode: mode}, nil, &Hooks{CleanerStart: make(chan struct{})})
+		mustPut(t, db, "before", "preserved")
+		frontier, stats := db.store.Current, db.Stats()
+		db.store.Current.Sequence = math.MaxUint64
+		db.store.Current.Generation = math.MaxUint64
+		exhausted := db.store.Current
+		if err := db.Delete([]byte("missing")); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("mode %d missing Delete with exhausted counters: %v", mode, err)
+		}
+		keys := [][]byte{[]byte("before"), []byte("before"), []byte("missing")}
+		err := db.BatchDelete(keys)
+		var keyError *BatchKeyError
+		if !errors.Is(err, ErrNotFound) || !errors.As(err, &keyError) || keyError.Index != 2 {
+			t.Fatalf("mode %d missing BatchDelete with exhausted counters: %v", mode, err)
+		}
+		if got := db.Stats(); db.store.Current != exhausted || got.WriteCommits != stats.WriteCommits || got.LiveKeys != stats.LiveKeys || got.LiveRecordBytes != stats.LiveRecordBytes || got.TombstoneBytes != stats.TombstoneBytes {
+			t.Fatalf("mode %d changed metadata after rejected delete, stats %+v", mode, got)
+		}
+		db.store.Current = frontier
+		wantValue(t, db, "before", "preserved")
+		if err := db.Delete([]byte("before")); err != nil {
+			t.Fatalf("mode %d retry: %v", mode, err)
+		}
 	}
 }

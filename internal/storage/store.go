@@ -16,6 +16,7 @@ import (
 
 	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/platform"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
@@ -58,10 +59,11 @@ type File struct {
 	Size                   atomic.Int64
 	refs                   atomic.Int64
 	LiveBytes, DeleteBytes atomic.Int64
+	LiveKeys               atomic.Int64 // index ownership independent of transient read and capture pins
 }
 
 func (f *File) Pin()              { f.refs.Add(1) }
-func (f *File) References() int64 { return f.refs.Load() }
+func (f *File) References() int64 { return f.refs.Load() + f.LiveKeys.Load() }
 
 func (f *File) Unpin() {
 	if f.refs.Add(-1) < 0 {
@@ -94,6 +96,8 @@ type Store struct {
 	retireSyncPending bool
 	// Created reports that this Open published the initial CURRENT.
 	Created bool
+	// MaxValueBytes is the largest live value at indexed Open.
+	MaxValueBytes int64
 }
 
 func DataName(uuid [16]byte, id uint64) string {
@@ -125,7 +129,18 @@ func Open(dir string, cfg Config, fs *IO) (*Store, map[string]Location, error) {
 	return OpenContext(context.Background(), dir, cfg, false, fs)
 }
 
-func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (_ *Store, index map[string]Location, result error) {
+func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (*Store, map[string]Location, error) {
+	return openStore(ctx, dir, cfg, existingOnly, fs, nil)
+}
+
+// OpenIndexed validates and replays selected DATA into a new empty backend.
+// The caller owns the backend and discards it if Open fails.
+func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, backend index.Backend) (*Store, error) {
+	s, _, err := openStore(ctx, dir, cfg, existingOnly, fs, backend)
+	return s, err
+}
+
+func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, backend index.Backend) (_ *Store, legacy map[string]Location, result error) {
 	absolute, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, nil, err
@@ -196,9 +211,17 @@ func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool,
 			return nil, nil, err
 		}
 		s.Created = true
-		return s, make(map[string]Location), nil
+		if backend == nil {
+			legacy = make(map[string]Location)
+		}
+		return s, legacy, nil
 	}
-	image, err := Validate(ctx, absolute)
+	var image *Image
+	if backend == nil {
+		image, err = Validate(ctx, absolute)
+	} else {
+		image, err = validateIndexed(ctx, absolute, backend)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -206,6 +229,7 @@ func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool,
 		return nil, nil, err
 	}
 	s.Current, s.Catalog, s.Manifest, s.Files = image.Current, image.Catalog, image.Manifest, image.Files
+	s.MaxValueBytes = image.MaxValueBytes
 	if err := s.inspectNames(ctx); err != nil {
 		return nil, nil, err
 	}
@@ -271,6 +295,13 @@ func (s *Store) newLog(initialRecords appendData) (*File, *os.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if initialRecords.prepare != nil {
+		if err := initialRecords.prepare(f, format.SegmentHeaderBytes); err != nil {
+			// No file was created and the writer gate still owns the reservation.
+			s.nextID--
+			return nil, nil, &prepareError{err}
+		}
+	}
 	fd, err := f.create(s.Current.UUID, s.IO, "segment", initialRecords)
 	if err != nil {
 		return nil, nil, err
@@ -327,6 +358,10 @@ func (s *Store) Rotate() error {
 func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy func() error) error {
 	file, fd, err := s.newLog(initialRecords)
 	if err != nil {
+		var prepare *prepareError
+		if errors.As(err, &prepare) {
+			return prepare.err
+		}
 		return fault("rotation.segment", publication.NotApplied, true, err)
 	}
 	if healthy != nil {
@@ -368,6 +403,11 @@ func (s *Store) checkSequence(count int) error {
 }
 
 func (s *Store) Append(kind uint8, key, value []byte, healthy func() error) (Location, error) {
+	return s.AppendPrepared(kind, key, value, healthy, nil)
+}
+
+// AppendPrepared supplies the final record location before the first DATA write.
+func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() error, prepare func(Location) error) (Location, error) {
 	if err := s.checkSequence(1); err != nil {
 		return Location{}, err
 	}
@@ -376,6 +416,11 @@ func (s *Store) Append(kind uint8, key, value []byte, healthy func() error) (Loc
 	data := appendData{size: int64(len(b)), writeAt: func(fd *os.File, off int64) error {
 		return s.IO.Write(fd, b, off, "data.write")
 	}}
+	if prepare != nil {
+		data.prepare = func(f *File, off int64) error {
+			return prepare(Location{File: f, Offset: off, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
+		}
+	}
 	file, offset, err := s.appendRecords(data, sequence, healthy)
 	if err != nil {
 		return Location{}, err
@@ -386,6 +431,11 @@ func (s *Store) Append(kind uint8, key, value []byte, healthy func() error) (Loc
 // AppendBatch publishes all records at one frontier. The caller validates the
 // entries and their combined size against a single segment before admission.
 func (s *Store) AppendBatch(kind uint8, entries []Entry, healthy func() error) ([]Location, error) {
+	return s.AppendBatchPrepared(kind, entries, healthy, nil)
+}
+
+// AppendBatchPrepared stages index changes at the same locations used by the append.
+func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() error, prepare func(int, Location) error) ([]Location, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -415,6 +465,17 @@ func (s *Store) AppendBatch(kind uint8, entries []Entry, healthy func() error) (
 		}
 		return w.Flush()
 	}}
+	if prepare != nil {
+		data.prepare = func(f *File, off int64) error {
+			for i, loc := range locations {
+				loc.File, loc.Offset = f, off+loc.Offset
+				if err := prepare(i, loc); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
 	file, offset, err := s.appendRecords(data, locations[len(locations)-1].Sequence, healthy)
 	if err != nil {
 		return nil, err
@@ -426,8 +487,14 @@ func (s *Store) AppendBatch(kind uint8, entries []Entry, healthy func() error) (
 	return locations, nil
 }
 
+type prepareError struct{ err error }
+
+func (e *prepareError) Error() string { return e.err.Error() }
+func (e *prepareError) Unwrap() error { return e.err }
+
 // appendData is written synchronously to either the current or a new segment.
 type appendData struct {
+	prepare func(*File, int64) error
 	size    int64
 	writeAt func(*os.File, int64) error
 }
@@ -439,6 +506,11 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 			return nil, 0, err
 		}
 		return s.Files[s.Current.ActiveID], format.SegmentHeaderBytes, nil
+	}
+	if data.prepare != nil {
+		if err := data.prepare(s.Files[s.Current.ActiveID], offset); err != nil {
+			return nil, 0, err
+		}
 	}
 	if err := data.writeAt(s.active, offset); err != nil {
 		return nil, 0, fault("data.write", publication.NotApplied, true, err)
@@ -551,7 +623,7 @@ func (s *Store) cleanup(ctx context.Context) (removed, pinned int64, result erro
 			manifestID = id
 		}
 		if id, ok := parseID(name, "DATA", s.Current.UUID); ok && !selected[id] {
-			if f := s.Files[id]; f != nil && f.refs.Load() != 0 {
+			if f := s.Files[id]; f != nil && f.References() != 0 {
 				if s.retired == nil {
 					s.retired = make(map[uint64]*File)
 				}

@@ -11,6 +11,7 @@ import (
 	"slices"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
@@ -24,11 +25,6 @@ type CleanSegment struct {
 	uuid     [16]byte
 	cutoff   uint64
 	created  bool
-}
-
-type Relocation struct {
-	Key      string
-	Old, New Location
 }
 
 // OutputBytes is the logical length of the finished replacement DATA file.
@@ -112,26 +108,30 @@ func (w pacedOutput) Write(b []byte) (int, error) {
 
 // Copy streams each source in catalog order into the same output. Every
 // tombstone is retained until the next complete checkpoint.
-func (c *CleanSegment) Copy(ctx context.Context, fs *IO, yield func() error, keep func(string, Location) bool) (moves []Relocation, result error) {
+func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, history index.Backend, yield func() error, keep func(string, Location) (bool, error)) (result error) {
+	moves.fs = fs
 	writer := &outputWriter{fs: fs, offset: format.SegmentHeaderBytes, point: "clean.copy"}
 	defer func() {
 		if writer.fd != nil {
 			result = errors.Join(result, writer.fd.Close())
 		}
 	}()
-	var snapshotKeys map[string]struct{}
-	if c.output.Kind == format.Snapshot {
-		snapshotKeys = make(map[string]struct{})
-	}
+	replay := replayBuilder{backend: history}
+	defer replay.abort()
 	choose := func(r format.Record, key string, old Location) (io.Writer, error) {
-		if snapshotKeys != nil {
-			if _, exists := snapshotKeys[key]; exists {
-				return nil, fmt.Errorf("%w: duplicate snapshot key", ErrCorrupt)
+		if c.output.Kind == format.Snapshot {
+			if err := replay.apply(old.File, old.Offset, r, key); err != nil {
+				return nil, err
 			}
-			snapshotKeys[key] = struct{}{}
 		}
-		if r.Kind == format.Put && !keep(key, old) {
-			return nil, nil
+		if r.Kind == format.Put {
+			retain, err := keep(key, old)
+			if err != nil {
+				return nil, err
+			}
+			if !retain {
+				return nil, nil
+			}
 		}
 		if writer.fd == nil {
 			fd, err := os.OpenFile(c.output.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -147,7 +147,9 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, yield func() error, kee
 		if r.Kind == format.Put {
 			next := old
 			next.File, next.Offset = c.output, writer.offset
-			moves = append(moves, Relocation{key, old, next})
+			if err := moves.append(key, old, next); err != nil {
+				return nil, err
+			}
 		} else {
 			c.output.DeleteBytes.Add(r.Bytes())
 		}
@@ -157,16 +159,16 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, yield func() error, kee
 	buf := make([]byte, 32<<10)
 	for _, source := range c.sources {
 		if err := c.scanSource(ctx, fs, source, buf, yield, choose); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if writer.fd != nil {
 		if err := fs.Sync(writer.fd, "clean.output.sync"); err != nil {
-			return nil, err
+			return err
 		}
 		c.output.Size.Store(writer.offset)
 	}
-	return moves, nil
+	return moves.seal()
 }
 
 // Validate each file with its own original kind and sequence interval before

@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/platform"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
@@ -75,7 +76,11 @@ func cleanStage(fs *IO, stage, point string) error {
 	return fs.Do(point+".cleanup", func() error { return os.RemoveAll(stage) })
 }
 
-func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error) (returned error) {
+func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error) error {
+	return BackupWithIndex(ctx, capture, cfg, fs, destination, yield, nil)
+}
+
+func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error, newIndex func() (index.Backend, error)) (returned error) {
 	target, err := destinationPath(filepath.Dir(capture.Files[0].File.Path), destination)
 	if err != nil {
 		return err
@@ -107,16 +112,57 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 	}
 	buffer := make([]byte, 32<<10)
 	stream := &backupStream{reader: bufio.NewReaderSize(nil, len(buffer)), source: backupReaderAt{fs: fs, yield: yield}}
-	liveKeys := make(map[string]struct{})
+	// Validate key transitions while streaming the captured records into the staged copy.
+	var visit recordVisitor
+	var backend index.Backend
+	var builder replayBuilder
+	var window *keyWindow
+	if newIndex != nil {
+		backend, err = newIndex()
+		if err != nil {
+			return &IndexWorkError{Err: err}
+		}
+		builder = newReplayBuilder(ctx, backend, capture.Catalog.PrunedThrough)
+		defer func() {
+			if backend != nil {
+				builder.abort()
+				returned = errors.Join(returned, backend.Close())
+			}
+		}()
+		visit = builder.apply
+	} else {
+		window = newKeyWindow("", verifyWindowBytes)
+		visit = func(f *File, _ int64, r format.Record, key string) error {
+			if err := window.apply(f.Kind, capture.Catalog.PrunedThrough, r, key); err != nil {
+				return &SourceError{Err: err}
+			}
+			return nil
+		}
+	}
 	for _, captured := range capture.Files {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		entry, err := copySegment(ctx, capture, captured, liveKeys, stage, fs, stream, buffer)
+		entry, err := copySegment(ctx, capture, captured, visit, stage, fs, stream, buffer)
 		if err != nil {
 			return err
 		}
 		meta.Files = append(meta.Files, entry)
+	}
+	if backend != nil {
+		if err := builder.finishValidation(); err != nil {
+			return err
+		}
+		builder.abort()
+		err = backend.Close()
+		backend = nil
+		if err != nil {
+			return &IndexWorkError{Err: err}
+		}
+	} else if window.more {
+		if _, err := validateReadOnly(ctx, stage, verifyWindowBytes); err != nil {
+			return err
+		}
 	}
 	if err := fs.NewFile(filepath.Join(stage, "BACKUP"), format.EncodeBackup(meta), "backup.manifest"); err != nil {
 		return err
@@ -161,7 +207,7 @@ type backupStream struct {
 	source backupReaderAt
 }
 
-func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, liveKeys map[string]struct{}, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
+func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, visit recordVisitor, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
 	src, header, _, err := openSelected(captured.File.Path, capture.Current.UUID, captured.Entry, captured.File.ID == capture.Current.ActiveID)
 	if err != nil {
 		return entry, &SourceError{Err: err}
@@ -201,14 +247,8 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, l
 		if err := span.Accept(r); err != nil {
 			return entry, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)}
 		}
-		_, present := liveKeys[key]
-		if err := validateKey(captured.File.Kind, r, present, capture.Catalog.PrunedThrough); err != nil {
-			return entry, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)}
-		}
-		if r.Kind == format.Delete {
-			delete(liveKeys, key)
-		} else {
-			liveKeys[key] = struct{}{}
+		if err := visit(captured.File, offset, r, key); err != nil {
+			return entry, fmt.Errorf("%s: record at offset %d: %w", name, offset, err)
 		}
 		offset += r.Bytes()
 	}
@@ -234,7 +274,13 @@ func backupSourcePath(ctx context.Context, source string) (string, error) {
 	return filepath.EvalSymlinks(absolute)
 }
 
-func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) (returned error) {
+func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) error {
+	return RestoreWithIndex(ctx, source, destination, cfg, fs, nil)
+}
+
+// RestoreWithIndex can spill validation state for large images into the
+// destination parent. Each verification builds an independent private index.
+func RestoreWithIndex(ctx context.Context, source, destination string, cfg Config, fs *IO, spill func(string) (index.Backend, error)) (returned error) {
 	source, err := backupSourcePath(ctx, source)
 	if err != nil {
 		return err
@@ -243,8 +289,14 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err != nil {
 		return err
 	}
+	var verify imageVerifier
+	if spill != nil {
+		verify = func(ctx context.Context, dir string) (*Image, error) {
+			return validateWindows(ctx, dir, verifyWindowBytes, func() (index.Backend, error) { return spill(filepath.Dir(target)) })
+		}
+	}
 	buffer := make([]byte, 32<<10)
-	backup, err := verifyBackup(ctx, source, buffer)
+	backup, err := verifyBackup(ctx, source, buffer, verify)
 	if err != nil {
 		return err
 	}
@@ -266,7 +318,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 			return fmt.Errorf("%s: %w", f.Name, err)
 		}
 	}
-	image, err := validateBackupImage(ctx, stage)
+	image, err := validateBackupImage(ctx, stage, verify)
 	if err != nil {
 		return err
 	}
@@ -299,11 +351,48 @@ func VerifyBackup(ctx context.Context, dir string) (BackupInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return BackupInfo{}, err
 	}
-	backup, err := verifyBackup(ctx, source, make([]byte, 32<<10))
+	backup, err := verifyBackup(ctx, source, make([]byte, 32<<10), nil)
 	return backup.info, err
 }
 
-func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBackup, error) {
+// VerifyBackupWithIndex places its optional disposable index in an existing
+// caller-selected directory outside the immutable backup.
+func VerifyBackupWithIndex(ctx context.Context, dir, scratch string, newIndex func(string) (index.Backend, error)) (BackupInfo, error) {
+	source, err := backupSourcePath(ctx, dir)
+	if err != nil {
+		return BackupInfo{}, err
+	}
+	if scratch == "" {
+		return BackupInfo{}, fmt.Errorf("storage: empty verification scratch directory: %w", os.ErrInvalid)
+	}
+	scratch, err = backupSourcePath(ctx, scratch)
+	if err != nil {
+		return BackupInfo{}, err
+	}
+	relative, err := filepath.Rel(source, scratch)
+	if err != nil {
+		return BackupInfo{}, err
+	}
+	if relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return BackupInfo{}, fmt.Errorf("storage: verification scratch directory must be outside source: %w", os.ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return BackupInfo{}, err
+	}
+	backend, err := newIndex(scratch)
+	if err != nil {
+		return BackupInfo{}, err
+	}
+	backup, verifyErr := verifyBackup(ctx, source, make([]byte, 32<<10), func(ctx context.Context, dir string) (*Image, error) { return validateIndexed(ctx, dir, backend) })
+	if err := errors.Join(verifyErr, backend.Close()); err != nil {
+		return BackupInfo{}, err
+	}
+	return backup.info, nil
+}
+
+type imageVerifier func(context.Context, string) (*Image, error)
+
+func verifyBackup(ctx context.Context, source string, buffer []byte, verify imageVerifier) (verifiedBackup, error) {
 	b, err := ReadRegular(filepath.Join(source, "BACKUP"))
 	if err != nil {
 		return verifiedBackup{}, requiredFileError("BACKUP", err)
@@ -341,7 +430,7 @@ func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBa
 	if len(entries) != len(files)+1 {
 		return verifiedBackup{}, fmt.Errorf("%w: missing BACKUP", ErrCorrupt)
 	}
-	image, err := validateBackupImage(ctx, source)
+	image, err := validateBackupImage(ctx, source, verify)
 	if err != nil {
 		return verifiedBackup{}, err
 	}
@@ -370,7 +459,7 @@ func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBa
 	return verifiedBackup{
 		files: meta.Files,
 		info: BackupInfo{
-			DatabaseID: image.Current.UUID, Sequence: image.Current.Sequence, LiveKeys: uint64(len(image.Index)),
+			DatabaseID: image.Current.UUID, Sequence: image.Current.Sequence, LiveKeys: image.LiveKeys,
 			Required: image.Required,
 		},
 	}, nil
@@ -378,8 +467,14 @@ func verifyBackup(ctx context.Context, source string, buffer []byte) (verifiedBa
 
 // Once BACKUP is recognized, every selected object must have the canonical
 // signature. An incompatible inner CURRENT is corruption of this backup.
-func validateBackupImage(ctx context.Context, dir string) (*Image, error) {
-	img, err := Validate(ctx, dir)
+func validateBackupImage(ctx context.Context, dir string, verify imageVerifier) (*Image, error) {
+	var img *Image
+	var err error
+	if verify != nil {
+		img, err = verify(ctx, dir)
+	} else {
+		img, err = validateReadOnly(ctx, dir, verifyWindowBytes)
+	}
 	if errors.Is(err, format.ErrUnsupported) {
 		return nil, fmt.Errorf("%w: backup selected an incompatible CURRENT", ErrCorrupt)
 	}

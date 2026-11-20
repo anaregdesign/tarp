@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -33,11 +34,39 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 		}
 	}()
 
-	moves, err := work.Copy(ctx, db.store.IO, func() error { return db.cleanYield(ctx) }, func(key string, old storage.Location) bool {
-		db.state.Lock()
-		defer db.state.Unlock()
-		return db.index[key] == old
-	})
+	var moves storage.Relocations
+	defer func() {
+		if closeErr := moves.Close(); closeErr != nil {
+			if result != nil {
+				// Preserve the primary operation's publication outcome.
+				result = errors.Join(result, closeErr)
+			} else {
+				result = &OpError{Operation: "clean", Phase: "scratch cleanup", Outcome: Committed, Err: publicCause(closeErr)}
+			}
+		}
+	}()
+	err = func() (result error) {
+		var history index.Backend
+		if entries[0].Kind == format.Snapshot {
+			var err error
+			history, err = db.newIndex()
+			if err != nil {
+				return &storage.IndexWorkError{Err: err}
+			}
+			defer func() {
+				if err := history.Close(); err != nil {
+					result = errors.Join(result, &storage.IndexWorkError{Err: err})
+				}
+			}()
+		}
+		return work.Copy(ctx, db.store.IO, &moves, history, func() error { return db.cleanYield(ctx) }, func(key string, old storage.Location) (bool, error) {
+			current, exists, err := db.lookupLocation(key)
+			if err != nil {
+				return false, &storage.SourceError{Err: err}
+			}
+			return exists && current == old, nil
+		})
+	}()
 	if err != nil {
 		db.compactFailure(err)
 		return operationError("clean", "copy", err)
@@ -92,7 +121,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	db.replaceDataStats(oldData, newData)
 	db.writer.Unlock()
 
-	db.relocate(moves, "clean.remap:after")
+	db.relocate(&moves, "clean.remap:after")
 	if err := db.health(); err != nil {
 		return &OpError{Operation: "clean", Phase: "post-publication", Outcome: Committed, Err: err}
 	}

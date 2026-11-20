@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
@@ -34,10 +35,9 @@ func (s *Store) ReserveSnapshotFile() (*File, error) {
 // Entries describes completed snapshot files for checkpoint size accounting.
 func (c *Checkpoint) Entries() []format.File { return c.entries }
 
-// Copy streams the live records into target-sized files and fills each new
-// location. Only reserve needs the caller's writer gate, once per output.
-func (c *Checkpoint) Copy(ctx context.Context, moves []Relocation, reserve func() (*File, error)) (result error) {
-	var reader snapshotReader
+// Copy validates the captured history, copies live records in physical order and
+// records their new addresses in moves. Only reserve takes the writer gate.
+func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*File, error)) (result error) {
 	var file *File
 	var fd *os.File
 	var offset int64
@@ -56,20 +56,17 @@ func (c *Checkpoint) Copy(ctx context.Context, moves []Relocation, reserve func(
 		return nil
 	}
 	defer func() {
-		if err := reader.close(); err != nil {
-			result = errors.Join(result, fault("source-close", publication.NotApplied, false, err))
-		}
 		if fd != nil {
 			result = errors.Join(result, fd.Close())
 		}
 	}()
 	buffer := make([]byte, 32<<10)
-	for i := range moves {
-		move := &moves[i]
+	moves.fs = fs
+	err := c.capture.replayLive(ctx, fs, history, live, func(src *os.File, key string, old Location) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if fd == nil || offset > c.store.Config.TargetSegmentBytes-move.Old.Bytes {
+		if fd == nil || offset > c.store.Config.TargetSegmentBytes-old.Bytes {
 			if err := finish(); err != nil {
 				return err
 			}
@@ -85,54 +82,49 @@ func (c *Checkpoint) Copy(ctx context.Context, moves []Relocation, reserve func(
 			c.files = append(c.files, file)
 			offset = format.SegmentHeaderBytes
 		}
-		if err := reader.copyRecord(ctx, fs, move.Old, move.Key, fd, offset, buffer); err != nil {
+		if err := copyCheckpointRecord(ctx, fs, src, old, key, fd, offset, buffer); err != nil {
 			return err
 		}
-		move.New = move.Old
-		move.New.File, move.New.Offset = file, offset
-		offset += move.Old.Bytes
-	}
-	if err := reader.close(); err != nil {
-		return fault("source-close", publication.NotApplied, false, err)
-	}
-	return finish()
-}
-
-// snapshotReader reuses a single source descriptor while copying a pinned
-// checkpoint in physical read order. Close it before publishing the result.
-type snapshotReader struct {
-	source *File
-	fd     *os.File
-}
-
-func (r *snapshotReader) close() error {
-	if r.fd == nil {
-		return nil
-	}
-	err := r.fd.Close()
-	r.source, r.fd = nil, nil
+		next := old
+		next.File, next.Offset = file, offset
+		offset += old.Bytes
+		return moves.append(key, old, next)
+	})
 	if err != nil {
-		return &SourceError{err}
+		return err
 	}
-	return nil
-}
-
-func (r *snapshotReader) copyRecord(ctx context.Context, fs *IO, old Location, key string, dst *os.File, offset int64, buffer []byte) error {
-	if r.source != old.File {
-		if err := r.close(); err != nil {
+	if err := finish(); err != nil {
+		return err
+	}
+	if err := moves.seal(); err != nil {
+		return err
+	}
+	// Verify the complete set against independently replayed DATA before the
+	// new checkpoint is allowed to replace its sources. An inconsistent derived
+	// index must never suppress the only surviving authoritative copy of a Put.
+	if moves.count != history.Count() {
+		return fmt.Errorf("%w: checkpoint index live count disagrees with replay", ErrCorrupt)
+	}
+	tx := history.Begin()
+	defer tx.Abort()
+	return moves.Each(func(key string, old, _ Location) error {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		fd, err := OpenRegular(old.File.Path)
+		loc, exists, err := tx.Lookup(key)
 		if err != nil {
-			return &SourceError{err}
+			return &IndexWorkError{Err: err}
 		}
-		r.source, r.fd = old.File, fd
-		if err := fs.Check("compact.source.open:after"); err != nil {
-			return &SourceError{err}
+		if !exists || loc.FileID != old.File.ID || loc.Offset != old.Offset || loc.Sequence != old.Sequence {
+			return fmt.Errorf("%w: checkpoint index location disagrees with replay", ErrCorrupt)
 		}
-	}
+		return nil
+	})
+}
+
+func copyCheckpointRecord(ctx context.Context, fs *IO, src *os.File, old Location, key string, dst *os.File, offset int64, buffer []byte) error {
 	writer := &outputWriter{fs: fs, fd: dst, offset: offset, point: "compact.write"}
-	record, err := format.CopyRecord(ctx, sourceReader{r.fd}, writer, old.Offset, old.Bytes,
+	record, err := format.CopyRecord(ctx, sourceReader{src}, writer, old.Offset, old.Bytes,
 		&format.Identity{Key: key, Sequence: old.Sequence}, buffer)
 	if err == nil {
 		if record.Bytes() != old.Bytes {

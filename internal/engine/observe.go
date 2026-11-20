@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"strings"
+
 	"github.com/anaregdesign/tarp/internal/cache"
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -32,11 +35,11 @@ func (o Observer) Frontier() format.Frontier {
 func (o Observer) LiveKeys() int {
 	o.db.state.Lock()
 	defer o.db.state.Unlock()
-	return len(o.db.index)
+	return int(o.db.stats.LiveKeys)
 }
 
 // Store observes a consistent catalog, frontier and file registry under the
-// writer gate. The callback may nest State. It must not mutate store state
+// writer gate. The callback may sample Stats. It must not mutate store state
 // or retain live references after returning.
 func (o Observer) Store(inspect func(*storage.Store)) {
 	o.db.writer.Lock()
@@ -44,12 +47,46 @@ func (o Observer) Store(inspect func(*storage.Store)) {
 	inspect(o.db.store)
 }
 
-// State observes the index and cache under the state lock. The callback may
-// probe LRU hits. It must not change the index or retain live references.
-func (o Observer) State(inspect func(map[string]storage.Location, *cache.Cache)) {
+// Cache runs a Value LRU measurement while holding the usual state lock.
+func (o Observer) Cache(inspect func(*cache.Cache)) {
 	o.db.state.Lock()
 	defer o.db.state.Unlock()
-	inspect(o.db.index, o.db.cache)
+	inspect(o.db.cache)
+}
+
+// IndexMetrics observes the backend's own counters without enumerating keys.
+func (o Observer) IndexMetrics() index.Metrics {
+	if m, ok := o.db.keys.(index.Meter); ok {
+		return m.Metrics()
+	}
+	return index.Metrics{}
+}
+
+// CloneMemoryIndex reproduces the historical clone-and-GC experiment on the
+// actual representation of the memory backend. Other modes return nil.
+func (o Observer) CloneMemoryIndex() map[string]index.Address {
+	o.db.writer.Lock()
+	defer o.db.writer.Unlock()
+	entries := o.memoryEntries()
+	if entries == nil {
+		return nil
+	}
+	copied := make(map[string]index.Address, len(entries))
+	for key, addr := range entries {
+		copied[strings.Clone(key)] = addr
+	}
+	return copied
+}
+
+// memoryEntries is observed only with the writer gate held or after Close.
+func (o Observer) memoryEntries() map[string]index.Address {
+	m, ok := o.db.keys.(interface {
+		RetainedEntries() map[string]index.Address
+	})
+	if !ok {
+		return nil
+	}
+	return m.RetainedEntries()
 }
 
 func (o Observer) ClearCache() {
@@ -58,17 +95,16 @@ func (o Observer) ClearCache() {
 	o.db.cache.Clear()
 }
 
-// CloseAndRetainIndex transfers ownership of the actual index and file
-// registry to a heap probe. Close joins the worker and releases pins and open
-// handles before the probe receives either map.
-func (o Observer) CloseAndRetainIndex() (map[string]storage.Location, map[uint64]*storage.File, error) {
-	o.db.state.Lock()
-	index := o.db.index
-	o.db.state.Unlock()
+// CloseAndRetainMemoryIndex transfers the memory index and file registry to
+// the heap experiment. The measurement coordinates Close with all other users.
+func (o Observer) CloseAndRetainMemoryIndex() (map[string]index.Address, map[uint64]*storage.File, error) {
+	o.db.writer.Lock()
+	entries := o.memoryEntries()
+	o.db.writer.Unlock()
 	if err := o.db.Close(); err != nil {
 		return nil, nil, err
 	}
 	files := o.db.store.Files
 	o.db.store.Files = nil
-	return index, files, nil
+	return entries, files, nil
 }

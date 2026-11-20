@@ -43,7 +43,6 @@ func (db *DB) ReadStats(s *Stats) {
 func (db *DB) readStatsLocked(s *Stats) {
 	*s = db.stats
 	if db.cache != nil {
-		s.LiveKeys = uint64(len(db.index))
 		s.Cache.UsedBytes = uint64(db.cache.Bytes())
 		s.Cache.LimitBytes = uint64(db.opts.CacheBytes)
 		s.Cache.Evictions = db.cache.Evictions()

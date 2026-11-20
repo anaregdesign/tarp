@@ -459,7 +459,7 @@ func TestCheckpointCopiesInSourceOrderAndReusesReaders(t *testing.T) {
 	}
 	var previous storage.Location
 	for _, key := range []string{"c", "d", "e", "f", "a", "b"} {
-		loc := db.index[key]
+		loc := testLoc(t, db, key)
 		if previous.File != nil && (loc.File.ID < previous.File.ID ||
 			loc.File.ID == previous.File.ID && loc.Offset <= previous.Offset) {
 			t.Fatalf("key %q copied out of source order", key)
@@ -516,6 +516,15 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 }
 
 func TestCompactionConcurrentTailWins(t *testing.T) {
+	opts := testOptions()
+	opts.IndexMode = IndexMemory
+	t.Run("memory", func(t *testing.T) { testCompactionConcurrentTail(t, opts) })
+	opts.IndexMode = IndexBTree
+	t.Run("btree", func(t *testing.T) { testCompactionConcurrentTail(t, opts) })
+}
+
+func testCompactionConcurrentTail(t *testing.T, opts Options) {
+	t.Helper()
 	var armed atomic.Bool
 	started, release := make(chan struct{}), make(chan struct{})
 	ioHooks := &storage.IO{Hook: func(p string) error {
@@ -531,7 +540,7 @@ func TestCompactionConcurrentTailWins(t *testing.T) {
 		}
 		return nil
 	}}
-	db := newTestDBWithHooks(t, testOptions(), ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 	mustPut(t, db, "a", "old")
 	mustPut(t, db, "b", "deleted")
 	armed.Store(true)
@@ -552,16 +561,16 @@ func TestCompactionConcurrentTailWins(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if loc, ok := db.index["a"]; !ok || loc.File.Kind != format.Log {
+	if loc, ok := testLookup(t, db, "a"); !ok || loc.File.Kind != format.Log {
 		t.Fatalf("concurrent update relocated into checkpoint: %+v", loc)
 	}
-	if _, exists := db.index["b"]; exists {
+	if _, exists := testLookup(t, db, "b"); exists {
 		t.Fatal("concurrent delete was relocated into the live index")
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(db.store.Dir, testOptions())
+	reopened, err := Open(db.store.Dir, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +635,7 @@ func TestMaintenanceSourceCorruptionFailsStop(t *testing.T) {
 		t.Run(fmt.Sprint(compact), func(t *testing.T) {
 			db := newTestDB(t, testOptions(), nil)
 			mustPut(t, db, "a", "cached")
-			path := db.index["a"].File.Path
+			path := testLoc(t, db, "a").File.Path
 			f, err := os.OpenFile(path, os.O_RDWR, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -651,4 +660,28 @@ func TestMaintenanceSourceCorruptionFailsStop(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompactScratchFailureLeavesSourceHealthy(t *testing.T) {
+	var armed atomic.Bool
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "index.moves.flush:before" && armed.CompareAndSwap(true, false) {
+			return syscall.EIO
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, testOptions(), fs, &Hooks{CleanerStart: make(chan struct{})})
+	mustPut(t, db, "k", "source")
+	armed.Store(true)
+	_, err := db.Compact(t.Context())
+	var op *OpError
+	if !errors.Is(err, syscall.EIO) || !errors.As(err, &op) || op.Outcome != NotApplied {
+		t.Fatalf("scratch failure: %v", err)
+	}
+	wantValue(t, db, "k", "source")
+	mustPut(t, db, "k", "retry")
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	wantValue(t, db, "k", "retry")
 }

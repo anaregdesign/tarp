@@ -37,7 +37,7 @@ bytes held by pins, use `MaintenanceStatus().PinnedBytes`.
 | `MissingKeys` | `tarp_missing_keys_total` | Distinct keys per read call absent from the live index |
 | `BatchGetDuplicateInputs` | `tarp_batch_get_duplicate_inputs_total` | Input positions beyond the first for each encoded key in a captured BatchGet |
 | `Cache.Evictions` | `tarp_cache_evictions_total` | LRU entries evicted to meet the byte limit |
-| `WriteCommits` | `tarp_write_commits_total` | Nonempty foreground write calls published to the in-memory index |
+| `WriteCommits` | `tarp_write_commits_total` | Nonempty foreground write calls published to the selected key index |
 | `WrittenRecords` | `tarp_written_records_total` | Put and Delete records published by those calls |
 
 Get counts its first lookup once, including when a concurrent update requires

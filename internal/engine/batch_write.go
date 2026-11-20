@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"hash/maphash"
 	"math"
 	"math/bits"
@@ -191,35 +192,54 @@ func (b PreparedBatch) apply() error {
 	op := "batch-put"
 	if kind == format.Delete {
 		op = "batch-delete"
-		db.state.Lock()
-		for i, record := range records {
-			if _, ok := db.index[string(record.Key)]; !ok {
-				db.state.Unlock()
-				if prefix := len(records) - len(b.deleteInputs); i >= prefix {
-					i = int(b.deleteInputs[i-prefix])
+	}
+	tx := db.keys.Begin()
+	finished := false
+	defer func() {
+		if !finished {
+			tx.Abort()
+		}
+	}()
+	previous := make([]storage.Location, len(records))
+	owned := make([]ownedMutation, len(records))
+	prepare := func(i int, loc storage.Location) error {
+		owned[i].key = string(records[i].Key)
+		old, err := db.stage(tx, kind, owned[i].key, loc)
+		previous[i] = old
+		return b.indexMutationError(i, err)
+	}
+	if kind == format.Delete {
+		for i := range records {
+			if err := prepare(i, storage.Location{}); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return err
 				}
-				return &BatchKeyError{Operation: "BatchDelete", Index: i, Err: ErrNotFound}
+				return operationError(op, "index-prepare", err)
 			}
 		}
-		db.state.Unlock()
+		prepare = nil
 	}
-	locations, err := db.store.AppendBatch(kind, records, db.health)
+	locations, err := db.store.AppendBatchPrepared(kind, records, db.health, prepare)
 	if err != nil {
 		db.storageFailure(err)
 		return operationError(op, "commit", err)
 	}
-	owned := make([]ownedMutation, len(records))
+
 	for i, record := range records {
-		owned[i] = db.ownMutation(kind, record.Key, record.Value)
+		db.copyPutValue(kind, &owned[i], record.Value)
 	}
 
+	db.indexGate.Lock()
+	defer db.indexGate.Unlock()
 	db.state.Lock()
 	defer db.state.Unlock()
 	if err := db.health(); err != nil {
 		return &OpError{Operation: op, Phase: "memory-publication", Outcome: Committed, Err: err}
 	}
+	tx.Commit()
+	finished = true
 	for i, entry := range owned {
-		if db.applyMutation(kind, entry, locations[i]) {
+		if db.applyMutation(kind, entry, locations[i], previous[i]) {
 			invalidatedSealed = true
 		}
 	}

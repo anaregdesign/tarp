@@ -8,11 +8,24 @@ import (
 	"github.com/anaregdesign/tarp/internal/format"
 )
 
+// IndexMode selects a derived key index for this open handle.
+type IndexMode uint8
+
+const (
+	IndexDefault IndexMode = iota
+	IndexMemory
+	IndexBTree
+)
+
+const defaultIndexBudget = 16 << 20
+
 // Options uses zero for each default, never to disable caching or syncing.
 // Bounds apply to encoded records and logically charged cache entries.
 type Options struct {
-	CacheBytes     int64
-	MaxRecordBytes int64
+	IndexMode        IndexMode
+	IndexMemoryBytes int64
+	CacheBytes       int64
+	MaxRecordBytes   int64
 	// TargetSegmentBytes sizes new logs and checkpoints and caps repack input bytes.
 	// Zero selects 4 MiB. The target grows to fit a header and one maximum record.
 	TargetSegmentBytes int64
@@ -52,6 +65,24 @@ func (l RestoreLimits) normalized() (RestoreLimits, error) {
 }
 
 func (o Options) normalized() (Options, error) {
+	if o.IndexMode == IndexDefault {
+		o.IndexMode = IndexMemory
+	}
+	switch o.IndexMode {
+	case IndexMemory:
+		if o.IndexMemoryBytes != 0 {
+			return o, fmt.Errorf("%w: IndexMemoryBytes requires B+tree mode", ErrInvalidOptions)
+		}
+	case IndexBTree:
+		if o.IndexMemoryBytes == 0 {
+			o.IndexMemoryBytes = defaultIndexBudget
+		}
+		if o.IndexMemoryBytes < 1<<20 {
+			return o, fmt.Errorf("%w: index budget must be at least 1 MiB", ErrInvalidOptions)
+		}
+	default:
+		return o, fmt.Errorf("%w: unknown index mode %d", ErrInvalidOptions, o.IndexMode)
+	}
 	if o.ReadFileHandles < 0 || o.TargetSegmentBytes < 0 || o.BatchReadConcurrency < 0 || o.MaxBatchResultBytes < 0 {
 		return o, fmt.Errorf("%w: negative setting", ErrInvalidOptions)
 	}

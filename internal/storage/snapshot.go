@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,9 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 )
 
 type CapturedFile struct {
@@ -93,50 +92,59 @@ func (w *outputWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// Replay validates the entire captured image before scheduling the live records
-// in physical read order. The same slice later carries the index relocations.
-func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error) {
-	index := make(map[string]Location)
+// replayLive validates the captured record history and visits the live Puts in
+// source file/offset order. The index view was captured with this layout under
+// the writer gate. The private builder independently validates key semantics,
+// including historical records that are absent from the final view.
+func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend, live index.View, visit func(*os.File, string, Location) error) error {
+	replay := newReplayBuilder(ctx, history, c.Catalog.PrunedThrough)
+	defer replay.abort()
 	for _, captured := range c.Files {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		fd, _, _, err := openSelected(captured.File.Path, c.Current.UUID, captured.Entry, captured.File.ID == c.Current.ActiveID)
 		if err != nil {
-			return nil, &SourceError{Err: err}
+			return &SourceError{Err: err}
 		}
+		copying := false
 		err = fs.Do("compact.scan", func() error {
-			span := format.NewRecordRange(captured.Entry, c.Catalog.Cutoff)
-			err := format.Scan(ctx, sourceReader{fd}, captured.Entry.Bytes, func(offset int64, r format.Record, key string) error {
-				if err := span.Accept(r); err != nil {
+			return scanSelectedRecords(ctx, sourceReader{fd}, captured.Entry, c.Catalog.Cutoff, func(off int64, r format.Record, key string) error {
+				if err := replay.apply(captured.File, off, r, key); err != nil {
 					return err
 				}
-				return applyRecord(index, captured.File, c.Catalog.PrunedThrough, offset, r, key)
+				if r.Kind != format.Put {
+					return nil
+				}
+				loc, exists, err := live.Lookup(key)
+				if err != nil {
+					return &SourceError{Err: err}
+				}
+				if !exists || loc.FileID != captured.File.ID || loc.Offset != off {
+					return nil
+				}
+				if loc.Bytes != r.Bytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
+					return fmt.Errorf("%w: index disagrees with captured DATA", ErrCorrupt)
+				}
+				if !copying {
+					// The same source descriptor now serves physical record copies.
+					if err := fs.Check("compact.source.open:after"); err != nil {
+						return &SourceError{Err: err}
+					}
+					copying = true
+				}
+				return visit(fd, key, Location{File: captured.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
 			})
-			if err != nil {
-				return err
-			}
-			return span.Finish()
 		})
-		if err = errors.Join(err, fd.Close()); err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Base(captured.File.Path), err)
+		if closeErr := fd.Close(); closeErr != nil {
+			err = errors.Join(err, &SourceError{Err: closeErr})
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(captured.File.Path), err)
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if err := replay.finish(); err != nil {
+		return err
 	}
-	moves := make([]Relocation, 0, len(index))
-	for key, loc := range index {
-		moves = append(moves, Relocation{Key: key, Old: loc})
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	slices.SortFunc(moves, func(a, b Relocation) int {
-		if a.Old.File != b.Old.File {
-			return cmp.Compare(a.Old.File.ID, b.Old.File.ID)
-		}
-		return cmp.Compare(a.Old.Offset, b.Old.Offset)
-	})
-	return moves, nil
+	return ctx.Err()
 }

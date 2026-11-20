@@ -9,8 +9,8 @@ import (
 )
 
 // Keys yields the live keys in unspecified order. Each iteration captures a
-// fresh point-in-time snapshot of the in-memory index. Capture takes O(live
-// keys) time and memory. It performs no DATA reads and pins no files.
+// fresh point-in-time snapshot. Memory mode copies the live index; B+tree
+// mode captures a root and streams its pages. Neither mode reads DATA.
 // Each returned key belongs to the caller. The loop body may call any DB method,
 // including Close. An error is yielded once with a nil key and ends iteration.
 func (db *DB) Keys(ctx context.Context) iter.Seq2[[]byte, error] {
