@@ -36,7 +36,7 @@ func (p *packed) add(c cell) bool {
 	if p.kind == branch {
 		sz += 8
 	} else {
-		sz += 40
+		sz += addressSize
 	}
 	first := c.key.inline
 	if len(p.cells) > 0 {

@@ -44,6 +44,25 @@ func (x *transaction) write(n node) (uint64, error) {
 	}
 	return id, x.tree.p.write(id, n.encode(id), x.gen)
 }
+
+// An overwrite changes the leaf address and, on its COW path, child IDs.
+// The caller patches a copy so every page buffer returned by the pager
+// remains immutable, including buffers for evicted private pages.
+func (x *transaction) writePatched(id uint64, p *page) (replacement, error) {
+	if !x.tree.p.private(id, x.gen) {
+		if err := x.retire(id); err != nil {
+			return replacement{}, err
+		}
+		next, err := x.alloc()
+		if err != nil {
+			return replacement{}, err
+		}
+		id = next
+		p.initialize(p[4], id)
+	}
+	p.seal()
+	return replacement{left: id}, x.tree.p.write(id, p, x.gen)
+}
 func (x *transaction) key(key string) (keyRef, error) {
 	ref := keyRef{inline: key, length: uint64(len(key))}
 	if ref.length > x.tree.p.maxKey.Load() {
@@ -168,25 +187,30 @@ func (x *transaction) update(id uint64, edit *mutation, depth int) (replacement,
 		if edit.Delete && !found {
 			return replacement{left: id}, nil
 		}
+		if found && !edit.Delete {
+			old, err := p.raw(slot)
+			if err != nil {
+				return replacement{}, &index.LookupError{Err: err}
+			}
+			edit.previous, edit.existed = old.address, true
+			updated := *p
+			end := p.cellEnd(slot)
+			putAddress(updated[end-addressSize:end], edit.Address)
+			return x.writePatched(id, &updated)
+		}
 		if id != 0 {
 			n = p.decode()
 		} else {
 			n.kind = leaf
 		}
-		if found {
-			edit.previous = n.cells[slot].address
-			edit.existed = true
-		}
-		switch {
-		case edit.Delete:
+		if edit.Delete {
+			edit.previous, edit.existed = n.cells[slot].address, true
 			if err = x.retireKey(n.cells[slot].key); err != nil {
 				return replacement{}, err
 			}
 			n.cells = slices.Delete(n.cells, slot, slot+1)
 			x.count--
-		case found:
-			n.cells[slot].address = edit.Address
-		default:
+		} else {
 			ref, e := x.key(edit.Key)
 			if e != nil {
 				return replacement{}, e
@@ -202,6 +226,11 @@ func (x *transaction) update(id uint64, edit *mutation, depth int) (replacement,
 		}
 		if change.left == child && change.right == 0 {
 			return replacement{left: id}, nil
+		}
+		if edit.existed && !edit.Delete {
+			updated := *p
+			updated.setChild(slot, change.left)
+			return x.writePatched(id, &updated)
 		}
 		n = p.decode()
 		if change.left == 0 {

@@ -97,10 +97,7 @@ func readChunk(ctx context.Context, src io.ReaderAt, chunk []byte, offset int64)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	n, err := src.ReadAt(chunk, offset)
-	if n != len(chunk) && err == nil {
-		return io.ErrUnexpectedEOF
-	}
+	_, err := (exactReadAt{src}).ReadAt(chunk, offset)
 	return err
 }
 

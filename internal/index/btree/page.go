@@ -14,14 +14,15 @@ import (
 )
 
 const (
-	pageSize   = 8192
-	header     = 32
-	leaf       = 1
-	branch     = 2
-	overflow   = 3
-	maxInline  = 240
-	longPrefix = 24
-	maxDepth   = 64
+	pageSize    = 8192
+	header      = 32
+	leaf        = 1
+	branch      = 2
+	overflow    = 3
+	maxInline   = 240
+	longPrefix  = 24
+	maxDepth    = 64
+	addressSize = 40
 )
 
 var errPage = fmt.Errorf("btree: invalid index page: %w", format.ErrCorrupt)
@@ -49,6 +50,12 @@ func (p *page) packedCellBytes() int {
 func (p *page) offset(i int) int {
 	o := header + int(p[5]) + 2*i
 	return int(order.Uint16(p[o : o+2]))
+}
+func (p *page) cellEnd(i int) int {
+	if i == 0 {
+		return pageSize
+	}
+	return p.offset(i - 1)
 }
 func (p *page) check(id uint64) error {
 	if order.Uint64(p[16:24]) != id || order.Uint32(p[:4]) != crc32.Checksum(p[4:], crcTable) {
@@ -138,16 +145,13 @@ func (p *page) cell(i int) (cell, error) {
 
 func (p *page) raw(i int) (rawCell, error) {
 	var c rawCell
-	end := pageSize
-	if i > 0 {
-		end = p.offset(i - 1)
-	}
+	end := p.cellEnd(i)
 	start := p.offset(i)
 	if start < header || end > pageSize || end <= start {
 		return c, errPage
 	}
 	b := p[start:end]
-	addressBytes := 40
+	addressBytes := addressSize
 	if p[4] == branch {
 		addressBytes = 8
 	}
@@ -220,7 +224,7 @@ func (n node) size() int {
 			size = 2 + 1 + 16 + longPrefix
 		}
 		if n.kind == leaf {
-			size += 40
+			size += addressSize
 		} else {
 			size += 8
 		}
@@ -240,7 +244,7 @@ func (n node) encode(id uint64) *page {
 	order.PutUint64(p[24:32], n.left)
 	end := pageSize
 	for i, c := range n.cells {
-		payload := 40
+		payload := addressSize
 		if n.kind == branch {
 			payload = 8
 		}
@@ -263,12 +267,7 @@ func (n node) encode(id uint64) *page {
 			b = b[1+len(suffix):]
 		}
 		if n.kind == leaf {
-			a := c.address
-			order.PutUint64(b, a.FileID)
-			order.PutUint64(b[8:], uint64(a.Offset))
-			order.PutUint64(b[16:], uint64(a.Bytes))
-			order.PutUint64(b[24:], uint64(a.ValueBytes))
-			order.PutUint64(b[32:], a.Sequence)
+			putAddress(b, c.address)
 		} else {
 			order.PutUint64(b, c.child)
 		}
@@ -277,6 +276,13 @@ func (n node) encode(id uint64) *page {
 	order.PutUint16(p[10:12], uint16(end))
 	p.seal()
 	return p
+}
+func putAddress(b []byte, a index.Address) {
+	order.PutUint64(b, a.FileID)
+	order.PutUint64(b[8:], uint64(a.Offset))
+	order.PutUint64(b[16:], uint64(a.Bytes))
+	order.PutUint64(b[24:], uint64(a.ValueBytes))
+	order.PutUint64(b[32:], a.Sequence)
 }
 func (k keyRef) compare(s *pager, key string) (int, error) {
 	if k.tail == 0 {
@@ -368,6 +374,14 @@ func (p *page) child(i int) uint64 {
 	}
 	c, _ := p.raw(i - 1)
 	return c.child
+}
+func (p *page) setChild(i int, id uint64) {
+	if i == 0 {
+		order.PutUint64(p[24:32], id)
+		return
+	}
+	end := p.cellEnd(i - 1)
+	order.PutUint64(p[end-8:end], id)
 }
 
 // keyStream compares and copies overflow keys one page at a time. It can

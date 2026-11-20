@@ -43,6 +43,13 @@ func (db *DB) readBatchData(keys [][]byte, results []BatchResult, reads []batchR
 	if len(reads) == 0 {
 		return nil
 	}
+	// Limit range planning to a small batch whose first reads are adjacent.
+	// Larger plans keep the adaptive per-record scheduler.
+	if len(reads) > 1 && len(reads) <= maxAdjacentRecords {
+		if n := adjacentCount(reads); n > 1 {
+			return db.readGroupedBatch(keys, results, reads, n)
+		}
+	}
 	db.batchReadSlots <- struct{}{}
 	if len(reads) == 1 || cap(db.batchReadSlots) == 1 {
 		return db.readBatchSerial(keys, results, reads, false)
@@ -71,6 +78,15 @@ func (db *DB) readBatchData(keys [][]byte, results []BatchResult, reads []batchR
 		sampleFirst = false
 	}
 
+	workers := db.reserveBatchWorkers(count)
+	if workers == 1 {
+		return db.readBatchSerial(keys, results, reads, sampleFirst)
+	}
+	return db.readBatchParallel(keys, results, reads, workers, sampleFirst)
+}
+
+// The caller already holds one permit. Additional workers only take free slots.
+func (db *DB) reserveBatchWorkers(count int) int {
 	workers := 1
 reserve:
 	for workers < min(count, cap(db.batchReadSlots)) {
@@ -81,10 +97,7 @@ reserve:
 			break reserve
 		}
 	}
-	if workers == 1 {
-		return db.readBatchSerial(keys, results, reads, sampleFirst)
-	}
-	return db.readBatchParallel(keys, results, reads, workers, sampleFirst)
+	return workers
 }
 
 // Time the first actual read separately, then up to four reads per observation.
@@ -161,6 +174,17 @@ func (db *DB) readBatchParallel(keys [][]byte, results []BatchResult, reads []ba
 			results[r.slot].Value = keys[r.slot]
 		}
 	}
+	return db.runBatchWorkers(workers, len(reads), func(i int) error {
+		r := reads[i]
+		if r.loc.File == nil {
+			return nil
+		}
+		result := &results[r.slot]
+		return db.readBatchRecord(result.Value, result, r, sampleFirst && i == 0)
+	})
+}
+
+func (db *DB) runBatchWorkers(workers, count int, read func(int) error) error {
 	var next atomic.Int32
 	var wg sync.WaitGroup
 	var once sync.Once
@@ -169,15 +193,10 @@ func (db *DB) readBatchParallel(keys [][]byte, results []BatchResult, reads []ba
 		defer func() { <-db.batchReadSlots }()
 		for db.failed.Load() == nil {
 			i := int(next.Add(1)) - 1
-			if i >= len(reads) {
+			if i >= count {
 				return
 			}
-			r := reads[i]
-			if r.loc.File == nil {
-				continue
-			}
-			result := &results[r.slot]
-			if err := db.readBatchRecord(result.Value, result, r, sampleFirst && i == 0); err != nil {
+			if err := read(i); err != nil {
 				once.Do(func() { readErr = err })
 				return
 			}
