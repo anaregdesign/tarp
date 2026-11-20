@@ -73,6 +73,19 @@ func (e *SizeError) Error() string {
 
 func (e *SizeError) Unwrap() error { return ErrTooLarge }
 
+// BatchKeyError identifies an empty input key or a missing BatchDelete key.
+type BatchKeyError struct {
+	Operation string // BatchGet, BatchPut or BatchDelete.
+	Index     int    // Zero-based position in the original request.
+	Err       error  // ErrEmptyKey or ErrNotFound.
+}
+
+func (e *BatchKeyError) Error() string {
+	return fmt.Sprintf("tarp: %s input[%d]: %v", e.Operation, e.Index, e.Err)
+}
+
+func (e *BatchKeyError) Unwrap() error { return e.Err }
+
 // BatchLimitKind identifies the admission limit exceeded by a batch.
 type BatchLimitKind string
 

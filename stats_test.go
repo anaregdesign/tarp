@@ -31,6 +31,13 @@ func ExampleDB_Stats() {
 	// Output: 2 1 2
 }
 
+func TestStatsSnapshotDoesNotAllocate(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	if allocs := testing.AllocsPerRun(100, func() { _ = db.Stats() }); allocs != 0 {
+		t.Fatalf("Stats allocated %v times per snapshot", allocs)
+	}
+}
+
 func TestOwnerStatsIncludeViewOperationsAndRetainFinalSnapshot(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
 	opts := tarp.Options{CacheBytes: 130} // one single-byte key and value

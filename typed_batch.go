@@ -95,7 +95,7 @@ func (db *View[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
 }
 
 // BatchDelete atomically removes the distinct encoded keys. A missing key
-// returns ErrNotFound before publication.
+// returns a BatchKeyError matching ErrNotFound before publication.
 func (db *View[K, V]) BatchDelete(keys []K) error {
 	batch, err := (*engine.DB)(db.core).PrepareDeletes(len(keys), func(i int) ([]byte, error) {
 		key, err := db.keyCodec.Encode(keys[i])

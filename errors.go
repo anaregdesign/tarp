@@ -42,6 +42,14 @@ type OpError = engine.OpError
 // configured budgets. Overflow means the costs do not fit in uint64.
 type SizeError = engine.SizeError
 
+// BatchKeyError identifies the first empty input key in BatchGet, BatchPut or
+// BatchDelete, or the first missing key in BatchDelete. Operation names the
+// method. Index is the zero-based position in the original request, including
+// duplicates. Typed batches check the encoded key, so a codec can produce an
+// empty key from a nonzero Go value. Err matches ErrEmptyKey or ErrNotFound
+// via errors.Is.
+type BatchKeyError = engine.BatchKeyError
+
 // BatchLimitKind identifies a batch input-count, entry-size, payload or result-byte limit.
 type BatchLimitKind = engine.BatchLimitKind
 

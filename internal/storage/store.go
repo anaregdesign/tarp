@@ -27,8 +27,21 @@ type Config struct {
 	Handles                                     int
 }
 
-type CompatibilityError struct {
+// RequiredLimits records the measured minima for a database image's live records.
+type RequiredLimits struct {
 	CacheBytes, RecordBytes int64
+}
+
+// CheckLimits compares normalized settings with the live record requirements.
+func (cfg Config) CheckLimits(required RequiredLimits) error {
+	if cfg.CacheBytes < required.CacheBytes || cfg.RecordBytes < required.RecordBytes {
+		return &CompatibilityError{required}
+	}
+	return nil
+}
+
+type CompatibilityError struct {
+	RequiredLimits
 }
 
 func (e *CompatibilityError) Error() string {
@@ -182,8 +195,11 @@ func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool,
 		s.Created = true
 		return s, make(map[string]Location), nil
 	}
-	image, err := Validate(ctx, absolute, cfg)
+	image, err := Validate(ctx, absolute)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := cfg.CheckLimits(image.Required); err != nil {
 		return nil, nil, err
 	}
 	s.Current, s.Catalog, s.Manifest, s.Files = image.Current, image.Catalog, image.Manifest, image.Files
@@ -443,18 +459,25 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 
 func (s *Store) Read(loc Location, key string) ([]byte, error) {
 	if err := s.IO.Check("read:before"); err != nil {
-		return nil, err
+		return nil, loc.readError(err)
 	}
 	h, err := s.readers.acquire(loc.File)
 	if err != nil {
-		return nil, err
+		return nil, loc.readError(err)
 	}
 	value, err := format.ReadValue(h.fd, loc.Offset, loc.Bytes, key, loc.Sequence)
 	s.readers.release(h)
-	if err == nil {
-		err = s.IO.Check("read:after")
+	if err != nil {
+		return nil, loc.readError(err)
 	}
-	return value, err
+	if err := s.IO.Check("read:after"); err != nil {
+		return value, loc.readError(err)
+	}
+	return value, nil
+}
+
+func (loc Location) readError(err error) error {
+	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.Offset, err)
 }
 
 func (s *Store) inspectNames(ctx context.Context) error {

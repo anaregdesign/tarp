@@ -248,10 +248,11 @@ atomic no-replace directory rename, and parent sync. Linux amd64/arm64 use
 There is no check-then-overwrite fallback. Require caller-controlled stable
 parents and immutable backup sources.
 
-VerifyBackup checks an immutable backup in place without creating a lock or
-staging directory. It shares Restore's input checks. Restore checks exact file
-set, safe names, hashes, formats, identities, record
-semantics, sequences, and smaller-limit compatibility; it then independently
-validates its staged image before publishing a new closed database. Existing
-destinations remain untouched. Uncertain output rename/parent sync is reported
+VerifyBackup checks the exact file set, safe names, hashes, formats,
+identities, record semantics and sequences of an immutable backup in place.
+It reports the required record and cache limits. BackupInfo.CheckLimits
+compares those requirements with a target configuration in memory.
+Restore enforces the target limits before staging, then independently validates
+the staged image and its size requirements before publishing a new closed
+database. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
 explicitly and does not poison an otherwise healthy source DB.

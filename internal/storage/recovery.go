@@ -20,11 +20,12 @@ type Image struct {
 	Manifest []byte
 	Files    map[uint64]*File
 	Index    map[string]Location
-	Required CompatibilityError
+	Required RequiredLimits
 }
 
-// Validate never changes a file and does not require/create LOCK.
-func Validate(ctx context.Context, dir string, cfg Config) (*Image, error) {
+// Validate checks and replays the selected image, measuring its required limits.
+// It never changes a file and does not require/create LOCK.
+func Validate(ctx context.Context, dir string) (*Image, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -103,13 +104,10 @@ func Validate(ctx context.Context, dir string, cfg Config) (*Image, error) {
 		if charge > math.MaxInt64 {
 			return nil, fmt.Errorf("%w: unrepresentable live cache charge", ErrCorrupt)
 		}
-		image.Required = CompatibilityError{CacheBytes: int64(charge), RecordBytes: loc.Bytes}
+		image.Required = RequiredLimits{CacheBytes: int64(charge), RecordBytes: loc.Bytes}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if image.Required.CacheBytes > cfg.CacheBytes || image.Required.RecordBytes > cfg.RecordBytes {
-		return nil, &image.Required
 	}
 	return image, nil
 }

@@ -46,7 +46,7 @@ func TestBackupCanceledWaitingForWriterSkipsDestinationIO(t *testing.T) {
 	if err := db.Backup(t.Context(), dest); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyBackup(t.Context(), dest, testOptions().RestoreLimits()); err != nil {
+	if _, err := VerifyBackup(t.Context(), dest); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -151,7 +151,7 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 			for name, data := range files {
 				writeFixtureFile(t, filepath.Join(source, name), []byte(data))
 			}
-			info, err := VerifyBackup(t.Context(), source, testOptions().RestoreLimits())
+			info, err := VerifyBackup(t.Context(), source)
 			if !errors.Is(err, ErrCorrupt) || info != (storage.BackupInfo{}) || !strings.Contains(err.Error(), wantLocation) {
 				t.Fatalf("VerifyBackup returned %+v, %v; want zero report and corruption at %q", info, err, wantLocation)
 			}
@@ -159,7 +159,8 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 			err = Restore(t.Context(), RestoreRequest{
 				Source:      source,
 				Destination: filepath.Join(parent, "restored"),
-				Limits:      testOptions().RestoreLimits(),
+				// Even when target limits are insufficient, verify the entire source first.
+				Limits: RestoreLimits{CacheBytes: 129, MaxRecordBytes: 49},
 			})
 			var op *OpError
 			if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrUnsupportedFormat) || !errors.As(err, &op) || op.Outcome != NotApplied ||

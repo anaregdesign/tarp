@@ -10,6 +10,54 @@ import (
 	"github.com/anaregdesign/tarp"
 )
 
+func requireBatchKeyError(t *testing.T, err error, operation string, index int, cause error) {
+	t.Helper()
+	var keyErr *tarp.BatchKeyError
+	if !errors.Is(err, cause) || !errors.As(err, &keyErr) || keyErr.Operation != operation || keyErr.Index != index || keyErr.Err != cause {
+		t.Fatalf("got %v, want %s input[%d] matching %v", err, operation, index, cause)
+	}
+}
+
+func TestBatchKeyErrorsReportOriginalInput(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	a, b := []byte("a"), []byte("b")
+	entries := []tarp.Entry{{Key: a, Value: a}, {Key: b, Value: b}}
+	if err := db.BatchPut(entries); err != nil {
+		t.Fatal(err)
+	}
+	before := db.Stats()
+	keys := [][]byte{a, a, nil}
+	got, err := db.BatchGet(keys)
+	requireBatchKeyError(t, err, "BatchGet", 2, tarp.ErrEmptyKey)
+	if got != nil {
+		t.Fatalf("BatchGet returned partial results: %v", got)
+	}
+	requireBatchKeyError(t, db.BatchPut([]tarp.Entry{{Key: a}, {Key: a}, {}}), "BatchPut", 2, tarp.ErrEmptyKey)
+	requireBatchKeyError(t, db.BatchDelete(keys), "BatchDelete", 2, tarp.ErrEmptyKey)
+
+	missing := []byte("missing")
+	requireBatchKeyError(t, db.BatchDelete([][]byte{a, missing, a, b}), "BatchDelete", 1, tarp.ErrNotFound)
+	requireBatchKeyError(t, db.BatchDelete([][]byte{a, a, b, a, missing, missing, []byte("also missing")}), "BatchDelete", 4, tarp.ErrNotFound)
+	full := make([][]byte, tarp.MaxBatchEntries)
+	for i := range full {
+		full[i] = a
+	}
+	full[len(full)-1] = missing
+	requireBatchKeyError(t, db.BatchDelete(full), "BatchDelete", len(full)-1, tarp.ErrNotFound)
+	if after := db.Stats(); after != before {
+		t.Fatalf("failed batches changed Stats: before %+v, after %+v", before, after)
+	}
+	for _, entry := range entries {
+		value, err := db.Get(entry.Key)
+		if err != nil || !bytes.Equal(value, entry.Value) {
+			t.Fatalf("Get(%q) after rejected batches = %q, %v", entry.Key, value, err)
+		}
+	}
+	if err := db.BatchDelete([][]byte{a, a, b}); err != nil {
+		t.Fatalf("retry with live keys: %v", err)
+	}
+}
+
 // The final state identifies the order of the two overlapping commits. Every
 // earlier BatchGet must then fit that same order, including after recovery.
 func TestBatchSnapshotsAgreeWithRecoveredCommitOrder(t *testing.T) {

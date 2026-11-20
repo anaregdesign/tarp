@@ -15,7 +15,7 @@ func checkStatsAgainstReplay(t *testing.T, db *DB) {
 	t.Helper()
 	db.writer.Lock()
 	defer db.writer.Unlock()
-	image, err := storage.Validate(t.Context(), db.store.Dir, db.store.Config)
+	image, err := storage.Validate(t.Context(), db.store.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
