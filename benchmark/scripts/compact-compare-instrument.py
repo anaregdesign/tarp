@@ -35,13 +35,33 @@ def writer_wait(timer):
             f' compareclock.{timer}.Add(start)\n}}')
 
 
+def probe_relocation_index_gate(source):
+    # The foreground staging path can also take this gate. Only measure the
+    # relocation functions, including the fallback after a staged-key conflict.
+    before = 'db.indexGate.Lock()\n\tdefer db.indexGate.Unlock()'
+    after = ('gateStart := compareclock.Now()\n\tdb.indexGate.Lock()\n'
+             '\tcompareclock.RelocateIndexWait.Add(gateStart)\n\tdefer db.indexGate.Unlock()\n'
+             '\tdefer compareclock.RelocateIndexHold.Add(compareclock.Now())')
+    functions = source.split('\nfunc ')
+    count = 0
+    for i, fn in enumerate(functions):
+        if fn.startswith(('(db *DB) relocateBatch(', '(db *DB) relocateUnstaged(')):
+            if fn.count(before) != 1:
+                raise ValueError('missing index gate in ' + fn.splitlines()[0])
+            functions[i] = fn.replace(before, after)
+            count += 1
+    if count == 0:
+        raise ValueError('missing gated relocation')
+    return '\nfunc '.join(functions)
+
+
 clock_dir = root / 'internal/compareclock'
 clock_dir.mkdir()
 shutil.copyfile(Path(__file__).resolve().parents[1] / 'testdata/compact_compare_clock.go',
                 clock_dir / 'clock.go')
 (root / 'benchmark/compact_compare_clock_test.go').write_text(
     'package benchmark\nimport ' + clock_import +
-    '\nfunc init() { compactDiagnostic = compareclock.Report }\n')
+    '\nfunc init() {\n compactDiagnostic = compareclock.Report\n compactGateSamples = compareclock.GateSamples\n}\n')
 
 compact = (root / 'internal/engine/compact.go').read_text()
 # Relocation has different parameters in each revision. Time the full method.
@@ -86,6 +106,8 @@ else:
         ('db.writer.Lock()', writer_wait('RelocateWait'), 1),
         ('defer db.writer.Unlock()', 'defer db.writer.Unlock()\n\tdefer compareclock.RelocateHold.Add(compareclock.Now())', 1),
     ])
+    index_file = root / 'internal/engine/index.go'
+    index_file.write_text(probe_relocation_index_gate(index_file.read_text()))
 edit('internal/storage/snapshot.go', [timed(replay, 'Replay')])
 edit('internal/storage/checkpoint.go', [
     timed('func (c *Checkpoint) Copy(ctx context.Context, ' + checkpoint_args +

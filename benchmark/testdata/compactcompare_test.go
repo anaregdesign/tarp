@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 // The diagnostic-only binary supplies timings for individual Compact stages.
 var compactDiagnostic = func() map[string]int64 { return nil }
+var compactGateSamples = func() map[string][]int64 { return nil }
 
 // TestCompactCompare is compiled into each arm's benchmark package. A single
 // seed invocation prepares the closed disk image used by both binaries.
@@ -119,6 +121,7 @@ func TestCompactCompare(t *testing.T) {
 			}
 			if worker == "durable_put" {
 				puts = sample.Operations
+				slices.Sort(sample.SamplesNS)
 			} else {
 				sample.SamplesNS = nil // Keep the much smaller Put sample for pooled tails.
 			}
@@ -129,12 +132,30 @@ func TestCompactCompare(t *testing.T) {
 			if stages == nil {
 				t.Fatal("missing per-stage instrumentation in diagnostic binary")
 			}
-			acquires := stages["relocation_writer_acquires"]
-			hold, longest := stages["relocation_writer_hold_ns"], stages["relocation_writer_max_hold_ns"]
-			if acquires != stages["relocation_writer_hold_calls"] || longest > hold || (acquires > 0 && longest <= 0) {
-				t.Fatalf("invalid relocation writer measurements: %+v", stages)
+			gateSamples := compactGateSamples()
+			for _, gate := range []string{"relocation_writer", "relocation_index_gate"} {
+				calls := stages[gate+"_acquires"]
+				for _, event := range []string{"_wait_ns", "_hold_ns"} {
+					intervals, ok := gateSamples[gate+event]
+					var total int64
+					for _, ns := range intervals {
+						total += ns
+					}
+					if !ok || int64(len(intervals)) != calls || total != stages[gate+event] || !slices.IsSorted(intervals) {
+						t.Fatalf("invalid %s%s intervals for %d acquisitions", gate, event, calls)
+					}
+				}
+				holds := gateSamples[gate+"_hold_ns"]
+				var longest int64
+				if len(holds) > 0 {
+					longest = holds[len(holds)-1]
+				}
+				if calls != stages[gate+"_hold_calls"] || longest != stages[gate+"_max_hold_ns"] {
+					t.Fatalf("invalid %s hold measurements: %+v", gate, stages)
+				}
 			}
 			row["stages"] = stages
+			row["relocation_gate_samples"] = gateSamples
 		}
 	default:
 		t.Fatalf("unknown comparison mode %q", mode)

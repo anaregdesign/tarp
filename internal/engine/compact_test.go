@@ -751,3 +751,111 @@ func TestCompactScratchFailureLeavesSourceHealthy(t *testing.T) {
 	}
 	wantValue(t, db, "k", "retry")
 }
+
+func TestCheckpointProgressesWhileAnotherKeySyncs(t *testing.T) {
+	for _, mode := range []string{"overwrite", "delete", "abort"} {
+		t.Run(mode, func(t *testing.T) {
+			entries := make([]Entry, 350)
+			for i := range entries {
+				entries[i] = Entry{Key: []byte(fmt.Sprintf("key-%012d", i)), Value: []byte("original")}
+			}
+			key := entries[len(entries)-1].Key
+			staged, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+			var db *DB
+			var source *storage.File
+			started, progressed := false, false
+			prepares := 0
+			fs := &storage.IO{Hook: func(point string) error {
+				switch point {
+				case "data.sync:before", "index.prepare:before":
+					if point == "index.prepare:before" {
+						if source == nil || mode != "abort" {
+							return nil
+						}
+						prepares++
+						if prepares != 2 {
+							return nil
+						}
+					}
+					if source == nil {
+						return nil
+					}
+					close(staged)
+					select {
+					case <-release:
+					case <-time.After(5 * time.Second):
+						return errors.New("no relocation progress during durable write")
+					}
+					if mode == "abort" {
+						return syscall.ENOSPC
+					}
+				case "compact.remap:after":
+					if !started {
+						started = true
+						go func() {
+							if mode == "delete" {
+								done <- db.Delete(key)
+								return
+							}
+							done <- db.BatchPut([]Entry{{key, []byte("intermediate")}, {key, []byte("updated")}})
+						}()
+						select {
+						case <-staged:
+						case <-time.After(time.Second):
+							return errors.New("writer did not stage")
+						}
+					}
+					if !progressed && source.LiveKeys.Load() < 150 {
+						if ok, err := db.relocateUnstaged([]storage.Relocation{{Key: string(key)}}); ok || err != nil {
+							return fmt.Errorf("staged key remapped: %t %v", ok, err)
+						}
+						progressed = true
+						close(release)
+						err := <-done
+						if mode == "abort" && !errors.Is(err, ErrNoSpace) || mode != "abort" && err != nil {
+							return fmt.Errorf("writer outcome: %v", err)
+						}
+					}
+				}
+				return nil
+			}}
+			db = newTestDBWithHooks(t, Options{}, fs, &Hooks{CleanerStart: make(chan struct{})})
+			if err := db.BatchPut(entries); err != nil {
+				t.Fatal(err)
+			}
+			old, _ := testLookup(t, db, string(key))
+			source = old.File
+			if _, err := db.Compact(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if !progressed || source.LiveBytes.Load() != 0 || source.LiveKeys.Load() != 0 {
+				t.Fatalf("progress=%v, original file retains %d keys", progressed, source.LiveKeys.Load())
+			}
+			if _, err := os.Stat(source.Path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("source retained: %v", err)
+			}
+			check := func(db *DB) {
+				switch mode {
+				case "overwrite":
+					wantValue(t, db, string(key), "updated")
+				case "abort":
+					wantValue(t, db, string(key), "original")
+				case "delete":
+					if _, err := db.Get(key); !errors.Is(err, ErrNotFound) {
+						t.Fatalf("deleted: %v", err)
+					}
+				}
+			}
+			check(db)
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(db.store.Dir, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			check(reopened)
+		})
+	}
+}

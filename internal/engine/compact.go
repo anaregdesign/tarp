@@ -6,6 +6,7 @@ import (
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -132,26 +133,26 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		db.writer.Unlock()
 		return result, operationError("compact", "pre-publication", err)
 	}
+	maxBatch := storage.RelocationBatchCount
 	err = checkpoint.Install()
 	if err == nil {
 		db.replaceDataStats(oldData, newData)
+		if resident, ok := db.keys.(index.ResidentRelocator); ok && db.opts.IndexMode == IndexMemory {
+			db.memoryRemap = &memoryCheckpointRemap{index: resident, staged: make(map[string]struct{})}
+			maxBatch = 128 // The spool still caps a batch of small keys at 8 KiB.
+		}
 	}
 	db.storageFailure(err)
 	db.writer.Unlock()
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	// Group more memory-index updates per writer lock. The spool reader still
-	// caps each batch by encoded bytes before taking the lock.
-	maxBatch := storage.RelocationBatchCount
-	if db.opts.IndexMode == IndexMemory {
-		maxBatch = 128
-	}
 	db.relocate(&moves, maxBatch, "compact.remap:after")
 	capture.Release()
 	released = true
 	db.writer.Lock()
 	defer db.writer.Unlock()
+	db.memoryRemap = nil
 	if err := db.health(); err != nil {
 		return result, &OpError{Operation: "compact", Phase: "post-publication", Outcome: Committed, Err: err}
 	}

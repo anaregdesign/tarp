@@ -34,6 +34,16 @@ func (s *store) LookupResident(key []byte) (index.Address, bool) {
 	return addr, ok
 }
 
+func (s *store) Relocate(key string, old, next index.Address) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a, ok := s.entries[key]; !ok || a != old {
+		return false
+	}
+	s.entries[key] = next
+	return true
+}
+
 func (s *store) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

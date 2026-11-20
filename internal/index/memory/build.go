@@ -8,8 +8,8 @@ import (
 )
 
 // initialBuild owns a single private map, which becomes the runtime map.
-// writer excludes mutations and Close. Concurrent readers can still observe
-// the original empty map while the storage owner replays and measures DATA.
+// writer excludes transactions and Close. Readers can observe the empty map
+// while the storage owner replays DATA. It has no addresses to relocate.
 type initialBuild struct {
 	store   *store
 	entries map[string]index.Address
@@ -17,12 +17,11 @@ type initialBuild struct {
 
 func (s *store) BeginBuild() (index.InitialBuild, error) {
 	s.writer.Lock()
-	// Every mutation, including Close, owns writer.
 	if s.closed.Load() {
 		s.writer.Unlock()
 		return nil, os.ErrClosed
 	}
-	if len(s.entries) != 0 {
+	if s.Count() != 0 {
 		s.writer.Unlock()
 		return nil, errors.New("memory: initial build requires an empty index")
 	}
