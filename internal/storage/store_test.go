@@ -80,6 +80,64 @@ func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
 	}
 }
 
+func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 1024, Handles: 1}
+	s, _, err := Open(dir, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frontier := s.Current
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(dir, DataName(frontier.UUID, 100))
+	manifest := filepath.Join(dir, ManifestName(frontier.UUID, 101))
+	if err := os.WriteFile(data, []byte("orphan"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("CURRENT", manifest); err != nil {
+		t.Fatal(err)
+	}
+	// The unselected DATA sorts before the invalid MANIFEST. Neither is
+	// eligible for cleanup until every entry has passed type and name checks.
+	rejected, _, err := Open(dir, cfg, nil)
+	if rejected != nil {
+		rejected.Close()
+	}
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open with symlink returned %v", err)
+	}
+	if err := os.Remove(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(data); err != nil || string(b) != "orphan" {
+		t.Fatalf("orphan after rejected Open: %q, %v", b, err)
+	}
+	if err := os.WriteFile(manifest, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, _, err = Open(dir, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, path := range []string{data, manifest} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unselected file %s after Open: %v", path, err)
+		}
+	}
+	if _, err := s.Append(format.Put, []byte("k"), nil, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Current.ActiveID <= 101 {
+		t.Fatalf("rotation reused a previously observed ID: %d", s.Current.ActiveID)
+	}
+}
+
 func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 	// The first value exceeds the encoding buffer. The second record shares
 	// the same commit, even when a write fails after the whole first record.
