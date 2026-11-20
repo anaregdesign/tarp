@@ -35,6 +35,23 @@ The table uses 64-byte values and a read concurrency limit of 8. For cache misse
 4. **Reusable directory descriptor — deferred.** This saved an open/close pair and roughly 168 B and three allocations per ordinary commit, at a cost of one permanent descriptor per open database. The longer isolated run showed +5.9% throughput (3/6 pairs), +23.1% p99 for a Memory Put and +27.9% throughput (4/6 pairs), -16.8% p99 for a B+tree Put. The tradeoff did not justify changing every open database.
 5. **Adjacent BatchGet — adopted for small read plans.** Plan a range only when the first two physical reads are contiguous, the plan has at most 32 descriptors, and every grouped record fits in the same 8 KiB window in one DATA file. Up to 32 small contiguous records then share one range read. Multiple jobs respect the DB-wide concurrency limit. Returned values retain their own storage and each record checks key, sequence and checksum. The first prototype made caller key slices escape on scattered requests. The revised one borrows keys through private result slots. A larger-plan prototype improved throughput but raised p99 on warm 256-key Memory batches. The merged version leaves those plans on the per-record scheduler.
 
+## Call-interleaved durable write control
+
+The process-at-a-time comparison showed slower Memory Delete and BatchDelete and slower single-key B+tree Put in the integrated run. To control for changes in sync latency within a round, two persistent workers opened separately seeded databases on the same ext4 volume. One operation finished before its counterpart began. The first worker alternated on each call and the starting order alternated on each round. A timer inside each worker covered the public API only. Each worker verified committed counts and all 8,192 keys after reopen. Two six-round campaigns measured 384 calls per operation, mode and revision (73,728 timed calls total). The second campaign exchanged the workers’ controller slots on a fresh volume. The table restores the revision labels before calculating the 12 paired differences.
+
+| Index | Public operation | Mean time per call, baseline → integrated | Paired throughput (wins) | Paired p99 (wins) |
+|---|---|---:|---:|---:|
+| memory | put | 1.018 → 1.106 ms | -7.5% (5/12) | +4.8% (5/12) |
+| memory | batchput16 | 1.040 → 0.983 ms | +7.8% (7/12) | -5.1% (8/12) |
+| memory | delete | 0.936 → 0.907 ms | -7.9% (5/12) | -12.6% (7/12) |
+| memory | batchdelete16 | 0.919 → 0.979 ms | -0.8% (5/12) | +5.7% (4/12) |
+| btree | put | 0.967 → 0.995 ms | +4.0% (6/12) | -4.1% (8/12) |
+| btree | batchput16 | 1.345 → 1.107 ms | +23.0% (12/12) | -20.7% (11/12) |
+| btree | delete | 0.983 → 0.964 ms | +11.8% (8/12) | -2.6% (7/12) |
+| btree | batchdelete16 | 1.309 → 1.281 ms | +1.9% (7/12) | -4.3% (9/12) |
+
+The scattered B+tree BatchPut won all 12 throughput comparisons and 11 p99 comparisons. Single Memory Put and Delete showed opposite throughput directions in the two campaigns. Memory BatchDelete throughput was near level (−0.8%); its p99 was 5.7% higher, slower in 8 of 12 pairs. The experiment supports the specific read and B+tree overwrite optimizations, with a remaining tail-latency concern for Memory BatchDelete.
+
 ## Prior 16-key write regression
 
 We compared `6c2c3d2` and `357e758` separately with the same hook instrumentation, one writer, a parked cleaner, and exactly 128 timed calls per condition per process. Every sample verified the committed sequence and whether rotation occurred. Each run reopened the database and checked the keys.
@@ -43,4 +60,4 @@ For 4 MiB segments and 64 KiB values, the paired mean call time increased 3.6% f
 
 ## Measurement boundary
 
-The campaign started on 2026-11-21 JST with Go 1.27.4 linux/arm64, the latest stable Go then available. Docker Desktop used a private ext4 volume on LinuxKit, with four CPUs and GOMAXPROCS=4. The official image digest for every arm was `sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea`. Timing arms ran sequentially, alternating order for six matched pairs, with fresh databases under /data. The public write confirmation used 8,192 seeded keys and 384 calls per operation per round. All retained write timings include DATA and CURRENT publication. Each process reported its own allocation counters and latency samples. p99 of a short cold sweep can represent only one or two samples, and observed differences across six pairs are descriptive. These are targeted foreground workloads with a single caller and parked cleaner.
+The campaign started on 2026-11-21 JST with Go 1.27.4 linux/arm64, the latest stable Go then available. Docker Desktop used a private ext4 volume on LinuxKit, with four CPUs and GOMAXPROCS=4. The official image digest for every arm was `sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea`. Timing arms ran sequentially, alternating order for six matched pairs, with fresh databases under /data. The public write confirmation used 8,192 seeded keys and 384 calls per operation per round. Public write timings include DATA and CURRENT publication. Each process reported its own allocation counters and latency samples. p99 of a short cold sweep can represent only one or two samples, and observed differences across six pairs are descriptive. These are targeted foreground workloads with a single caller and parked cleaner.
