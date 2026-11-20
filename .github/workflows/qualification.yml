@@ -30,10 +30,10 @@ on:
         type: string
         required: false
       compact-pair:
-        description: Compare v0.8.0 with v0.9.0 (releases), or v0.9.0 with the selected ref (candidate)
+        description: Compare releases, v0.9.0 with the selected ref, or that candidate in fixed 5s windows
         type: choice
         default: releases
-        options: [releases, candidate]
+        options: [releases, candidate, candidate-fixed]
       group:
         description: Bounded phase group; all is limited to 192 cases and 50 minutes
         required: true
@@ -49,7 +49,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: vm-qualification-${{ github.ref }}-${{ inputs.mode }}-${{ inputs.go-version }}-${{ inputs.group }}-${{ inputs.value-bytes }}
+  group: vm-qualification-${{ github.ref }}-${{ inputs.mode }}-${{ inputs.go-version }}-${{ inputs.group }}-${{ inputs.value-bytes }}-${{ inputs.compact-pair }}
   cancel-in-progress: false
 
 jobs:

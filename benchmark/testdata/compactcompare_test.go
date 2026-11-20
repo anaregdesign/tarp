@@ -104,23 +104,35 @@ func TestCompactCompare(t *testing.T) {
 		row["compact_records_copied"] = hooks.manualRecords.Load()
 		row["compact_copy_bytes"] = hooks.manualBytes.Load()
 		row["compact_copy_source_opens"] = hooks.manualSourceOpens.Load()
-	case "overlap", "diagnostic", "baseline", "pinned":
+	case "overlap", "fixed", "diagnostic", "baseline", "pinned":
 		originalMode := "compact"
+		minimum := 500 * time.Millisecond
 		switch mode {
+		case "fixed":
+			minimum = 5 * time.Second
 		case "baseline":
 			originalMode = "baseline"
 		case "pinned":
 			originalMode = pinnedBackupMode
 		}
-		// Use the release's original 5 ms sampler and 500 ms foreground window.
-		row = measureInterferenceFor(t, db, hooks, keys[:8], value, originalMode, 500*time.Millisecond)
+		// The fixed window continues the same traffic after Compact returns.
+		row = measureInterferenceFor(t, db, hooks, keys[:8], value, originalMode, minimum)
+		if mode == "fixed" && row["maintenance_ns"].(int64) >= minimum.Nanoseconds() {
+			t.Fatal("Compact exceeded the fixed foreground window")
+		}
 		for _, worker := range []string{"read", "durable_put"} {
 			sample := row[worker].(sampledLatency)
 			if sample.Operations <= 0 || sample.P99NS <= 0 {
 				t.Fatalf("%s missing foreground latency measurements", worker)
 			}
+			if mode == "fixed" && sample.WallNS < minimum.Nanoseconds() {
+				t.Fatalf("%s ran for %d ns of the %v window", worker, sample.WallNS, minimum)
+			}
 			if worker == "durable_put" {
 				puts = sample.Operations
+				if mode == "fixed" && int64(len(sample.SamplesNS)) != puts {
+					t.Fatalf("fixed window retained %d of %d Put latencies", len(sample.SamplesNS), puts)
+				}
 				slices.Sort(sample.SamplesNS)
 			} else {
 				sample.SamplesNS = nil // Keep the much smaller Put sample for pooled tails.

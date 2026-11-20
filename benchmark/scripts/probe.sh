@@ -79,6 +79,8 @@ if [[ "$mode" != probe ]]; then
   if [[ "$mode" == compact-compare ]]; then
     driver=benchmark/testdata/compactcompare_test.go
     instrument=benchmark/scripts/compact-compare-instrument.py
+    pair=${TARP_COMPACT_PAIR:-releases}
+    printf '%s\n' "$pair" >"$work/input/compact-pair"
     sha256sum "$driver" "$instrument" benchmark/testdata/compact_compare_clock.go benchmark/scripts/compact-compare-guest.sh \
       >"$work/evidence/compact-compare-driver.sha256"
     build_comparison_arm() {
@@ -88,19 +90,23 @@ if [[ "$mode" != probe ]]; then
       git archive --format=tar "$commit" | tar -xf - -C "$source"
       cp "$driver" "$source/benchmark/"
       (cd "$source" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -buildvcs=false -o "$work/input/$arm.test" ./benchmark)
-      python3 "$instrument" "$source" "$layout"
-      (cd "$source" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -buildvcs=false -o "$work/input/$arm.diag.test" ./benchmark)
+      local binaries=("$work/input/$arm.test")
+      if [[ "$pair" != candidate-fixed ]]; then
+        python3 "$instrument" "$source" "$layout"
+        (cd "$source" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -buildvcs=false -o "$work/input/$arm.diag.test" ./benchmark)
+        binaries+=("$work/input/$arm.diag.test")
+      fi
       printf '%s\t%s\t%s\n' "$arm" "$ref" "$commit" >>"$work/evidence/compact-compare-releases.tsv"
-      go version -m "$work/input/$arm.test" "$work/input/$arm.diag.test" >>"$work/evidence/compact-compare-builds.txt"
-      sha256sum "$work/input/$arm.test" "$work/input/$arm.diag.test" >>"$work/evidence/compact-compare-binaries.sha256"
+      go version -m "${binaries[@]}" >>"$work/evidence/compact-compare-builds.txt"
+      sha256sum "${binaries[@]}" >>"$work/evidence/compact-compare-binaries.sha256"
     }
     v09=d09d79239a6182f1c4933d32e14f3ffe00e38924
-    case "${TARP_COMPACT_PAIR:-releases}" in
+    case "$pair" in
       releases)
         build_comparison_arm base v0.8.0 dbb553eac61142352b4d7b757d8079ff4b161287 v08
         build_comparison_arm next v0.9.0 "$v09" v09
         ;;
-      candidate)
+      candidate|candidate-fixed)
         build_comparison_arm base v0.9.0 "$v09" v09
         build_comparison_arm next HEAD "$(git rev-parse HEAD)" v09
         ;;

@@ -10,6 +10,7 @@ run_case() {
 
 # Seed once on the guarded guest device. Both releases clone the same fixture.
 run_case base seed 0
+read -r pair </mnt/tarp-input/compact-pair
 for round in 1 2 3 4 5 6; do
   if [ "$((round % 2))" -eq 1 ]; then
     first=base second=next
@@ -18,11 +19,17 @@ for round in 1 2 3 4 5 6; do
     first=next second=base
     modes='parked overlap'
   fi
+  if [ "$pair" = candidate-fixed ]; then modes=fixed; fi
   for mode in $modes; do
     run_case "$first" "$mode" "$round"
     run_case "$second" "$mode" "$round"
   done
 done
+
+if [ "$pair" = candidate-fixed ]; then
+  echo TARP_COMPARE_PASS
+  exit 0
+fi
 
 run_case base baseline 0
 run_case next baseline 0
