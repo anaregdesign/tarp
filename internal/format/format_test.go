@@ -297,6 +297,7 @@ func FuzzDecoders(f *testing.F) {
 		_, _ = DecodeFrontier(b)
 		_, _ = DecodeCatalog(b)
 		_, _ = DecodeBackup(b)
+		_, _ = DecodeIndexedValue(b, []byte("k"), 1)
 		if len(b) >= RecordHeaderBytes {
 			_, _ = DecodeRecord(b[:RecordHeaderBytes], int64(len(b)))
 		}
@@ -436,5 +437,23 @@ func TestIndexedReadRejectsInvalidBoundsBeforeIO(t *testing.T) {
 	}
 	if reader.calls != 0 {
 		t.Fatalf("read %d times for invalid indexed locations", reader.calls)
+	}
+}
+
+func TestReadValueAcceptsCompleteFinalReadWithEOF(t *testing.T) {
+	for _, size := range []int{10, indexedReadBufferBytes + 1} {
+		value := bytes.Repeat([]byte{0x77}, size)
+		record := EncodeRecord(Put, 7, []byte("k"), value)
+		r := readerAtFunc(func(b []byte, off int64) (int, error) {
+			n, err := bytes.NewReader(record).ReadAt(b, off)
+			if off+int64(n) == int64(len(record)) {
+				return n, io.EOF
+			}
+			return n, err
+		})
+		got, err := ReadValue(r, 0, int64(len(record)), "k", 7)
+		if err != nil || !bytes.Equal(got, value) {
+			t.Fatalf("size %d: err %v, value length %d", size, err, len(got))
+		}
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestExactLRUAgainstModel(t *testing.T) {
@@ -99,6 +101,17 @@ func TestBatchPeekAcrossGenerationWrap(t *testing.T) {
 	}
 }
 
+func TestOverwriteClearsBatchMark(t *testing.T) {
+	c := New(1024)
+	c.Put("a", []byte("old"))
+	c.BeginBatch()
+	c.PeekBatch([]byte("a"))
+	c.Put("a", []byte("new"))
+	if got, found, duplicate := c.PeekBatch([]byte("a")); string(got) != "new" || !found || duplicate {
+		t.Fatalf("after overwrite: got %q, found %t, duplicate %t", got, found, duplicate)
+	}
+}
+
 func TestEvictionCounterSaturates(t *testing.T) {
 	c := New(MetadataBytes + 1)
 	c.evictions = math.MaxUint64 - 1
@@ -107,5 +120,21 @@ func TestEvictionCounterSaturates(t *testing.T) {
 	}
 	if c.Evictions() != math.MaxUint64 {
 		t.Fatalf("eviction counter wrapped to %d", c.Evictions())
+	}
+}
+
+func TestOverwriteRetainsOnlyTheNewOwnedKey(t *testing.T) {
+	c := New(1024)
+	old := strings.Clone("owned key")
+	key := strings.Clone(old)
+	c.Put(old, nil)
+	c.Put(key, nil)
+	if len(c.items) != 1 {
+		t.Fatalf("retained %d entries", len(c.items))
+	}
+	for stored, e := range c.items {
+		if unsafe.StringData(stored) != unsafe.StringData(key) || unsafe.StringData(e.key) != unsafe.StringData(key) {
+			t.Fatal("cache retained the previous key allocation")
+		}
 	}
 }

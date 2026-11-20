@@ -217,19 +217,12 @@ func ReadValue(f io.ReaderAt, offset, size int64, key string, sequence uint64) (
 	if err := readChunk(context.Background(), f, first, offset); err != nil {
 		return nil, err
 	}
-	r, err := DecodeRecord(first[:RecordHeaderBytes], size)
+	if int64(len(first)) == size {
+		return DecodeIndexedValue(first, []byte(key), sequence)
+	}
+	r, err := decodeIndexedHeader(first[:RecordHeaderBytes], size, len(key), sequence)
 	if err != nil {
 		return nil, err
-	}
-	if r.Bytes() != size || r.Sequence != sequence || r.Kind != Put || r.KeyBytes != int64(len(key)) {
-		return nil, bad("indexed record identity")
-	}
-	if int64(len(first)) == size {
-		payload := first[RecordHeaderBytes:]
-		if !bytes.Equal(payload[:len(key)], []byte(key)) || crc32.Checksum(payload, table) != r.PayloadCRC {
-			return nil, bad("indexed record payload")
-		}
-		return bytes.Clone(payload[len(key):]), nil
 	}
 	k := make([]byte, len(key))
 	if err := readChunk(context.Background(), f, k, offset+RecordHeaderBytes); err != nil {

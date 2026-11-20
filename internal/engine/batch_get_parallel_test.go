@@ -60,6 +60,7 @@ func TestBatchGetLimitsConcurrentStorageReads(t *testing.T) {
 				for i := range tc.keys {
 					key := []byte{byte('a' + i)}
 					mustPut(t, db, string(key), string(key))
+					mustPut(t, db, "~", "") // Keep each requested record a separate physical read.
 					keys = append(keys, key)
 					want = append(want, BatchResult{Value: key, Found: true})
 				}
@@ -152,7 +153,9 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 		db := newTestDBWithHooks(t, Options{ValueCacheBudgetBytes: 130, BatchGetReadConcurrency: 2}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 		for _, k := range []string{"a", "b", "c", "z"} {
 			mustPut(t, db, k, k)
+			mustPut(t, db, "~", "") // Distinct workers must be able to block and fail independently.
 		}
+		mustPut(t, db, "z", "z") // Keep the health probe cached.
 		file := testLoc(t, db, "a").File
 		refs := file.References()
 		done := startBatchGet(db, [][]byte{[]byte("a"), []byte("b"), []byte("a"), []byte("c"), []byte("?")})
@@ -220,6 +223,7 @@ func TestBatchGetSmallReadsAdaptWithinTheSameBatch(t *testing.T) {
 				for i := range unique {
 					key, value := []byte{byte('a' + i)}, []byte{byte('A' + i)}
 					mustPut(t, db, string(key), string(value))
+					mustPut(t, db, "~", "") // Exercise per-record latency adaptation.
 					keys = append(keys, key)
 					want = append(want, BatchResult{Value: value, Found: true})
 				}

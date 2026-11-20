@@ -79,8 +79,10 @@ func (c *Cache) Get(key []byte) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	c.unlink(e)
-	c.front(e)
+	if e != c.head {
+		c.unlink(e)
+		c.front(e)
+	}
 	return e.value, true
 }
 
@@ -90,14 +92,21 @@ func (c *Cache) Put(key string, value []byte) {
 	if charge > c.limit {
 		panic("cache: unvalidated admission")
 	}
-	c.Delete(key)
+	e := c.items[key]
+	if e != nil {
+		c.remove(e)
+	}
 	for c.used > c.limit-charge {
-		c.Delete(c.tail.key)
+		c.remove(c.tail)
 		if c.evictions < math.MaxUint64 {
 			c.evictions++
 		}
 	}
-	e := &entry{key: key, value: value}
+	if e == nil {
+		e = new(entry)
+	}
+	// Both the map and the list share the newly owned key with the index.
+	*e = entry{key: key, value: value}
 	c.items[key] = e
 	c.used += charge
 	c.front(e)
@@ -105,10 +114,14 @@ func (c *Cache) Put(key string, value []byte) {
 
 func (c *Cache) Delete(key string) {
 	if e, ok := c.items[key]; ok {
-		c.unlink(e)
-		delete(c.items, key)
-		c.used -= entrysize.CacheCharge(int64(len(e.key)), int64(len(e.value)))
+		c.remove(e)
 	}
+}
+
+func (c *Cache) remove(e *entry) {
+	c.unlink(e)
+	delete(c.items, e.key)
+	c.used -= entrysize.CacheCharge(int64(len(e.key)), int64(len(e.value)))
 }
 
 func (c *Cache) unlink(e *entry) {
