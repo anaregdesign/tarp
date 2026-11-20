@@ -142,7 +142,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		return result, operationError("compact", "publication", err)
 	}
 	// Group more memory-index updates per writer lock. The spool reader still
-	// limits batches by encoded bytes and releases the gate between batches.
+	// caps each batch by encoded bytes before taking the lock.
 	maxBatch := storage.RelocationBatchCount
 	if db.opts.IndexMode == IndexMemory {
 		maxBatch = 128

@@ -523,6 +523,72 @@ func TestCompactionConcurrentTailWins(t *testing.T) {
 	t.Run("btree", func(t *testing.T) { testCompactionConcurrentTail(t, opts) })
 }
 
+func TestMemoryCheckpointHonorsMutationsBetweenRelocationBatches(t *testing.T) {
+	entries := make([]Entry, 180)
+	for i := range entries {
+		entries[i] = Entry{Key: []byte(fmt.Sprintf("key-%012d", i)), Value: []byte("old")}
+	}
+	opts := Options{IndexMode: IndexMemory}
+	var source *storage.File
+	var db *DB
+	overwrite, remove := entries[len(entries)-2].Key, entries[len(entries)-1].Key
+	firstBatch := int64(0)
+	fs := &storage.IO{Hook: func(point string) error {
+		if point != "compact.remap:after" || firstBatch != 0 {
+			return nil
+		}
+		firstBatch = int64(len(entries)) - source.LiveKeys.Load()
+		if firstBatch <= storage.RelocationBatchCount || firstBatch >= int64(len(entries)-2) {
+			return fmt.Errorf("unexpected first memory relocation batch of %d", firstBatch)
+		}
+		for _, key := range [][]byte{overwrite, remove} {
+			if loc, ok := testLookup(t, db, string(key)); !ok || loc.File != source {
+				return fmt.Errorf("key %q was already relocated", key)
+			}
+		}
+		if err := db.Put(overwrite, []byte("new")); err != nil {
+			return err
+		}
+		return db.Delete(remove)
+	}}
+	db = newTestDBWithHooks(t, opts, fs, &Hooks{CleanerStart: make(chan struct{})})
+	if err := db.BatchPut(entries); err != nil {
+		t.Fatal(err)
+	}
+	loc, _ := testLookup(t, db, string(overwrite))
+	source = loc.File
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if firstBatch == 0 || source.LiveKeys.Load() != 0 || source.LiveBytes.Load() != 0 {
+		t.Fatalf("first batch %d; source still holds %d keys and %d bytes", firstBatch, source.LiveKeys.Load(), source.LiveBytes.Load())
+	}
+	if _, err := os.Stat(source.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source after relocation: %v", err)
+	}
+	check := func(db *DB) {
+		t.Helper()
+		if db.keys.Count() != len(entries)-1 {
+			t.Fatalf("unexpected live count %d", db.keys.Count())
+		}
+		wantValue(t, db, string(overwrite), "new")
+		if _, err := db.Get(remove); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("deleted key: %v", err)
+		}
+		wantValue(t, db, string(entries[0].Key), "old")
+	}
+	check(db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	check(reopened)
+}
+
 func testCompactionConcurrentTail(t *testing.T, opts Options) {
 	t.Helper()
 	var armed atomic.Bool

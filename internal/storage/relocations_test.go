@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -56,6 +57,45 @@ func TestRelocationsStreamCheckedAddressesAcrossBufferBoundaries(t *testing.T) {
 	var work *IndexWorkError
 	if err := verify(); !errors.As(err, &work) {
 		t.Fatalf("invalid scratch record returned %v", err)
+	}
+}
+
+func TestRelocationsBatchLimitsOnReplay(t *testing.T) {
+	var moves Relocations
+	defer moves.Close()
+	src, dst := &File{ID: 1}, &File{ID: 2}
+	appendKey := func(key string) {
+		t.Helper()
+		old := Location{File: src, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + int64(len(key))}
+		next := old
+		next.File = dst
+		if err := moves.append(key, old, next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 150 {
+		appendKey(strings.Repeat("k", 16))
+	}
+	appendKey(strings.Repeat("L", moveBatchBytes))
+	appendKey("tail")
+	if err := moves.seal(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		maxCount int
+		want     []int
+	}{
+		{32, []int{32, 32, 32, 32, 22, 1, 1}},
+		{128, []int{moveBatchBytes / (relocationHeader + 16), 150 - moveBatchBytes/(relocationHeader+16), 1, 1}},
+	} {
+		var sizes []int
+		err := moves.EachBatch(tc.maxCount, func(batch []Relocation) error {
+			sizes = append(sizes, len(batch))
+			return nil
+		})
+		if err != nil || !slices.Equal(sizes, tc.want) {
+			t.Fatalf("limit %d: got %v, %v; want %v", tc.maxCount, sizes, err, tc.want)
+		}
 	}
 }
 
