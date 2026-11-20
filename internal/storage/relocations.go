@@ -18,7 +18,7 @@ type Relocation struct {
 }
 
 // Relocations keeps one small batch in memory. Larger operations spill all
-// moves into an unnamed scratch file. File registry entries remain shared.
+// moves into an unnamed file in the owning DB workspace.
 type Relocations struct {
 	small  []Relocation
 	fd     *os.File
@@ -27,7 +27,7 @@ type Relocations struct {
 	count  int
 	maxKey int
 	bytes  int64
-	fs     *IO
+	store  *Store
 }
 
 const (
@@ -38,8 +38,15 @@ const (
 	RelocationBatchCount = 32
 )
 
+// NewRelocations starts an in-memory batch and opens its workspace only on spill.
+func (s *Store) NewRelocations() *Relocations { return &Relocations{store: s} }
+
 func (m *Relocations) open() error {
-	fd, err := platform.OpenScratch("", "tarp-relocations-*")
+	dir, err := m.store.WorkspaceDir()
+	if err != nil {
+		return err
+	}
+	fd, err := platform.OpenScratch(dir, "tarp-relocations-*")
 	if err != nil {
 		return err
 	}
@@ -50,7 +57,7 @@ func (m *Relocations) open() error {
 }
 
 func (m *Relocations) append(key string, old, next Location) error {
-	err := m.fs.Do("index.moves.write", func() error {
+	err := m.store.IO.Do("index.moves.write", func() error {
 		move := Relocation{Key: key, Old: old, Next: next}
 		if m.fd == nil {
 			if m.count < RelocationBatchCount && int64(len(key)) <= moveBatchBytes-relocationHeader-m.bytes {
@@ -109,7 +116,7 @@ func (m *Relocations) seal() error {
 	if m.count == 0 {
 		return nil
 	}
-	if err := m.fs.Do("index.moves.flush", func() error {
+	if err := m.store.IO.Do("index.moves.flush", func() error {
 		if m.writer == nil {
 			return nil
 		}

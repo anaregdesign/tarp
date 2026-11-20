@@ -40,7 +40,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 		}
 	}()
 
-	var moves storage.Relocations
+	moves := db.store.NewRelocations()
 	defer func() {
 		if closeErr := moves.Close(); closeErr != nil {
 			if result != nil {
@@ -65,7 +65,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 				}
 			}()
 		}
-		return work.Copy(ctx, db.store.IO, &moves, history, func() error { return db.cleanYield(ctx) }, func(key string, old storage.Location) (bool, error) {
+		return work.Copy(ctx, db.store.IO, moves, history, func() error { return db.cleanYield(ctx) }, func(key string, old storage.Location) (bool, error) {
 			current, exists, err := db.lookupLocation(key)
 			if err != nil {
 				return false, &storage.SourceError{Err: err}
@@ -127,7 +127,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	db.replaceDataStats(oldData, newData)
 	db.writer.Unlock()
 
-	db.relocate(&moves, storage.RelocationBatchCount, "clean.remap:after")
+	db.relocate(moves, storage.RelocationBatchCount, "clean.remap:after")
 	if err := db.health(); err != nil {
 		return &OpError{Operation: "clean", Phase: "post-publication", Outcome: Committed, Err: err}
 	}

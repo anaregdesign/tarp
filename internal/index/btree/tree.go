@@ -27,9 +27,6 @@ type tree struct {
 	allocErr         error
 }
 
-// New builds an empty process-private index in the OS scratch directory.
-func New(budget int64) (index.Backend, error) { return NewIn("", budget) }
-
 // NewIn puts all disk workspace for the derived index on the chosen filesystem.
 func NewIn(dir string, budget int64) (index.Backend, error) {
 	p, err := newPager(dir, budget)

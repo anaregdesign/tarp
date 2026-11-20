@@ -12,7 +12,7 @@ import (
 // increase. The metric is the charged resident page cache only; process-level
 // allocations and operational latency are measured by the opt-in campaign.
 func TestPagedIndexBudgetAtTenfoldCardinality(t *testing.T) {
-	db, err := btree.New(btree.MinBudget)
+	db, err := btree.NewIn(t.TempDir(), btree.MinBudget)
 	if err != nil {
 		t.Fatal(err)
 	}

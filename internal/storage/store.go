@@ -80,20 +80,21 @@ type Location struct {
 }
 
 type Store struct {
-	Dir               string
-	Config            Config
-	IO                *IO
-	Current           format.Frontier
-	Catalog           format.Catalog
-	Manifest          []byte
-	Files             map[uint64]*File
-	active            *os.File
-	lock              *platform.DirectoryLock
-	readers           *handles
-	nextID            uint64
-	retired           map[uint64]*File
-	retiredCatalogs   map[uint64]struct{}
-	retireSyncPending bool
+	Dir                   string
+	Config                Config
+	IO                    *IO
+	Current               format.Frontier
+	Catalog               format.Catalog
+	Manifest              []byte
+	Files                 map[uint64]*File
+	active                *os.File
+	lock                  *platform.DirectoryLock
+	readers               *handles
+	nextID                uint64
+	retired               map[uint64]*File
+	retiredCatalogs       map[uint64]struct{}
+	retireSyncPending     bool
+	cleanWorkspaceOnClose bool
 	// Created reports that this Open published the initial CURRENT.
 	Created bool
 	// MaxValueBytes is the largest live value at indexed Open.
@@ -130,29 +131,30 @@ func Open(dir string, cfg Config, fs *IO) (*Store, map[string]Location, error) {
 }
 
 func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (*Store, map[string]Location, error) {
-	return openStore(ctx, dir, cfg, existingOnly, fs, nil)
+	s, legacy, _, err := openStore(ctx, dir, cfg, existingOnly, fs, nil)
+	return s, legacy, err
 }
 
-// OpenIndexed validates and replays selected DATA into a new empty backend.
-// The caller owns the backend and discards it if Open fails.
-func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, backend index.Backend) (*Store, error) {
-	s, _, err := openStore(ctx, dir, cfg, existingOnly, fs, backend)
-	return s, err
+// OpenIndexed constructs the backend under the directory lock. On success
+// the caller owns both objects and must close the backend before the store.
+func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error)) (*Store, index.Backend, error) {
+	s, _, keys, err := openStore(ctx, dir, cfg, existingOnly, fs, newIndex)
+	return s, keys, err
 }
 
-func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, backend index.Backend) (_ *Store, legacy map[string]Location, result error) {
+func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (_ *Store, result error) {
 	absolute, err := filepath.Abs(dir)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if !existingOnly {
 		if err := os.Mkdir(absolute, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	absolute, err = filepath.EvalSymlinks(absolute)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Restored databases and backups both have CURRENT but no LOCK. Reject a
 	// foreign format or backup before creating LOCK. Validate the DB under lock.
@@ -160,26 +162,26 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
 		if err == nil {
 			if _, err := format.DecodeFrontier(b); err != nil {
-				return nil, nil, fmt.Errorf("CURRENT: %w", err)
+				return nil, fmt.Errorf("CURRENT: %w", err)
 			}
 			if _, err := os.Lstat(filepath.Join(absolute, "BACKUP")); err == nil {
-				return nil, nil, ErrBackupDirectory
+				return nil, ErrBackupDirectory
 			} else if !errors.Is(err, os.ErrNotExist) {
-				return nil, nil, err
+				return nil, err
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, nil, err
+			return nil, err
 		} else if existingOnly {
 			if err := checkUninitializedDir(absolute); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 		}
 	} else if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	lock, err := platform.Lock(absolute)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	s := &Store{Dir: absolute, Config: cfg, IO: fs, lock: lock, readers: newHandles(cfg.Handles), Files: make(map[uint64]*File)}
 	defer func() {
@@ -188,71 +190,120 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 		}
 	}()
 	if err := fs.Do("lock.sync", lock.Sync); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := fs.SyncDir(absolute, "lock.dirsync"); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	entries, err := os.ReadDir(absolute)
+	return s, nil
+}
+
+func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error)) (_ *Store, _ map[string]Location, _ index.Backend, result error) {
+	s, err := lockStore(ctx, dir, cfg, existingOnly, fs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if len(entries) == 1 && entries[0].Name() == "LOCK" {
-		if existingOnly {
-			return nil, nil, &os.PathError{Op: "open", Path: filepath.Join(absolute, "CURRENT"), Err: os.ErrNotExist}
+	var keys index.Backend
+	defer func() {
+		if result != nil {
+			if keys != nil {
+				result = errors.Join(result, keys.Close())
+			}
+			result = errors.Join(result, s.Close())
 		}
-		if err := fs.SyncDir(filepath.Dir(absolute), "init.parent.sync"); err != nil {
-			return nil, nil, err
-		}
-		if err := s.initialize(); err != nil {
-			return nil, nil, err
-		}
-		s.Created = true
-		if backend == nil {
-			legacy = make(map[string]Location)
-		}
-		return s, legacy, nil
+	}()
+	entries, err := os.ReadDir(s.Dir)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	var image *Image
-	if backend == nil {
-		image, err = Validate(ctx, absolute)
-	} else {
-		image, err = validateIndexed(ctx, absolute, backend)
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := cfg.CheckLimits(image.Required); err != nil {
-		return nil, nil, err
-	}
-	s.Current, s.Catalog, s.Manifest, s.Files = image.Current, image.Catalog, image.Manifest, image.Files
-	s.MaxValueBytes = image.MaxValueBytes
-	if err := s.inspectNames(ctx, entries); err != nil {
-		return nil, nil, err
-	}
-	s.active, err = os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	if s.Files[s.Current.ActiveID].Size.Load() != s.Current.ActiveEnd {
-		if err := fs.Do("recover.truncate", func() error { return s.active.Truncate(s.Current.ActiveEnd) }); err != nil {
-			return nil, nil, err
+	fresh := len(entries) == 1 && entries[0].Name() == "LOCK"
+	hadWorkspace := false
+	if fresh {
+		if existingOnly {
+			return nil, nil, nil, &os.PathError{Op: "open", Path: filepath.Join(s.Dir, "CURRENT"), Err: os.ErrNotExist}
 		}
-		if err := fs.Sync(s.active, "recover.sync"); err != nil {
-			return nil, nil, err
+		if err := fs.SyncDir(filepath.Dir(s.Dir), "init.parent.sync"); err != nil {
+			return nil, nil, nil, err
+		}
+		if err := s.initialize(); err != nil {
+			return nil, nil, nil, err
+		}
+		s.Created = true
+	} else {
+		image, err = readImage(ctx, s.Dir)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		s.Current = image.Current
+		hadWorkspace, err = s.inspectNames(ctx, entries)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	// Until the DATA and limits pass validation, remove only a workspace
+	// created by this Open. An incompatible Open preserves prior remnants.
+	s.cleanWorkspaceOnClose = !hadWorkspace
+	if newIndex != nil {
+		keys, err = newIndex(s)
+		if err != nil {
+			outcome := publication.NotApplied
+			if s.Created {
+				outcome = publication.Committed
+			}
+			return nil, nil, nil, fault("index", outcome, false, err)
+		}
+	}
+	if fresh {
+		var legacy map[string]Location
+		if keys == nil {
+			legacy = make(map[string]Location)
+		}
+		return s, legacy, keys, nil
+	}
+	if err := s.recover(ctx, image, entries, keys, hadWorkspace); err != nil {
+		return nil, nil, nil, err
+	}
+	return s, image.Index, keys, nil
+}
+
+func (s *Store) recover(ctx context.Context, image *Image, entries []os.DirEntry, keys index.Backend, hadWorkspace bool) error {
+	if err := image.replay(ctx, keys); err != nil {
+		return err
+	}
+	if err := s.Config.CheckLimits(image.Required); err != nil {
+		return err
+	}
+	if hadWorkspace {
+		// Replay can leave the backend open and using this directory.
+		if err := s.sweepWorkspace(false); err != nil {
+			return err
+		}
+		s.cleanWorkspaceOnClose = true
+	}
+	s.Catalog, s.Manifest, s.Files = image.Catalog, image.Manifest, image.Files
+	s.MaxValueBytes = image.MaxValueBytes
+	active, err := os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	s.active = active
+	if s.Files[s.Current.ActiveID].Size.Load() != s.Current.ActiveEnd {
+		if err := s.IO.Do("recover.truncate", func() error { return s.active.Truncate(s.Current.ActiveEnd) }); err != nil {
+			return err
+		}
+		if err := s.IO.Sync(s.active, "recover.sync"); err != nil {
+			return err
 		}
 		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveEnd)
 	}
 	if _, _, err := s.cleanupValidated(ctx, entries); err != nil {
-		return nil, nil, err
+		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
-	}
-	return s, image.Index, nil
+	return ctx.Err()
 }
 
 // Neither LOCK nor CURRENT was observed before locking. Keep empty directories
@@ -555,14 +606,19 @@ func (loc Location) readError(err error) error {
 	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.Offset, err)
 }
 
-func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry) error {
+func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry) (bool, error) {
+	hasWorkspace := false
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 		name := e.Name()
+		if name == workspaceName && e.IsDir() {
+			hasWorkspace = true
+			continue
+		}
 		if !e.Type().IsRegular() {
-			return fmt.Errorf("%w: non-regular engine object %s", ErrCorrupt, name)
+			return false, fmt.Errorf("%w: non-regular engine object %s", ErrCorrupt, name)
 		}
 		if name == "LOCK" || name == "CURRENT" {
 			continue
@@ -572,10 +628,10 @@ func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry) error {
 		} else if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {
 			s.nextID = max(s.nextID, id)
 		} else if !s.ownedTemp(name) {
-			return fmt.Errorf("%w: unknown engine object %s", ErrCorrupt, name)
+			return false, fmt.Errorf("%w: unknown engine object %s", ErrCorrupt, name)
 		}
 	}
-	return nil
+	return hasWorkspace, nil
 }
 
 func (s *Store) ownedTemp(name string) bool {
@@ -591,7 +647,7 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 		return 0, 0, err
 	}
 	ctx := context.Background()
-	if err := s.inspectNames(ctx, entries); err != nil {
+	if _, err := s.inspectNames(ctx, entries); err != nil {
 		return 0, 0, err
 	}
 	return s.cleanupValidated(ctx, entries)
@@ -673,6 +729,9 @@ func (s *Store) Close() error {
 		s.active = nil
 	}
 	if s.lock != nil {
+		if s.cleanWorkspaceOnClose {
+			err = errors.Join(err, s.cleanWorkspace())
+		}
 		err = errors.Join(err, s.lock.Close())
 		s.lock = nil
 	}

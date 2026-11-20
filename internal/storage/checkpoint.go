@@ -61,7 +61,6 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 		}
 	}()
 	buffer := make([]byte, 32<<10)
-	moves.fs = fs
 	err := c.capture.replayLive(ctx, fs, history, live, func(src *os.File, key string, old Location) error {
 		if err := ctx.Err(); err != nil {
 			return err

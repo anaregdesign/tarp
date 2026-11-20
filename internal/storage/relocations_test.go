@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -11,7 +12,8 @@ import (
 )
 
 func TestRelocationsStreamCheckedAddressesAcrossBufferBoundaries(t *testing.T) {
-	var moves Relocations
+	store := &Store{Dir: t.TempDir()}
+	moves := store.NewRelocations()
 	defer moves.Close()
 	key := strings.Repeat("\x00key\xff", 10_000)
 	in := &File{ID: 4}
@@ -61,7 +63,8 @@ func TestRelocationsStreamCheckedAddressesAcrossBufferBoundaries(t *testing.T) {
 }
 
 func TestRelocationsBatchLimitsOnReplay(t *testing.T) {
-	var moves Relocations
+	store := &Store{Dir: t.TempDir()}
+	moves := store.NewRelocations()
 	defer moves.Close()
 	src, dst := &File{ID: 1}, &File{ID: 2}
 	appendKey := func(key string) {
@@ -107,7 +110,9 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 	}{{"small", RelocationBatchCount, 1, false}, {"many", RelocationBatchCount + 1, 1, true},
 		{"exact bytes", 1, moveBatchBytes - relocationHeader, false}, {"large keys", 3, moveBatchBytes, true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			var moves Relocations
+			store := &Store{Dir: t.TempDir()}
+			t.Setenv("TMPDIR", filepath.Join(store.Dir, "missing-temp"))
+			moves := store.NewRelocations()
 			defer moves.Close()
 			base := Location{File: &File{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + int64(tc.keyBytes)}
 			next := base
@@ -124,6 +129,14 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 			}
 			if (moves.fd != nil) != tc.spill {
 				t.Fatalf("spilled = %t, want %t", moves.fd != nil, tc.spill)
+			}
+			workspace := filepath.Join(store.Dir, workspaceName)
+			if tc.spill {
+				if filepath.Dir(moves.fd.Name()) != workspace {
+					t.Fatalf("relocation scratch %q, want directory %q", moves.fd.Name(), workspace)
+				}
+			} else if _, err := os.Lstat(workspace); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("in-memory relocation created a workspace: %v", err)
 			}
 			seen := 0
 			err := moves.EachBatch(RelocationBatchCount, func(batch []Relocation) error {
@@ -142,5 +155,42 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 				t.Fatalf("visited %d of %d, error %v", seen, tc.count, err)
 			}
 		})
+	}
+}
+
+func TestRelocationSpillCanRetryAfterWorkspaceFailure(t *testing.T) {
+	store := &Store{Dir: t.TempDir()}
+	workspace := filepath.Join(store.Dir, workspaceName)
+	if err := os.WriteFile(workspace, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	moves := store.NewRelocations()
+	defer moves.Close()
+	old := Location{File: &File{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + 1}
+	next := old
+	next.File = &File{ID: 2}
+	for range RelocationBatchCount {
+		if err := moves.append("k", old, next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var work *IndexWorkError
+	if err := moves.append("k", old, next); !errors.As(err, &work) {
+		t.Fatalf("spill returned %v, want an index workspace error", err)
+	}
+	if moves.fd != nil || moves.count != RelocationBatchCount {
+		t.Fatalf("failed spill changed buffered moves: %d, fd %v", moves.count, moves.fd)
+	}
+	if got, err := os.ReadFile(workspace); err != nil || string(got) != "occupied" {
+		t.Fatalf("workspace collision: %q, %v", got, err)
+	}
+	if err := os.Remove(workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := moves.append("k", old, next); err != nil {
+		t.Fatal(err)
+	}
+	if moves.fd == nil || moves.count != RelocationBatchCount+1 {
+		t.Fatalf("retry left %d moves, fd %v", moves.count, moves.fd)
 	}
 }

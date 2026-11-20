@@ -29,7 +29,11 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 	m := memory.New()
 	defer m.Close()
 	// A full replay against the image produces exact key, byte and limit totals.
-	image, err := validateIndexed(t.Context(), dir, m)
+	image, err := readImage(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = image.replayIndexed(t.Context(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +55,11 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 	failing := memory.New()
 	defer failing.Close()
 	for range 2 {
-		_, err := validateIndexed(t.Context(), dir, failing)
+		image, err := readImage(t.Context(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = image.replayIndexed(t.Context(), failing)
 		var source *SourceError
 		if !errors.As(err, &source) || !errors.Is(err, ErrCorrupt) || failing.Count() != 0 {
 			t.Fatalf("failed replay: count=%d, err=%v", failing.Count(), err)

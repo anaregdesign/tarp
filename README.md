@@ -298,12 +298,16 @@ db, err := tarp.Open(dir, tarp.Options{
 })
 ```
 
-`IndexBTree` stores encoded keys and DATA addresses in private 8 KiB pages
-on the OS temporary filesystem. The root and frequently used routing pages
-get priority in the cache. Value LRU hits bypass the index. On a Value miss,
-cold routing, leaf and overflow pages can add reads before loading DATA.
-Use a disk-backed temporary filesystem with enough free space. An unlinked
-scratch file is released by the OS after its final descriptor closes.
+`IndexBTree` stores encoded keys and DATA addresses in private 8 KiB pages.
+Tarp creates the backing files in `.tarp-work/` inside the database directory
+passed to `Open` or `OpenExisting`. Size the database volume for DATA, index
+pages, and temporary work during replay, compaction and online backup. Tarp
+unlinks each scratch file immediately after opening it. The OS releases its
+space when its final descriptor closes.
+
+The root and frequently used routing pages get priority in the cache. Value
+LRU hits bypass the index. On a Value miss, cold routing, leaf and overflow
+pages can add reads before loading DATA.
 
 The configured budget is split between the foreground index (one half),
 compaction and backup (one quarter each). It limits page-cache and index work

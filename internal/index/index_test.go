@@ -21,7 +21,7 @@ func TestBackendTransactionsExposeWholeSnapshots(t *testing.T) {
 		open func() (index.Backend, error)
 	}{
 		{"memory", func() (index.Backend, error) { return memory.New(), nil }},
-		{"btree", func() (index.Backend, error) { return btree.New(btree.MinBudget) }},
+		{"btree", func() (index.Backend, error) { return btree.NewIn(t.TempDir(), btree.MinBudget) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, err := test.open()

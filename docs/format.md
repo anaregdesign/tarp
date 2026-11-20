@@ -18,13 +18,15 @@ CURRENT
 MANIFEST-<32 lowercase UUID hex>-<16 lowercase nonzero ID hex>
 DATA-<32 lowercase UUID hex>-<16 lowercase nonzero ID hex>
 .tarp-current-<32 lowercase UUID hex>-<random>.tmp
+.tarp-work/
 ```
 
 IDs share one allocation space and do not wrap. Recognized names are inspected
 before assigning IDs on reopen. UUID-bound names allow safe recognition of an
 unselected partially written header; unknown objects are not garbage. `CURRENT`
-alone selects the authoritative catalog. Backup excludes LOCK, unselected
-objects, and temporary files and adds one `BACKUP` metadata file.
+alone selects the authoritative catalog. `.tarp-work/` is a reserved directory
+for process-private scratch. Backup excludes it, LOCK, unselected objects and
+temporary files, and adds one `BACKUP` metadata file.
 
 ## Data segment header: 64 bytes
 
