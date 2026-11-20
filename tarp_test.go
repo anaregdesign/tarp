@@ -1,6 +1,7 @@
 package tarp_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"maps"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +101,56 @@ func TestOpenExistingAcceptsRestoredDatabaseWithoutLockFile(t *testing.T) {
 	}
 	if got, err := restored.Get([]byte("k")); err != nil || string(got) != "v" {
 		t.Fatalf("restored value: %q, %v", got, err)
+	}
+}
+
+func TestOpenRejectsBackupWithoutChangingItsFiles(t *testing.T) {
+	source := openPublicDB(t, t.TempDir(), tarp.Options{})
+	if err := source.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"Open", "OpenExisting"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			dir := t.TempDir()
+			req := tarp.RestoreRequest{Source: filepath.Join(dir, "backup"), Destination: filepath.Join(dir, "restored")}
+			if err := source.Backup(ctx, req.Source); err != nil {
+				t.Fatal(err)
+			}
+			manifest := filepath.Join(req.Source, "BACKUP")
+			before, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var db *tarp.DB
+			if mode == "Open" {
+				db, err = tarp.Open(req.Source, tarp.Options{})
+			} else {
+				db, err = tarp.OpenExisting(ctx, req.Source, tarp.Options{})
+			}
+			if db != nil {
+				db.Close()
+				t.Fatal("opened a backup as a database")
+			}
+			if !errors.Is(err, tarp.ErrCorrupt) || !strings.Contains(err.Error(), "Restore") {
+				t.Errorf("opening backup: %v", err)
+			}
+			after, err := os.ReadFile(manifest)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("backup manifest changed after open: %v", err)
+			}
+			// The manifest authenticates the exact inventory and bytes of all other files.
+			if _, err := tarp.VerifyBackup(ctx, req.Source, req.Limits); err != nil {
+				t.Fatalf("verify after open: %v", err)
+			}
+			if err := tarp.Restore(ctx, req); err != nil {
+				t.Fatalf("restore after open: %v", err)
+			}
+			restored := openPublicDB(t, req.Destination, tarp.Options{})
+			if got, err := restored.Get([]byte("k")); err != nil || string(got) != "v" {
+				t.Fatalf("restored value: %q, %v", got, err)
+			}
+		})
 	}
 }
 

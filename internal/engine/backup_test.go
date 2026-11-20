@@ -21,6 +21,36 @@ import (
 	"github.com/anaregdesign/tarp/internal/testfixture"
 )
 
+func TestBackupCanceledWaitingForWriterSkipsDestinationIO(t *testing.T) {
+	var backupIO []string
+	fs := &storage.IO{Hook: func(point string) error {
+		if strings.HasPrefix(point, "backup.") {
+			backupIO = append(backupIO, point)
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, testOptions(), fs, &Hooks{CleanerStart: make(chan struct{})})
+	mustPut(t, db, "key", "value")
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "backup")
+	cancelMaintenanceWaitingForWriter(t, db, db.backup.Load, func(ctx context.Context) error {
+		return db.Backup(ctx, dest)
+	})
+	if len(backupIO) != 0 {
+		t.Fatalf("canceled Backup performed I/O: %v", backupIO)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("canceled Backup left entries %v: %v", entries, err)
+	}
+	if err := db.Backup(t.Context(), dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBackup(t.Context(), dest, testOptions().RestoreLimits()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func makeRestoreBackup(t *testing.T) string {
 	t.Helper()
 	db := newTestDB(t, testOptions(), nil)

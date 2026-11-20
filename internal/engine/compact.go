@@ -44,6 +44,10 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 		return result, operationError("compact", "wait", ctx.Err())
 	}
 	db.writer.Lock()
+	if err := ctx.Err(); err != nil {
+		db.writer.Unlock()
+		return result, operationError("compact", "wait", err)
+	}
 	if err := db.health(); err != nil {
 		db.writer.Unlock()
 		return result, err
@@ -90,7 +94,18 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 			}
 		}
 	}()
-	if err := checkpoint.Copy(ctx, moves, db.reserveSnapshotFile); err != nil {
+	reserve := func() (*storage.File, error) {
+		db.writer.Lock()
+		defer db.writer.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := db.health(); err != nil {
+			return nil, err
+		}
+		return db.store.ReserveSnapshotFile()
+	}
+	if err := checkpoint.Copy(ctx, moves, reserve); err != nil {
 		db.compactFailure(err)
 		return result, operationError("compact", "copy", err)
 	}
@@ -119,15 +134,6 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	}
 	result.ReclaimedBytes, result.PinnedBytes, err = db.store.Cleanup()
 	return result, compactCleanupError(err)
-}
-
-func (db *DB) reserveSnapshotFile() (*storage.File, error) {
-	db.writer.Lock()
-	defer db.writer.Unlock()
-	if err := db.health(); err != nil {
-		return nil, err
-	}
-	return db.store.ReserveSnapshotFile()
 }
 
 // relocate moves index ownership only while it still names the copied record.
