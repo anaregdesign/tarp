@@ -260,7 +260,6 @@ the staged image and its size requirements before publishing a new closed
 database. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
 explicitly and does not poison an otherwise healthy source DB.
 
-
 ## Derived index and scratch space
 
 The backend is selected per Open. A B+tree stores pointer-free DATA addresses
@@ -271,8 +270,13 @@ then establish the commit. Publication switches the index, cache and counters
 together. A failure preparing scratch leaves the selected frontier intact.
 After an uncertain durable publication, reopen to rebuild the selected index.
 
+During B+tree recovery, the builder sorts bounded runs by exact binary key.
+It validates each key’s transitions in the order in which its records were
+replayed, then packs its final live address into the tree from the leaves up.
+Backup uses the same reducer to validate its captured history.
+
 `VerifyBackup` verifies the immutable directory with bounded key windows. A
 large backup can take multiple sequential DATA passes. Use
 `VerifyBackupWithScratch(ctx, source, scratchDir)` to verify with a disposable
 paged index on an existing external directory. Restore validates both its source
-and the published candidate before the destination rename.
+and the staged copy before the destination rename.

@@ -12,6 +12,14 @@ Benchmarks, smoke measurement profiles, and the VM measurement workflow run only
 on a separate explicit user request. Ordinary functional and race tests provide
 the routine PR checks.
 
+## Selectable key indexes
+
+The [index-mode campaign](benchmarks/index-modes.md) compares Memory and B+tree
+at two live-key cardinalities and measures latency, page reads, heap, scratch
+and maintenance. The [full Go suite](benchmarks/index-full-suite.md) compares
+the default Memory mode with v0.8.0. The [disposable VM profiles](benchmarks/index-vm.md)
+record results for 64 B, 1 KiB and 4 KiB values.
+
 ## Public batch APIs and Stats
 
 Run `benchmark/scripts/api-benchmarks.sh` to compare grouped and single reads,

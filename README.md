@@ -385,7 +385,10 @@ if err := info.CheckLimits(opts.RestoreLimits()); err != nil {
 ```
 
 `VerifyBackup` checks the exact file set and digests and replays the selected
-records. `info.RequiredLimits` reports the largest logical cache charge and
+records. It writes no files and can make multiple passes over large backups.
+For a single DATA replay using temporary disk space, call
+`VerifyBackupWithScratch(ctx, backupDir, scratchDir)` with an existing
+directory outside the backup. `info.RequiredLimits` reports the largest logical cache charge and
 encoded record among the live entries. Both
 are zero for an empty backup. A verification error returns a zero report.
 `info.CheckLimits` compares these sizes with a target configuration in memory.
