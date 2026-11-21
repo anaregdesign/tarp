@@ -15,7 +15,7 @@ import (
 
 func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
 	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64, Handles: 1}
-	store, _, err := Open(t.TempDir(), cfg, nil)
+	store, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
 
 func TestCheckpointRejectsAStaleLocationWithTheRightLiveCount(t *testing.T) {
 	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
-	db, _, err := Open(t.TempDir(), cfg, nil)
+	db, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

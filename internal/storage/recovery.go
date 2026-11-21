@@ -14,6 +14,7 @@ import (
 	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/index"
+	"github.com/anaregdesign/tarp/internal/index/memory"
 )
 
 type Image struct {
@@ -21,7 +22,6 @@ type Image struct {
 	Catalog       format.Catalog
 	Manifest      []byte
 	Files         map[uint64]*File
-	Index         map[string]Location
 	Required      RequiredLimits
 	LiveKeys      uint64
 	MaxValueBytes int64
@@ -37,32 +37,12 @@ func Validate(ctx context.Context, dir string) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := image.replay(ctx, nil); err != nil {
+	backend := memory.New()
+	defer backend.Close()
+	if err := image.replayIndexed(ctx, backend); err != nil {
 		return nil, err
 	}
 	return image, nil
-}
-
-func (image *Image) replay(ctx context.Context, keys index.Backend) error {
-	if keys != nil {
-		return image.replayIndexed(ctx, keys)
-	}
-	image.Index = make(map[string]Location)
-	err := image.scan(ctx, func(file *File, off int64, r format.Record, key string) error {
-		return applyRecord(image.Index, file, image.Catalog.PrunedThrough, off, r, key)
-	})
-	if err != nil {
-		return err
-	}
-	for key, loc := range image.Index {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := image.measure(key, loc.Bytes, loc.ValueBytes); err != nil {
-			return err
-		}
-	}
-	return ctx.Err()
 }
 
 // readImage decodes the exact frontier and catalog before any index is built.
@@ -485,19 +465,6 @@ func validateKey(kind uint32, record format.Record, present bool, prunedThrough 
 		return fmt.Errorf("%w: duplicate snapshot key", ErrCorrupt)
 	case record.Kind == format.Delete && !present && record.Sequence > prunedThrough:
 		return fmt.Errorf("%w: tombstone without a live key", ErrCorrupt)
-	}
-	return nil
-}
-
-func applyRecord(index map[string]Location, file *File, prunedThrough uint64, offset int64, r format.Record, key string) error {
-	_, present := index[key]
-	if err := validateKey(file.Kind, r, present, prunedThrough); err != nil {
-		return err
-	}
-	if r.Kind == format.Delete {
-		delete(index, key)
-	} else {
-		index[key] = Location{File: file, Offset: offset, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 	}
 	return nil
 }

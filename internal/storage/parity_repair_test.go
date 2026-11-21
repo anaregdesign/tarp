@@ -23,7 +23,7 @@ type repairFixture struct {
 func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 	t.Helper()
 	dir := t.TempDir()
-	db, _, err := Open(dir, Config{Handles: 1, RecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
+	db, err := openTestStore(t, dir, Config{Handles: 1, RecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

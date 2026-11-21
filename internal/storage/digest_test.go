@@ -15,7 +15,7 @@ import (
 // Its key and payload CRCs pass every decoder, including on a dead record.
 func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.T) {
 	cfg := Config{ValueCacheBudgetBytes: 4096, RecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
-	store, _, err := Open(t.TempDir(), cfg, nil)
+	store, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

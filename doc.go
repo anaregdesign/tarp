@@ -32,8 +32,9 @@
 // space for both maintenance and backup. Close joins the worker. Stats returns
 // a constant-time snapshot of storage, cache and foreground activity.
 //
-// Open and Restore accept one unversioned format. A database or backup from
-// the previous implementation is unsupported. Use Backup for a consistent
-// image. VerifyBackup returns metadata for a fully verified immutable backup. Restore publishes
-// a new closed DB. See README.md and docs/ for limits, recovery and qualification evidence.
+// During v0 the public API and the database and backup formats may change
+// between releases. Each revision reads and writes its current formats.
+// Backup captures a consistent image. VerifyBackup verifies that image and
+// returns its metadata. Restore publishes a new closed DB. See README.md
+// and docs/ for limits, recovery and qualification evidence.
 package tarp

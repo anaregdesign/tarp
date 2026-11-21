@@ -155,22 +155,6 @@ func (s *Store) allocateID() (uint64, error) {
 	return s.nextID, nil
 }
 
-func Open(dir string, cfg Config, fs *IO) (*Store, map[string]Location, error) {
-	return OpenContext(context.Background(), dir, cfg, false, fs)
-}
-
-func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (*Store, map[string]Location, error) {
-	s, legacy, _, err := openStore(ctx, dir, cfg, existingOnly, fs, nil, nil)
-	return s, legacy, err
-}
-
-// OpenIndexed constructs the backend under the directory lock. On success
-// the caller owns both objects and must close the backend before the store.
-func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error), load IndexImporter) (*Store, index.Backend, error) {
-	s, _, keys, err := openStore(ctx, dir, cfg, existingOnly, fs, newIndex, load)
-	return s, keys, err
-}
-
 func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (_ *Store, result error) {
 	absolute, err := filepath.Abs(dir)
 	if err != nil {
@@ -230,10 +214,12 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	return s, nil
 }
 
-func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error), load IndexImporter) (_ *Store, _ map[string]Location, _ index.Backend, result error) {
+// OpenIndexed constructs the backend under the directory lock. On success
+// the caller owns both objects and must close the backend before the store.
+func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error), load IndexImporter) (_ *Store, _ index.Backend, result error) {
 	s, err := lockStore(ctx, dir, cfg, existingOnly, fs)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	var keys index.Backend
 	defer func() {
@@ -246,26 +232,26 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	}()
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	var image *Image
 	fresh := len(entries) == 1 && entries[0].Name() == "LOCK"
 	var listing directoryListing
 	if fresh {
 		if existingOnly {
-			return nil, nil, nil, &os.PathError{Op: "open", Path: filepath.Join(s.Dir, "CURRENT"), Err: os.ErrNotExist}
+			return nil, nil, &os.PathError{Op: "open", Path: filepath.Join(s.Dir, "CURRENT"), Err: os.ErrNotExist}
 		}
 		if err := fs.SyncDir(filepath.Dir(s.Dir), "init.parent.sync"); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		if err := s.initialize(); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		s.Created = true
 	} else {
 		image, err = readImage(ctx, s.Dir)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		if s.IO != nil {
 			image.openRead = s.IO.OpenRead
@@ -273,7 +259,7 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 		s.Current = image.Current
 		s.nextID = max(s.nextID, image.Catalog.Index.ID)
 		if err := s.inspectNames(ctx, entries, &listing); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 	}
 	// Until the DATA and limits pass validation, remove only a workspace
@@ -282,31 +268,26 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if image != nil && image.Catalog.Index.ID != 0 && load != nil {
 		keys, err = s.loadCheckpoint(ctx, image, load)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		s.IndexCheckpointHit = keys != nil
 	}
-	if keys == nil && newIndex != nil {
+	if keys == nil {
 		keys, err = newIndex(s)
 		if err != nil {
 			outcome := publication.NotApplied
 			if s.Created {
 				outcome = publication.Committed
 			}
-			return nil, nil, nil, fault("index", outcome, false, err)
+			return nil, nil, fault("index", outcome, false, err)
 		}
 	}
-	if fresh {
-		var legacy map[string]Location
-		if keys == nil {
-			legacy = make(map[string]Location)
+	if !fresh {
+		if err := s.recover(ctx, image, listing, keys); err != nil {
+			return nil, nil, err
 		}
-		return s, legacy, keys, nil
 	}
-	if err := s.recover(ctx, image, listing, keys); err != nil {
-		return nil, nil, nil, err
-	}
-	return s, image.Index, keys, nil
+	return s, keys, nil
 }
 
 func (s *Store) recover(ctx context.Context, image *Image, listing directoryListing, keys index.Backend) error {
@@ -314,7 +295,7 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 	if s.IndexCheckpointHit {
 		err = image.replayAfterCheckpoint(ctx, keys, s.Config.IndexedOpen)
 	} else {
-		err = image.replay(ctx, keys)
+		err = image.replayIndexed(ctx, keys)
 	}
 	if err != nil {
 		return err

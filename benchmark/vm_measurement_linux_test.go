@@ -335,7 +335,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 	}
 	write("environment", 0, map[string]any{
 		"go": runtime.Version(), "goos": runtime.GOOS, "goarch": runtime.GOARCH, "gomaxprocs": runtime.GOMAXPROCS(0),
-		"storage_format": "unversioned", "guest_cpuinfo": string(cpu), "guest_meminfo": string(memory), "options": measurementOptions(engine.Observe(db).Options()),
+		"storage_format": "unversioned", "guest_cpuinfo": string(cpu), "guest_meminfo": string(memory), "options": engine.Observe(db).Options(),
 		"working_keys": len(keys), "hot_keys": 8, "key_bytes": 16, "repetitions": 5,
 		"read_samples": 8192, "mixed_samples": 4096, "durable_samples": 64,
 		"cold_get_samples_per_rep": 32, "cold_open_samples_per_history_state": 5,
@@ -432,7 +432,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 				}
 				vmMeasureLatency(write, fmt.Sprintf("durable_put_rotate_%t", rotate), repetition, latency(putRaw, 64, putElapsed))
 				write(fmt.Sprintf("durable_put_rotation_checks_%t", rotate), repetition, map[string]any{
-					"effective_options": measurementOptions(engine.Observe(writer).Options()), "prefills": 1, "timed_puts": 64, "verified_samples": 64, "rotation_expected": rotate,
+					"effective_options": engine.Observe(writer).Options(), "prefills": 1, "timed_puts": 64, "verified_samples": 64, "rotation_expected": rotate,
 					"scope": "one fully synced prefill outside timing; active IDs checked after every timed Put; wall_ns sums only timed API intervals",
 				})
 				if rotate {

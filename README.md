@@ -6,8 +6,7 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses v0.10.0. For the previous release, see the
-[v0.9.1 documentation](https://github.com/anaregdesign/tarp/tree/v0.9.1).
+uses [v0.10.0](https://github.com/anaregdesign/tarp/tree/v0.10.0).
 
 ```sh
 mkdir tarp-example
@@ -62,6 +61,14 @@ go run .
 
 ## Storage and compatibility
 
+During v0, each revision supports its current Go API, database format and
+backup format. Any of these can change between releases. To carry data across
+a format change, export the live keys and values with the version that wrote
+them, import them into a fresh database, and verify the result before switching.
+
+On `main`, the BACKUP header has changed since v0.10.0. To use a v0.10.0
+backup, restore it with v0.10.0 first. This change affects only backup metadata.
+
 The parent directory must exist. One process exclusively owns a directory, while
 its `DB` supports concurrent goroutines without caller locks. Individual key operations are linearizable. Each batch call operates on its
 keys atomically. Separate calls have their own publication or read points.
@@ -73,11 +80,10 @@ path. An absent or empty directory matches `fs.ErrNotExist`. Use
 create-or-open behavior. After either function returns a DB, its lifetime is
 controlled by `Close`. For typed access, use `Bind` on that DB.
 
-**Every successful `Open` starts automatic incremental compaction.** Both new
-and reopened stores use one unversioned storage and backup format. A database
-or backup from the previous implementation returns `ErrUnsupportedFormat`.
-Opening it leaves the files untouched and restoring it leaves the destination
-unpublished. There is no migration path in this package.
+**Every successful `Open` starts automatic incremental compaction.** An unrecognized
+outer signature in CURRENT or BACKUP returns `ErrUnsupportedFormat`. Opening
+such a database preserves its files. Restoring such a backup leaves the
+destination unpublished.
 
 The historical Linux/ext4 power-cut results and performance measurements cover
 the earlier storage implementation. Evidence for the current format and cleaner
@@ -116,10 +122,6 @@ if err != nil {
 }
 return scores.Put("score", 42)
 ```
-
-When upgrading from v0.4, replace `NewTypedDB(raw, ...)` with `Bind(raw, ...)`
-and call `Close`, `Stats`, `Backup` and maintenance methods on the owner.
-Existing v0.4 and v0.5 databases and backups use the same on-disk format as v0.6.
 
 Built-in codecs cover `bool`, `string`, all integer, float and complex types,
 and `[]byte`. Use `Uint8Codec` for `byte` and `Int32Codec` for `rune`. Numeric
@@ -317,7 +319,6 @@ limits entries kept in the value LRU. `MaxBatchGetValueBytes` limits encoded
 value bytes returned by one batch read. Long-running readers can
 hold previous page generations and DATA files on disk.
 
-The checkpoint API introduced in v0.10.0 uses a newer storage format than v0.9.1.
 Both index modes can reuse the same immutable `INDEX` file. A healthy B+tree handle
 refreshes a missing or outdated checkpoint at `Close`. To checkpoint a
 long-running DB or an in-memory index, call `db.CheckpointIndex(ctx)`. It seals
@@ -380,40 +381,6 @@ files. If a live entry exceeds the new cache or record limit, they return
 `ErrIncompatibleOptions`. Minimum settings are 129 cache bytes, 49 record
 bytes and one read handle.
 
-### Upgrading from v0.9.1 to v0.10.0
-
-v0.10.0 changes the database and backup formats. To keep existing data,
-export the live keys and values with v0.9.1, write them into a fresh v0.10.0
-database, and verify the imported data before switching directories. Keep the
-v0.9.1 directory and its backups available until verification is complete.
-
-### Upgrading from v0.9.0 to v0.9.1
-
-Existing Go callers, databases and backups are compatible. If you provisioned
-space in the OS temporary directory for the B+tree, allow that space on the
-database volume before upgrading. The index is rebuilt under `.tarp-work/`
-when the database opens.
-
-### Updating Go callers to v0.9.0
-
-When updating from v0.8.0 to v0.9.0, use the names below. You can reopen
-v0.8.0 databases and restore v0.8.0 backups with the same limits.
-
-| Previously | Now |
-| --- | --- |
-| `Options.IndexMemoryBytes` (introduced on `main` after v0.8.0) | `Options.BTreeMemoryBudgetBytes` |
-| `CacheBytes` on `Options`, `RestoreLimits`, and `SizeError` | `ValueCacheBudgetBytes` |
-| `CompatibilityError.RequiredCacheBytes` | `CompatibilityError.RequiredValueCacheBudgetBytes` |
-| `SizeError.CacheCharge` | `SizeError.ValueCacheChargeBytes` |
-| `Stats.Cache` of type `CacheStats` | `Stats.ValueCache` of type `ValueCacheStats` |
-| `Stats.MissingKeys` | `Stats.MissingKeyLookups` |
-| `Options.BatchReadConcurrency` | `Options.BatchGetReadConcurrency` |
-| `Options.MaxBatchResultBytes` | `Options.MaxBatchGetValueBytes` |
-| `BatchResultBytesLimit` | `BatchGetValueBytesLimit` |
-| `MaintenanceStatus` type and method | `AutoCompactionStatus` |
-| `CompactResult.ReclaimedBytes` | `CompactResult.UnlinkedBytes` |
-| `PinnedBytes` on `CompactResult` and the worker status | `PinnedRetiredDataBytes` |
-
 ## Backup, restore, and maintenance
 
 ```go
@@ -427,8 +394,8 @@ return tarp.Restore(ctx, tarp.RestoreRequest{
 ```
 
 `RestoreRequest.Limits` defaults to the same cache and record limits as
-`Open`. To migrate a v0.4 call that passed `opts`, set
-`Limits: opts.RestoreLimits()`. Configure handles, batch read concurrency
+`Open`. Set `Limits: opts.RestoreLimits()` to reuse explicit limits.
+Configure handles, batch read concurrency
 and the segment target when opening the restored DB.
 
 To inspect an immutable backup, use the metadata returned by its verification.

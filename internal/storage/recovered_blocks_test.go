@@ -17,7 +17,7 @@ import (
 func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *Checkpoint, CapturedFile, []byte) {
 	t.Helper()
 	cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
-	s, _, err := Open(t.TempDir(), cfg, fs)
+	s, err := openTestStore(t, t.TempDir(), cfg, fs)
 	if err != nil {
 		t.Fatal(err)
 	}

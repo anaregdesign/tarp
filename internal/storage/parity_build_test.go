@@ -24,7 +24,7 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 				}
 			}}
 			cfg := Config{ValueCacheBudgetBytes: 4 << 20, RecordBytes: 3 << 20, TargetSegmentBytes: 4 << 20, Handles: 1}
-			s, _, err := Open(t.TempDir(), cfg, io)
+			s, err := openTestStore(t, t.TempDir(), cfg, io)
 			if err != nil {
 				t.Fatal(err)
 			}

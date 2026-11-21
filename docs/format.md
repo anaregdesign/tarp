@@ -70,8 +70,8 @@ Obsolete records are validated even above a new admission limit.
 One optional PARITY file belongs to one selected immutable DATA file, including
 its 64-byte segment header. The filename reuses its DATA ID. The trusted source
 of the expected identity, length and SHA-256 is the selected MANIFEST.
-Compaction requires stripes bound to this identity. Tarp regenerates older
-sidecars from healthy sealed DATA.
+Compaction requires stripes bound to this identity. Tarp rebuilds missing or
+invalid sidecars from healthy sealed DATA.
 
 | Header offset | Bytes | Field |
 | --- | --- | --- |
@@ -133,7 +133,7 @@ end is discardable after validation and compatible-options checks.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | `TARPMNFT` or `TARPBACK` |
+| 0 | 8 | `TARPMNFT` or `TARPBKUP` |
 | 8 | 2 | Reserved |
 | 10 | 2 | Reserved |
 | 12 | 8 | Payload length, exactly file size minus 32 |
@@ -210,10 +210,8 @@ Reopen, streamed backup and manual checkpoint replay apply the same rules.
 
 ## BACKUP payload
 
-UUID[16], sequence u64, cutoff u64, advisory source cache bytes u64, advisory source
-record bytes u64, an unused u64, and file count u64. Writers store zero in the
-unused field at payload offset 48. Readers also accept values up to 2⁶³−1
-that older writers stored there as an advisory per-file limit. Each variable
+The 56-byte prefix contains UUID[16], sequence u64, cutoff u64, advisory source
+cache bytes u64, advisory source record bytes u64, and file count u64. Each variable
 entry is name length u16, ASCII name bytes, exact file length u64, SHA-256[32].
 Names are 1..96 bytes and must be generated CURRENT/DATA/MANIFEST names for the
 same UUID. Reject duplicates, unsafe/missing/extra/nonregular objects, trailing

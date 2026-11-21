@@ -40,7 +40,7 @@ func TestRestoreVerifierCarriesOnlySourceSpillDecisionToStage(t *testing.T) {
 	cfg := Config{Handles: 1, TargetSegmentBytes: 1 << 20}
 	healthy := func() error { return nil }
 	source := t.TempDir()
-	store, _, err := Open(source, cfg, nil)
+	store, err := openTestStore(t, source, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestRestoreVerifierCarriesOnlySourceSpillDecisionToStage(t *testing.T) {
 	}
 
 	stage := t.TempDir()
-	staged, _, err := Open(stage, cfg, nil)
+	staged, err := openTestStore(t, stage, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestRestoreVerifierCarriesOnlySourceSpillDecisionToStage(t *testing.T) {
 
 func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) {
 	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 256, Handles: 1}
-	store, _, err := Open(t.TempDir(), cfg, nil)
+	store, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

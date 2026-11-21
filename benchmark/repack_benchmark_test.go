@@ -22,21 +22,21 @@ const (
 )
 
 type repackMeasurement struct {
-	Mode               string             `json:"mode"`
-	WriteGapNS         int64              `json:"write_gap_ns"`
-	Options            measurementOptions `json:"options"`
-	Get                sampledLatency     `json:"get"`
-	Put                sampledLatency     `json:"put"`
-	WallNS             int64              `json:"wall_ns"`
-	RepackElapsedNS    int64              `json:"repack_elapsed_ns"`
-	CoordinationWaitNS int64              `json:"coordination_wait_ns"`
-	OverlappingGets    int                `json:"overlapping_gets"`
-	OverlappingPuts    int                `json:"overlapping_puts"`
-	GetDuringRepack    repackPercentiles  `json:"get_during_repack"`
-	PutDuringRepack    repackPercentiles  `json:"put_during_repack"`
-	DataFilesBefore    int                `json:"data_files_before"`
-	DataFilesAfter     int                `json:"data_files_after"`
-	ReopenedStateHash  string             `json:"reopened_state_sha256"`
+	Mode               string            `json:"mode"`
+	WriteGapNS         int64             `json:"write_gap_ns"`
+	Options            engine.Options    `json:"options"`
+	Get                sampledLatency    `json:"get"`
+	Put                sampledLatency    `json:"put"`
+	WallNS             int64             `json:"wall_ns"`
+	RepackElapsedNS    int64             `json:"repack_elapsed_ns"`
+	CoordinationWaitNS int64             `json:"coordination_wait_ns"`
+	OverlappingGets    int               `json:"overlapping_gets"`
+	OverlappingPuts    int               `json:"overlapping_puts"`
+	GetDuringRepack    repackPercentiles `json:"get_during_repack"`
+	PutDuringRepack    repackPercentiles `json:"put_during_repack"`
+	DataFilesBefore    int               `json:"data_files_before"`
+	DataFilesAfter     int               `json:"data_files_after"`
+	ReopenedStateHash  string            `json:"reopened_state_sha256"`
 }
 
 type repackCall struct{ begin, end time.Time }
@@ -221,7 +221,7 @@ func (f repackFixture) measureTraced(t testing.TB, mode string, puts int, trace 
 	if err := errors.Join(getErr, putErr, ctx.Err()); err != nil {
 		t.Fatal(err)
 	}
-	result := repackMeasurement{Mode: mode, WriteGapNS: repackWriteGap.Nanoseconds(), Options: measurementOptions(f.opts),
+	result := repackMeasurement{Mode: mode, WriteGapNS: repackWriteGap.Nanoseconds(), Options: f.opts,
 		WallNS: wall.Nanoseconds(), DataFilesBefore: len(f.inputs) + 1}
 	result.Get, result.OverlappingGets, result.GetDuringRepack = summarizeRepackCalls(gets, begin, retired)
 	result.Put, result.OverlappingPuts, result.PutDuringRepack = summarizeRepackCalls(writes, begin, retired)
