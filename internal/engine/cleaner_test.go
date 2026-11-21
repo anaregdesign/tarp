@@ -682,3 +682,140 @@ func TestRepackGroupUsesHealthyRunAfterUnavailableFile(t *testing.T) {
 		t.Fatalf("unexpected repack across unavailable file: %v, %d", group, n)
 	}
 }
+
+func TestReadWakesCleanerToCheckpointUnrecoverableKeys(t *testing.T) {
+	start := make(chan struct{})
+	db := newTestDBWithHooks(t, Options{}, nil, &Hooks{CleanerStart: start, ParityStart: make(chan struct{})})
+	mustPut(t, db, "kept", "healthy")
+	mustPut(t, db, "lost", strings.Repeat("v", 10000))
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if db.store.Current.Sequence != db.store.Catalog.Cutoff {
+		t.Fatal("fixture has a post-checkpoint write")
+	}
+	entry := damageProtectedTail(t, db)
+	path := db.store.Files[entry.ID].Path
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[300] ^= 1 // Two bad blocks in the same record and stripe.
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	Observe(db).ClearCache()
+	<-db.cleaner.wake // Drain earlier writes and Open's initial wake.
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
+		t.Fatalf("initial failing read: %v", err)
+	}
+	close(start)
+	waitForUnlink(t, db, path)
+	// Retirement happens before the checkpoint reports its result to the worker.
+	<-db.cleaner.gate
+	status := db.AutoCompactionStatus()
+	db.cleaner.gate <- struct{}{}
+	if status.DroppedKeys != 1 || status.UnlinkedBytes == 0 {
+		t.Fatalf("unexpected automatic recovery result: %+v", status)
+	}
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("discarded key: %v", err)
+	}
+	wantValue(t, db, "kept", "healthy")
+	mustPut(t, db, "lost", "later")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	image, err := Open(db.store.Dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer image.Close()
+	wantValue(t, image, "kept", "healthy")
+	wantValue(t, image, "lost", "later")
+}
+
+func TestAutomaticCheckpointRejectsInvalidSidecarAfterUnrecoverableStripe(t *testing.T) {
+	var scans atomic.Int64
+	db := openMaintenanceDamageDB(t, Options{}, &storage.IO{Hook: func(point string) error {
+		if point == "compact.scan:before" {
+			scans.Add(1)
+		}
+		return nil
+	}})
+	corruptUncachedCheckpointValue(t, db)
+	entry := db.store.Catalog.Files[0]
+	path := selectedParity(t, db, entry)
+	sidecar, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(sidecar, 1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
+		t.Fatal(err)
+	}
+	before := db.store.Current
+	if again, retry := db.cleanPass(t.Context()); again || retry || scans.Load() == 0 {
+		t.Fatalf("automatic recovery did not defer: %+v", db.AutoCompactionStatus())
+	}
+	status := db.AutoCompactionStatus()
+	if !errors.Is(status.LastError, format.ErrInvalidParity) || !errors.Is(status.LastError, ErrDataUnavailable) ||
+		status.DroppedKeys != 0 || db.store.Current != before || db.health() != nil {
+		t.Fatalf("invalid proof allowed progress or stopped service: %+v, %v", status, db.health())
+	}
+	scanCount := scans.Load()
+	if again, retry := db.cleanPass(t.Context()); again || retry || scans.Load() != scanCount {
+		t.Fatalf("retried invalid recovery proof: %+v", db.AutoCompactionStatus())
+	}
+	mustPut(t, db, "lost", "replacement")
+	wantValue(t, db, "lost", "replacement")
+}
+
+func TestManualCompactPreemptsAutomaticRecoveryBeforePublication(t *testing.T) {
+	ready, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	db := openMaintenanceDamageDB(t, Options{}, &storage.IO{Hook: func(point string) error {
+		if point == "compact.parity.sync:before" && first.CompareAndSwap(false, true) {
+			close(ready)
+			<-release
+		}
+		return nil
+	}})
+	corruptUncachedCheckpointValue(t, db)
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
+		t.Fatalf("initial read: %v", err)
+	}
+	autoDone := make(chan struct{})
+	go func() {
+		defer close(autoDone)
+		db.cleanPass(t.Context())
+	}()
+	select {
+	case <-ready:
+	case <-autoDone:
+		t.Fatalf("automatic checkpoint did not stage a replacement: %+v", db.AutoCompactionStatus())
+	}
+	select {
+	case <-db.cleaner.resume:
+	default:
+	}
+	type outcome struct {
+		result CompactResult
+		err    error
+	}
+	manualDone := make(chan outcome, 1)
+	go func() {
+		result, err := db.Compact(t.Context())
+		manualDone <- outcome{result, err}
+	}()
+	<-db.cleaner.resume // Manual Compact has canceled the private worker checkpoint.
+	close(release)
+	<-autoDone
+	manual := <-manualDone
+	if manual.err != nil || manual.result.DroppedKeys != 1 || db.AutoCompactionStatus().DroppedKeys != 0 {
+		t.Fatalf("manual recovery %+v, worker %+v", manual, db.AutoCompactionStatus())
+	}
+	wantValue(t, db, "keep", "healthy")
+}

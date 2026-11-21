@@ -70,10 +70,12 @@ Obsolete records are validated even above a new admission limit.
 One optional PARITY file belongs to one selected immutable DATA file, including
 its 64-byte segment header. The filename reuses its DATA ID. The trusted source
 of the expected identity, length and SHA-256 is the selected MANIFEST.
+Compaction requires stripes bound to this identity. Tarp regenerates older
+sidecars from healthy sealed DATA.
 
 | Header offset | Bytes | Field |
 | --- | --- | --- |
-| 0 | 8 | `TARPPAR1` |
+| 0 | 8 | `TARPPAR2` |
 | 8 | 16 | Database UUID |
 | 24 | 8 | DATA ID |
 | 32 | 8 | Exact DATA length |
@@ -91,7 +93,7 @@ After the header, consume one stripe for each successive 64 KiB of DATA.
 | 8 | 64 | Sixteen u32 CRC32Cs of actual DATA bytes, zero for nonexistent blocks |
 | 72 | 32 | Sixteen u16 offsets to the first record header in each block, relative to its start. 0xffff means no record starts there |
 | 104 | 4 | CRC32C of the stored XOR bytes |
-| 108 | 4 | CRC32C of stripe bytes [0,108) |
+| 108 | 4 | CRC32C of header bytes [0,84) followed by stripe bytes [0,108) |
 | 112 | Up to 4096 | Bytewise XOR of the DATA blocks in this stripe |
 
 A shorter final block contributes zero beyond its end to the XOR. The number of

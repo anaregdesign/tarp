@@ -43,7 +43,7 @@ func TestCleanWorkspaceRemovesInterruptedScratchNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, prefix := range []string{"tarp-index-", "tarp-replay-", "tarp-relocations-", "tarp-repair-"} {
+	for _, prefix := range []string{"tarp-index-", "tarp-replay-", "tarp-relocations-", "tarp-repair-", "tarp-checkpoint-recover-"} {
 		f, err := os.CreateTemp(dir, prefix+"*")
 		if err != nil {
 			t.Fatal(err)

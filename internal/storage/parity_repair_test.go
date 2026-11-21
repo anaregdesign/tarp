@@ -63,7 +63,7 @@ func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 func TestRepairParityRecoversIndependentFilesAndPreservesFailures(t *testing.T) {
 	f := newRepairFixture(t, 10000, 6000, 30)
 	bad := bytes.Clone(f.originals[0])
-	bad[60] ^= 0x90
+	bad[format.SegmentHeaderBytes+120] ^= 0x90
 	bad[4500] ^= 0x90
 	if err := os.WriteFile(f.paths[0], bad, 0600); err != nil {
 		t.Fatal(err)

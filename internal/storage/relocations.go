@@ -128,6 +128,9 @@ func (m *Relocations) seal() error {
 	return nil
 }
 
+// Resident returns the read-only batch when enumeration needs no scratch I/O.
+func (m *Relocations) Resident() ([]Relocation, bool) { return m.small, m.fd == nil }
+
 func (m *Relocations) Close() error {
 	if m.fd == nil {
 		return nil

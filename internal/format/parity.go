@@ -29,13 +29,30 @@ const (
 // DATA source or a stripe exceeding its repair capacity matches ErrCorrupt.
 var ErrInvalidParity = fmt.Errorf("%w: invalid parity sidecar", ErrCorrupt)
 
+// ErrParityGap identifies DATA blocks that the checked stripe cannot reconstruct.
+var ErrParityGap = fmt.Errorf("%w: unrecoverable parity stripe", ErrCorrupt)
+
+// ParityBytes returns the encoded sidecar length for a physical DATA file.
+// Metadata-only compaction intervals consume no sidecar space.
+func ParityBytes(dataBytes uint64) uint64 {
+	if dataBytes == 0 {
+		return 0
+	}
+	full, tail := dataBytes/parityStripeBytes, dataBytes%parityStripeBytes
+	size := uint64(parityHeaderBytes) + full*(parityMetaBytes+ParityBlockBytes)
+	if tail != 0 {
+		size += parityMetaBytes + min(tail, ParityBlockBytes)
+	}
+	return size
+}
+
 func parityHeader(uuid [16]byte, e File) ([parityHeaderBytes]byte, error) {
 	var h [parityHeaderBytes]byte
 	if e.ID == 0 || e.Bytes < SegmentHeaderBytes+RecordHeaderBytes+1 || e.Digest == ([32]byte{}) ||
 		(e.Kind != Log && e.Kind != Snapshot && e.Kind != Cleaned) {
 		return h, bad("parity requires a physical sealed catalog entry")
 	}
-	copy(h[:8], "TARPPAR1")
+	copy(h[:8], "TARPPAR2")
 	copy(h[8:24], uuid[:])
 	order.PutUint64(h[24:], e.ID)
 	order.PutUint64(h[32:], uint64(e.Bytes))
@@ -45,6 +62,13 @@ func parityHeader(uuid [16]byte, e File) ([parityHeaderBytes]byte, error) {
 	order.PutUint32(h[80:], ParityDataBlocks)
 	order.PutUint32(h[84:], crc32.Checksum(h[:84], table))
 	return h, nil
+}
+
+// Seed each stripe checksum with the checked header CRC. An intact stripe
+// copied from another DATA file at the same ordinal must fail verification
+// even when damage elsewhere prevents a whole-DATA digest check.
+func parityStripeCRC(headerCRC uint32, meta []byte) uint32 {
+	return crc32.Update(headerCRC, table, meta[:parityCRCOffset+4])
 }
 
 type parityStripe struct {
@@ -175,7 +199,7 @@ func WriteParity(ctx context.Context, data io.ReaderAt, out io.Writer, uuid [16]
 		}
 		p := stripe.xor[:min(ParityBlockBytes, len(chunk))]
 		order.PutUint32(stripe.meta[parityCRCOffset:], crc32.Checksum(p, table))
-		order.PutUint32(stripe.meta[parityCRCOffset+4:], crc32.Checksum(stripe.meta[:parityCRCOffset+4], table))
+		order.PutUint32(stripe.meta[parityCRCOffset+4:], parityStripeCRC(order.Uint32(h[84:]), stripe.meta[:]))
 		if err := writeChunk(ctx, out, stripe.meta[:]); err != nil {
 			return err
 		}
@@ -237,7 +261,7 @@ func walkParity(ctx context.Context, r io.Reader, uuid [16]byte, e File, visit f
 		}
 		size := int(min(int64(parityStripeBytes), e.Bytes-off))
 		if order.Uint64(s.meta[:]) != uint64(off/parityStripeBytes) ||
-			order.Uint32(s.meta[parityCRCOffset+4:]) != crc32.Checksum(s.meta[:parityCRCOffset+4], table) {
+			order.Uint32(s.meta[parityCRCOffset+4:]) != parityStripeCRC(order.Uint32(want[84:]), s.meta[:]) {
 			return fmt.Errorf("%w: stripe metadata at DATA offset %d", ErrInvalidParity, off)
 		}
 		for i := range ParityDataBlocks {
@@ -296,7 +320,7 @@ func unreadableParityBlock(err error) bool {
 }
 
 // recoverStripe returns a bit mask of chunks that could not be recovered.
-func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw []byte, s *parityStripe) (uint16, error) {
+func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw, header []byte, s *parityStripe) (uint16, error) {
 	// Use one sequential read on healthy stripes. Isolate a short read or
 	// media error to an individual block before charging it as an erasure.
 	stripeErr := readChunk(ctx, data, raw, off)
@@ -312,6 +336,12 @@ func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw []byte,
 		}
 		if err != nil && !unreadableParityBlock(err) {
 			return 0, err
+		}
+		// The catalog specifies the exact segment header. Its own trailing
+		// CRC lets even a valid foreign header have the same enclosing block
+		// CRC. Normalize those bytes before checking the complete first block.
+		if err == nil && off == 0 && pos == 0 {
+			copy(block, header)
 		}
 		if err != nil || crc32.Checksum(block, table) != s.dataCRC(pos/ParityBlockBytes) {
 			gaps |= 1 << (pos / ParityBlockBytes)
@@ -333,18 +363,19 @@ func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw []byte,
 	dst := raw[missing:min(missing+ParityBlockBytes, len(raw))]
 	copy(dst, s.xor[:len(dst)])
 	if crc32.Checksum(dst, table) != s.dataCRC(missing/ParityBlockBytes) {
-		return gaps, nil
+		return 0, fmt.Errorf("%w: XOR disagrees with block checksum at DATA offset %d", ErrInvalidParity, off+int64(missing))
 	}
 	return 0, nil
 }
 
 func walkParityData(ctx context.Context, data io.ReaderAt, parity io.Reader, uuid [16]byte, entry File, visit func(*parityStripe, int64, []byte, uint16) error) error {
 	var raw [parityStripeBytes]byte
+	header := EncodeSegment(Segment{UUID: uuid, ID: entry.ID, Kind: entry.Kind})
 	digest := sha256.New()
 	complete := true
 	err := walkParity(ctx, parity, uuid, entry, func(s *parityStripe, off int64, size int) error {
 		chunk := raw[:size]
-		gaps, err := recoverStripe(ctx, data, off, chunk, s)
+		gaps, err := recoverStripe(ctx, data, off, chunk, header, s)
 		if err != nil {
 			return err
 		}
@@ -396,7 +427,7 @@ func WalkParityBlocks(ctx context.Context, data io.ReaderAt, parity io.Reader, u
 func RecoverParity(ctx context.Context, data io.ReaderAt, parity io.Reader, out io.Writer, uuid [16]byte, entry File) error {
 	return walkParityData(ctx, data, parity, uuid, entry, func(_ *parityStripe, off int64, raw []byte, gaps uint16) error {
 		if gaps != 0 {
-			return fmt.Errorf("%w: unrecoverable chunks at DATA offset %d (mask %#x)", ErrCorrupt, off, gaps)
+			return fmt.Errorf("%w at DATA offset %d (mask %#x)", ErrParityGap, off, gaps)
 		}
 		return writeChunk(ctx, out, raw)
 	})

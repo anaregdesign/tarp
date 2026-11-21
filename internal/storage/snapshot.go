@@ -17,8 +17,9 @@ import (
 )
 
 type CapturedFile struct {
-	File  *File
-	Entry format.File
+	File                *File
+	Entry               format.File
+	liveKeys, liveBytes int64 // owned by the logical index at capture
 }
 
 type Capture struct {
@@ -43,7 +44,10 @@ func (s *Store) Capture() (*Capture, error) {
 		}
 	}
 	c.Files = append(c.Files, CapturedFile{File: s.Files[active.ID], Entry: active})
-	for _, captured := range c.Files {
+	for i := range c.Files {
+		captured := &c.Files[i]
+		captured.liveKeys = captured.File.LiveKeys.Load()
+		captured.liveBytes = captured.File.LiveBytes.Load()
 		captured.File.Pin()
 	}
 	return c, nil

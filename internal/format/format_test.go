@@ -304,7 +304,7 @@ func FuzzDecoders(f *testing.F) {
 		_, _ = DecodeBackup(b)
 		_, _ = DecodeIndexedValue(b, []byte("k"), 1)
 		_ = ValidateParity(t.Context(), bytes.NewReader(b), parityTestUUID, sealed)
-		if len(b) >= 8 && string(b[:8]) == "TARPPAR1" {
+		if len(b) >= 8 && string(b[:8]) == "TARPPAR2" {
 			_ = RecoverParity(t.Context(), bytes.NewReader(nil), bytes.NewReader(b), io.Discard, parityTestUUID, sealed)
 		}
 		if len(b) >= RecordHeaderBytes {

@@ -219,12 +219,14 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
 
-// CompactResult reports the logical size of files unlinked by this Compact
-// call and the size of retired DATA files still held by leases at cleanup.
+// CompactResult reports discarded live keys, unlinked bytes and retired DATA bytes
+// still held by leases at cleanup.
 type CompactResult = engine.CompactResult
 
 // Compact replaces the complete committed prefix with an online checkpoint.
-// It requires temporary disk space.
+// It uses PARITY to recover damaged sealed DATA. A live key whose record is
+// proved irrecoverable is removed when the checkpoint commits. The operation
+// requires temporary disk space for recovery and protected snapshot files.
 func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	return (*engine.DB)(db).Compact(ctx)
 }

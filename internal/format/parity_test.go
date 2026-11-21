@@ -39,6 +39,9 @@ func parityFor(t testing.TB, raw []byte, e File) []byte {
 		t.Fatal(err)
 	}
 	b := out.Bytes()
+	if n := ParityBytes(uint64(len(raw))); n != uint64(len(b)) {
+		t.Fatalf("estimated sidecar length %d, encoded %d", n, len(b))
+	}
 	if err := ValidateParity(t.Context(), bytes.NewReader(b), parityTestUUID, e); err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +53,8 @@ func TestParityGoldenSingleDataBlock(t *testing.T) {
 	raw = append(raw, EncodeRecord(Put, 1, []byte{0, 255}, []byte{1, 2, 3})...)
 	e := File{ID: 7, Kind: Log, Bytes: int64(len(raw)), Digest: sha256.Sum256(raw)}
 	sidecar := parityFor(t, raw, e)
-	const header = "54415250504152310102030000000000000000000000000007000000000000007500000000000000fe0d896c3bb484d389ef04942770c118c95d5e5cff9619b8f459101c5dee4b2f010000000010000010000000d3638a41"
-	const stripe = "0000000000000000f5a4c0b60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a4c0b6524346c5"
+	const header = "54415250504152320102030000000000000000000000000007000000000000007500000000000000fe0d896c3bb484d389ef04942770c118c95d5e5cff9619b8f459101c5dee4b2f010000000010000010000000e2be9e8a"
+	const stripe = "0000000000000000f5a4c0b60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a4c0b6203fca63"
 	if hex.EncodeToString(sidecar[:200]) != header+stripe || !bytes.Equal(sidecar[200:], raw) {
 		t.Fatal("golden parity image mismatch")
 	}
@@ -95,13 +98,41 @@ func TestParityFixesIndependentErasuresAndPartialTail(t *testing.T) {
 	}
 }
 
+func TestParityRepairsCatalogHeaderAndPayloadInOneStripe(t *testing.T) {
+	raw, entry, _ := parityFixture(3 * ParityBlockBytes)
+	sidecar := parityFor(t, raw, entry)
+	for _, foreign := range []bool{false, true} {
+		input := bytes.Clone(raw)
+		if foreign {
+			copy(input, EncodeSegment(Segment{UUID: parityTestUUID, ID: entry.ID + 1, Kind: Snapshot}))
+			if crc32.Checksum(input[:ParityBlockBytes], table) != crc32.Checksum(raw[:ParityBlockBytes], table) {
+				t.Fatal("fixture requires equivalent CRCs for two valid segment headers")
+			}
+		} else {
+			input[8] ^= 1
+		}
+		input[ParityBlockBytes+17] ^= 1
+		var recovered bytes.Buffer
+		err := RecoverParity(t.Context(), bytes.NewReader(input), bytes.NewReader(sidecar), &recovered, parityTestUUID, entry)
+		if err != nil || sha256.Sum256(recovered.Bytes()) != entry.Digest || !bytes.Equal(recovered.Bytes(), raw) {
+			t.Fatalf("restore header and payload (foreign header %t): %v", foreign, err)
+		}
+		// Header replacement alone cannot certify the remaining bytes of block zero.
+		input[SegmentHeaderBytes+1] ^= 1
+		err = RecoverParity(t.Context(), bytes.NewReader(input), bytes.NewReader(sidecar), io.Discard, parityTestUUID, entry)
+		if !errors.Is(err, ErrParityGap) {
+			t.Fatalf("accepted a second damaged payload block (foreign header %t): %v", foreign, err)
+		}
+	}
+}
+
 func TestParityAnchorsCrossStripeHeadersAndReportOnlyLostBlocks(t *testing.T) {
 	// Start a header 7 bytes before a stripe boundary, and one at the next
 	// block boundary. Include long payloads and multiple headers per block.
 	raw, e, headers := parityFixture(parityStripeBytes-7-SegmentHeaderBytes-RecordHeaderBytes-2, ParityBlockBytes+7-RecordHeaderBytes-2, 0, 91, parityStripeBytes, 100)
 	sidecar := parityFor(t, raw, e)
 	input := slices.Clone(raw)
-	input[0] ^= 1
+	input[SegmentHeaderBytes+200] ^= 1
 	input[2*ParityBlockBytes+4] ^= 1
 	input[parityStripeBytes+2] ^= 1 // independently recoverable in next stripe
 	count := 0
@@ -135,7 +166,7 @@ func TestParityAnchorsCrossStripeHeadersAndReportOnlyLostBlocks(t *testing.T) {
 		t.Fatalf("walk: lost %v, blocks %d, error %v", lost, count, err)
 	}
 	err = RecoverParity(t.Context(), bytes.NewReader(input), bytes.NewReader(sidecar), io.Discard, parityTestUUID, e)
-	if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrInvalidParity) {
+	if !errors.Is(err, ErrParityGap) || !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrInvalidParity) {
 		t.Fatalf("unrecoverable stripe: %v", err)
 	}
 }
@@ -150,7 +181,7 @@ func TestParityRejectsDamagedSidecarAndForeignIdentity(t *testing.T) {
 			first := b[parityHeaderBytes : parityHeaderBytes+parityMetaBytes]
 			lastAt := parityHeaderBytes + parityMetaBytes + ParityBlockBytes
 			last := b[lastAt : lastAt+parityMetaBytes]
-			seal := func(p []byte) { order.PutUint32(p[parityCRCOffset+4:], crc32.Checksum(p[:parityCRCOffset+4], table)) }
+			seal := func(p []byte) { order.PutUint32(p[parityCRCOffset+4:], parityStripeCRC(order.Uint32(b[84:]), p)) }
 			switch tc {
 			case "uuid":
 				uuid[7]++
@@ -199,6 +230,24 @@ func TestParityRejectsDamagedSidecarAndForeignIdentity(t *testing.T) {
 				t.Fatalf("accepted %s: %v", tc, err)
 			}
 		})
+	}
+}
+
+func TestParityRejectsContradictorySingleBlockRecovery(t *testing.T) {
+	raw, entry, _ := parityFixture(2 * ParityBlockBytes)
+	sidecar := parityFor(t, raw, entry)
+	meta := sidecar[parityHeaderBytes : parityHeaderBytes+parityMetaBytes]
+	xor := sidecar[parityHeaderBytes+parityMetaBytes:]
+	// The stripe passes its framing checks, but its sole missing block
+	// cannot simultaneously match the checked XOR and expected block CRC.
+	xor[0] ^= 1
+	order.PutUint32(meta[parityCRCOffset:], crc32.Checksum(xor, table))
+	order.PutUint32(meta[parityCRCOffset+4:], parityStripeCRC(order.Uint32(sidecar[84:]), meta))
+	raw[ParityBlockBytes+7] ^= 1
+	err := WalkParityBlocks(t.Context(), bytes.NewReader(raw), bytes.NewReader(sidecar), parityTestUUID, entry,
+		func(int64, uint16, []byte) error { t.Fatal("contradictory stripe reported a block"); return nil })
+	if !errors.Is(err, ErrInvalidParity) || errors.Is(err, ErrParityGap) {
+		t.Fatalf("contradictory single-block recovery: %v", err)
 	}
 }
 
@@ -251,7 +300,7 @@ func TestParityWholeFileDigestRejectsCoherentlyAlteredChunks(t *testing.T) {
 	sum := crc32.Checksum(changed, table)
 	order.PutUint32(meta[8:], sum)
 	order.PutUint32(meta[parityCRCOffset:], sum)
-	order.PutUint32(meta[parityCRCOffset+4:], crc32.Checksum(meta[:parityCRCOffset+4], table))
+	order.PutUint32(meta[parityCRCOffset+4:], parityStripeCRC(order.Uint32(sidecar[84:]), meta))
 	for _, b := range [][]byte{nil, changed} {
 		err := WalkParityBlocks(t.Context(), bytes.NewReader(b), bytes.NewReader(sidecar), parityTestUUID, e, func(int64, uint16, []byte) error { return nil })
 		if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrInvalidParity) {
@@ -354,5 +403,23 @@ func TestParityCrossStripeLookaheadMustMatchHashedSource(t *testing.T) {
 	})
 	if err := WriteParity(t.Context(), src, io.Discard, parityTestUUID, e); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("accepted inconsistent lookahead: %v", err)
+	}
+}
+
+func TestParityRejectsStripeCopiedFromAnotherFile(t *testing.T) {
+	raw, e, _ := parityFixture(2 * parityStripeBytes)
+	original := parityFor(t, raw, e)
+	foreign := bytes.Clone(raw)
+	foreignID := e.ID + 1
+	copy(foreign, EncodeSegment(Segment{UUID: parityTestUUID, ID: foreignID, Kind: e.Kind}))
+	other := e
+	other.ID, other.Digest = foreignID, sha256.Sum256(foreign)
+	foreignParity := parityFor(t, foreign, other)
+	// The payload, ordinal, anchors and XOR are identical for stripe one.
+	// The stripe still belongs to a different selected DATA file.
+	start := parityHeaderBytes + parityMetaBytes + ParityBlockBytes
+	copy(original[start:], foreignParity[start:])
+	if err := ValidateParity(t.Context(), bytes.NewReader(original), parityTestUUID, e); !errors.Is(err, ErrInvalidParity) {
+		t.Fatalf("accepted stripe copied from DATA %d: %v", foreignID, err)
 	}
 }

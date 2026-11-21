@@ -41,8 +41,9 @@ type measurementOptions struct {
 }
 
 type measurementCompactResult struct {
-	UnlinkedBytes          int64 `json:"ReclaimedBytes"`
-	PinnedRetiredDataBytes int64 `json:"PinnedBytes"`
+	DroppedKeys            uint64 `json:"DroppedKeys,omitempty"`
+	UnlinkedBytes          int64  `json:"ReclaimedBytes"`
+	PinnedRetiredDataBytes int64  `json:"PinnedBytes"`
 }
 
 func TestMeasurementJSONKeepsPublishedFieldNames(t *testing.T) {
@@ -51,7 +52,7 @@ func TestMeasurementJSONKeepsPublishedFieldNames(t *testing.T) {
 		MaxRecordBytes: 256, TargetSegmentBytes: 4096, ReadFileHandles: 4,
 		BatchGetReadConcurrency: 2, MaxBatchGetValueBytes: 128,
 	}
-	compact := engine.CompactResult{UnlinkedBytes: 100, PinnedRetiredDataBytes: 200}
+	compact := engine.CompactResult{UnlinkedBytes: 100, PinnedRetiredDataBytes: 200, DroppedKeys: 3}
 	for _, tc := range []struct {
 		row  any
 		want map[string]int64
@@ -61,7 +62,7 @@ func TestMeasurementJSONKeepsPublishedFieldNames(t *testing.T) {
 			"MaxRecordBytes": 256, "TargetSegmentBytes": 4096, "ReadFileHandles": 4,
 			"BatchReadConcurrency": 2, "MaxBatchResultBytes": 128,
 		}},
-		{measurementCompactResult(compact), map[string]int64{"ReclaimedBytes": 100, "PinnedBytes": 200}},
+		{measurementCompactResult(compact), map[string]int64{"ReclaimedBytes": 100, "PinnedBytes": 200, "DroppedKeys": 3}},
 	} {
 		data, err := json.Marshal(tc.row)
 		if err != nil {

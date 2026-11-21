@@ -496,7 +496,9 @@ tail writes. It serializes with the worker and can overlap one online backup.
 Duplicate manual checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult.UnlinkedBytes` counts the logical lengths of files removed by
 that call. `PinnedRetiredDataBytes` reports the retired DATA file bytes still
-held by leases at cleanup.
+held by leases at cleanup. `DroppedKeys` counts live keys discarded by this
+checkpoint after recovery. The worker reports its own cumulative `DroppedKeys`
+in `AutoCompactionStatus`.
 If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
@@ -531,6 +533,22 @@ unreadable key. Retrieve the affected file ID with
 A failed `BatchGet` returns no results. `Scan` reports the error and ends that
 iteration. To read individual keys while serving traffic, enumerate them with
 `Keys` and handle each `Get` result separately.
+
+Compaction first tries to restore the complete DATA file. If two or more
+damaged blocks in a stripe exceed its parity budget, a full checkpoint can
+still keep independently verified records, including neighbors in those same
+blocks. It can also recover a value from the live cache when its version and
+record checksum match. A live key is dropped only when its current record
+cannot be recovered. An older value or a deleted key cannot reappear.
+After publication, `Get` returns `ErrNotFound` for a dropped key and a new
+`Put` for that key works normally.
+
+The automatic worker uses this full checkpoint when it learns of damage
+beyond parity's correction budget. `Compact(ctx)` can also perform the
+recovery explicitly. A missing or invalid sidecar, an I/O error without
+verified loss, or insufficient staging space cannot authorize dropping keys.
+Compaction verifies and syncs the replacement DATA and PARITY before switching
+to the new files. Readers with pins keep their original files until release.
 
 For offline recovery of historical records, run
 `tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` after closing the

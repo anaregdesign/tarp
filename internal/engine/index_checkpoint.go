@@ -77,6 +77,7 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 	if !db.compact.CompareAndSwap(false, true) {
 		return ErrBusy
 	}
+	db.cancelAutoRecovery()
 	db.resumeCleaner()
 	defer func() { db.compact.Store(false); db.notifyCleaner() }()
 	select {

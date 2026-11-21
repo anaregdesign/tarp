@@ -668,3 +668,58 @@ func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 	wantValue(t, db, "a", "first")
 	wantValue(t, db, "b", "second")
 }
+
+func TestCompactionKeepsSelectedPairOnReplacementParityFailure(t *testing.T) {
+	for _, operation := range []string{"compact", "clean"} {
+		for _, phase := range []string{"write:after", "rename:after", "dirsync:before"} {
+			t.Run(operation+"/"+phase, func(t *testing.T) {
+				var armed atomic.Bool
+				fs := &storage.IO{Hook: func(p string) error {
+					if p == operation+".parity."+phase && armed.Swap(false) {
+						return syscall.ENOSPC
+					}
+					return nil
+				}}
+				db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
+				mustPut(t, db, "keep", "value")
+				if err := db.ProtectParity(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				before := db.store.Current
+				entry := db.store.Catalog.Files[0]
+				oldParity := selectedParity(t, db, entry)
+				run := func() error {
+					if operation == "clean" {
+						return db.cleanSegment(t.Context(), entry)
+					}
+					_, err := db.Compact(t.Context())
+					return err
+				}
+				armed.Store(true)
+				var op *OpError
+				if err := run(); !errors.As(err, &op) || op.Outcome != NotApplied || !errors.Is(err, ErrNoSpace) {
+					t.Fatalf("failed parity publication: %v", err)
+				}
+				files, err := filepath.Glob(filepath.Join(db.store.Dir, "PARITY-*"))
+				if err != nil || len(files) != 1 || files[0] != oldParity || db.store.Current != before || db.health() != nil {
+					t.Fatalf("selected DATA or PARITY changed: %v (%v), frontier %+v", files, err, db.store.Current)
+				}
+				wantValue(t, db, "keep", "value")
+				if err := run(); err != nil {
+					t.Fatal(err)
+				}
+				replacement := db.store.Catalog.Files[0]
+				if replacement.ID == entry.ID {
+					t.Fatal("retry did not publish a replacement")
+				}
+				sidecar, err := os.Open(selectedParity(t, db, replacement))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := errors.Join(format.ValidateParity(t.Context(), sidecar, before.UUID, replacement), sidecar.Close()); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}

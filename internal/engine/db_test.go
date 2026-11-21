@@ -81,6 +81,15 @@ func directoryBytes(t *testing.T, dir string) map[string]string {
 		if e.Name() == "LOCK" {
 			continue
 		}
+		if e.IsDir() && e.Name() == ".tarp-work" {
+			// Maintenance creates this directory lazily. A completed or
+			// discarded operation must leave no named private files in it.
+			files, err := os.ReadDir(filepath.Join(dir, e.Name()))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("unexpected private workspace contents: %v, %v", files, err)
+			}
+			continue
+		}
 		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
 			t.Fatal(err)
