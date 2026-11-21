@@ -3,8 +3,6 @@ package storage
 import (
 	"context"
 	"errors"
-
-	"github.com/anaregdesign/tarp/internal/format"
 )
 
 // A dataReadError identifies the physical input. The file may become sealed
@@ -17,15 +15,15 @@ type dataReadError struct {
 func (e *dataReadError) Error() string { return e.err.Error() }
 func (e *dataReadError) Unwrap() error { return e.err }
 
-func selectedReadFailure(entry format.File, err error) error {
-	if err == nil || entry.ID == 0 || !repairableRead(err) {
+func selectedReadFailure(id uint64, err error) error {
+	if err == nil || id == 0 || !repairableRead(err) {
 		return err
 	}
 	var source *SourceError
 	if !errors.As(err, &source) {
 		err = &SourceError{Err: err}
 	}
-	return &dataReadError{entry.ID, err}
+	return &dataReadError{id, err}
 }
 
 // Require an unambiguous file error. A separate stage or close failure must

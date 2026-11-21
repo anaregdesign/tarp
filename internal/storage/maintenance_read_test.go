@@ -7,18 +7,16 @@ import (
 	"io"
 	"syscall"
 	"testing"
-
-	"github.com/anaregdesign/tarp/internal/format"
 )
 
 func TestMaintenanceRetryRequiresOneLocalizedFailure(t *testing.T) {
-	sealed := format.File{ID: 4, Digest: [32]byte{1}}
-	read := selectedReadFailure(sealed, fmt.Errorf("%w: %w", ErrCorrupt, io.ErrUnexpectedEOF))
-	if got := failedDataRead(errors.Join(fmt.Errorf("copy: %w", errors.Join(read)))); got == nil || got.id != sealed.ID {
+	const fileID = 4
+	read := selectedReadFailure(fileID, fmt.Errorf("%w: %w", ErrCorrupt, io.ErrUnexpectedEOF))
+	if got := failedDataRead(errors.Join(fmt.Errorf("copy: %w", errors.Join(read)))); got == nil || got.id != fileID {
 		t.Fatalf("lost wrapped DATA failure: %v", got)
 	}
 	for _, err := range []error{
-		selectedReadFailure(format.File{}, ErrCorrupt),
+		selectedReadFailure(0, ErrCorrupt),
 		&destinationError{syscall.EIO},
 		&IndexWorkError{Err: syscall.EIO},
 		errors.Join(read, syscall.EACCES),

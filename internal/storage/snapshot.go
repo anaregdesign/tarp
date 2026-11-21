@@ -109,7 +109,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 		}
 		fd, header, _, err := openSelected(captured.File.Path, c.Current.UUID, captured.Entry, captured.File.ID == c.Current.ActiveID)
 		if err != nil {
-			return selectedReadFailure(captured.Entry, &SourceError{Err: err})
+			return selectedReadFailure(captured.Entry.ID, &SourceError{Err: err})
 		}
 		copying := false
 		err = fs.Do("compact.scan", func() error {
@@ -129,14 +129,14 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 				r, err := format.SelectStreamRecord(ctx, reader, off, captured.Entry.Bytes-off, buffer, func(r format.Record, key string) (_ io.Writer, outcome error) {
 					defer func() { callbackErr = outcome }()
 					if err := span.Accept(r); err != nil {
-						return nil, selectedReadFailure(captured.Entry, err)
+						return nil, selectedReadFailure(captured.Entry.ID, err)
 					}
 					if err := replay.apply(captured.File, off, r, key); err != nil {
 						// The key is decoded before SelectStreamRecord reaches its
 						// payload checksum. A damaged Delete can fail replay first.
 						var source *SourceError
 						if errors.As(err, &source) {
-							err = selectedReadFailure(captured.Entry, err)
+							err = selectedReadFailure(captured.Entry.ID, err)
 						}
 						return nil, err
 					}
@@ -170,7 +170,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 					if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 						err = errors.Join(ErrCorrupt, err)
 					}
-					return selectedReadFailure(captured.Entry, err)
+					return selectedReadFailure(captured.Entry.ID, err)
 				}
 				if copied {
 					if err := fs.Check("compact.record:after"); err != nil {
@@ -180,10 +180,10 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 				off += r.Bytes()
 			}
 			if err := span.Finish(); err != nil {
-				return selectedReadFailure(captured.Entry, err)
+				return selectedReadFailure(captured.Entry.ID, err)
 			}
 			if h != nil {
-				return selectedReadFailure(captured.Entry, checkSealedDigest(h, captured.Entry))
+				return selectedReadFailure(captured.Entry.ID, checkSealedDigest(h, captured.Entry))
 			}
 			return ctx.Err()
 		})

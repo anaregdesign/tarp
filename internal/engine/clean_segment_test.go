@@ -627,3 +627,43 @@ func TestCleanSegmentRepairsGroupAndRestartsTombstoneAccounting(t *testing.T) {
 		t.Fatalf("deleted key after cleaning: %v", err)
 	}
 }
+
+func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
+	var verifies atomic.Int32
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "repair.verify:before" {
+			verifies.Add(1)
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
+	mustPut(t, db, "a", "first")
+	mustPut(t, db, "b", "second")
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	a, b := testLoc(t, db, "a"), testLoc(t, db, "b")
+	source := db.store.Catalog.Files[0]
+	if source.Kind != format.Snapshot || a.File.ID != source.ID || b.File != a.File || a.Offset >= b.Offset {
+		t.Fatal("expected two ordered records in one snapshot")
+	}
+	fd, err := os.OpenFile(b.File.Path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fd.WriteAt([]byte("a"), b.Offset+format.RecordHeaderBytes)
+	if err := errors.Join(err, fd.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.cleanSegment(t.Context(), source); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.store.Catalog.Files; len(got) != 1 || got[0].ID == source.ID || got[0].Kind != format.Snapshot || verifies.Load() != 1 {
+		t.Fatalf("replacement after repair: %+v, repairs %d", got, verifies.Load())
+	}
+	wantValue(t, db, "a", "first")
+	wantValue(t, db, "b", "second")
+}

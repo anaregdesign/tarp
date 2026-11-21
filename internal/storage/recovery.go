@@ -26,6 +26,8 @@ type Image struct {
 	LiveKeys      uint64
 	MaxValueBytes int64
 	openRead      func(string, int)
+	// Only an index build has a live capture whose pinned DATA can be repaired.
+	liveCapture bool
 }
 
 // Validate checks and replays the selected image, measuring its required limits.
@@ -129,7 +131,10 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 		file := image.Files[entry.ID]
 		fd, _, physical, err := openSelectedForRead(file.Path, image.Current.UUID, entry, entry.ID == image.Current.ActiveID, image.openRead, area)
 		if err != nil {
-			return selectedReadFailure(entry, err)
+			if image.liveCapture {
+				return selectedReadFailure(entry.ID, err)
+			}
+			return err
 		}
 		file.Size.Store(physical)
 		var activeDigest hash.Hash
@@ -146,8 +151,8 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 			visitErr = visit(file, off, r, key)
 			return visitErr
 		}, activeDigest)
-		if err != nil && visitErr == nil {
-			err = selectedReadFailure(entry, err)
+		if image.liveCapture && err != nil && visitErr == nil {
+			err = selectedReadFailure(entry.ID, err)
 		}
 		if err = errors.Join(err, fd.Close()); err != nil {
 			return fmt.Errorf("%s: %w", filepath.Base(file.Path), err)

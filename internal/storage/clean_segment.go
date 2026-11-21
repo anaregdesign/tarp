@@ -137,6 +137,12 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 	choose := func(r format.Record, key string, old Location) (io.Writer, error) {
 		if c.output.Kind == format.Snapshot {
 			if err := replay.apply(old.File, old.Offset, r, key); err != nil {
+				// A damaged key can look like a duplicate before the
+				// streaming decoder reaches the record's payload CRC.
+				var input *SourceError
+				if errors.As(err, &input) {
+					err = selectedReadFailure(old.File.ID, err)
+				}
 				return nil, err
 			}
 		}
@@ -197,7 +203,7 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 	}
 	fd, header, _, err := openSelected(source.File.Path, c.uuid, source.Entry, false)
 	if err != nil {
-		return selectedReadFailure(source.Entry, &SourceError{Err: err})
+		return selectedReadFailure(source.Entry.ID, &SourceError{Err: err})
 	}
 	defer func() {
 		if err := fd.Close(); err != nil {
@@ -217,7 +223,7 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 			var callbackErr error
 			r, err := format.SelectRecord(ctx, input, off, source.Entry.Bytes-off, buf, func(r format.Record, key string) (io.Writer, error) {
 				if err := span.Accept(r); err != nil {
-					return nil, selectedReadFailure(source.Entry, err)
+					return nil, selectedReadFailure(source.Entry.ID, err)
 				}
 				old := Location{File: source.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 				var w io.Writer
@@ -229,14 +235,14 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 				if callbackErr != nil || pacedErr != nil || errors.As(err, &destination) {
 					return err
 				}
-				return selectedReadFailure(source.Entry, err)
+				return selectedReadFailure(source.Entry.ID, err)
 			}
 			off += r.Bytes()
 		}
 		if err := span.Finish(); err != nil {
-			return selectedReadFailure(source.Entry, err)
+			return selectedReadFailure(source.Entry.ID, err)
 		}
-		return selectedReadFailure(source.Entry, checkSealedDigest(digest, source.Entry))
+		return selectedReadFailure(source.Entry.ID, checkSealedDigest(digest, source.Entry))
 	})
 }
 
