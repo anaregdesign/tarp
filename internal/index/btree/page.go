@@ -127,13 +127,13 @@ func (c rawCell) compare(s *pager, key string) (int, error) {
 		return c.key().compare(s, key)
 	}
 	n := min(len(c.prefix), len(key))
-	if cmp := bytes.Compare(c.prefix[:n], []byte(key[:n])); cmp != 0 {
+	if cmp := compareBytesString(c.prefix[:n], key[:n]); cmp != 0 {
 		return cmp, nil
 	}
 	if n < len(c.prefix) {
 		return 1, nil
 	}
-	return bytes.Compare(c.suffix, []byte(key[n:])), nil
+	return compareBytesString(c.suffix, key[n:]), nil
 }
 func (p *page) cell(i int) (cell, error) {
 	c, err := p.raw(i)
@@ -286,7 +286,7 @@ func putAddress(b []byte, a index.Address) {
 }
 func (k keyRef) compare(s *pager, key string) (int, error) {
 	if k.tail == 0 {
-		return cmpString(k.inline, key), nil
+		return strings.Compare(k.inline, key), nil
 	}
 	r := stream(k, s.read)
 	for {
@@ -295,7 +295,7 @@ func (k keyRef) compare(s *pager, key string) (int, error) {
 			return 0, err
 		}
 		n := min(len(b), len(key))
-		if c := bytes.Compare(b[:n], []byte(key[:n])); c != 0 {
+		if c := compareBytesString(b[:n], key[:n]); c != 0 {
 			return c, nil
 		}
 		if len(b) == 0 || n < len(b) {
@@ -305,11 +305,14 @@ func (k keyRef) compare(s *pager, key string) (int, error) {
 		r.data = r.data[n:]
 	}
 }
-func cmpString(a, b string) int {
-	if a < b {
+
+// Converting inside the comparison lets Go compare the page bytes directly
+// with the search key without copying either operand.
+func compareBytesString(data []byte, key string) int {
+	if string(data) < key {
 		return -1
 	}
-	if a > b {
+	if string(data) > key {
 		return 1
 	}
 	return 0
