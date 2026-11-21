@@ -290,14 +290,15 @@ records, or total disk quota is provided.
 
 ## Choosing the key index
 
-`Options{}` uses an in-memory hash index for fast random lookups.
-For datasets whose keys would consume too much heap, choose the disk index
-when opening the database.
+`Options{}` and `IndexDefault` use a disk-backed B+tree with a 16 MiB
+working-memory budget. The index mode is selected on each Open, so an
+existing database can use either backend without migration.
+If random lookup latency is a priority and every key and its DATA address fit
+in the available heap, select the in-memory hash index with `IndexMemory`.
 
 ```go
 db, err := tarp.Open(dir, tarp.Options{
-	IndexMode:              tarp.IndexBTree,
-	BTreeMemoryBudgetBytes: 16 << 20,
+	IndexMode: tarp.IndexMemory,
 })
 ```
 
@@ -351,7 +352,7 @@ the commit sync protocol.
 | Option | Default | What the limit applies to |
 | --- | ---: | --- |
 | `OpenValidation` | `Full` | Choose eager DATA verification or `Indexed` checkpoint recovery. |
-| `IndexMode` | `IndexMemory` | Selects a built-in key index for this Open. |
+| `IndexMode` | `IndexBTree` | Selects a built-in key index for this Open. |
 | `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
 | `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |

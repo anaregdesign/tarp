@@ -15,7 +15,7 @@ type DB engine.DB
 type IndexMode = engine.IndexMode
 
 const (
-	// IndexDefault selects the in-memory hash index.
+	// IndexDefault selects IndexBTree.
 	IndexDefault = engine.IndexDefault
 	// IndexMemory keeps all key locations in memory.
 	IndexMemory = engine.IndexMemory
@@ -36,14 +36,15 @@ const (
 
 // Options configures one database. Zero fields select their defaults.
 type Options struct {
-	// IndexMode selects a paged B+tree or in-memory hash map for this handle.
+	// IndexMode selects a paged B+tree (the default) or an in-memory hash
+	// index for this handle.
 	IndexMode IndexMode
 	// OpenValidation selects Full (the default) or Indexed recovery.
 	OpenValidation OpenValidation
 	// BTreeMemoryBudgetBytes sets the working-memory budget for IndexBTree,
 	// shared by the foreground index and its maintenance workspaces.
-	// Zero selects 16 MiB in IndexBTree mode. An explicit budget must be at
-	// least 1 MiB and requires IndexBTree.
+	// Zero selects 16 MiB for the B+tree. A nonzero budget must be at least
+	// 1 MiB and is valid with IndexDefault or IndexBTree.
 	BTreeMemoryBudgetBytes int64
 	// ValueCacheBudgetBytes sets the logical budget for the value LRU in
 	// either index mode. Each live key, value and its entry metadata must fit
@@ -240,7 +241,8 @@ func (db *DB) AutoCompactionStatus() AutoCompactionStatus {
 }
 
 // Close rejects new calls and waits for admitted operations before releasing
-// directory ownership. Concurrent or repeated calls return the same result.
+// directory ownership. A healthy B+tree handle persists or reuses an index
+// checkpoint. Concurrent or repeated calls return the same result.
 func (db *DB) Close() error {
 	return (*engine.DB)(db).Close()
 }

@@ -19,7 +19,7 @@ func TestIndexOpenReplay(t *testing.T) {
 	if parent == "" {
 		t.Skip("set TARP_REPLAY_FIXTURE to compare Open times")
 	}
-	opts := engine.Options{ValueCacheBudgetBytes: 64 << 10, MaxRecordBytes: 2048, TargetSegmentBytes: 1 << 20}
+	opts := engine.Options{IndexMode: engine.IndexMemory, ValueCacheBudgetBytes: 64 << 10, MaxRecordBytes: 2048, TargetSegmentBytes: 1 << 20}
 	open := func(dir string) *engine.DB {
 		t.Helper()
 		db, err := engine.OpenWithHooks(dir, opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})

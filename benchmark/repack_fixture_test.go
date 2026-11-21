@@ -33,7 +33,11 @@ func prepareRepackFixture(t testing.TB, size int) repackFixture {
 	opts.MaxRecordBytes = int64(format.RecordHeaderBytes + len(keys[0]) + size)
 	opts.TargetSegmentBytes = format.SegmentHeaderBytes + recordsPerLog*opts.MaxRecordBytes
 	dir := filepath.Join(t.TempDir(), "seed")
-	db, err := engine.OpenWithHooks(dir, opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
+	// Closing the seed must leave its last record in the active log.
+	// The timed clones use the default index.
+	seedOpts := opts
+	seedOpts.IndexMode = engine.IndexMemory
+	db, err := engine.OpenWithHooks(dir, seedOpts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,14 +130,12 @@ func repackDataFileCount(t testing.TB, dir string) int {
 	return len(files)
 }
 
-// verify checks retirement before reopen can remove orphans, then independently
-// rebuilds the index and checks the complete contents of the measured clone.
+// Inspect the repacked layout before Close seals the foreground tail for its
+// index checkpoint. Verify the complete contents again on reopen.
 func (f repackFixture) verify(t testing.TB, db *engine.DB, repacked bool, puts int) (int, string) {
 	t.Helper()
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	dir := engine.Observe(db).Dir()
+	probe := engine.Observe(db)
+	dir := probe.Dir()
 	fileCount := repackDataFileCount(t, dir)
 	wantFiles := len(f.inputs) + 1
 	if repacked {
@@ -142,16 +144,6 @@ func (f repackFixture) verify(t testing.TB, db *engine.DB, repacked bool, puts i
 	if fileCount != wantFiles {
 		t.Fatalf("repacked=%t: found %d physical DATA files; want %d", repacked, fileCount, wantFiles)
 	}
-	reopened, err := engine.OpenWithHooks(dir, f.opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := reopened.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	probe := engine.Observe(reopened)
 	frontier := probe.Frontier()
 	if frontier.ActiveID != f.frontier.ActiveID || frontier.Sequence != f.frontier.Sequence+uint64(puts) ||
 		frontier.ActiveEnd != f.frontier.ActiveEnd+int64(puts)*f.opts.MaxRecordBytes {
@@ -170,6 +162,21 @@ func (f repackFixture) verify(t testing.TB, db *engine.DB, repacked bool, puts i
 			t.Fatalf("unexpected repacked catalog: %+v", s.Catalog)
 		}
 	})
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := engine.OpenWithHooks(dir, f.opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if got := engine.Observe(reopened).Frontier(); got.Sequence != frontier.Sequence || got.UUID != frontier.UUID {
+		t.Fatalf("reopened clone has unexpected identity or sequence: %+v", got)
+	}
 	hash, count := measurementState(t, reopened)
 	if hash != f.stateHash || uint64(count) != f.frontier.Sequence {
 		t.Fatalf("state after reopen: %d keys, digest %s", count, hash)

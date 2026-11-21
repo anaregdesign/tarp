@@ -4,8 +4,9 @@
 // Retained inputs and returned values are copied. Keep input backing arrays
 // stable until all calls using them have returned.
 //
-// Options.IndexMode selects an in-memory hash index (the default) or a paged
-// copy-on-write B+tree. Both can reuse a persistent index checkpoint and replay
+// The default key index is a paged copy-on-write B+tree with a 16 MiB
+// working-memory budget. Set Options.IndexMode to IndexMemory for an in-memory
+// hash index. Both can reuse a persistent index checkpoint and replay
 // later commits. Full (default) verifies all committed DATA. Indexed skips the
 // covered payloads on Open. Both modes share the Value LRU.
 //

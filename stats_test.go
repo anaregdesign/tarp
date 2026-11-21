@@ -70,13 +70,17 @@ func TestOwnerStatsIncludeViewOperationsAndRetainFinalSnapshot(t *testing.T) {
 	if s := raw.Stats(); s != want {
 		t.Fatalf("raw stats after view operations = %+v, want %+v", s, want)
 	}
+	// The default B+tree seals the nonempty log for its Close checkpoint.
+	afterClose := want
+	afterClose.SelectedSegments++
+	afterClose.SelectedDataBytes += 64
 	// Scrape while Close releases the DB, and once more after shutdown.
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	wg.Go(func() {
 		close(start)
 		for range 1000 {
-			if s := raw.Stats(); s != want {
+			if s := raw.Stats(); s != want && s != afterClose {
 				t.Errorf("snapshot during Close = %+v", s)
 				return
 			}
@@ -88,14 +92,15 @@ func TestOwnerStatsIncludeViewOperationsAndRetainFinalSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw.Stats() != want {
-		t.Fatal("lost final snapshot")
+	if s := raw.Stats(); s != afterClose {
+		t.Fatalf("final snapshot = %+v, want %+v", s, afterClose)
 	}
 	next, err := tarp.Open(dir, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer next.Close()
+	want = afterClose
 	want.ValueCache = tarp.ValueCacheStats{LimitBytes: 130}
 	want.BatchGetDuplicateInputs = 0
 	want.MissingKeyLookups, want.WriteCommits, want.WrittenRecords = 0, 0, 0

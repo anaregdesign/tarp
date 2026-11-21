@@ -47,7 +47,10 @@ func TestProcessCrashRecoveryMatrix(t *testing.T) {
 		t.Run(tc.mode+"/"+tc.point, func(t *testing.T) {
 			parent := t.TempDir()
 			dir := filepath.Join(parent, "db")
-			db, err := Open(dir, testOptions())
+			// Keep the seeded log active so the child exercises append and rotation.
+			opts := testOptions()
+			opts.IndexMode = IndexMemory
+			db, err := Open(dir, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -281,12 +284,10 @@ func TestPowerCutGuest(t *testing.T) {
 		}
 	}
 	if mode == "recover" {
-		db.writer.Lock()
-		active := db.store.Files[db.store.Current.ActiveID].Path
-		db.writer.Unlock()
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
+		active := db.store.Files[db.store.Current.ActiveID].Path
 		fd, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
 			t.Fatal(err)

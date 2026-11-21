@@ -340,7 +340,8 @@ func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 	end := db.store.Current.ActiveEnd
 	seq := db.store.Current.Sequence
 	// An uncommitted active-file suffix is outside the permitted read window.
-	fd, err := os.OpenFile(testLoc(t, db, "last").File.Path, os.O_WRONLY, 0)
+	file := testLoc(t, db, "last").File.Path
+	fd, err := os.OpenFile(file, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,6 +351,11 @@ func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 	if err := fd.Close(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := os.Truncate(file, end); err != nil {
+			t.Error(err)
+		}
+	})
 	target := filepath.Join(t.TempDir(), "backup")
 	if err := db.Backup(t.Context(), target); err != nil {
 		t.Fatal(err)

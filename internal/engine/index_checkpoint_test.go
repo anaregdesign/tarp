@@ -91,7 +91,8 @@ func TestCheckpointIndexConcurrentRotationPreservesTail(t *testing.T) {
 				return nil
 			}}
 			dir := t.TempDir()
-			opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128, OpenValidation: Indexed}
+			// Keep the captured checkpoint and its replay suffix across Close.
+			opts := Options{IndexMode: IndexMemory, MaxRecordBytes: 64, TargetSegmentBytes: 128, OpenValidation: Indexed}
 			db, err := OpenWithHooks(dir, opts, fs, &Hooks{CleanerStart: make(chan struct{})})
 			if err != nil {
 				t.Fatal(err)

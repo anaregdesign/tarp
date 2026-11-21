@@ -101,7 +101,7 @@ The table shows the B+tree just after 96 durable overwrites while an older Scan 
 
 At 20,480 keys, a Value LRU hit loaded zero index pages in every run. Median hot Get was 0.17 µs for Memory and 0.17 µs for B+tree. Timings this short are sensitive to timer resolution and scheduling.
 
-At the minimum B+tree budget, p99 was 6.5× Memory for a value-cold point lookup and 60.2× for a scattered 32-key batch. Keys with a 9 KiB common prefix require exact comparisons along overflow chains. Compact took 8.7× as long as Memory on this fixture. These measured cold paths and maintenance costs favor keeping Memory as the default. B+tree offers a bounded index for larger datasets and streams the first enumeration result without copying the entire index.
+At the minimum B+tree budget, p99 was 6.5× Memory for a value-cold point lookup and 60.2× for a scattered 32-key batch. Keys with a 9 KiB common prefix require exact comparisons along overflow chains. Compact took 8.7× as long as Memory on this fixture. These measurements informed the original choice of Memory as the default. They predate the [long-key comparison fix](https://github.com/anaregdesign/tarp/pull/142). For current defaults and guidance on selecting a backend, see [Choosing the key index](../../README.md#choosing-the-key-index).
 
 ## Environment and reproduction
 

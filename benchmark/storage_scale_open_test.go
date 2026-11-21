@@ -20,7 +20,9 @@ func TestStorageScaleOpen(t *testing.T) {
 	// Keep a single selected segment, independent of the orphan count.
 	opts.TargetSegmentBytes = 4 << 20
 	seed := filepath.Join(t.TempDir(), "seed")
-	db, err := tarp.Open(seed, tarp.Options(opts))
+	seedOpts := tarp.Options(opts)
+	seedOpts.IndexMode = tarp.IndexMemory // Keep the single DATA segment unsealed on Close.
+	db, err := tarp.Open(seed, seedOpts)
 	if err != nil {
 		t.Fatal(err)
 	}

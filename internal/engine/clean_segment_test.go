@@ -530,7 +530,8 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 				}
 				return nil
 			}}
-			db := newTestDBWithHooks(t, Options{}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+			// Check the repacked catalog across Close with the final append still active.
+			db := newTestDBWithHooks(t, Options{IndexMode: IndexMemory}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 			mustPut(t, db, "prefix", "earlier")
 			prefix := sealForCleaning(t, db)
 			var group []format.File
