@@ -123,7 +123,9 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 		row.Arm = "first-after-release"
 	}
 	sequence := uint64(len(rows))
+	row.IDWitness = os.Getenv("TARP_SCAN_RELEASE_WITNESS") == "1"
 	for step := 1; step <= steps; step++ {
+		stepStart := time.Now()
 		version := (step-1)%16 + 1
 		// 32 overwritten keys and eight different keys deleted/reinserted per
 		// step. The offset varies by matched pair; both arms use the same trace.
@@ -162,6 +164,11 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 			}
 			row.PinnedDATA = append(row.PinnedDATA, uint64(r.PinnedRetiredDataBytes))
 		}
+		if row.IDWitness {
+			// Spread the same ongoing churn over at least 16 s in the 256-step
+			// witness. This separate path contributes no performance samples.
+			time.Sleep(time.Until(stepStart.Add(64 * time.Millisecond)))
+		}
 	}
 	a.drainHeld(t)
 	b.drainHeld(t)
@@ -171,7 +178,6 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 	}
 	row.RetiredAtTwoViews = m.RetiredPages
 	var queuedIDs map[uint64]bool
-	row.IDWitness = os.Getenv("TARP_SCAN_RELEASE_WITNESS") == "1"
 	if row.IDWitness {
 		queued, live, err := observe.Corner145IDSets()
 		if err != nil || len(queued) < 128 {
