@@ -72,7 +72,7 @@ type releaseSample struct {
 	RootBefore, RootAfter   uint64
 	HighWaterBefore         uint64
 	HighWaterAfter          uint64
-	PinnedDATA              [2]uint64
+	PinnedDATA              []uint64
 	CommitSequence          uint64
 }
 
@@ -152,12 +152,12 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 			b = holdReleaseCursor(t, db, model)
 			defer b.stop()
 		}
-		if step == steps/2 || step == steps {
+		if step%min(32, steps/2) == 0 {
 			r, err := db.Compact(t.Context())
 			if err != nil || r.DroppedKeys != 0 || r.PinnedRetiredDataBytes == 0 {
 				t.Fatalf("Compact at step %d: %+v, %v", step, r, err)
 			}
-			row.PinnedDATA[step/(steps/2)-1] = uint64(r.PinnedRetiredDataBytes)
+			row.PinnedDATA = append(row.PinnedDATA, uint64(r.PinnedRetiredDataBytes))
 		}
 	}
 	a.drainHeld(t)
