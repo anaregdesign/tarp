@@ -72,6 +72,31 @@ type frame struct {
 }
 type cursor struct{ stack []frame }
 
+// seek positions the cursor at the first key >= lower. Each ancestor frame
+// resumes at the sibling after the child selected by the search.
+func (c *cursor) seek(s *pager, lower string) error {
+	for {
+		f := &c.stack[len(c.stack)-1]
+		p, err := s.read(f.id)
+		if err != nil {
+			return err
+		}
+		at, _, err := p.search(s, lower)
+		if err != nil {
+			return err
+		}
+		if p[4] == leaf {
+			f.pos = at
+			return nil
+		}
+		if len(c.stack) >= maxDepth {
+			return errPage
+		}
+		f.pos = at + 1
+		c.stack = append(c.stack, frame{id: p.child(at)})
+	}
+}
+
 // Advance only while admitted. No page buffer or reader workspace is held
 // over user code, including a nested read, mutation, or Close.
 func (c *cursor) next(s *pager) (string, index.Address, bool, error) {
@@ -108,20 +133,36 @@ func (c *cursor) next(s *pager) (string, index.Address, bool, error) {
 }
 
 func (v *view) All(yield func(string, index.Address) bool) error {
-	if v.root == 0 {
+	return v.Range("", "", yield)
+}
+
+// Range visits keys in [lower, upper) at this view's root. An empty upper
+// bound extends through the last key.
+func (v *view) Range(lower, upper string, yield func(string, index.Address) bool) error {
+	if v.root == 0 || upper != "" && lower >= upper {
 		if !v.valid() {
 			return os.ErrClosed
 		}
 		return nil
 	}
 	c := cursor{stack: []frame{{id: v.root}}}
+	if lower != "" {
+		if err := v.beginRead(); err != nil {
+			return err
+		}
+		err := c.seek(v.tree.p, lower)
+		v.tree.reads.release()
+		if err != nil {
+			return err
+		}
+	}
 	for {
 		if err := v.beginRead(); err != nil {
 			return err
 		}
 		key, a, ok, err := c.next(v.tree.p)
 		v.tree.reads.release()
-		if err != nil || !ok {
+		if err != nil || !ok || upper != "" && key >= upper {
 			return err
 		}
 		if !yield(key, a) {

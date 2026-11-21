@@ -2,8 +2,11 @@ package btree
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,5 +75,103 @@ func TestSuspendedCursorAndBatchCallbacksReleaseReadWorkspace(t *testing.T) {
 	}
 	if err := v.LookupMany([]string{"one", "two"}, func(int, index.Address, bool) { check() }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRangeSeeksAndTraversesAnImmutableRoot(t *testing.T) {
+	tr := openTest(t)
+	const count = 300
+	prefix := strings.Repeat("p", maxInline+1) + "\x00"
+	var keys []string
+	tx := tr.Begin()
+	for i := range count {
+		key := fmt.Sprintf("%s%03d", prefix, i)
+		keys = append(keys, key)
+		if err := tx.Put(key, addr(uint64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx.Commit()
+	v := tr.View().(*view)
+	defer v.Close()
+	root, err := tr.p.read(v.root)
+	if err != nil || root[4] != branch {
+		t.Fatalf("fixture requires a branch root: %v", err)
+	}
+	separator, err := root.cell(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRight, err := separator.key.string(tr.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := slices.Index(keys, firstRight)
+	if at <= 1 || at+2 >= len(keys) {
+		t.Fatalf("unexpected separator position %d", at)
+	}
+	tx = tr.Begin()
+	if err := tx.Delete(firstRight); err != nil {
+		t.Fatal(err)
+	}
+	tx.Commit()
+	for _, tc := range []struct {
+		name, lower, upper string
+		start, end         int
+	}{
+		{"branch equality", firstRight, keys[at+2], at, at + 2},
+		{"between leaves", keys[at-1] + "\xff", keys[at+2], at, at + 2},
+		{"across leaves", keys[at-1], keys[at+2], at - 1, at + 2},
+		{"from beginning", "", keys[1], 0, 1},
+		{"through end", keys[count-2], "", count - 2, count},
+		{"before first", "a", "b", 0, 0},
+		{"after last", "q", "", count, count},
+		{"equal bounds", firstRight, firstRight, at, at},
+		{"reversed bounds", keys[at+1], firstRight, at, at},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			err := v.Range(tc.lower, tc.upper, func(key string, a index.Address) bool {
+				if a != addr(uint64(tc.start+len(got))) {
+					t.Errorf("address %v at position %d", a, len(got))
+				}
+				got = append(got, key)
+				return true
+			})
+			if err != nil || !slices.Equal(got, keys[tc.start:tc.end]) {
+				t.Fatalf("Range returned %d keys, want positions [%d,%d): %v", len(got), tc.start, tc.end, err)
+			}
+		})
+	}
+}
+
+func TestRangeStopsAndReleasesReadWorkspaceAtCallbacks(t *testing.T) {
+	tr := openTest(t)
+	tx := tr.Begin()
+	for i, key := range []string{"a", "b", "c"} {
+		if err := tx.Put(key, addr(uint64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx.Commit()
+	v := tr.View().(*view)
+	defer v.Close()
+	calls := 0
+	err := v.Range("b", "", func(key string, _ index.Address) bool {
+		calls++
+		if key != "b" || tr.Metrics().ReadWorkspaceBytes != 0 {
+			t.Fatalf("callback at %q with %d reserved bytes", key, tr.Metrics().ReadWorkspaceBytes)
+		}
+		return false
+	})
+	if err != nil || calls != 1 {
+		t.Fatalf("break after one key: calls=%d, err=%v", calls, err)
+	}
+	err = v.Range("b", "", func(string, index.Address) bool {
+		v.Close()
+		return true
+	})
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("closing view from callback: %v", err)
 	}
 }
