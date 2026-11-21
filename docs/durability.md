@@ -113,18 +113,21 @@ The prior whole-VM campaign described above predates the batch API.
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
 supported layout, recovery locks the directory and validates the selected `CURRENT`, its
-SHA-256-bound catalog, every selected segment header/identity, every committed
-record/checksum/sequence, and all live option minima. It rebuilds the selected key index from that replay and starts with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
+SHA-256-bound catalog, each selected segment header and length, and all live
+option minima. Full recovery verifies each sealed DATA digest and each committed
+active record. A validated INDEX can supply the covered key history. Indexed
+recovery skips covered DATA payloads after validating INDEX and replays the
+committed suffix. Both start with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
 preserve coverage even when they have zero records. Deletes through the catalog
 pruning boundary may refer to a Put removed by cleaning. All selected physical
-files must exist. See the [replay rules](format.md#catalog-payload).
+DATA files must exist. See the [replay rules](format.md#catalog-payload).
 Missing required files and invalid checksums match `ErrCorrupt`.
 Read failures such as permission or device errors preserve the filesystem
 cause for `errors.Is` and `errors.As`.
 Only after that validation may recovery truncate/sync the active suffix
 strictly beyond the committed frontier or delete recognized unselected objects.
 
-`Open`, `Restore`, and the validation pass of a manual checkpoint read each
+Full replay, `Restore`, and the validation pass of a manual checkpoint read each
 selected file sequentially in blocks of up to 32 KiB. The committed end bounds
 read-ahead, including when the active log has a longer physical tail. The
 decoder verifies each record's checksum before applying it to the rebuilt index.
@@ -278,7 +281,26 @@ the staged image and its size requirements before publishing a new closed
 database. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
 explicitly and does not poison an otherwise healthy source DB.
 
-## Derived index and scratch space
+## Index checkpoints
+
+`CheckpointIndex` seals a nonempty active log under the writer gate and pins
+the captured DATA. It shares the maintenance slot with compaction. Foreground
+writes and rotation can proceed while a private B+tree is bulk-built from the
+validated record stream. After syncing the staging file, the publisher checks
+its layout against the latest catalog under the gate, renames the INDEX and
+syncs the database directory. A new MANIFEST and CURRENT then select it
+together with the latest committed tail. Cleaning and compaction invalidate
+the descriptor when replacing its physical layout. Sealed DATA digests also
+protect maintenance reads of segments opened with Indexed validation.
+
+A failure building the optional index leaves existing acknowledged writes
+committed. A failure during selector rename or directory sync has an unknown
+publication outcome and requires reopening. Obsolete files are retired after
+publication. A healthy B+tree Close waits for admitted operations and the
+cleaner, refreshes the checkpoint if needed, and releases the lock even on
+error. Memory handles checkpoint explicitly.
+
+## Runtime index and scratch space
 
 The backend is selected per Open. A B+tree stores pointer-free DATA addresses
 in process-private scratch files. The database reserves `.tarp-work/` for
@@ -286,7 +308,8 @@ B+tree pages, replay sort runs, and indexes used by compaction and online
 backup. Compaction also uses this directory when its relocation list spills
 in either index mode. These files share the database volume.
 
-Tarp unlinks each scratch file after opening it. A process exit between
+Tarp unlinks private pager and replay files after opening them. The synced INDEX
+staging file retains a temporary name until publication. A process exit between
 creation and unlink can leave a name behind. On reopen, Tarp validates the
 selected DATA and option limits before removing recognized leftover scratch
 files. On close, it also removes the empty workspace before releasing the
@@ -298,9 +321,9 @@ mutation or atomic batch, Tarp stages the new locations in a private index
 transaction. The existing DATA and CURRENT syncs
 then establish the commit. Publication switches the index, cache and counters
 together. A failure preparing scratch leaves the selected frontier intact.
-After an uncertain durable publication, reopen to rebuild the selected index.
+After an uncertain durable publication, reopen to recover the selected state.
 
-During B+tree recovery, the builder sorts bounded runs by exact binary key.
+During full B+tree replay, the builder sorts bounded runs by exact binary key.
 It validates each key’s transitions in the order in which its records were
 replayed, then packs its final live address into the tree from the leaves up.
 Backup uses the same reducer to validate its captured history.

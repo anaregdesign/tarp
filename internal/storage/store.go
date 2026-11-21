@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"math"
 	"os"
 	"path/filepath"
@@ -29,6 +31,7 @@ var (
 type Config struct {
 	ValueCacheBudgetBytes, RecordBytes, TargetSegmentBytes int64
 	Handles                                                int
+	IndexedOpen                                            bool
 }
 
 // RequiredLimits records the measured minima for a database image's live records.
@@ -53,6 +56,8 @@ func (e *CompatibilityError) Error() string {
 }
 
 type File struct {
+	activeDigest hash.Hash // writer gate owns the committed active byte stream
+
 	ID                     uint64
 	Kind                   uint32
 	Path                   string
@@ -93,10 +98,13 @@ type Store struct {
 	nextID                uint64
 	retired               map[uint64]*File
 	retiredCatalogs       map[uint64]struct{}
+	retiredIndexes        map[uint64]struct{}
 	retireSyncPending     bool
 	cleanWorkspaceOnClose bool
 	// Created reports that this Open published the initial CURRENT.
 	Created bool
+	// IndexCheckpointHit reports use of the selected index at Open.
+	IndexCheckpointHit bool
 	// MaxValueBytes is the largest live value at indexed Open.
 	MaxValueBytes int64
 }
@@ -131,14 +139,14 @@ func Open(dir string, cfg Config, fs *IO) (*Store, map[string]Location, error) {
 }
 
 func OpenContext(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO) (*Store, map[string]Location, error) {
-	s, legacy, _, err := openStore(ctx, dir, cfg, existingOnly, fs, nil)
+	s, legacy, _, err := openStore(ctx, dir, cfg, existingOnly, fs, nil, nil)
 	return s, legacy, err
 }
 
 // OpenIndexed constructs the backend under the directory lock. On success
 // the caller owns both objects and must close the backend before the store.
-func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error)) (*Store, index.Backend, error) {
-	s, _, keys, err := openStore(ctx, dir, cfg, existingOnly, fs, newIndex)
+func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error), load IndexImporter) (*Store, index.Backend, error) {
+	s, _, keys, err := openStore(ctx, dir, cfg, existingOnly, fs, newIndex, load)
 	return s, keys, err
 }
 
@@ -201,7 +209,7 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	return s, nil
 }
 
-func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error)) (_ *Store, _ map[string]Location, _ index.Backend, result error) {
+func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error), load IndexImporter) (_ *Store, _ map[string]Location, _ index.Backend, result error) {
 	s, err := lockStore(ctx, dir, cfg, existingOnly, fs)
 	if err != nil {
 		return nil, nil, nil, err
@@ -239,6 +247,7 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 			return nil, nil, nil, err
 		}
 		s.Current = image.Current
+		s.nextID = max(s.nextID, image.Catalog.Index.ID)
 		hadWorkspace, err = s.inspectNames(ctx, entries)
 		if err != nil {
 			return nil, nil, nil, err
@@ -247,7 +256,14 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	// Until the DATA and limits pass validation, remove only a workspace
 	// created by this Open. An incompatible Open preserves prior remnants.
 	s.cleanWorkspaceOnClose = !hadWorkspace
-	if newIndex != nil {
+	if image != nil && image.Catalog.Index.ID != 0 && load != nil {
+		keys, err = s.loadCheckpoint(ctx, image, load)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		s.IndexCheckpointHit = keys != nil
+	}
+	if keys == nil && newIndex != nil {
 		keys, err = newIndex(s)
 		if err != nil {
 			outcome := publication.NotApplied
@@ -271,7 +287,16 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 }
 
 func (s *Store) recover(ctx context.Context, image *Image, entries []os.DirEntry, keys index.Backend, hadWorkspace bool) error {
-	if err := image.replay(ctx, keys); err != nil {
+	if s.IO != nil {
+		image.openRead = s.IO.OpenRead
+	}
+	var err error
+	if s.IndexCheckpointHit {
+		err = image.replayAfterCheckpoint(ctx, keys, s.Config.IndexedOpen)
+	} else {
+		err = image.replay(ctx, keys)
+	}
+	if err != nil {
 		return err
 	}
 	if err := s.Config.CheckLimits(image.Required); err != nil {
@@ -377,8 +402,12 @@ func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords append
 	}
 	b := format.EncodeSegment(format.Segment{UUID: uuid, ID: f.ID, Kind: f.Kind})
 	err = fs.Write(fd, b, 0, point+".write")
+	if f.Kind == format.Log {
+		f.activeDigest = sha256.New()
+		f.activeDigest.Write(b)
+	}
 	if err == nil && initialRecords.size > 0 {
-		err = initialRecords.writeAt(fd, format.SegmentHeaderBytes)
+		err = initialRecords.writeAt(fd, format.SegmentHeaderBytes, f.activeDigest)
 	}
 	// Private checkpoints sync the complete file before publication.
 	if err == nil && f.Kind != format.Snapshot {
@@ -424,6 +453,7 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 	catalog.Files = append(append([]format.File(nil), catalog.Files...), format.File{
 		ID: s.Current.ActiveID, Bytes: s.Current.ActiveEnd, Kind: format.Log,
 		First: s.Catalog.SealedEnd() + 1, Last: s.Current.Sequence,
+		Digest: [sha256.Size]byte(s.Files[s.Current.ActiveID].activeDigest.Sum(nil)),
 	})
 	catalog.ActiveID = file.ID
 	candidate := s.Current
@@ -433,6 +463,7 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return errors.Join(err, fd.Close())
 	}
+	s.Files[catalog.Files[len(catalog.Files)-1].ID].activeDigest = nil
 	old := s.active
 	s.active = fd
 	if err := errors.Join(old.Close(), s.IO.Check("rotation.close:after")); err != nil {
@@ -464,8 +495,12 @@ func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() err
 	}
 	sequence := s.Current.Sequence + 1
 	b := format.EncodeRecord(kind, sequence, key, value)
-	data := appendData{size: int64(len(b)), writeAt: func(fd *os.File, off int64) error {
-		return s.IO.Write(fd, b, off, "data.write")
+	data := appendData{size: int64(len(b)), writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
+		if err := s.IO.Write(fd, b, off, "data.write"); err != nil {
+			return err
+		}
+		digest.Write(b)
+		return nil
 	}}
 	if prepare != nil {
 		data.prepare = func(f *File, off int64) error {
@@ -500,10 +535,10 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 		locations[i] = Location{Offset: size, Bytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.Sequence + uint64(i) + 1}
 		size += n
 	}
-	data := appendData{size: size, writeAt: func(fd *os.File, off int64) error {
+	data := appendData{size: size, writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
 		// Buffer small records together; bufio writes large values directly from
 		// the caller's slice. The buffer lives only through this append.
-		dst := &outputWriter{fs: s.IO, fd: fd, offset: off, point: "data.write"}
+		dst := &outputWriter{fs: s.IO, fd: fd, offset: off, point: "data.write", hash: digest}
 		w := bufio.NewWriterSize(dst, int(min(size, 32<<10)))
 		var header [format.RecordHeaderBytes]byte
 		for i, e := range entries {
@@ -547,7 +582,7 @@ func (e *prepareError) Unwrap() error { return e.err }
 type appendData struct {
 	prepare func(*File, int64) error
 	size    int64
-	writeAt func(*os.File, int64) error
+	writeAt func(*os.File, int64, hash.Hash) error
 }
 
 func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func() error) (*File, int64, error) {
@@ -563,7 +598,7 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 			return nil, 0, err
 		}
 	}
-	if err := data.writeAt(s.active, offset); err != nil {
+	if err := data.writeAt(s.active, offset, s.Files[s.Current.ActiveID].activeDigest); err != nil {
 		return nil, 0, fault("data.write", publication.NotApplied, true, err)
 	}
 	if err := s.IO.Sync(s.active, "data.sync"); err != nil {
@@ -627,6 +662,8 @@ func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry) (bool, 
 			s.nextID = max(s.nextID, id)
 		} else if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {
 			s.nextID = max(s.nextID, id)
+		} else if id, ok := parseID(name, "INDEX", s.Current.UUID); ok {
+			s.nextID = max(s.nextID, id)
 		} else if !s.ownedTemp(name) {
 			return false, fmt.Errorf("%w: unknown engine object %s", ErrCorrupt, name)
 		}
@@ -667,7 +704,11 @@ func (s *Store) cleanupValidated(ctx context.Context, entries []os.DirEntry) (re
 		}
 		name := e.Name()
 		remove := s.ownedTemp(name)
-		var removedID, manifestID uint64
+		var removedID, manifestID, indexID uint64
+		if id, ok := parseID(name, "INDEX", s.Current.UUID); ok {
+			remove = id != s.Catalog.Index.ID
+			indexID = id
+		}
 		if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {
 			remove = id != s.Current.ManifestID
 			manifestID = id
@@ -704,6 +745,9 @@ func (s *Store) cleanupValidated(ctx context.Context, entries []os.DirEntry) (re
 					delete(s.Files, removedID)
 					delete(s.retired, removedID)
 				}
+			}
+			if unlinked && indexID != 0 {
+				delete(s.retiredIndexes, indexID)
 			}
 			if unlinked && manifestID != 0 {
 				delete(s.retiredCatalogs, manifestID)

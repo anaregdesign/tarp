@@ -11,7 +11,7 @@ import (
 // DB owns its directory until Close finishes. Do not copy a DB.
 type DB engine.DB
 
-// IndexMode selects the key index built from DATA on each Open.
+// IndexMode selects the runtime key index.
 type IndexMode = engine.IndexMode
 
 const (
@@ -19,14 +19,27 @@ const (
 	IndexDefault = engine.IndexDefault
 	// IndexMemory keeps all key locations in memory.
 	IndexMemory = engine.IndexMemory
-	// IndexBTree keeps key locations in a disposable paged disk index.
+	// IndexBTree keeps key locations in a paged disk index and checkpoints on clean Close.
 	IndexBTree = engine.IndexBTree
+)
+
+// OpenValidation controls verification of DATA covered by a persisted index.
+type OpenValidation = engine.OpenValidation
+
+const (
+	// Full verifies all committed DATA during Open. This is the default.
+	Full = engine.Full
+	// Indexed verifies the index and replays its tail. Covered payloads
+	// receive their record checks when read. Open with Full to check all bytes.
+	Indexed = engine.Indexed
 )
 
 // Options configures one database. Zero fields select their defaults.
 type Options struct {
 	// IndexMode selects a paged B+tree or in-memory hash map for this handle.
 	IndexMode IndexMode
+	// OpenValidation selects Full (the default) or Indexed recovery.
+	OpenValidation OpenValidation
 	// BTreeMemoryBudgetBytes sets the working-memory budget for IndexBTree,
 	// shared by the foreground index and its maintenance workspaces.
 	// Zero selects 16 MiB in IndexBTree mode. An explicit budget must be at
@@ -192,6 +205,11 @@ func publicBackupInfo(info storage.BackupInfo, err error) (BackupInfo, error) {
 			MaxRecordBytes:        info.Required.RecordBytes,
 		},
 	}, nil
+}
+
+// CheckpointIndex persists the key index for a committed prefix while normal writes continue.
+func (db *DB) CheckpointIndex(ctx context.Context) error {
+	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
 
 // CompactResult reports the logical size of files unlinked by this Compact

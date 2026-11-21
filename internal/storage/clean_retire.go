@@ -32,6 +32,13 @@ func (s *Store) retireManifest(id uint64) {
 	}
 }
 
+func (s *Store) retireIndex(id uint64) {
+	if s.retiredIndexes == nil {
+		s.retiredIndexes = make(map[uint64]struct{})
+	}
+	s.retiredIndexes[id] = struct{}{}
+}
+
 // Manual cleanup and the automatic worker can finish each other's pending sync.
 // Both callers hold the writer gate.
 func (s *Store) syncRetirements(point string) error {
@@ -115,6 +122,20 @@ func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result er
 		}
 		result = err
 	}
+	for id := range s.retiredIndexes {
+		if remaining == 0 || result != nil {
+			break
+		}
+		if id == s.Catalog.Index.ID {
+			result = fmt.Errorf("%w: retiring selected index", ErrCorrupt)
+			break
+		}
+		removed, err := remove(filepath.Join(s.Dir, IndexName(s.Current.UUID, id)))
+		if removed {
+			delete(s.retiredIndexes, id)
+		}
+		result = err
+	}
 	result = errors.Join(result, s.syncRetirements("clean.retire.dirsync"))
-	return unlinked, pinned, len(s.retired)+len(s.retiredCatalogs) != 0 || s.retireSyncPending, result
+	return unlinked, pinned, len(s.retired)+len(s.retiredCatalogs)+len(s.retiredIndexes) != 0 || s.retireSyncPending, result
 }

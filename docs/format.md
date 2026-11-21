@@ -17,6 +17,7 @@ LOCK
 CURRENT
 MANIFEST-<32 lowercase UUID hex>-<16 lowercase nonzero ID hex>
 DATA-<32 lowercase UUID hex>-<16 lowercase nonzero ID hex>
+INDEX-<32 lowercase UUID hex>-<16 lowercase nonzero ID hex>
 .tarp-current-<32 lowercase UUID hex>-<random>.tmp
 .tarp-work/
 ```
@@ -25,7 +26,7 @@ IDs share one allocation space and do not wrap. Recognized names are inspected
 before assigning IDs on reopen. UUID-bound names allow safe recognition of an
 unselected partially written header; unknown objects are not garbage. `CURRENT`
 alone selects the authoritative catalog. `.tarp-work/` is a reserved directory
-for process-private scratch. Backup excludes it, LOCK, unselected objects and
+for process-private scratch. Backup excludes it, INDEX, LOCK, unselected objects and
 temporary files, and adds one `BACKUP` metadata file.
 
 ## Data segment header: 64 bytes
@@ -67,7 +68,7 @@ Obsolete records are validated even above a new admission limit.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | ASCII `TARPCURR` |
+| 0 | 8 | ASCII `TARPHEAD` |
 | 8 | 2 | Reserved |
 | 10 | 2 | Length, 128 |
 | 12 | 4 | Reserved |
@@ -92,7 +93,7 @@ end is discardable after validation and compatible-options checks.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | `TARPCATL` or `TARPBACK` |
+| 0 | 8 | `TARPMNFT` or `TARPBACK` |
 | 8 | 2 | Reserved |
 | 10 | 2 | Reserved |
 | 12 | 8 | Payload length, exactly file size minus 32 |
@@ -102,10 +103,42 @@ end is discardable after validation and compatible-options checks.
 
 ## Catalog payload
 
-The 48-byte prefix contains the database UUID[16], full-checkpoint cutoff C u64,
-pruned-through sequence H u64, active file ID u64, and entry count u64, in that
-order. Exactly that many 40-byte entries follow. Each holds five consecutive u64
-fields giving the file ID, exact length, kind, first sequence and last sequence.
+The payload begins with a 144-byte prefix. The first 48 bytes contain the
+database UUID[16], full-checkpoint cutoff C u64, pruned-through sequence H u64,
+active file ID u64, and entry count u64. Bytes [48,144) hold the index
+checkpoint descriptor.
+
+| Payload offset | Bytes | Field |
+| ---: | ---: | --- |
+| 48 | 8 | INDEX object ID |
+| 56 | 8 | Exact INDEX length, within signed file-offset range |
+| 64 | 32 | SHA-256 of the complete INDEX |
+| 96 | 8 | Covered user sequence |
+| 104 | 8 | Number of covered catalog entries |
+| 112 | 32 | Covered layout fingerprint |
+
+All 96 descriptor bytes are zero when no checkpoint is selected. A present
+descriptor has a nonzero ID distinct from the active DATA, every sealed DATA
+and the selected MANIFEST. Recovery reserves this ID even if INDEX is missing.
+
+Exactly the declared number of 72-byte catalog entries follow. The first 40
+bytes hold five consecutive u64 fields giving the file ID, exact length, kind,
+first sequence and last sequence. The final 32 bytes hold SHA-256 of the
+complete sealed DATA, including the segment header. Physical entries require a
+nonzero digest. Empty cleaned intervals have a zero digest.
+
+The layout fingerprint is SHA-256 of these concatenated bytes, in order:
+
+1. Eight ASCII bytes `TARPLAYT` and UUID[16].
+2. Four little-endian u64 values giving C, H, covered sequence, and covered entry count.
+3. The exact wire bytes of each covered entry, in catalog order, including empty intervals.
+
+A prefix must contain every snapshot file. Its final sequence is the last
+covered log interval's endpoint, or C when there are no covered log intervals.
+The checkpoint may only cover a sequence at or above H. Neither the active ID
+nor later sealed entries contribute to this digest, so an append or rotation
+can preserve a previously published checkpoint. Cleaning or compaction clears
+the descriptor in the same catalog publication that replaces physical files.
 
 | Entry kind | Selected file and coverage |
 | --- | --- |
@@ -158,8 +191,8 @@ truncations, and decoder fuzzing live in `internal/format/format_test.go`.
 
 ## Private B+tree files
 
-Opening with `IndexBTree` rebuilds a process-private index from the checked
-DATA stream. The in-process root descriptor identifies a generation and its
+Opening with `IndexBTree` uses a process-private working tree. Recovery can
+import the selected packed index and replay its suffix, or build the tree from DATA. The in-process root descriptor identifies a generation and its
 root page. A zero root represents an empty tree. Private files use 8 KiB
 pages with one-based IDs. The page header records its CRC-32C, kind, page ID,
 slot count, byte boundaries and leftmost child or next overflow page.
@@ -171,5 +204,22 @@ and their remaining bytes in checked overflow pages.
 Readers validate offsets, lengths, links, checksums and key ordering before
 using pages loaded from disk. A snapshot retains its original root while a
 writer copies changed paths. The OS releases the unlinked scratch files
-when their descriptors close. Only the durable files described above take
-part in recovery, backup and format compatibility.
+when their descriptors close.
+
+
+## INDEX file
+
+The catalog selects the entire INDEX length and SHA-256. The outer header is
+48 bytes. Bytes [0,8) are `TARPIDX1`, [8,40) hold the selected layout
+fingerprint, and [40,48) hold the covered catalog entry count. One u64
+tombstone byte count per covered entry follows in catalog order. An empty
+interval or snapshot has zero tombstone bytes.
+
+The packed tree follows immediately. Its 48-byte header begins with
+`TARPBTP1`, followed by the u32 page size (8192), the CRC32C of [16,48),
+and four u64 fields for root page ID, page count, live key count and maximum
+key length. Empty trees have four zero fields. Exactly the declared number of
+8 KiB pages follow, in one-based page ID order. The importer checks page and
+overflow links, search routing, live addresses and totals before admitting
+readers. Its private allocator starts above the imported pages. The immutable
+published file can be removed after the catalog selects a replacement.

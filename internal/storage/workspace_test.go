@@ -159,7 +159,7 @@ func TestIndexCreationFailureReleasesWorkspaceAndReportsInitialization(t *testin
 					return nil, err
 				}
 				return nil, syscall.ENOSPC
-			})
+			}, nil)
 			var failure *Fault
 			if s != nil || backend != nil || !errors.Is(err, syscall.ENOSPC) || !errors.As(err, &failure) ||
 				failure.Phase != "index" || failure.Outcome != tc.want {

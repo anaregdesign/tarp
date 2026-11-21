@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -101,5 +102,69 @@ func TestRestoreVerifierCarriesOnlySourceSpillDecisionToStage(t *testing.T) {
 				t.Fatalf("stage after scratch removal: got %v, want %v", err, wantErr)
 			}
 		})
+	}
+}
+
+func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) {
+	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 256, Handles: 1}
+	store, _, err := Open(t.TempDir(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Append(format.Put, []byte("key"), []byte("value"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	c, err := store.Capture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Release()
+	dir := filepath.Join(t.TempDir(), "backup")
+	if err := Backup(t.Context(), c, cfg, store.IO, dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	listPath := filepath.Join(dir, "BACKUP")
+	list, err := os.ReadFile(listPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := format.DecodeBackup(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := DataName(c.Current.UUID, c.Catalog.Files[0].ID)
+	path := filepath.Join(dir, name)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(b[format.SegmentHeaderBytes:], format.EncodeRecord(format.Put, 1, []byte("key"), []byte("other")))
+	if err := os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i, f := range meta.Files {
+		if f.Name == name {
+			meta.Files[i].Hash = sha256.Sum256(b)
+		}
+	}
+	if err := os.WriteFile(listPath, format.EncodeBackup(meta), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBackup(t.Context(), dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("verified backup: %v", err)
+	}
+	if _, err := VerifyBackupWithScratch(t.Context(), dir, t.TempDir()); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("verified backup with scratch: %v", err)
+	}
+	restore := filepath.Join(t.TempDir(), "restored")
+	if err := Restore(t.Context(), dir, restore, cfg, nil); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := os.Stat(restore); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published destination: %v", err)
 	}
 }

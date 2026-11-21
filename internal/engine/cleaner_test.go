@@ -105,7 +105,7 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 }
 
 func TestCleanerPublishesAdjacentObsoleteLogsAndReopens(t *testing.T) {
-	opts := Options{MaxRecordBytes: 512, TargetSegmentBytes: 1024}
+	opts := Options{MaxRecordBytes: 768, TargetSegmentBytes: 1024}
 	parked := &Hooks{CleanerStart: make(chan struct{})}
 	var noSpace atomic.Bool
 	fs := &storage.IO{Hook: func(point string) error {
@@ -115,7 +115,7 @@ func TestCleanerPublishesAdjacentObsoleteLogsAndReopens(t *testing.T) {
 		return nil
 	}}
 	db := newTestDBWithHooks(t, opts, fs, parked)
-	stale := strings.Repeat("x", 350)
+	stale := strings.Repeat("x", 600)
 	mustPut(t, db, "gone", stale)
 	mustPut(t, db, "one", "1")
 	first := sealForCleaning(t, db)

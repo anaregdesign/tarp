@@ -5,8 +5,9 @@
 // stable until all calls using them have returned.
 //
 // Options.IndexMode selects an in-memory hash index (the default) or a paged
-// copy-on-write B+tree. Reopening a DB with a different index mode rebuilds
-// key locations from the same committed DATA. Both modes share the Value LRU.
+// copy-on-write B+tree. Both can reuse a persistent index checkpoint and replay
+// later commits. Full (default) verifies all committed DATA. Indexed skips the
+// covered payloads on Open. Both modes share the Value LRU.
 //
 // Use OpenTyped with a Codec for each of the key and value types to work with
 // Go values. NewCodec derives a codec for scalar types and their combinations

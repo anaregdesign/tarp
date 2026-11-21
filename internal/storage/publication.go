@@ -36,12 +36,12 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 			if errors.As(result, &f) && f.Outcome == publication.Unknown {
 				return
 			}
-			err := s.IO.Do("clean.discard.catalog", func() error { return os.Remove(name) })
+			err := s.IO.Do(actor+"discard.catalog", func() error { return os.Remove(name) })
 			if errors.Is(err, os.ErrNotExist) {
 				return
 			}
 			if err == nil {
-				err = s.IO.SyncDir(s.Dir, "clean.discard.dirsync")
+				err = s.IO.SyncDir(s.Dir, actor+"discard.dirsync")
 			}
 			if err != nil {
 				s.retireManifest(id)
@@ -82,6 +82,9 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 		return err
 	}
 	s.retireManifest(previous)
+	if old := s.Catalog.Index.ID; old != 0 && old != catalog.Index.ID {
+		s.retireIndex(old)
+	}
 	s.Catalog, s.Manifest = catalog, b
 	return nil
 }

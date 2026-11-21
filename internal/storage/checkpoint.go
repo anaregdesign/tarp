@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 
@@ -41,6 +43,7 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 	var file *File
 	var fd *os.File
 	var offset int64
+	digest := sha256.New()
 	fs := c.store.IO
 	finish := func() error {
 		if fd == nil {
@@ -52,7 +55,7 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 			return fault("output-sync", publication.NotApplied, false, err)
 		}
 		file.Size.Store(offset)
-		c.entries = append(c.entries, format.File{ID: file.ID, Bytes: offset, Kind: format.Snapshot})
+		c.entries = append(c.entries, format.File{ID: file.ID, Bytes: offset, Kind: format.Snapshot, Digest: [32]byte(digest.Sum(nil))})
 		return nil
 	}
 	defer func() {
@@ -60,34 +63,33 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 			result = errors.Join(result, fd.Close())
 		}
 	}()
-	buffer := make([]byte, 32<<10)
-	err := c.capture.replayLive(ctx, fs, history, live, func(src *os.File, key string, old Location) error {
+	err := c.capture.replayLive(ctx, fs, history, live, func(key string, old Location) (io.Writer, error) {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		if fd == nil || offset > c.store.Config.TargetSegmentBytes-old.Bytes {
 			if err := finish(); err != nil {
-				return err
+				return nil, err
 			}
 			var err error
 			file, err = reserve()
 			if err != nil {
-				return fault("output-create", publication.NotApplied, false, err)
+				return nil, fault("output-create", publication.NotApplied, false, err)
 			}
 			fd, err = file.create(c.capture.Current.UUID, fs, "compact.segment", appendData{})
 			if err != nil {
-				return fault("output-create", publication.NotApplied, false, err)
+				return nil, fault("output-create", publication.NotApplied, false, err)
 			}
 			c.files = append(c.files, file)
 			offset = format.SegmentHeaderBytes
+			digest.Reset()
+			digest.Write(format.EncodeSegment(format.Segment{UUID: c.capture.Current.UUID, ID: file.ID, Kind: file.Kind}))
 		}
-		if err := copyCheckpointRecord(ctx, fs, src, old, key, fd, offset, buffer); err != nil {
-			return err
-		}
+		writer := &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
 		next := old
 		next.File, next.Offset = file, offset
 		offset += old.Bytes
-		return moves.append(key, old, next)
+		return writer, moves.append(key, old, next)
 	})
 	if err != nil {
 		return err
@@ -119,23 +121,6 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 		}
 		return nil
 	})
-}
-
-func copyCheckpointRecord(ctx context.Context, fs *IO, src *os.File, old Location, key string, dst *os.File, offset int64, buffer []byte) error {
-	writer := &outputWriter{fs: fs, fd: dst, offset: offset, point: "compact.write"}
-	record, err := format.CopyRecord(ctx, sourceReader{src}, writer, old.Offset, old.Bytes,
-		&format.Identity{Key: key, Sequence: old.Sequence}, buffer)
-	if err == nil {
-		if record.Bytes() != old.Bytes {
-			return fmt.Errorf("%w: changed checkpoint record length", ErrCorrupt)
-		}
-		return fs.Check("compact.record:after")
-	}
-	var destination *destinationError
-	if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		return &SourceError{err}
-	}
-	return err
 }
 
 // Install splices the captured prefix into the current tail under the writer

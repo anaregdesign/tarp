@@ -151,7 +151,7 @@ func TestCheckpointSpoolsTenfoldGrowthWithinFixedPageCaches(t *testing.T) {
 				return nil
 			}}
 			cfg := Config{ValueCacheBudgetBytes: 2 << 20, RecordBytes: 1024, TargetSegmentBytes: 64 << 10, Handles: 4}
-			store, _, err := OpenIndexed(t.Context(), t.TempDir(), cfg, false, io, func(*Store) (index.Backend, error) { return live, nil })
+			store, _, err := OpenIndexed(t.Context(), t.TempDir(), cfg, false, io, func(*Store) (index.Backend, error) { return live, nil }, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

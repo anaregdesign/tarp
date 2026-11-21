@@ -29,14 +29,15 @@ import (
 // Measurement rows keep their published JSON keys across API renames. Conversions
 // from the engine structs check that every field is represented here.
 type measurementOptions struct {
-	IndexMode               engine.IndexMode `json:"IndexMode"`
-	BTreeMemoryBudgetBytes  int64            `json:"IndexMemoryBytes"`
-	ValueCacheBudgetBytes   int64            `json:"CacheBytes"`
-	MaxRecordBytes          int64            `json:"MaxRecordBytes"`
-	TargetSegmentBytes      int64            `json:"TargetSegmentBytes"`
-	ReadFileHandles         int              `json:"ReadFileHandles"`
-	BatchGetReadConcurrency int              `json:"BatchReadConcurrency"`
-	MaxBatchGetValueBytes   int64            `json:"MaxBatchResultBytes"`
+	IndexMode               engine.IndexMode      `json:"IndexMode"`
+	OpenValidation          engine.OpenValidation `json:"OpenValidation,omitempty"`
+	BTreeMemoryBudgetBytes  int64                 `json:"IndexMemoryBytes"`
+	ValueCacheBudgetBytes   int64                 `json:"CacheBytes"`
+	MaxRecordBytes          int64                 `json:"MaxRecordBytes"`
+	TargetSegmentBytes      int64                 `json:"TargetSegmentBytes"`
+	ReadFileHandles         int                   `json:"ReadFileHandles"`
+	BatchGetReadConcurrency int                   `json:"BatchReadConcurrency"`
+	MaxBatchGetValueBytes   int64                 `json:"MaxBatchResultBytes"`
 }
 
 type measurementCompactResult struct {

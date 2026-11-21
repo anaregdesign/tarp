@@ -19,10 +19,19 @@ const (
 
 const defaultBTreeMemoryBudgetBytes = 16 << 20
 
+// OpenValidation selects when covered DATA payloads are checked.
+type OpenValidation uint8
+
+const (
+	Full OpenValidation = iota
+	Indexed
+)
+
 // Options uses zero for each default, never to disable caching or syncing.
 // Bounds apply to encoded records and logically charged value cache entries.
 type Options struct {
 	IndexMode              IndexMode
+	OpenValidation         OpenValidation
 	BTreeMemoryBudgetBytes int64
 	ValueCacheBudgetBytes  int64
 	MaxRecordBytes         int64
@@ -65,6 +74,9 @@ func (l RestoreLimits) normalized() (RestoreLimits, error) {
 }
 
 func (o Options) normalized() (Options, error) {
+	if o.OpenValidation > Indexed {
+		return o, fmt.Errorf("%w: unknown open validation %d", ErrInvalidOptions, o.OpenValidation)
+	}
 	if o.IndexMode == IndexDefault {
 		o.IndexMode = IndexMemory
 	}

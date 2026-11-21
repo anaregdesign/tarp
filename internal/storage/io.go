@@ -19,6 +19,9 @@ type IO struct {
 	WriteAt func(*os.File, []byte, int64) (int, error)
 	// Wrote observes the bytes accepted by each write, including short writes.
 	Wrote func(point string, bytes int)
+	// OpenRead observes bytes returned by reads of selected DATA and INDEX
+	// during Open. DATA distinguishes covered, tail and replay headers/payloads.
+	OpenRead func(kind string, n int)
 }
 
 func (i *IO) Check(point string) error {

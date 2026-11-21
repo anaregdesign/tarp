@@ -807,3 +807,83 @@ func ExampleOpen_indexMode() {
 	fmt.Println(string(value))
 	// Output: Tokyo
 }
+
+func TestBTreeClosePersistsIndexAndReusesExactCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	opts := tarp.Options{IndexMode: tarp.IndexBTree, OpenValidation: tarp.Indexed}
+	db := openPublicDB(t, dir, opts)
+	if err := db.Put([]byte("key"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "INDEX-*"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("index files %v, %v", files, err)
+	}
+	frontier := func() []byte {
+		b, err := os.ReadFile(filepath.Join(dir, "CURRENT"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	before := frontier()
+	db = openPublicDB(t, dir, opts)
+	if got, err := db.Get([]byte("key")); err != nil || string(got) != "value" {
+		t.Fatalf("get %q, %v", got, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, frontier()) {
+		t.Fatal("an exact index was republished on Close")
+	}
+	if err := os.Truncate(files[0], 1); err != nil {
+		t.Fatal(err)
+	}
+	db = openPublicDB(t, dir, opts)
+	if got, err := db.Get([]byte("key")); err != nil || string(got) != "value" {
+		t.Fatalf("fallback %q, %v", got, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(before, frontier()) {
+		t.Fatal("Close retained a corrupt checkpoint")
+	}
+}
+
+func TestCheckpointIndexBackupRestoresWithoutIndex(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	if err := db.Put([]byte("prefix"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CheckpointIndex(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Put([]byte("tail"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup")
+	if err := db.Backup(t.Context(), backup); err != nil {
+		t.Fatal(err)
+	}
+	if files, err := filepath.Glob(filepath.Join(backup, "INDEX-*")); err != nil || len(files) != 0 {
+		t.Fatalf("backup index files %v, %v", files, err)
+	}
+	target := filepath.Join(t.TempDir(), "restore")
+	if err := tarp.Restore(t.Context(), tarp.RestoreRequest{Source: backup, Destination: target}); err != nil {
+		t.Fatal(err)
+	}
+	db = openPublicDB(t, target, tarp.Options{IndexMode: tarp.IndexBTree, OpenValidation: tarp.Indexed})
+	for _, key := range []string{"prefix", "tail"} {
+		if got, err := db.Get([]byte(key)); err != nil || string(got) != "v" {
+			t.Fatalf("restore %s: %q, %v", key, got, err)
+		}
+	}
+	if err := db.CheckpointIndex(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}

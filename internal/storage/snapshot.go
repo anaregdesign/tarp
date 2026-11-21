@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"hash"
@@ -96,45 +98,79 @@ func (w *outputWriter) Write(b []byte) (int, error) {
 // source file/offset order. The index view was captured with this layout under
 // the writer gate. The private builder independently validates key semantics,
 // including historical records that are absent from the final view.
-func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend, live index.View, visit func(*os.File, string, Location) error) error {
+func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend, live index.View, selectOutput func(string, Location) (io.Writer, error)) error {
 	replay := newReplayBuilder(ctx, history, c.Catalog.PrunedThrough)
 	defer replay.abort()
+	buffer := make([]byte, 32<<10)
+	reader := bufio.NewReaderSize(nil, len(buffer))
 	for _, captured := range c.Files {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		fd, _, _, err := openSelected(captured.File.Path, c.Current.UUID, captured.Entry, captured.File.ID == c.Current.ActiveID)
+		fd, header, _, err := openSelected(captured.File.Path, c.Current.UUID, captured.Entry, captured.File.ID == c.Current.ActiveID)
 		if err != nil {
 			return &SourceError{Err: err}
 		}
 		copying := false
 		err = fs.Do("compact.scan", func() error {
-			return scanSelectedRecords(ctx, sourceReader{fd}, captured.Entry, c.Catalog.Cutoff, func(off int64, r format.Record, key string) error {
-				if err := replay.apply(captured.File, off, r, key); err != nil {
+			span := format.NewRecordRange(captured.Entry, c.Catalog.Cutoff)
+			const start = int64(format.SegmentHeaderBytes)
+			source := io.Reader(io.NewSectionReader(sourceReader{fd}, start, captured.Entry.Bytes-start))
+			var h hash.Hash
+			if captured.Entry.Digest != ([32]byte{}) {
+				h = sha256.New()
+				h.Write(header)
+				source = io.TeeReader(source, h)
+			}
+			reader.Reset(source)
+			for off := start; off < captured.Entry.Bytes; {
+				copied := false
+				r, err := format.SelectStreamRecord(ctx, reader, off, captured.Entry.Bytes-off, buffer, func(r format.Record, key string) (io.Writer, error) {
+					if err := span.Accept(r); err != nil {
+						return nil, err
+					}
+					if err := replay.apply(captured.File, off, r, key); err != nil || r.Kind != format.Put {
+						return nil, err
+					}
+					loc, exists, err := live.Lookup(key)
+					if err != nil {
+						return nil, &SourceError{Err: err}
+					}
+					if !exists || loc.FileID != captured.File.ID || loc.Offset != off {
+						return nil, nil
+					}
+					if loc.Bytes != r.Bytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
+						return nil, fmt.Errorf("%w: index disagrees with captured DATA", ErrCorrupt)
+					}
+					if !copying {
+						if err := fs.Check("compact.source.open:after"); err != nil {
+							return nil, &SourceError{Err: err}
+						}
+						copying = true
+					}
+					copied = true
+					return selectOutput(key, Location{File: captured.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
+				})
+				if err != nil {
+					if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+						return errors.Join(ErrCorrupt, err)
+					}
 					return err
 				}
-				if r.Kind != format.Put {
-					return nil
-				}
-				loc, exists, err := live.Lookup(key)
-				if err != nil {
-					return &SourceError{Err: err}
-				}
-				if !exists || loc.FileID != captured.File.ID || loc.Offset != off {
-					return nil
-				}
-				if loc.Bytes != r.Bytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
-					return fmt.Errorf("%w: index disagrees with captured DATA", ErrCorrupt)
-				}
-				if !copying {
-					// The same source descriptor now serves physical record copies.
-					if err := fs.Check("compact.source.open:after"); err != nil {
-						return &SourceError{Err: err}
+				if copied {
+					if err := fs.Check("compact.record:after"); err != nil {
+						return err
 					}
-					copying = true
 				}
-				return visit(fd, key, Location{File: captured.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
-			})
+				off += r.Bytes()
+			}
+			if err := span.Finish(); err != nil {
+				return err
+			}
+			if h != nil {
+				return checkSealedDigest(h, captured.Entry)
+			}
+			return ctx.Err()
 		})
 		if closeErr := fd.Close(); closeErr != nil {
 			err = errors.Join(err, &SourceError{Err: closeErr})
