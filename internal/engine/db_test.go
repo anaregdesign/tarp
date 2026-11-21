@@ -1276,7 +1276,7 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 				}
 				return nil
 			}}
-			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			engineHooks := parkedMaintenance()
 			opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128}
 			db := newTestDBWithHooks(t, opts, fs, engineHooks)
 			mustPut(t, db, "k", "old")
@@ -1295,7 +1295,7 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 			if err := db.Close(); !errors.Is(err, syscall.EIO) {
 				t.Fatal(err)
 			}
-			image, err := OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
+			image, err := OpenWithHooks(dir, opts, nil, parkedMaintenance())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1313,9 +1313,26 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 				}
 			}
 			entries, err := os.ReadDir(dir)
-			// CURRENT, LOCK, one manifest, the active log and all selected sealed logs.
-			if err != nil || len(entries) != 4+len(image.store.Catalog.Files) {
-				t.Fatalf("unexpected objects after recovery: %v, %v", entries, err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]bool{
+				"CURRENT": true,
+				"LOCK":    true,
+				storage.ManifestName(frontier.UUID, frontier.ManifestID): true,
+				storage.DataName(frontier.UUID, frontier.ActiveID):       true,
+			}
+			for _, file := range image.store.Catalog.Files {
+				if file.HasPhysicalFile() {
+					want[storage.DataName(frontier.UUID, file.ID)] = true
+				}
+			}
+			got := make(map[string]bool, len(entries))
+			for _, entry := range entries {
+				got[entry.Name()] = true
+			}
+			if !maps.Equal(got, want) {
+				t.Fatalf("objects after recovery: got %v, want %v", got, want)
 			}
 		})
 	}

@@ -356,7 +356,7 @@ func TestCheckpointSplitsAtSegmentTarget(t *testing.T) {
 }
 
 func TestRepeatedCompactionDoesNotRetainOldFileRegistry(t *testing.T) {
-	db := newTestDB(t, testOptions(), nil)
+	db := newTestDBWithHooks(t, testOptions(), nil, parkedMaintenance())
 	for i := 0; i < 8; i++ {
 		mustPut(t, db, "k", "value")
 		if _, err := db.Compact(context.Background()); err != nil {
@@ -410,12 +410,12 @@ func TestCompactionValidatesCapturedSegmentHeaders(t *testing.T) {
 
 func TestCleanupAfterFaultDoesNotRetainUnlinkedMetadata(t *testing.T) {
 	var armed atomic.Bool
-	db := newTestDB(t, testOptions(), &storage.IO{Hook: func(p string) error {
+	db := newTestDBWithHooks(t, testOptions(), &storage.IO{Hook: func(p string) error {
 		if p == "cleanup.unlink:after" && armed.CompareAndSwap(true, false) {
 			return syscall.EIO
 		}
 		return nil
-	}})
+	}}, parkedMaintenance())
 	mustPut(t, db, "k", "old")
 	mustPut(t, db, "k", "new")
 	old := db.store.Current.ActiveID
