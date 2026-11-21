@@ -15,7 +15,7 @@ test ! -e "$out/raw.jsonl"
 docker run --rm --pull=never --platform "$platform" --cpus=4 --network=none \
   --mount type=volume,dst=/data --mount "type=bind,src=$repo,dst=/src,readonly" \
   --mount "type=bind,src=$out,dst=/out" -w /src \
-  -e "TARP_SCAN_RELEASE_STEPS=$steps" -e "TARP_SCAN_RELEASE_ROUNDS=$rounds" -e "TARP_SCAN_RELEASE_PAIRS=$pairs" \
+  -e "TARP_SCAN_RELEASE_WITNESS=${TARP_SCAN_RELEASE_WITNESS:-0}" -e "TARP_SCAN_RELEASE_STEPS=$steps" -e "TARP_SCAN_RELEASE_ROUNDS=$rounds" -e "TARP_SCAN_RELEASE_PAIRS=$pairs" \
   -e TARP_SCAN_RELEASE_OUT=/out/raw.jsonl -e GOTOOLCHAIN=local -e GOWORK=off \
   -e GOPROXY=off -e GOMAXPROCS=4 -e TMPDIR=/data/tmp \
   -e "VERSION=$version" -e "IMAGE=$image" -e "REVISION=$(git rev-parse HEAD)" \

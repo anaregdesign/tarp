@@ -8,6 +8,7 @@ import (
 	"iter"
 	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -74,6 +75,8 @@ type releaseSample struct {
 	HighWaterAfter          uint64
 	PinnedDATA              []uint64
 	CommitSequence          uint64
+	QueuedPageIDsReused     []uint64 `json:",omitempty"`
+	IDWitness               bool     `json:",omitempty"`
 }
 
 func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRelease, newerFirst bool) releaseSample {
@@ -167,6 +170,20 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 		t.Fatalf("expected two generations and substantial retirement: %+v", m)
 	}
 	row.RetiredAtTwoViews = m.RetiredPages
+	var queuedIDs map[uint64]bool
+	row.IDWitness = os.Getenv("TARP_SCAN_RELEASE_WITNESS") == "1"
+	if row.IDWitness {
+		queued, live, err := observe.Corner145IDSets()
+		if err != nil || len(queued) < 128 {
+			t.Fatalf("sampling pinned generations: queued %d err %v", len(queued), err)
+		}
+		for id := range live {
+			if queued[id] {
+				t.Fatalf("queued ID %d still live before release", id)
+			}
+		}
+		queuedIDs = queued
+	}
 	finish := func() {
 		if newerFirst {
 			b.finish(t)
@@ -211,6 +228,32 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 	row.RetiredAfterPut = observe.IndexMetrics().RetiredPages
 	if row.QueueAfter != 0 || row.RetiredAfterPut > 16 || row.RootBefore == row.RootAfter || row.RootAfter > row.HighWaterBefore || row.HighWaterAfter != row.HighWaterBefore {
 		t.Fatalf("expected reclamation and allocation from reusable pages: %+v", row)
+	}
+
+	if row.IDWitness {
+		// A broad same-value overwrite after the sampled Put demands more pages
+		// than a single point update. Prove actual IDs from under the pins now
+		// store live pages, independently of the high-water mark.
+		for i := range rows {
+			rows[i].Value = []byte(model[string(rows[i].Key)])
+		}
+		if err := db.BatchPut(rows); err != nil {
+			t.Fatal(err)
+		}
+		sequence += uint64(len(rows))
+		_, live, err := observe.Corner145IDSets()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for id := range live {
+			if queuedIDs[id] {
+				row.QueuedPageIDsReused = append(row.QueuedPageIDsReused, id)
+			}
+		}
+		slices.Sort(row.QueuedPageIDsReused)
+		if len(row.QueuedPageIDsReused) == 0 {
+			t.Fatalf("no retired ID found under latest root: %+v", row)
+		}
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
