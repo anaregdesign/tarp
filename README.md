@@ -6,13 +6,13 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses [v0.10.0](https://github.com/anaregdesign/tarp/tree/v0.10.0).
+uses [v0.11.0](https://github.com/anaregdesign/tarp/tree/v0.11.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.10.0
+go get github.com/anaregdesign/tarp@v0.11.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -66,8 +66,9 @@ backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
 
-On `main`, the BACKUP header has changed since v0.10.0. To use a v0.10.0
-backup, restore it with v0.10.0 first. This change affects only backup metadata.
+v0.11.0 changes the BACKUP header. You can open a v0.10.0 database directly
+with v0.11.0 and create a new backup. If you have only a v0.10.0 backup,
+restore it with v0.10.0 first, then open the restored database with v0.11.0.
 
 The parent directory must exist. One process exclusively owns a directory, while
 its `DB` supports concurrent goroutines without caller locks. Individual key operations are linearizable. Each batch call operates on its
