@@ -1,0 +1,165 @@
+{
+  "samples": 400,
+  "matched_pairs": 200,
+  "per_arm": {
+    "first-after-release": {
+      "p50_ms": 1.000666,
+      "p95_ms": 1.968833,
+      "p99_ms": 3.582917,
+      "max_ms": 12.0645
+    },
+    "normal": {
+      "p50_ms": 0.707083,
+      "p95_ms": 0.97475,
+      "p99_ms": 4.788667,
+      "max_ms": 9.777208
+    }
+  },
+  "per_round": {
+    "first-after-release": [
+      {
+        "p50_ms": 1.009084,
+        "p95_ms": 1.839916,
+        "p99_ms": 3.721875,
+        "max_ms": 12.0645
+      },
+      {
+        "p50_ms": 0.990042,
+        "p95_ms": 2.091333,
+        "p99_ms": 3.2365,
+        "max_ms": 3.295292
+      }
+    ],
+    "normal": [
+      {
+        "p50_ms": 0.724792,
+        "p95_ms": 1.022542,
+        "p99_ms": 6.617916,
+        "max_ms": 9.777208
+      },
+      {
+        "p50_ms": 0.686666,
+        "p95_ms": 0.875958,
+        "p99_ms": 3.545375,
+        "max_ms": 4.788667
+      }
+    ]
+  },
+  "order": {
+    "first-after-release": [
+      {
+        "p50_ms": 1.009041,
+        "p95_ms": 1.839916,
+        "p99_ms": 3.428917,
+        "max_ms": 12.0645
+      },
+      {
+        "p50_ms": 0.993209,
+        "p95_ms": 2.091333,
+        "p99_ms": 3.582917,
+        "max_ms": 3.721875
+      }
+    ],
+    "normal": [
+      {
+        "p50_ms": 0.70425,
+        "p95_ms": 0.8945,
+        "p99_ms": 2.452583,
+        "max_ms": 3.545375
+      },
+      {
+        "p50_ms": 0.707083,
+        "p95_ms": 1.054708,
+        "p99_ms": 6.617916,
+        "max_ms": 9.777208
+      }
+    ]
+  },
+  "details": {
+    "first-after-release": {
+      "conditioner": {
+        "p50_ms": 0.915208,
+        "p95_ms": 4.259084,
+        "p99_ms": 6.309375,
+        "max_ms": 10.794708
+      },
+      "held_seconds_min_median_max": [
+        0.76972725,
+        0.9370552505,
+        8.09822492
+      ],
+      "queue_before_min_median_max": [
+        6506,
+        6530.5,
+        6552
+      ],
+      "retired_after_min_median_max": [
+        2,
+        2.0,
+        2
+      ],
+      "pinned_DATA_bytes_pre_release": [
+        245824,
+        245824.0,
+        245824
+      ],
+      "compact_calls": [
+        8
+      ],
+      "sequence": [
+        12802
+      ],
+      "round_p99_ms_min_median_max": [
+        3.2365,
+        3.4791875,
+        3.721875
+      ]
+    },
+    "normal": {
+      "conditioner": {
+        "p50_ms": 1.098292,
+        "p95_ms": 4.41825,
+        "p99_ms": 8.242375,
+        "max_ms": 10.628209
+      },
+      "held_seconds_min_median_max": [
+        0.753264375,
+        0.9294839800000001,
+        3.73408821
+      ],
+      "queue_before_min_median_max": [
+        0,
+        0.0,
+        0
+      ],
+      "retired_after_min_median_max": [
+        2,
+        2.0,
+        2
+      ],
+      "pinned_DATA_bytes_pre_release": [
+        245824,
+        245824.0,
+        245824
+      ],
+      "compact_calls": [
+        8
+      ],
+      "sequence": [
+        12802
+      ],
+      "round_p99_ms_min_median_max": [
+        3.545375,
+        5.0816455000000005,
+        6.617916
+      ]
+    }
+  },
+  "paired": {
+    "release_slower": 192,
+    "total": 200,
+    "median_difference_ms": 0.28254199999999996,
+    "p99_difference_ms": 2.976791,
+    "pooled_p99_ratio": 0.7482075909642495
+  }
+}

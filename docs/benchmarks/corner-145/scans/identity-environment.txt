@@ -1,0 +1,6 @@
+revision=b368978dfb564cebc0fcf251025edd027adad5bc image=docker.io/library/golang@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea rounds=1 pairs=2 steps=256
+go version go1.27.4 linux/arm64
+Linux 6.12.76-linuxkit aarch64
+TARGET SOURCE                                                                                            FSTYPE OPTIONS
+/data  /dev/vda1[/docker/volumes/573a9582f156a40ff63e35769f6132b273f8eca748560c15cff3b589c81f9e7c/_data] ext4   rw,relatime,discard
+400000 100000

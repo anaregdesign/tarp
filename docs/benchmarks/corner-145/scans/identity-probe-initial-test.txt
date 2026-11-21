@@ -1,0 +1,6 @@
+=== RUN   TestCorner145ScanRelease
+    scan_release_corner_test.go:308: no retired ID found under latest root: {Round:0 Pair:0 Position:0 Arm:first-after-release NewerReleasedFirst:true FirstPutNS:1373208 ConditionerPutNS:1559833 OldestHeldNS:18434904009 RetiredAtTwoViews:6519 RetiredBeforePut:6521 RetiredAfterPut:2 QueueBefore:6519 QueueAfter:0 RootBefore:6527 RootAfter:6521 HighWaterBefore:6527 HighWaterAfter:6527 PinnedDATA:[245824 245824 245824 245824 245824 245824 245824 245824] CommitSequence:0 QueuedPageIDsReused:[] IDWitness:true}
+--- FAIL: TestCorner145ScanRelease (18.46s)
+FAIL
+FAIL	github.com/anaregdesign/tarp/benchmark	18.465s
+FAIL

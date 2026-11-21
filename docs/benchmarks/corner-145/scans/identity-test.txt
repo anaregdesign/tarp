@@ -1,0 +1,5 @@
+=== RUN   TestCorner145ScanRelease
+    scan_release_corner_test.go:326: round 1/1 complete
+--- PASS: TestCorner145ScanRelease (73.84s)
+PASS
+ok  	github.com/anaregdesign/tarp/benchmark	73.845s

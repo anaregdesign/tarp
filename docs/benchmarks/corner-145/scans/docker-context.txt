@@ -1,0 +1,2 @@
+desktop-linux
+server=29.5.3 backend=Docker Desktop arch=aarch64 guest_cpus=16 guest_mem=8216018944

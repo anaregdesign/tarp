@@ -1,0 +1,6 @@
+=== RUN   TestCorner145ScanRelease
+    scan_release_corner_test.go:253: expected reclamation and allocation from reusable pages: {Round:0 Pair:0 Position:0 Arm:first-after-release NewerReleasedFirst:true FirstPutNS:2556041 ConditionerPutNS:2224416 OldestHeldNS:111543042 RetiredAtTwoViews:427 RetiredBeforePut:429 RetiredAfterPut:2 RootBefore:435 RootAfter:430 HighWaterBefore:435 HighWaterAfter:435 PinnedDATA:[110656 110656] CommitSequence:0}
+--- FAIL: TestCorner145ScanRelease (0.14s)
+FAIL
+FAIL	github.com/anaregdesign/tarp/benchmark	0.142s
+FAIL
