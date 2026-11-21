@@ -9,6 +9,7 @@ import (
 	"hash/crc32"
 	"io"
 	"slices"
+	"strconv"
 	"syscall"
 	"testing"
 	"testing/iotest"
@@ -363,6 +364,50 @@ func TestParityBuildReadsStripesOnceExceptCrossingHeader(t *testing.T) {
 	stripes := (len(raw) + parityStripeBytes - 1) / parityStripeBytes
 	if reads != stripes+1 || lookahead != 1 {
 		t.Fatalf("reads %d, expected %d stripes + one header", reads, stripes)
+	}
+}
+
+type parityReaderFunc func([]byte) (int, error)
+
+func (f parityReaderFunc) Read(p []byte) (int, error) { return f(p) }
+
+func TestParityBoundsWorkspaceToDataSize(t *testing.T) {
+	const overhead = SegmentHeaderBytes + RecordHeaderBytes + 2 // two-byte fixture key
+	for _, size := range []int{
+		overhead,
+		ParityBlockBytes - 1, ParityBlockBytes, ParityBlockBytes + 1,
+		parityStripeBytes - 1, parityStripeBytes, parityStripeBytes + 1,
+	} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			raw, entry, _ := parityFixture(size - overhead)
+			src := bytes.NewReader(raw)
+			data := readerAtFunc(func(p []byte, off int64) (int, error) {
+				if cap(p) > min(size, parityStripeBytes) {
+					t.Fatalf("DATA buffer capacity %d for %d bytes", cap(p), size)
+				}
+				return src.ReadAt(p, off)
+			})
+			var sidecar bytes.Buffer
+			if err := WriteParity(t.Context(), data, &sidecar, parityTestUUID, entry); err != nil {
+				t.Fatal(err)
+			}
+			parity := parityReaderFunc(func(p []byte) (int, error) {
+				if cap(p) > min(size, ParityBlockBytes) {
+					t.Fatalf("PARITY buffer capacity %d for %d DATA bytes", cap(p), size)
+				}
+				return sidecar.Read(p)
+			})
+			damaged := bytes.Clone(raw)
+			damaged[size-1] ^= 1
+			src.Reset(damaged)
+			var recovered bytes.Buffer
+			if err := RecoverParity(t.Context(), data, parity, &recovered, parityTestUUID, entry); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(recovered.Bytes(), raw) {
+				t.Fatal("final damaged block did not recover byte-for-byte")
+			}
+		})
 	}
 }
 

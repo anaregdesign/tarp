@@ -34,12 +34,11 @@ type Hooks struct {
 
 // DB owns its directory until Close finishes. Do not copy a DB.
 type DB struct {
-	cleaner cleaner
-	opts    Options
-	store   *storage.Store
-	writer  engineMutex
-	state   engineMutex
-	keys    index.Backend
+	opts   Options
+	store  *storage.Store
+	writer engineMutex
+	state  engineMutex
+	keys   index.Backend
 	// indexGate coordinates point/batch lookup and DATA lease acquisition with publication.
 	// Neither DATA reads nor caller callbacks run under this lock.
 	indexGate sync.RWMutex
@@ -73,7 +72,10 @@ type DB struct {
 	// Only Compact sets or clears this under writer while it owns the cleaner
 	// gate. indexGate guards the staged keys during that interval.
 	memoryRemap *memoryCheckpointRemap
-	parity      parityWorker
+
+	// Keep the workers last so their growth cannot shift the fields used by Get.
+	parity  parityWorker
+	cleaner cleaner
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.

@@ -29,7 +29,7 @@ func TestReadMissingSegmentPreservesPathErrorAndRecordOffset(t *testing.T) {
 	}
 }
 
-func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
+func TestOpenPreservesUnrecognizedFilesBeforeCleanup(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{Handles: 1}
 	store, _, err := Open(dir, cfg, nil)
@@ -50,7 +50,13 @@ func TestOpenPreservesUnrecognizedTemporaryFilesBeforeCleanup(t *testing.T) {
 	}
 	otherUUID := uuid
 	otherUUID[0] ^= 1
-	for _, name := range []string{prefix + ".tmp", prefix + "123", fmt.Sprintf(".tarp-current-%x-123.tmp", otherUUID)} {
+	for _, name := range []string{
+		prefix + ".tmp", prefix + "123", fmt.Sprintf(".tarp-current-%x-123.tmp", otherUUID),
+		DataName(otherUUID, 99),
+		fmt.Sprintf("INDEX-%x-000000000000000A", uuid),
+		fmt.Sprintf("PARITY-%x-000000000000000", uuid),
+		ManifestName(uuid, 0),
+	} {
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, []byte("preserve me"), 0600); err != nil {
 			t.Fatal(err)
@@ -205,15 +211,18 @@ func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
 	if b, err := os.ReadFile(data); err != nil || string(b) != "orphan" {
 		t.Fatalf("orphan after rejected Open: %q, %v", b, err)
 	}
-	if err := os.WriteFile(manifest, nil, 0600); err != nil {
-		t.Fatal(err)
+	unselected := []string{data, manifest, filepath.Join(dir, IndexName(frontier.UUID, 102)), filepath.Join(dir, parityName(frontier.UUID, 103))}
+	for _, path := range unselected[1:] {
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s, _, err = Open(dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	for _, path := range []string{data, manifest} {
+	for _, path := range unselected {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("unselected file %s after Open: %v", path, err)
 		}
@@ -224,7 +233,7 @@ func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
 	if err := s.Rotate(); err != nil {
 		t.Fatal(err)
 	}
-	if s.Current.ActiveID <= 101 {
+	if s.Current.ActiveID <= 103 {
 		t.Fatalf("rotation reused a previously observed ID: %d", s.Current.ActiveID)
 	}
 }

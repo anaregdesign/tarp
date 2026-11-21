@@ -131,12 +131,20 @@ func ManifestName(uuid [16]byte, id uint64) string {
 }
 
 func parseID(name, prefix string, uuid [16]byte) (uint64, bool) {
-	head := prefix + "-" + hex.EncodeToString(uuid[:]) + "-"
-	if !strings.HasPrefix(name, head) || len(name) != len(head)+16 {
+	kind, rest, ok := strings.Cut(name, "-")
+	if !ok || kind != prefix {
 		return 0, false
 	}
-	n, err := strconv.ParseUint(name[len(head):], 16, 64)
-	return n, err == nil && n != 0 && fmt.Sprintf("%016x", n) == name[len(head):]
+	return parseObjectID(rest, hex.EncodeToString(uuid[:])+"-")
+}
+
+func parseObjectID(rest, uuidPrefix string) (uint64, bool) {
+	digits, ok := strings.CutPrefix(rest, uuidPrefix)
+	if !ok || len(digits) != 16 || strings.ContainsAny(digits, "ABCDEF") {
+		return 0, false
+	}
+	id, err := strconv.ParseUint(digits, 16, 64)
+	return id, err == nil && id != 0
 }
 
 func (s *Store) allocateID() (uint64, error) {
@@ -242,7 +250,7 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	}
 	var image *Image
 	fresh := len(entries) == 1 && entries[0].Name() == "LOCK"
-	hadWorkspace := false
+	var listing directoryListing
 	if fresh {
 		if existingOnly {
 			return nil, nil, nil, &os.PathError{Op: "open", Path: filepath.Join(s.Dir, "CURRENT"), Err: os.ErrNotExist}
@@ -264,14 +272,13 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 		}
 		s.Current = image.Current
 		s.nextID = max(s.nextID, image.Catalog.Index.ID)
-		hadWorkspace, err = s.inspectNames(ctx, entries)
-		if err != nil {
+		if err := s.inspectNames(ctx, entries, &listing); err != nil {
 			return nil, nil, nil, err
 		}
 	}
 	// Until the DATA and limits pass validation, remove only a workspace
 	// created by this Open. An incompatible Open preserves prior remnants.
-	s.cleanWorkspaceOnClose = !hadWorkspace
+	s.cleanWorkspaceOnClose = !listing.hasWorkspace
 	if image != nil && image.Catalog.Index.ID != 0 && load != nil {
 		keys, err = s.loadCheckpoint(ctx, image, load)
 		if err != nil {
@@ -296,13 +303,13 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 		}
 		return s, legacy, keys, nil
 	}
-	if err := s.recover(ctx, image, entries, keys, hadWorkspace); err != nil {
+	if err := s.recover(ctx, image, listing, keys); err != nil {
 		return nil, nil, nil, err
 	}
 	return s, image.Index, keys, nil
 }
 
-func (s *Store) recover(ctx context.Context, image *Image, entries []os.DirEntry, keys index.Backend, hadWorkspace bool) error {
+func (s *Store) recover(ctx context.Context, image *Image, listing directoryListing, keys index.Backend) error {
 	var err error
 	if s.IndexCheckpointHit {
 		err = image.replayAfterCheckpoint(ctx, keys, s.Config.IndexedOpen)
@@ -315,7 +322,7 @@ func (s *Store) recover(ctx context.Context, image *Image, entries []os.DirEntry
 	if err := s.Config.CheckLimits(image.Required); err != nil {
 		return err
 	}
-	if hadWorkspace {
+	if listing.hasWorkspace {
 		// Replay can leave the backend open and using this directory.
 		if err := s.sweepWorkspace(false); err != nil {
 			return err
@@ -343,7 +350,7 @@ func (s *Store) recover(ctx context.Context, image *Image, entries []os.DirEntry
 		}
 		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveEnd)
 	}
-	if _, _, err := s.cleanupValidated(ctx, entries); err != nil {
+	if _, _, err := s.cleanupValidated(ctx, listing.objects); err != nil {
 		return err
 	}
 	return ctx.Err()
@@ -686,42 +693,65 @@ func (loc Location) readError(err error) error {
 	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.Offset, err)
 }
 
-func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry) (bool, error) {
-	hasWorkspace := false
+// directoryListing retains the type and ID of every object cleanup may retire.
+// Current selection and pins are checked when cleanup actually runs.
+type directoryListing struct {
+	objects      []directoryObject
+	hasWorkspace bool
+}
+
+type directoryObject struct {
+	entry os.DirEntry
+	kind  string
+	id    uint64
+}
+
+// Offline repair only validates names and passes a nil listing.
+func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry, listing *directoryListing) error {
+	if listing != nil {
+		listing.objects = make([]directoryObject, 0, len(entries))
+	}
+	uuidPrefix := hex.EncodeToString(s.Current.UUID[:]) + "-"
+	tempPrefix := ".tarp-current-" + uuidPrefix
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return err
 		}
 		name := e.Name()
 		if name == workspaceName && e.IsDir() {
-			hasWorkspace = true
+			if listing != nil {
+				listing.hasWorkspace = true
+			}
 			continue
 		}
 		if !e.Type().IsRegular() {
-			return false, fmt.Errorf("%w: non-regular engine object %s", ErrCorrupt, name)
+			return fmt.Errorf("%w: non-regular engine object %s", ErrCorrupt, name)
 		}
 		if name == "LOCK" || name == "CURRENT" {
 			continue
 		}
-		if id, ok := parseID(name, "DATA", s.Current.UUID); ok {
+		kind, rest, _ := strings.Cut(name, "-")
+		var id uint64
+		switch kind {
+		case "DATA", "MANIFEST", "INDEX", "PARITY":
+			var ok bool
+			id, ok = parseObjectID(rest, uuidPrefix)
+			if !ok {
+				return fmt.Errorf("%w: unknown engine object %s", ErrCorrupt, name)
+			}
 			s.nextID = max(s.nextID, id)
-		} else if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {
-			s.nextID = max(s.nextID, id)
-		} else if id, ok := parseID(name, "INDEX", s.Current.UUID); ok {
-			s.nextID = max(s.nextID, id)
-		} else if id, ok := parseID(name, "PARITY", s.Current.UUID); ok {
-			s.nextID = max(s.nextID, id)
-		} else if !s.ownedTemp(name) {
-			return false, fmt.Errorf("%w: unknown engine object %s", ErrCorrupt, name)
+		default:
+			suffix, ok := strings.CutPrefix(name, tempPrefix)
+			if !ok || len(suffix) <= len(".tmp") || !strings.HasSuffix(suffix, ".tmp") {
+				return fmt.Errorf("%w: unknown engine object %s", ErrCorrupt, name)
+			}
+			kind = ".tarp-current"
+		}
+		if listing != nil {
+			listing.objects = append(listing.objects, directoryObject{entry: e, kind: kind, id: id})
 		}
 	}
-	return hasWorkspace, nil
-}
-
-func (s *Store) ownedTemp(name string) bool {
-	prefix := ".tarp-current-" + hex.EncodeToString(s.Current.UUID[:]) + "-"
-	suffix, ok := strings.CutPrefix(name, prefix)
-	return ok && len(suffix) > len(".tmp") && strings.HasSuffix(suffix, ".tmp")
+	return nil
 }
 
 // Cleanup only runs under the writer gate; release pins never performs I/O.
@@ -731,84 +761,87 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 		return 0, 0, err
 	}
 	ctx := context.Background()
-	if _, err := s.inspectNames(ctx, entries); err != nil {
+	var listing directoryListing
+	if err := s.inspectNames(ctx, entries, &listing); err != nil {
 		return 0, 0, err
 	}
-	return s.cleanupValidated(ctx, entries)
+	return s.cleanupValidated(ctx, listing.objects)
 }
 
 // The caller validates the entire listing before truncating or unlinking any file.
-func (s *Store) cleanupValidated(ctx context.Context, entries []os.DirEntry) (removed, pinned int64, result error) {
+func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject) (removed, pinned int64, result error) {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
 	for _, f := range s.Catalog.Files {
 		if f.HasPhysicalFile() {
 			selected[f.ID] = true
 		}
 	}
-	for _, e := range entries {
+	for _, obj := range objects {
 		if err := ctx.Err(); err != nil {
 			return removed, pinned, errors.Join(err, s.syncRetirements("cleanup.dirsync"))
 		}
-		name := e.Name()
-		remove := s.ownedTemp(name)
-		var removedID, manifestID, indexID uint64
-		if id, ok := parseID(name, "INDEX", s.Current.UUID); ok {
-			remove = id != s.Catalog.Index.ID && id != s.buildingIndex.Load()
-			indexID = id
-		}
-		if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {
-			remove = id != s.Current.ManifestID
-			manifestID = id
-		}
-		if id, ok := parseID(name, "PARITY", s.Current.UUID); ok {
-			remove = id == s.Current.ActiveID || !selected[id]
-			if f := s.Files[id]; f != nil && f.References() != 0 && !selected[id] {
-				// A parity publisher may still own its source pin.
-				remove = false
+		id := obj.id
+		switch obj.kind {
+		case "INDEX":
+			if id == s.Catalog.Index.ID || id == s.buildingIndex.Load() {
+				continue
 			}
-		}
-		if id, ok := parseID(name, "DATA", s.Current.UUID); ok && !selected[id] {
-			if f := s.Files[id]; f != nil && f.References() != 0 {
-				s.retireData(f)
-				pinned += f.Size.Load()
+		case "MANIFEST":
+			if id == s.Current.ManifestID {
+				continue
+			}
+		case "PARITY":
+			if id != s.Current.ActiveID && selected[id] {
+				continue
+			}
+			if f := s.Files[id]; !selected[id] && f != nil && f.References() != 0 {
+				// A parity publisher may still own its source pin.
+				continue
+			}
+		case "DATA":
+			if selected[id] {
 				continue
 			}
 			if f := s.Files[id]; f != nil {
+				if f.References() != 0 {
+					s.retireData(f)
+					pinned += f.Size.Load()
+					continue
+				}
 				if err := s.readers.forget(f); err != nil {
 					return removed, pinned, err
 				}
 			}
-			remove = true
-			removedID = id
+		case ".tarp-current":
+			// Only owned temporary files were included in the listing.
+		default:
+			continue
 		}
-		if remove {
-			st, err := e.Info()
-			if err != nil {
-				return removed, pinned, err
+		st, err := obj.entry.Info()
+		if err != nil {
+			return removed, pinned, err
+		}
+		unlinked := false
+		unlinkErr := s.IO.Do("cleanup.unlink", func() error {
+			err := os.Remove(filepath.Join(s.Dir, obj.entry.Name()))
+			unlinked = err == nil
+			return err
+		})
+		if unlinked {
+			removed += st.Size()
+			s.retireSyncPending = true
+			switch obj.kind {
+			case "DATA":
+				delete(s.Files, id)
+				delete(s.retired, id)
+			case "INDEX":
+				delete(s.retiredIndexes, id)
+			case "MANIFEST":
+				delete(s.retiredCatalogs, id)
 			}
-			unlinked := false
-			unlinkErr := s.IO.Do("cleanup.unlink", func() error {
-				err := os.Remove(filepath.Join(s.Dir, name))
-				unlinked = err == nil
-				return err
-			})
-			if unlinked {
-				removed += st.Size()
-				s.retireSyncPending = true
-				if removedID != 0 {
-					delete(s.Files, removedID)
-					delete(s.retired, removedID)
-				}
-			}
-			if unlinked && indexID != 0 {
-				delete(s.retiredIndexes, indexID)
-			}
-			if unlinked && manifestID != 0 {
-				delete(s.retiredCatalogs, manifestID)
-			}
-			if unlinkErr != nil {
-				return removed, pinned, unlinkErr
-			}
+		}
+		if unlinkErr != nil {
+			return removed, pinned, unlinkErr
 		}
 	}
 	return removed, pinned, s.syncRetirements("cleanup.dirsync")
