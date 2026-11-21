@@ -210,6 +210,39 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 			outputState = "validated_at_capture"
 		}
 	}
+	if cfg.Mode == "exhaustion" {
+		opts := vmCaseOptions("exhaustion")
+		db, err := Open(dir, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const key, value = "post-enospc-probe", "new-durable-value"
+		if got := Observe(db).Options(); got.IndexMode != IndexBTree || got.BTreeMemoryBudgetBytes != 16<<20 {
+			t.Fatalf("unexpected reopened index configuration: %+v", got)
+		}
+		if _, err := db.Get([]byte(key)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("post-exhaustion probe unexpectedly exists: %v", err)
+		}
+		if err := db.Put([]byte(key), []byte(value)); err != nil {
+			t.Fatalf("post-exhaustion durable Put: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		db, err = Open(dir, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := db.Get([]byte(key))
+		after := Observe(db)
+		if err != nil || string(got) != value || after.Frontier().Sequence != sequence+1 || after.LiveKeys() != liveKeys+1 {
+			t.Fatalf("post-exhaustion Put after reopen: value=%x err=%v sequence=%d keys=%d", got, err, after.Frontier().Sequence, after.LiveKeys())
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("post-exhaustion B+tree cold reboot, durable Put, Close and reopen verified: key=%s sequence=%d live_keys=%d\n", key, sequence+1, liveKeys+1)
+	}
 	reportVMRecovery(t, qualification.RecoveryVerdict{
 		Source: "file_only", SourceSequence: sequence, SourceLiveKeys: liveKeys, StateSHA256: digest,
 		Output: outputState, CaptureSequence: cfg.CaptureSequence,

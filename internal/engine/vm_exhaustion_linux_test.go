@@ -21,7 +21,7 @@ import (
 
 func vmCaseOptions(mode string) Options {
 	if mode == "exhaustion" {
-		return Options{ValueCacheBudgetBytes: 64 << 10, MaxRecordBytes: 8 << 10, TargetSegmentBytes: 1 << 20, ReadFileHandles: 4}
+		return Options{IndexMode: IndexBTree, BTreeMemoryBudgetBytes: 16 << 20, ValueCacheBudgetBytes: 64 << 10, MaxRecordBytes: 8 << 10, TargetSegmentBytes: 1 << 20, ReadFileHandles: 4}
 	}
 	return testOptions()
 }
@@ -98,10 +98,15 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 		}
 		return nil
 	}}
-	db, err := OpenWithHooks(dir, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+	// Exclude asynchronous parity pins from the designated backup-pin control.
+	db, err := OpenWithHooks(dir, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{}), ParityStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := Observe(db).Options(); got.IndexMode != IndexBTree || got.BTreeMemoryBudgetBytes != 16<<20 {
+		t.Fatalf("unexpected runtime index configuration: %+v", got)
+	}
+	fmt.Println("exhaustion runtime index: B+tree, 16777216-byte budget")
 	keys := make([][]byte, 128)
 	old, current := make([][]byte, len(keys)), make([][]byte, len(keys))
 	put := func(key, value []byte) {
