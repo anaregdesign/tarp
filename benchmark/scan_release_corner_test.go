@@ -59,20 +59,21 @@ func (c *releaseCursor) finish(t *testing.T) {
 }
 
 type releaseSample struct {
-	Round, Pair, Position int
-	Arm                   string
-	NewerReleasedFirst    bool
-	FirstPutNS            int64
-	ConditionerPutNS      int64
-	OldestHeldNS          int64
-	RetiredAtTwoViews     uint64
-	RetiredBeforePut      uint64
-	RetiredAfterPut       uint64
-	RootBefore, RootAfter uint64
-	HighWaterBefore       uint64
-	HighWaterAfter        uint64
-	PinnedDATA            [2]uint64
-	CommitSequence        uint64
+	Round, Pair, Position   int
+	Arm                     string
+	NewerReleasedFirst      bool
+	FirstPutNS              int64
+	ConditionerPutNS        int64
+	OldestHeldNS            int64
+	RetiredAtTwoViews       uint64
+	RetiredBeforePut        uint64
+	RetiredAfterPut         uint64
+	QueueBefore, QueueAfter uint64
+	RootBefore, RootAfter   uint64
+	HighWaterBefore         uint64
+	HighWaterAfter          uint64
+	PinnedDATA              [2]uint64
+	CommitSequence          uint64
 }
 
 func scanReleaseEpisode(t *testing.T, round, pair, position int, lateRelease, newerFirst bool) releaseSample {
@@ -194,10 +195,10 @@ func scanReleaseEpisode(t *testing.T, round, pair, position int, lateRelease, ne
 	}
 	m = observe.IndexMetrics()
 	row.RetiredBeforePut = m.RetiredPages
-	if m.ActiveViews != 0 || m.PinnedGenerations != 0 || (m.RetiredPages != 0) != lateRelease {
+	row.RootBefore, row.HighWaterBefore, row.QueueBefore = observe.Corner145PageIDs()
+	if m.ActiveViews != 0 || m.PinnedGenerations != 0 || (row.QueueBefore >= 128) != lateRelease || (!lateRelease && row.QueueBefore != 0) {
 		t.Fatalf("unmatched preconditions: %+v", m)
 	}
-	row.RootBefore, row.HighWaterBefore = observe.Corner145PageIDs()
 	before = time.Now()
 	err = db.Put(timedKey, values[34])
 	row.FirstPutNS = time.Since(before).Nanoseconds()
@@ -205,9 +206,9 @@ func scanReleaseEpisode(t *testing.T, round, pair, position int, lateRelease, ne
 		t.Fatal(err)
 	}
 	model[string(timedKey)] = string(values[34])
-	row.RootAfter, row.HighWaterAfter = observe.Corner145PageIDs()
+	row.RootAfter, row.HighWaterAfter, row.QueueAfter = observe.Corner145PageIDs()
 	row.RetiredAfterPut = observe.IndexMetrics().RetiredPages
-	if row.RetiredAfterPut != 0 || row.RootBefore == row.RootAfter || row.RootAfter > row.HighWaterBefore || row.HighWaterAfter != row.HighWaterBefore {
+	if row.QueueAfter != 0 || row.RetiredAfterPut > 16 || row.RootBefore == row.RootAfter || row.RootAfter > row.HighWaterBefore || row.HighWaterAfter != row.HighWaterBefore {
 		t.Fatalf("expected reclamation and allocation from reusable pages: %+v", row)
 	}
 	if err := db.Close(); err != nil {
