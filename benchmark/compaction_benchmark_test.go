@@ -151,6 +151,7 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
+	var compactResult engine.CompactResult
 	b, isBenchmark := t.(*testing.B)
 	if isBenchmark {
 		b.StartTimer()
@@ -167,7 +168,7 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 			err = fmt.Errorf("waiting for cleaner retirement: %w (%+v)", ctx.Err(), db.AutoCompactionStatus())
 		}
 	case manualFullCheckpoint:
-		_, err = db.Compact(ctx) // keep automatic processing parked on this clone
+		compactResult, err = db.Compact(ctx) // keep automatic processing parked on this clone
 	default:
 		err = fmt.Errorf("unknown compaction mode %q", mode)
 	}
@@ -177,6 +178,21 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+	if mode == manualFullCheckpoint && compactResult.PinnedRetiredDataBytes > 0 {
+		// Join any parity publisher that still held a retired DATA pin at
+		// the end of the timed Compact, then repeat cleanup at the same cutoff.
+		before := engine.Observe(db).Frontier()
+		if err := db.ProtectParity(ctx); err != nil {
+			t.Fatalf("join parity after timed checkpoint: %v", err)
+		}
+		cleanup, err := db.Compact(ctx)
+		if err != nil {
+			t.Fatalf("cleanup after parity pin release: %v", err)
+		}
+		if cleanup.PinnedRetiredDataBytes != 0 || engine.Observe(db).Frontier() != before {
+			t.Fatalf("retirement retry retained pins or changed the committed frontier: %+v", cleanup)
+		}
 	}
 
 	result := f.verify(t, db, mode)
