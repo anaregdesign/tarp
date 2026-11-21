@@ -106,10 +106,10 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	if err != nil {
 		return nil, err
 	}
-	cfg := storage.Config{ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
+	cfg := storage.Config{IndexedOpen: opts.OpenValidation == Indexed, ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
 	s, keys, err := storage.OpenIndexed(ctx, dir, cfg, existingOnly, fs, func(s *storage.Store) (index.Backend, error) {
 		return openIndex(s, opts.IndexMode, opts.BTreeMemoryBudgetBytes/2)
-	})
+	}, opts.importCheckpoint)
 	if err != nil {
 		return nil, operationError("open", "recovery", err)
 	}
@@ -473,6 +473,10 @@ func (db *DB) Close() error {
 	}
 	db.life.Unlock()
 	<-db.cleaner.done
+	var checkpointErr error
+	if db.opts.IndexMode == IndexBTree && db.health() == nil {
+		checkpointErr = db.checkpointIndex(context.Background(), true)
+	}
 	for _, file := range db.files {
 		file.LiveKeys.Store(0)
 	}
@@ -480,7 +484,7 @@ func (db *DB) Close() error {
 	db.readStatsLocked(&db.stats)
 	db.files, db.cache = nil, nil
 	db.state.Unlock()
-	err := publicCause(errors.Join(db.keys.Close(), db.store.Close()))
+	err := publicCause(errors.Join(checkpointErr, db.keys.Close(), db.store.Close()))
 	if f := db.failed.Load(); f != nil {
 		err = errors.Join(f.err, err)
 	}

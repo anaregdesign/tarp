@@ -314,3 +314,29 @@ func storeScore() (err error) {
 	fmt.Println(score)
 	return nil
 }
+
+func TestTypedCheckpointIndexReopensEncodedKeys(t *testing.T) {
+	dir := t.TempDir()
+	db, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.BytesCodec{}, tarp.Uint16Codec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := []byte{0, 255, 1}
+	if err := db.Put(key, 4096); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CheckpointIndex(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = tarp.OpenTyped(dir, tarp.Options{OpenValidation: tarp.Indexed}, tarp.BytesCodec{}, tarp.Uint16Codec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if got, err := db.Get(key); err != nil || got != 4096 {
+		t.Fatalf("Get = %v, %v", got, err)
+	}
+}

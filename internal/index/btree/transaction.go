@@ -15,6 +15,7 @@ type transaction struct {
 	allocated, old idLog
 	err            error
 	done           bool
+	packed         bool
 }
 
 func (x *transaction) Lookup(key string) (index.Address, bool, error) {
@@ -388,6 +389,10 @@ func (x *transaction) Commit() {
 	t := x.tree
 	t.mu.Lock()
 	t.root, t.count, t.generation = x.root, x.count, t.generation+1
+	t.packed = packedHeader{}
+	if x.packed {
+		t.packed = packedHeader{root: x.root, pages: t.p.top, keys: uint64(x.count), maxKey: t.p.maxKey.Load()}
+	}
 	t.p.root.Store(x.root)
 	t.retiredPages.Add(uint64(x.old.n) + uint64(x.old.bytes/8))
 	t.mu.Unlock()

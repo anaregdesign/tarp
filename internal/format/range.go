@@ -13,6 +13,9 @@ func (c Catalog) ActiveFile(current Frontier) (File, error) {
 	if c.UUID != current.UUID || c.ActiveID != current.ActiveID || c.PrunedThrough > current.Sequence {
 		return File{}, bad("catalog/frontier identity or pruning boundary")
 	}
+	if c.Index.ID != 0 && c.Index.ID == current.ManifestID {
+		return File{}, bad("catalog and index share an ID")
+	}
 	for _, file := range c.Files {
 		if file.HasPhysicalFile() && file.ID == current.ManifestID {
 			return File{}, bad("catalog and data file share an ID")

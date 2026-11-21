@@ -171,6 +171,11 @@ func (db *TypedDB[K, V]) Backup(ctx context.Context, destination string) error {
 	return db.core.Backup(ctx, destination)
 }
 
+// CheckpointIndex persists the encoded-key index for a committed prefix.
+func (db *TypedDB[K, V]) CheckpointIndex(ctx context.Context) error {
+	return db.core.CheckpointIndex(ctx)
+}
+
 // Compact builds an online checkpoint of the underlying DB.
 func (db *TypedDB[K, V]) Compact(ctx context.Context) (CompactResult, error) {
 	return db.core.Compact(ctx)

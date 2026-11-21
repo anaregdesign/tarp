@@ -125,6 +125,16 @@ func CopyRecord(ctx context.Context, src io.ReaderAt, dst io.Writer, offset, ava
 // ReadRecordKey consumes one complete record from a forward-only stream,
 // validates it, and returns the key without retaining its value.
 func ReadRecordKey(ctx context.Context, src io.Reader, offset, available int64, buffer []byte) (Record, string, error) {
+	var key string
+	r, err := SelectStreamRecord(ctx, src, offset, available, buffer, func(_ Record, k string) (io.Writer, error) {
+		key = k
+		return nil, nil
+	})
+	return r, key, err
+}
+
+// SelectStreamRecord validates and optionally copies the same bytes from a forward-only stream.
+func SelectStreamRecord(ctx context.Context, src io.Reader, offset, available int64, buffer []byte, choose func(Record, string) (io.Writer, error)) (Record, error) {
 	read := func(p []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -132,10 +142,5 @@ func ReadRecordKey(ctx context.Context, src io.Reader, offset, available int64, 
 		_, err := io.ReadFull(src, p)
 		return err
 	}
-	var key string
-	r, err := selectRecord(ctx, read, offset, available, buffer, func(_ Record, k string) (io.Writer, error) {
-		key = k
-		return nil, nil
-	})
-	return r, key, err
+	return selectRecord(ctx, read, offset, available, buffer, choose)
 }

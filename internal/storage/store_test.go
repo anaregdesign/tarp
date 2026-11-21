@@ -128,7 +128,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 
 	tooSmall := cfg
 	tooSmall.RecordBytes = 1
-	rejected, keys, err := OpenIndexed(t.Context(), dir, tooSmall, true, nil, newBTree)
+	rejected, keys, err := OpenIndexed(t.Context(), dir, tooSmall, true, nil, newBTree, nil)
 	var limits *CompatibilityError
 	if rejected != nil || keys != nil || !errors.As(err, &limits) {
 		t.Fatalf("Open with incompatible limits: %v, %v, %v", rejected, keys, err)
@@ -139,7 +139,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	if err := os.WriteFile(unknown, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	rejected, keys, err = OpenIndexed(t.Context(), dir, cfg, true, nil, newBTree)
+	rejected, keys, err = OpenIndexed(t.Context(), dir, cfg, true, nil, newBTree, nil)
 	if rejected != nil || keys != nil || !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Open with unknown workspace file: %v, %v, %v", rejected, keys, err)
 	}

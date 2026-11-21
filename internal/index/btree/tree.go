@@ -23,6 +23,7 @@ type tree struct {
 	stopped          chan struct{}
 	reads            readWorkspace
 	pending          *transaction
+	packed           packedHeader // dense bulk-built image, protected by writer
 	retired          retireQueue
 	allocErr         error
 }

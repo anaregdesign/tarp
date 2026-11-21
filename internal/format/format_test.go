@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"math"
@@ -21,11 +22,11 @@ func TestGoldenVectors(t *testing.T) {
 	}{
 		{"segment", EncodeSegment(Segment{UUID: uuid, ID: 7, Kind: Log}), "544152505345474d00004000010000000102030000000000000000000000000007000000000000000000000000000000000000000000000000000000b1343913"},
 		{"record", EncodeRecord(Put, 1, []byte{0, 255}, []byte{1, 2, 3}), "5441525052454344000001003fce7e6b01000000000000000200000000000000030000000000000013cf25fc0000000000ff010203"},
-		{"frontier", EncodeFrontier(Frontier{UUID: uuid, Generation: 9, ManifestID: 8, ActiveID: 7, ActiveEnd: 64, Sequence: 6}), "544152504355525200008000000000000102030000000000000000000000000009000000000000000800000000000000000000000000000000000000000000000000000000000000000000000000000007000000000000004000000000000000060000000000000000000000000000000000000000000000000000009543bbc6"},
-		{"catalog-raw", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Bytes: 128, Kind: Log, First: 7, Last: 7}}}), "544152504341544c00000000800000000000000065b4654ac8eb83ea000000000102030000000000000000000000000006000000000000000f00000000000000090000000000000002000000000000000700000000000000730000000000000002000000000000000000000000000000000000000000000008000000000000008000000000000000010000000000000007000000000000000700000000000000"},
-		{"catalog-cleaned", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Bytes: 128, Kind: Log, First: 7, Last: 7}, {ID: 10, Bytes: 162, Kind: Cleaned, First: 8, Last: 15}}}), "544152504341544c00000000a800000000000000c17e831794048e53000000000102030000000000000000000000000006000000000000000f000000000000000900000000000000030000000000000007000000000000007300000000000000020000000000000000000000000000000000000000000000080000000000000080000000000000000100000000000000070000000000000007000000000000000a00000000000000a200000000000000030000000000000008000000000000000f00000000000000"},
-		{"catalog-recleaned", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Bytes: 128, Kind: Log, First: 7, Last: 7}, {ID: 11, Bytes: 113, Kind: Cleaned, First: 8, Last: 15}}}), "544152504341544c00000000a800000000000000b5c306b941905ee0000000000102030000000000000000000000000006000000000000000f000000000000000900000000000000030000000000000007000000000000007300000000000000020000000000000000000000000000000000000000000000080000000000000080000000000000000100000000000000070000000000000007000000000000000b000000000000007100000000000000030000000000000008000000000000000f00000000000000"},
-		{"catalog-empty", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Bytes: 128, Kind: Log, First: 7, Last: 7}, {ID: 0, Bytes: 0, Kind: Cleaned, First: 8, Last: 15}}}), "544152504341544c00000000a80000000000000007ce3133369e1a16000000000102030000000000000000000000000006000000000000000f0000000000000009000000000000000300000000000000070000000000000073000000000000000200000000000000000000000000000000000000000000000800000000000000800000000000000001000000000000000700000000000000070000000000000000000000000000000000000000000000030000000000000008000000000000000f00000000000000"},
+		{"frontier", EncodeFrontier(Frontier{UUID: uuid, Generation: 9, ManifestID: 8, ActiveID: 7, ActiveEnd: 64, Sequence: 6}), "544152504845414400008000000000000102030000000000000000000000000009000000000000000800000000000000000000000000000000000000000000000000000000000000000000000000000007000000000000004000000000000000060000000000000000000000000000000000000000000000000000001dd11936"},
+		{"catalog-raw", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Digest: [32]byte{7}, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Digest: [32]byte{8}, Bytes: 128, Kind: Log, First: 7, Last: 7}}}), "544152504d4e4654000000002001000000000000760f67d09dd76084000000000102030000000000000000000000000006000000000000000f0000000000000009000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000070000000000000073000000000000000200000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000080000000000000080000000000000000100000000000000070000000000000007000000000000000800000000000000000000000000000000000000000000000000000000000000"},
+		{"catalog-cleaned", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Digest: [32]byte{7}, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Digest: [32]byte{8}, Bytes: 128, Kind: Log, First: 7, Last: 7}, {ID: 10, Digest: [32]byte{10}, Bytes: 162, Kind: Cleaned, First: 8, Last: 15}}}), "544152504d4e4654000000006801000000000000c9e1e57a7d6b6d22000000000102030000000000000000000000000006000000000000000f00000000000000090000000000000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000700000000000000730000000000000002000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000000800000000000000800000000000000001000000000000000700000000000000070000000000000008000000000000000000000000000000000000000000000000000000000000000a00000000000000a200000000000000030000000000000008000000000000000f000000000000000a00000000000000000000000000000000000000000000000000000000000000"},
+		{"catalog-recleaned", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Digest: [32]byte{7}, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Digest: [32]byte{8}, Bytes: 128, Kind: Log, First: 7, Last: 7}, {ID: 11, Digest: [32]byte{11}, Bytes: 113, Kind: Cleaned, First: 8, Last: 15}}}), "544152504d4e465400000000680100000000000012dd2f1b7254ac0a000000000102030000000000000000000000000006000000000000000f00000000000000090000000000000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000700000000000000730000000000000002000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000000800000000000000800000000000000001000000000000000700000000000000070000000000000008000000000000000000000000000000000000000000000000000000000000000b000000000000007100000000000000030000000000000008000000000000000f000000000000000b00000000000000000000000000000000000000000000000000000000000000"},
+		{"catalog-empty", EncodeCatalog(Catalog{UUID: uuid, Cutoff: 6, PrunedThrough: 15, ActiveID: 9, Files: []File{{ID: 7, Digest: [32]byte{7}, Bytes: 115, Kind: Snapshot, First: 0, Last: 0}, {ID: 8, Digest: [32]byte{8}, Bytes: 128, Kind: Log, First: 7, Last: 7}, {ID: 0, Bytes: 0, Kind: Cleaned, First: 8, Last: 15}}}), "544152504d4e46540000000068010000000000002be2ebcbadc5f758000000000102030000000000000000000000000006000000000000000f000000000000000900000000000000030000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007000000000000007300000000000000020000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000008000000000000008000000000000000010000000000000007000000000000000700000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000008000000000000000f000000000000000000000000000000000000000000000000000000000000000000000000000000"},
 		{"backup", EncodeBackup(Backup{UUID: uuid, Sequence: 6, Cutoff: 3, SourceCacheBytes: 512, SourceRecordBytes: 128, Files: []BackupFile{{Name: "CURRENT", Bytes: 128}}}), "544152504241434b00000000710000000000000087968015af5a971e0000000001020300000000000000000000000000060000000000000003000000000000000002000000000000800000000000000000000000000000000100000000000000070043555252454e5480000000000000000000000000000000000000000000000000000000000000000000000000000000"},
 	} {
 		expected, err := hex.DecodeString(tc.hex)
@@ -37,7 +38,7 @@ func TestGoldenVectors(t *testing.T) {
 
 func TestMetadataOnlyCatalogEntryRetainsSequenceCoverage(t *testing.T) {
 	catalog := Catalog{ActiveID: 3, PrunedThrough: 4, Files: []File{
-		{ID: 2, Kind: Log, Bytes: SegmentHeaderBytes + RecordHeaderBytes + 1, First: 1, Last: 1},
+		{ID: 2, Digest: [32]byte{2}, Kind: Log, Bytes: SegmentHeaderBytes + RecordHeaderBytes + 1, First: 1, Last: 1},
 		{Kind: Cleaned, First: 2, Last: 4},
 	}}
 	got, err := DecodeCatalog(EncodeCatalog(catalog))
@@ -72,7 +73,7 @@ func TestWireImages(t *testing.T) {
 	if got, err := DecodeFrontier(EncodeFrontier(frontier)); err != nil || got != frontier {
 		t.Fatalf("frontier: %#v %v", got, err)
 	}
-	catalog := Catalog{UUID: uuid, ActiveID: 7, Cutoff: 3, PrunedThrough: 5, Files: []File{{ID: 1, Bytes: 113, Kind: Snapshot}, {ID: 4, Bytes: 113, Kind: Log, First: 4, Last: 4}, {Kind: Cleaned, First: 5, Last: 5}}}
+	catalog := Catalog{UUID: uuid, ActiveID: 7, Cutoff: 3, PrunedThrough: 5, Files: []File{{ID: 1, Digest: [32]byte{1}, Bytes: 113, Kind: Snapshot}, {ID: 4, Digest: [32]byte{4}, Bytes: 113, Kind: Log, First: 4, Last: 4}, {Kind: Cleaned, First: 5, Last: 5}}}
 	if got, err := DecodeCatalog(EncodeCatalog(catalog)); err != nil || !reflect.DeepEqual(got, catalog) {
 		t.Fatalf("catalog: %#v %v", got, err)
 	}
@@ -281,10 +282,11 @@ func FuzzDecoders(f *testing.F) {
 	for _, b := range [][]byte{
 		EncodeSegment(Segment{ID: 1, Kind: Cleaned}),
 		EncodeCatalog(Catalog{ActiveID: 1}),
+		EncodeCatalog(Catalog{ActiveID: 1, Index: IndexCheckpoint{ID: 2, Bytes: 1024, Digest: [32]byte{1}, Layout: [32]byte{2}}}),
 		EncodeCatalog(Catalog{ActiveID: 1, PrunedThrough: 5, Files: []File{
-			{ID: 2, Bytes: 128, Kind: Log, First: 1, Last: 1},
+			{ID: 2, Digest: [32]byte{2}, Bytes: 128, Kind: Log, First: 1, Last: 1},
 			{Kind: Cleaned, First: 2, Last: 2},
-			{ID: 3, Bytes: 128, Kind: Cleaned, First: 3, Last: 5},
+			{ID: 3, Digest: [32]byte{3}, Bytes: 128, Kind: Cleaned, First: 3, Last: 5},
 		}}),
 		EncodeRecord(Put, 1, []byte("k"), nil),
 		EncodeFrontier(Frontier{Generation: 1, ManifestID: 2, ActiveID: 1, ActiveEnd: SegmentHeaderBytes}),
@@ -306,16 +308,16 @@ func FuzzDecoders(f *testing.F) {
 
 func TestCatalogRejectsAmbiguousCoverage(t *testing.T) {
 	const size = SegmentHeaderBytes + RecordHeaderBytes + 1
-	raw := File{ID: 2, Bytes: size, Kind: Log, First: 4, Last: 4}
-	snapshot := File{ID: 3, Bytes: size, Kind: Snapshot}
+	raw := File{ID: 2, Digest: [32]byte{2}, Bytes: size, Kind: Log, First: 4, Last: 4}
+	snapshot := File{ID: 3, Digest: [32]byte{3}, Bytes: size, Kind: Snapshot}
 	valid := Catalog{Cutoff: 3, PrunedThrough: 6, ActiveID: 7}
 	for _, tc := range []struct {
 		name  string
 		files []File
 	}{
-		{"start gap", []File{{ID: 2, Bytes: size, Kind: Log, First: 5, Last: 5}}},
-		{"start overlap", []File{{ID: 2, Bytes: size, Kind: Log, First: 3, Last: 4}}},
-		{"duplicate ID", []File{raw, {ID: 2, Bytes: size, Kind: Cleaned, First: 5, Last: 6}}},
+		{"start gap", []File{{ID: 2, Digest: [32]byte{2}, Bytes: size, Kind: Log, First: 5, Last: 5}}},
+		{"start overlap", []File{{ID: 2, Digest: [32]byte{2}, Bytes: size, Kind: Log, First: 3, Last: 4}}},
+		{"duplicate ID", []File{raw, {ID: 2, Digest: [32]byte{2}, Bytes: size, Kind: Cleaned, First: 5, Last: 6}}},
 		{"overlapping intervals", []File{raw, {Kind: Cleaned, First: 4, Last: 6}}},
 		{"reversed interval", []File{raw, {Kind: Cleaned, First: 5, Last: 4}}},
 		{"empty raw interval", []File{{Kind: Log, First: 4, Last: 4}}},
@@ -323,9 +325,9 @@ func TestCatalogRejectsAmbiguousCoverage(t *testing.T) {
 		{"empty interval has bytes", []File{{Bytes: size, Kind: Cleaned, First: 4, Last: 4}}},
 		{"past prune boundary", []File{{Kind: Cleaned, First: 4, Last: 7}}},
 		{"snapshot after log", []File{raw, snapshot}},
-		{"snapshot with interval", []File{{ID: 3, Bytes: size, Kind: Snapshot, First: 1, Last: 2}}},
-		{"active ID reused", []File{{ID: 7, Bytes: size, Kind: Snapshot}}},
-		{"raw records exceed physical length", []File{{ID: 2, Bytes: size, Kind: Log, First: 4, Last: 5}}},
+		{"snapshot with interval", []File{{ID: 3, Digest: [32]byte{3}, Bytes: size, Kind: Snapshot, First: 1, Last: 2}}},
+		{"active ID reused", []File{{ID: 7, Digest: [32]byte{7}, Bytes: size, Kind: Snapshot}}},
+		{"raw records exceed physical length", []File{{ID: 2, Digest: [32]byte{2}, Bytes: size, Kind: Log, First: 4, Last: 5}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := valid
@@ -454,6 +456,50 @@ func TestReadValueAcceptsCompleteFinalReadWithEOF(t *testing.T) {
 		got, err := ReadValue(r, 0, int64(len(record)), "k", 7)
 		if err != nil || !bytes.Equal(got, value) {
 			t.Fatalf("size %d: err %v, value length %d", size, err, len(got))
+		}
+	}
+}
+
+func TestIndexLayoutCoversSnapshotsIntervalsAndSelectedBytes(t *testing.T) {
+	c := Catalog{UUID: [16]byte{1}, ActiveID: 4, Cutoff: 2, PrunedThrough: 4, Files: []File{
+		{ID: 1, Digest: [32]byte{1}, Bytes: 120, Kind: Snapshot},
+		{ID: 2, Digest: [32]byte{2}, Bytes: 120, Kind: Snapshot},
+		{Kind: Cleaned, First: 3, Last: 4},
+		{ID: 3, Digest: [32]byte{3}, Bytes: 120, Kind: Log, First: 5, Last: 5},
+	}}
+	layout, err := c.IndexLayout(3, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%x", layout) != "9263094565f4a77808ee498e376f2c93796fd07fbddf482990da6b935fcf7e1c" {
+		t.Fatalf("layout wire vector %x", layout)
+	}
+	c.Index = IndexCheckpoint{ID: 5, Bytes: 12000, Digest: [32]byte{0xaa}, Sequence: 4, Entries: 3, Layout: layout}
+	got, err := DecodeCatalog(EncodeCatalog(c))
+	if err != nil || !reflect.DeepEqual(c, got) {
+		t.Fatalf("checkpoint descriptor round-trip: %+v, %v", got, err)
+	}
+	c.Files[3].Digest[0]++
+	if actual, err := c.IndexLayout(3, 4); err != nil || actual != layout {
+		t.Fatalf("uncovered tail changed binding: %x %v", actual, err)
+	}
+	c.Files[1].Digest[0]++
+	if actual, err := c.IndexLayout(3, 4); err != nil || actual == layout {
+		t.Fatalf("covered digest change: %x %v", actual, err)
+	}
+	c.PrunedThrough = 2
+	for _, test := range []struct{ entries, seq uint64 }{{0, 2}, {1, 2}, {3, 5}, {math.MaxUint64, 4}} {
+		if _, err := c.IndexLayout(test.entries, test.seq); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("accepted invalid cut %+v: %v", test, err)
+		}
+	}
+	if _, err := c.IndexLayout(2, 2); err != nil {
+		t.Fatal("complete snapshot cut", err)
+	}
+	for _, id := range []uint64{0, 1, 4} {
+		c.Index.ID = id
+		if _, err := DecodeCatalog(EncodeCatalog(c)); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("checkpoint identity %d: %v", id, err)
 		}
 	}
 }

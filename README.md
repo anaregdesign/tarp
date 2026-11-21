@@ -289,7 +289,7 @@ records, or total disk quota is provided.
 
 `Options{}` uses an in-memory hash index for fast random lookups.
 For datasets whose keys would consume too much heap, choose the disk index
-when opening the database. The index options below are available from v0.9.0.
+when opening the database.
 
 ```go
 db, err := tarp.Open(dir, tarp.Options{
@@ -301,8 +301,8 @@ db, err := tarp.Open(dir, tarp.Options{
 `IndexBTree` stores encoded keys and DATA addresses in private 8 KiB pages.
 Tarp creates the backing files in `.tarp-work/` inside the database directory
 passed to `Open` or `OpenExisting`. Size the database volume for DATA, index
-pages, and temporary work during replay, compaction and online backup. Tarp
-unlinks each scratch file immediately after opening it. The OS releases its
+pages, the persistent checkpoint, and temporary work during replay, compaction and online backup. Tarp
+unlinks private pager files immediately after opening them. The OS releases its
 space when its final descriptor closes.
 
 The root and frequently used routing pages get priority in the cache. Value
@@ -317,11 +317,28 @@ limits entries kept in the value LRU. `MaxBatchGetValueBytes` limits encoded
 value bytes returned by one batch read. Long-running readers can
 hold previous page generations and DATA files on disk.
 
-Both modes use the same DATA, MANIFEST, CURRENT and backup formats. Switch
-by closing the DB and reopening with `IndexMemory` or `IndexBTree`. Open
-revalidates the selected DATA and rebuilds the index. A B+tree workspace
-needs no additional durability sync on the foreground commit path.
-See the [measured memory and latency trade-offs](docs/benchmarks/index-modes.md).
+The checkpoint API on `main` uses a newer storage format than v0.9.1.
+Both index modes can reuse the same immutable `INDEX` file. A healthy B+tree handle
+refreshes a missing or outdated checkpoint at `Close`. To checkpoint a
+long-running DB or an in-memory index, call `db.CheckpointIndex(ctx)`. It seals
+the active log and verifies and packs the committed prefix. Writes can continue
+during the build. Size the volume for both the build workspace and the new INDEX,
+and allow for the extra Close time. Checkpoint creation leaves the normal
+per-write sync protocol intact.
+
+| `Options.OpenValidation` | Work done during Open |
+| --- | --- |
+| `tarp.Full` (default) | Verify every committed DATA byte. Import the packed index when available and apply later commits. |
+| `tarp.Indexed` | Verify the INDEX and selected DATA headers, then read and validate only the records after the checkpoint. |
+
+`Indexed` can defer detection of disk damage. A value read verifies the record's
+identity and CRC. `Has` and `Keys` can complete without reading its value. Reopen
+with `Full` to check the complete selected history, including obsolete values.
+Both modes rebuild from DATA when INDEX is missing or unusable. Compaction
+invalidates indexes tied to the superseded files. Backups omit INDEX and remain
+independently verifiable. See the [format](docs/format.md) and the
+[checkpoint measurements](docs/benchmarks/index-checkpoints.md) and
+[runtime index measurements](docs/benchmarks/index-modes.md).
 
 ## Limits
 
@@ -331,6 +348,7 @@ the commit sync protocol.
 
 | Option | Default | What the limit applies to |
 | --- | ---: | --- |
+| `OpenValidation` | `Full` | Choose eager DATA verification or `Indexed` checkpoint recovery. |
 | `IndexMode` | `IndexMemory` | Selects a built-in key index for this Open. |
 | `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
 | `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |

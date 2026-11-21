@@ -277,6 +277,11 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 	if err := span.Finish(); err != nil {
 		return entry, &SourceError{Err: fmt.Errorf("%s: %w", name, err)}
 	}
+	if captured.File.ID != capture.Current.ActiveID {
+		if err := checkSealedDigest(h, captured.Entry); err != nil {
+			return entry, err
+		}
+	}
 	if err := fs.Sync(dst, "backup.file.sync"); err != nil {
 		return entry, err
 	}

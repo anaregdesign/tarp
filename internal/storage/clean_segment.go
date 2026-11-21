@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ type CleanSegment struct {
 	uuid     [16]byte
 	cutoff   uint64
 	created  bool
+	digest   [sha256.Size]byte
 }
 
 // OutputBytes is the logical length of the finished replacement DATA file.
@@ -109,7 +111,7 @@ func (w pacedOutput) Write(b []byte) (int, error) {
 // Copy streams each source in catalog order into the same output. Every
 // tombstone is retained until the next complete checkpoint.
 func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, history index.Backend, yield func() error, keep func(string, Location) (bool, error)) (result error) {
-	writer := &outputWriter{fs: fs, offset: format.SegmentHeaderBytes, point: "clean.copy"}
+	writer := &outputWriter{fs: fs, offset: format.SegmentHeaderBytes, point: "clean.copy", hash: sha256.New()}
 	defer func() {
 		if writer.fd != nil {
 			result = errors.Join(result, writer.fd.Close())
@@ -139,6 +141,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 			}
 			writer.fd, c.created = fd, true
 			header := format.EncodeSegment(format.Segment{UUID: c.uuid, ID: c.output.ID, Kind: c.output.Kind})
+			writer.hash.Write(header)
 			if err := fs.Write(fd, header, 0, "clean.header"); err != nil {
 				return nil, err
 			}
@@ -166,6 +169,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 			return err
 		}
 		c.output.Size.Store(writer.offset)
+		c.digest = [sha256.Size]byte(writer.hash.Sum(nil))
 	}
 	return moves.seal()
 }
@@ -176,7 +180,7 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 	if err := yield(); err != nil {
 		return err
 	}
-	fd, _, _, err := openSelected(source.File.Path, c.uuid, source.Entry, false)
+	fd, header, _, err := openSelected(source.File.Path, c.uuid, source.Entry, false)
 	if err != nil {
 		return &SourceError{Err: err}
 	}
@@ -185,7 +189,9 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 			result = errors.Join(result, &SourceError{Err: err})
 		}
 	}()
-	input := pacedSource{fd: fd, yield: yield}
+	digest := sha256.New()
+	digest.Write(header)
+	input := &digestReader{ReaderAt: pacedSource{fd: fd, yield: yield}, hash: digest, next: format.SegmentHeaderBytes}
 	span := format.NewRecordRange(source.Entry, c.cutoff)
 	return fs.Do("clean.scan", func() error {
 		for off := int64(format.SegmentHeaderBytes); off < source.Entry.Bytes; {
@@ -201,7 +207,10 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 			}
 			off += r.Bytes()
 		}
-		return span.Finish()
+		if err := span.Finish(); err != nil {
+			return err
+		}
+		return checkSealedDigest(digest, source.Entry)
 	})
 }
 
@@ -234,11 +243,12 @@ func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error
 		return fault("clean.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
 	catalog := s.Catalog
+	catalog.Index = format.IndexCheckpoint{}
 	catalog.Files = slices.Clone(catalog.Files)
 	catalog.PrunedThrough = s.Current.Sequence
 	replacement := format.File{Kind: c.output.Kind, First: c.entries[0].First, Last: c.entries[len(c.entries)-1].Last}
 	if c.created {
-		replacement.ID, replacement.Bytes = c.output.ID, c.output.Size.Load()
+		replacement.ID, replacement.Bytes, replacement.Digest = c.output.ID, c.output.Size.Load(), c.digest
 	}
 	if !c.created && replacement.Kind == format.Snapshot {
 		catalog.Files = slices.Delete(catalog.Files, start, end)

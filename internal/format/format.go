@@ -251,7 +251,7 @@ type Frontier struct {
 
 func EncodeFrontier(f Frontier) []byte {
 	b := make([]byte, FrontierBytes)
-	copy(b, "TARPCURR")
+	copy(b, "TARPHEAD")
 	order.PutUint16(b[10:], FrontierBytes)
 	copy(b[16:], f.UUID[:])
 	order.PutUint64(b[32:], f.Generation)
@@ -270,7 +270,7 @@ func CheckFrontierSignature(prefix []byte) error {
 	if len(prefix) < 8 {
 		return bad("incomplete frontier signature")
 	}
-	if string(prefix[:8]) != "TARPCURR" {
+	if string(prefix[:8]) != "TARPHEAD" {
 		return ErrUnsupported
 	}
 	return nil
@@ -305,17 +305,28 @@ type File struct {
 	Bytes       int64
 	Kind        uint32
 	First, Last uint64
+	Digest      [sha256.Size]byte
 }
 
 // HasPhysicalFile reports whether this catalog entry names a DATA file.
 // A cleaned interval with no retained records still contributes sequence coverage.
 func (f File) HasPhysicalFile() bool { return f.ID != 0 }
 
+// IndexCheckpoint identifies an immutable packed index and the catalog prefix it covers.
+type IndexCheckpoint struct {
+	ID                uint64
+	Bytes             int64
+	Digest            [sha256.Size]byte
+	Sequence, Entries uint64
+	Layout            [sha256.Size]byte
+}
+
 type Catalog struct {
 	UUID                  [16]byte
 	Cutoff, PrunedThrough uint64
 	ActiveID              uint64
 	Files                 []File
+	Index                 IndexCheckpoint
 }
 
 func envelope(magic string, payload []byte) []byte {
@@ -353,8 +364,8 @@ func payload(b []byte, magic string) ([]byte, error) {
 }
 
 const (
-	catalogHeaderBytes = 48
-	catalogEntryBytes  = 40
+	catalogHeaderBytes = 144
+	catalogEntryBytes  = 72
 )
 
 func EncodeCatalog(c Catalog) []byte {
@@ -364,20 +375,58 @@ func EncodeCatalog(c Catalog) []byte {
 	order.PutUint64(p[24:], c.PrunedThrough)
 	order.PutUint64(p[32:], c.ActiveID)
 	order.PutUint64(p[40:], uint64(len(c.Files)))
+	d := c.Index
+	order.PutUint64(p[48:], d.ID)
+	order.PutUint64(p[56:], uint64(d.Bytes))
+	copy(p[64:96], d.Digest[:])
+	order.PutUint64(p[96:], d.Sequence)
+	order.PutUint64(p[104:], d.Entries)
+	copy(p[112:144], d.Layout[:])
 	for i, f := range c.Files {
-		q := p[catalogHeaderBytes+catalogEntryBytes*i:]
-		order.PutUint64(q, f.ID)
-		order.PutUint64(q[8:], uint64(f.Bytes))
-		order.PutUint64(q[16:], uint64(f.Kind))
-		order.PutUint64(q[24:], f.First)
-		order.PutUint64(q[32:], f.Last)
+		putCatalogEntry(p[catalogHeaderBytes+catalogEntryBytes*i:], f)
 	}
-	return envelope("TARPCATL", p)
+	return envelope("TARPMNFT", p)
+}
+
+func putCatalogEntry(b []byte, f File) {
+	order.PutUint64(b, f.ID)
+	order.PutUint64(b[8:], uint64(f.Bytes))
+	order.PutUint64(b[16:], uint64(f.Kind))
+	order.PutUint64(b[24:], f.First)
+	order.PutUint64(b[32:], f.Last)
+	copy(b[40:72], f.Digest[:])
+}
+
+// IndexLayout fingerprints a complete sealed prefix, including empty logical
+// intervals. A cut through the unordered snapshot files is never a valid state.
+func (c Catalog) IndexLayout(entries, seq uint64) ([sha256.Size]byte, error) {
+	if entries > uint64(len(c.Files)) || entries < uint64(len(c.Files)) && c.Files[entries].Kind == Snapshot {
+		return [sha256.Size]byte{}, bad("checkpoint prefix")
+	}
+	prefix := c
+	prefix.Files = c.Files[:entries]
+	if seq != prefix.SealedEnd() || c.PrunedThrough > seq {
+		return [sha256.Size]byte{}, bad("checkpoint sequence")
+	}
+	h := sha256.New()
+	h.Write([]byte("TARPLAYT"))
+	h.Write(c.UUID[:])
+	var b [catalogEntryBytes]byte
+	order.PutUint64(b[:], c.Cutoff)
+	order.PutUint64(b[8:], c.PrunedThrough)
+	order.PutUint64(b[16:], seq)
+	order.PutUint64(b[24:], entries)
+	h.Write(b[:32])
+	for _, f := range prefix.Files {
+		putCatalogEntry(b[:], f)
+		h.Write(b[:])
+	}
+	return [sha256.Size]byte(h.Sum(nil)), nil
 }
 
 func DecodeCatalog(b []byte) (Catalog, error) {
 	var c Catalog
-	p, err := payload(b, "TARPCATL")
+	p, err := payload(b, "TARPMNFT")
 	if err != nil {
 		return c, err
 	}
@@ -393,17 +442,24 @@ func DecodeCatalog(b []byte) (Catalog, error) {
 	if c.ActiveID == 0 || c.Cutoff > c.PrunedThrough {
 		return c, bad("catalog identity or pruning boundary")
 	}
-	seen := map[uint64]bool{c.ActiveID: true}
+	c.Index.ID, c.Index.Bytes = order.Uint64(p[48:]), int64(order.Uint64(p[56:]))
+	copy(c.Index.Digest[:], p[64:96])
+	c.Index.Sequence, c.Index.Entries = order.Uint64(p[96:]), order.Uint64(p[104:])
+	copy(c.Index.Layout[:], p[112:144])
+	if c.Index.ID == c.ActiveID || c.Index.Bytes < 0 || c.Index.ID == 0 && c.Index != (IndexCheckpoint{}) {
+		return c, bad("catalog index descriptor")
+	}
+	seen := map[uint64]bool{c.ActiveID: true, c.Index.ID: true}
 	previous := c.Cutoff
 	for q := entries; len(q) != 0; q = q[catalogEntryBytes:] {
 		id, n, kind := order.Uint64(q), order.Uint64(q[8:]), order.Uint64(q[16:])
 		first, last := order.Uint64(q[24:]), order.Uint64(q[32:])
 		if id == 0 {
-			if kind != Cleaned || n != 0 {
+			if kind != Cleaned || n != 0 || !zero(q[40:72]) {
 				return c, bad("empty cleaned interval")
 			}
 		} else {
-			if seen[id] || n < SegmentHeaderBytes+RecordHeaderBytes+1 || n > math.MaxInt64 {
+			if seen[id] || zero(q[40:72]) || n < SegmentHeaderBytes+RecordHeaderBytes+1 || n > math.MaxInt64 {
 				return c, bad("catalog duplicate ID or file length")
 			}
 			seen[id] = true
@@ -427,7 +483,7 @@ func DecodeCatalog(b []byte) (Catalog, error) {
 		default:
 			return c, bad("catalog entry kind")
 		}
-		c.Files = append(c.Files, File{ID: id, Bytes: int64(n), Kind: uint32(kind), First: first, Last: last})
+		c.Files = append(c.Files, File{ID: id, Bytes: int64(n), Kind: uint32(kind), First: first, Last: last, Digest: [32]byte(q[40:72])})
 	}
 	return c, nil
 }

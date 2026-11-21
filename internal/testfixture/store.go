@@ -28,7 +28,7 @@ func WriteMixedStore(t testing.TB, prune uint64) string {
 			b = append(b, record...)
 		}
 		write(storage.DataName(uuid, id), b)
-		return format.File{ID: id, Kind: kind, Bytes: int64(len(b)), First: first, Last: last}
+		return format.File{ID: id, Kind: kind, Bytes: int64(len(b)), First: first, Last: last, Digest: sha256.Sum256(b)}
 	}
 	catalog := format.Catalog{
 		UUID: uuid, Cutoff: 2, PrunedThrough: prune, ActiveID: 4,
