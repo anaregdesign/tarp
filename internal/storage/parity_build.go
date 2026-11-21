@@ -27,6 +27,16 @@ func parityBufferSize(bytes int64) int {
 // No store-wide metadata or writer lock is needed during these operations.
 func (s *Store) EnsureParity(ctx context.Context, uuid [16]byte, source CapturedFile, recheck bool, yield func() error) error {
 	f := source.File
+	if unavailable := f.UnavailableData(); unavailable != nil {
+		if !recheck {
+			return unavailable
+		}
+		// An explicit recheck must establish that DATA is readable before
+		// using an already-valid sidecar as evidence of protection.
+		if err := s.RepairRead(ctx, f, &SourceError{Err: ErrCorrupt}); err != nil {
+			return err
+		}
+	}
 	if f.parityReady && !recheck {
 		return nil
 	}
@@ -37,7 +47,9 @@ func (s *Store) EnsureParity(ctx context.Context, uuid [16]byte, source Captured
 	switch {
 	case err == nil:
 	case missing || errors.Is(err, format.ErrInvalidParity):
-		if err := s.buildParity(ctx, path, uuid, source, !missing, yield); err != nil {
+		if err := s.RetryMaintenance(ctx, []CapturedFile{source}, func() error {
+			return s.buildParity(ctx, path, uuid, source, !missing, yield)
+		}, nil); err != nil {
 			return err
 		}
 	default:
@@ -87,7 +99,7 @@ func (s *Store) buildParity(ctx context.Context, path string, uuid [16]byte, sou
 	}
 	data, _, _, err := openSelected(source.File.Path, uuid, source.Entry, false)
 	if err != nil {
-		return &SourceError{Err: err}
+		return selectedReadFailure(source.Entry.ID, &SourceError{Err: err})
 	}
 	defer func() {
 		if err := data.Close(); err != nil {
@@ -115,12 +127,20 @@ func (s *Store) buildParity(ctx context.Context, path string, uuid [16]byte, sou
 	}()
 
 	var input io.ReaderAt = data
+	var paceErr error
 	if yield != nil {
-		input = paritySource{data, yield}
+		input = paritySource{data, func() error {
+			paceErr = yield()
+			return paceErr
+		}}
 	}
 	writer := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: "parity.write"}, parityBufferSize(source.Entry.Bytes))
 	err = s.IO.Do("parity.scan", func() error {
-		return format.WriteParity(ctx, input, writer, uuid, source.Entry)
+		err := format.WriteParity(ctx, input, writer, uuid, source.Entry)
+		if err != nil && paceErr == nil {
+			return selectedReadFailure(source.Entry.ID, err)
+		}
+		return err
 	})
 	if err != nil {
 		var dst *destinationError

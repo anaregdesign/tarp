@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/anaregdesign/tarp/internal/storage"
 )
 
 const (
@@ -138,7 +140,7 @@ func (db *DB) readBatchRecord(key []byte, result *BatchResult, r batchRead, samp
 	}
 	value, err := db.store.Read(r.loc, string(key))
 	if err != nil {
-		db.poison(err)
+		db.readFailure(err)
 		return operationError("batch-get", "read", err)
 	}
 	if sample {
@@ -187,7 +189,7 @@ func (db *DB) readBatchParallel(keys [][]byte, results []BatchResult, reads []ba
 func (db *DB) runBatchWorkers(workers, count int, read func(int) error) error {
 	var next atomic.Int32
 	var wg sync.WaitGroup
-	var once sync.Once
+	var errMu sync.Mutex
 	var readErr error
 	work := func() {
 		defer func() { <-db.batchReadSlots }()
@@ -197,7 +199,13 @@ func (db *DB) runBatchWorkers(workers, count int, read func(int) error) error {
 				return
 			}
 			if err := read(i); err != nil {
-				once.Do(func() { readErr = err })
+				next.Store(int32(count))
+				errMu.Lock()
+				// A sibling already in flight may report a DB-wide failure.
+				if readErr == nil || storage.IsDataUnavailable(readErr) && !storage.IsDataUnavailable(err) {
+					readErr = err
+				}
+				errMu.Unlock()
 				return
 			}
 		}

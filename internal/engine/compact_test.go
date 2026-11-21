@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -371,7 +372,7 @@ func TestRepeatedCompactionDoesNotRetainOldFileRegistry(t *testing.T) {
 func TestCompactionValidatesCapturedSegmentHeaders(t *testing.T) {
 	for _, damage := range []string{"checksum", "uuid", "id", "kind"} {
 		t.Run(damage, func(t *testing.T) {
-			db := newTestDB(t, testOptions(), nil)
+			db := openMaintenanceDamageDB(t, testOptions(), nil)
 			mustPut(t, db, "k", "acknowledged")
 			file := db.store.Files[db.store.Current.ActiveID]
 			header := format.Segment{UUID: db.store.Current.UUID, ID: file.ID, Kind: format.Log}
@@ -395,12 +396,11 @@ func TestCompactionValidatesCapturedSegmentHeaders(t *testing.T) {
 			if err := errors.Join(writeErr, fd.Sync(), fd.Close()); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Compact(context.Background()); !errors.Is(err, ErrCorrupt) {
-				t.Fatalf("header damage skipped: %v", err)
+			if _, err := db.Compact(context.Background()); !errors.Is(err, ErrCorrupt) || !errors.Is(err, ErrDataUnavailable) || db.health() != nil {
+				t.Fatalf("sealed header damage: %v, health %v", err, db.health())
 			}
-			if _, err := db.Get([]byte("k")); !errors.Is(err, ErrUnhealthy) {
-				t.Fatalf("corrupt source hidden by cache: %v", err)
-			}
+			wantValue(t, db, "k", "acknowledged") // Previously committed value from cache.
+			mustPut(t, db, "unrelated", "healthy")
 			if _, err := os.Stat(file.Path); err != nil {
 				t.Fatalf("corrupt selected evidence removed: %v", err)
 			}
@@ -696,10 +696,10 @@ func TestMaintenanceCancellationAndNoSpace(t *testing.T) {
 	}
 }
 
-func TestMaintenanceSourceCorruptionFailsStop(t *testing.T) {
+func TestMaintenanceIsolatesOnlySealedSourceCorruption(t *testing.T) {
 	for _, compact := range []bool{false, true} {
 		t.Run(fmt.Sprint(compact), func(t *testing.T) {
-			db := newTestDB(t, testOptions(), nil)
+			db := openMaintenanceDamageDB(t, testOptions(), nil)
 			mustPut(t, db, "a", "cached")
 			path := testLoc(t, db, "a").File.Path
 			f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -721,8 +721,14 @@ func TestMaintenanceSourceCorruptionFailsStop(t *testing.T) {
 			if !errors.Is(err, ErrCorrupt) {
 				t.Fatal(err)
 			}
-			if _, err := db.Get([]byte("a")); !errors.Is(err, ErrUnhealthy) {
-				t.Fatalf("cached read escaped corrupt source: %v", err)
+			if compact {
+				// Compact seals before reading and can authenticate the source.
+				if !errors.Is(err, ErrDataUnavailable) || db.health() != nil {
+					t.Fatalf("sealed read failure: %v, health %v", err, db.health())
+				}
+				mustPut(t, db, "unrelated", "healthy")
+			} else if _, err := db.Get([]byte("a")); !errors.Is(err, ErrUnhealthy) {
+				t.Fatalf("active source failure: %v", err)
 			}
 		})
 	}
@@ -919,4 +925,65 @@ func TestCompactRepairsProtectedSourceAndRestartsPrivateOutputs(t *testing.T) {
 	}
 	defer reopened.Close()
 	wantValue(t, reopened, "other", "two")
+}
+
+// Damage tests explicitly verify the expected maintenance and Close errors.
+func openMaintenanceDamageDB(t *testing.T, opts Options, fs *storage.IO) *DB {
+	t.Helper()
+	db, err := OpenWithHooks(t.TempDir(), opts, fs, parkedMaintenance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestMaintenanceKeepsDamagedDataAndLeavesWritersAvailable(t *testing.T) {
+	for _, op := range []string{"backup", "compact", "index", "clean"} {
+		t.Run(op, func(t *testing.T) {
+			db := openMaintenanceDamageDB(t, Options{IndexMode: IndexBTree}, nil)
+			mustPut(t, db, "intact", "healthy")
+			mustPut(t, db, "unavailable", strings.Repeat("v", 10000))
+			entry := damageProtectedTail(t, db)
+			file := db.store.Files[entry.ID]
+			raw, err := os.ReadFile(file.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw[300] ^= 1 // A second bad block in the same stripe.
+			if err := os.WriteFile(file.Path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			before := db.store.Current
+			switch op {
+			case "backup":
+				dest := filepath.Join(t.TempDir(), "backup")
+				err = db.Backup(t.Context(), dest)
+				if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("incomplete backup was published: %v", statErr)
+				}
+			case "compact":
+				_, err = db.Compact(t.Context())
+			case "index":
+				err = db.CheckpointIndex(t.Context())
+			case "clean":
+				err = db.cleanSegment(t.Context(), entry)
+			}
+			var local *storage.UnavailableDataError
+			if !errors.As(err, &local) || local.FileID != entry.ID || !errors.Is(err, ErrDataUnavailable) || db.health() != nil {
+				t.Fatalf("expected local damage to file %d: %v, health %v", entry.ID, err, db.health())
+			}
+			if db.store.Current != before {
+				t.Fatal("incomplete maintenance published a frontier")
+			}
+			if data, err := os.ReadFile(file.Path); err != nil || !bytes.Equal(data, raw) {
+				t.Fatalf("damaged source lost: %v", err)
+			}
+			mustPut(t, db, "new", "acknowledged")
+			wantValue(t, db, "new", "acknowledged")
+			if err := db.Close(); !errors.Is(err, ErrDataUnavailable) || errors.Is(err, ErrUnhealthy) {
+				t.Fatalf("close with selected damage: %v", err)
+			}
+		})
+	}
 }

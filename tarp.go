@@ -94,7 +94,8 @@ func OpenExisting(ctx context.Context, dir string, opts Options) (*DB, error) {
 	return (*DB)(db), err
 }
 
-// Get returns an independently owned value, or ErrNotFound.
+// Get returns an independently owned value. A missing key returns [ErrNotFound].
+// If its sealed DATA cannot supply the value, Get may return [ErrDataUnavailable].
 func (db *DB) Get(key []byte) ([]byte, error) {
 	return (*engine.DB)(db).Get(key)
 }

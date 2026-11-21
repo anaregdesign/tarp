@@ -30,24 +30,24 @@ func TestCleanerRanksNetSavings(t *testing.T) {
 		f.DeleteBytes.Store(64)
 		s.Files[e.ID] = f
 		s.Catalog.Files = []format.File{e}
-		got, needed := nextCandidate(s, 4096)
+		got, needed, _ := nextCandidate(s, 4096)
 		if (len(got) != 0) != (n >= 1024) || len(got) != 0 && (got[0].ID != e.ID || needed != 512) {
 			t.Fatalf("source %d: selected %+v, staging %d", n, got, needed)
 		}
 	}
 	s.Files[3] = &storage.File{}
 	s.Catalog.Files = append(s.Catalog.Files, format.File{ID: 3, Kind: format.Cleaned, Bytes: 1025, First: 4, Last: 7})
-	if got, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 3 {
+	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 3 {
 		t.Fatal("higher net savings should win", got)
 	}
 	s.Catalog.Files[1].Bytes = math.MaxInt64
 	s.Files[3].LiveBytes.Store(math.MaxInt64 - 64)
-	if got, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("large low-benefit file should be skipped", got)
 	}
 	s.Catalog.Files[1].Bytes = s.Catalog.Files[0].Bytes
 	s.Files[3].LiveBytes.Store(256)
-	if got, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("oldest covered interval should win the tie", got)
 	}
 }
@@ -95,7 +95,7 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 				}
 				s.Catalog.Files = append(s.Catalog.Files, entry)
 			}
-			got, staging := nextCandidate(s, tc.target)
+			got, staging, _ := nextCandidate(s, tc.target)
 			want := s.Catalog.Files[tc.first : tc.first+tc.count]
 			if !slices.Equal(got, want) || staging != tc.staging {
 				t.Fatalf("selected %+v staging %d, want %+v staging %d", got, staging, want, tc.staging)
@@ -181,7 +181,7 @@ func TestRepackGroupLimits(t *testing.T) {
 			for i, size := range tc.sizes {
 				files = append(files, format.File{ID: uint64(i + 1), Kind: format.Log, Bytes: size})
 			}
-			group, bytes := repackGroup(files, target)
+			group, bytes := repackGroup(files, target, nil)
 			if len(group) != tc.count || len(group) > 0 && group[0].ID != uint64(tc.first) {
 				t.Fatalf("selected %+v, want %d files starting at ID %d", group, tc.count, tc.first)
 			}
@@ -634,5 +634,51 @@ func TestCleanerCrashChild(t *testing.T) {
 		t.Fatalf("worker stopped before cut %s: %+v", point, db.AutoCompactionStatus())
 	case <-time.After(4 * time.Second):
 		t.Fatalf("cut %s not reached: %+v", point, db.AutoCompactionStatus())
+	}
+}
+
+func TestCleanerKeepsUnavailableInputAndReclaimsOtherObsoleteFiles(t *testing.T) {
+	db := openMaintenanceDamageDB(t, Options{}, nil)
+	oldValue := strings.Repeat("x", 10000)
+	mustPut(t, db, "damaged", oldValue)
+	damaged := damageProtectedTail(t, db)
+	if err := os.Remove(selectedParity(t, db, damaged)); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, db, "healthy", oldValue)
+	obsolete := sealForCleaning(t, db)
+	mustPut(t, db, "damaged", "replacement")
+	mustPut(t, db, "healthy", "new")
+
+	if again, retry := db.cleanPass(t.Context()); !again || retry || !errors.Is(db.AutoCompactionStatus().LastError, ErrDataUnavailable) {
+		t.Fatalf("first pass did not isolate damaged input: %+v", db.AutoCompactionStatus())
+	}
+	if again, retry := db.cleanPass(t.Context()); !again || retry {
+		t.Fatalf("healthy cleaning was starved: %+v", db.AutoCompactionStatus())
+	}
+	if again, retry := db.cleanPass(t.Context()); again || retry || !errors.Is(db.AutoCompactionStatus().LastError, ErrDataUnavailable) {
+		t.Fatalf("blocked input is being retried: %+v", db.AutoCompactionStatus())
+	}
+	if got := db.store.Catalog.Files; len(got) != 2 || got[0] != damaged || got[1].ID != 0 {
+		t.Fatalf("unexpected cleaned catalog %+v", got)
+	}
+	if _, err := os.Stat(db.store.Files[damaged.ID].Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(db.store.Dir, storage.DataName(db.store.Current.UUID, obsolete.ID))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("obsolete healthy file not reclaimed: %v", err)
+	}
+	wantValue(t, db, "damaged", "replacement")
+}
+
+func TestRepackGroupUsesHealthyRunAfterUnavailableFile(t *testing.T) {
+	var files []format.File
+	for id := uint64(1); id <= 7; id++ {
+		files = append(files, format.File{ID: id, Kind: format.Log, Bytes: 128})
+	}
+	blocked := map[uint64]*storage.UnavailableDataError{3: {FileID: 3, Err: os.ErrNotExist}}
+	group, n := repackGroup(files, 4096, blocked)
+	if !slices.Equal(group, files[3:]) || n != 4*128 {
+		t.Fatalf("unexpected repack across unavailable file: %v, %d", group, n)
 	}
 }

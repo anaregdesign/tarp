@@ -942,3 +942,101 @@ func TestIndexedOpenRepairsCoveredDataOnFirstValueRead(t *testing.T) {
 		t.Fatalf("full reopen after repair: %v", err)
 	}
 }
+
+func TestIndexedReopenReplaysWritesMadeWithUnavailableSealedData(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+	seed := openPublicDB(t, dir, tarp.Options{})
+	badKey := []byte("unreadable")
+	want := bytes.Repeat([]byte("v"), 9000)
+	if err := seed.BatchPut([]tarp.Entry{
+		{Key: badKey, Value: want},
+		{Key: []byte("remove"), Value: []byte("old")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.CheckpointIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.ProtectParity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := sealedTestPaths(t, dir)
+	wire, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := bytes.Clone(wire)
+	db, err := tarp.OpenExisting(ctx, dir, tarp.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	flipSealedTestBytes(t, path, wire, 200, 4096+200)
+	if _, err := db.Get(badKey); !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatalf("damaged read: %v", err)
+	}
+	if err := db.Put([]byte("new"), []byte("committed during damage")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Delete([]byte("remove")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); !errors.Is(err, tarp.ErrDataUnavailable) || errors.Is(err, tarp.ErrUnhealthy) {
+		t.Fatalf("close with selected damage: %v", err)
+	}
+	if strict, err := tarp.OpenExisting(ctx, dir, tarp.Options{OpenValidation: tarp.Full}); strict != nil || !errors.Is(err, tarp.ErrCorrupt) {
+		t.Fatalf("full recovery accepted damaged DATA: %v", err)
+	}
+	checkTail := func(db *tarp.DB) {
+		t.Helper()
+		if got, err := db.Get([]byte("new")); err != nil || string(got) != "committed during damage" {
+			t.Fatalf("lost acknowledged Put: %q, %v", got, err)
+		}
+		if _, err := db.Get([]byte("remove")); !errors.Is(err, tarp.ErrNotFound) {
+			t.Fatalf("lost acknowledged Delete: %v", err)
+		}
+	}
+	indexed, err := tarp.OpenExisting(ctx, dir, tarp.Options{OpenValidation: tarp.Indexed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer indexed.Close()
+	if _, err := indexed.Get(badKey); !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatalf("covered key after indexed recovery: %v", err)
+	}
+	checkTail(indexed)
+	replacement := []byte("replacement for unreadable value")
+	if err := indexed.Put(badKey, replacement); err != nil {
+		t.Fatalf("Put over unreadable value: %v", err)
+	}
+	if err := indexed.Close(); !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatal(err)
+	}
+	// Reopen with damage still present. The later Put shadows the damaged
+	// record even with an empty cache and a checkpoint older than that Put.
+	latest, err := tarp.OpenExisting(ctx, dir, tarp.Options{OpenValidation: tarp.Indexed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer latest.Close()
+	if got, err := latest.Get(badKey); err != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("replacement after indexed reopen: %q, %v", got, err)
+	}
+	if err := latest.Close(); err != nil && !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatal(err)
+	}
+	// Restoring the exact original bytes allows full replay as well. The old
+	// value must stay superseded even after those bytes are readable again.
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	recovered := openPublicDB(t, dir, tarp.Options{})
+	checkTail(recovered)
+	if got, err := recovered.Get(badKey); err != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("replacement after full recovery: %q, %v", got, err)
+	}
+}

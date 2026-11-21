@@ -73,7 +73,8 @@ then recheck health and version. A changed/deleted/reinserted key causes retry;
 an unchanged version may safely have moved physically during compaction.
 Failed or missing reads do not create cache entries. A source read failure
 on protected sealed DATA can trigger verified online repair and a retry. A
-persistent source error fail-stops the DB. Cache hits read memory and never
+confirmed local loss in sealed DATA fails the affected request and permits
+other reads and writes to continue. Cache hits read memory and never
 start an on-disk scrub.
 
 ## Commit and recovery
@@ -164,7 +165,8 @@ Use `errors.Is` for category/underlying causes and `errors.As` for `*OpError`,
 | All commit syncs finish but another read detects source failure before memory publication | Known `Committed`, unhealthy error | Fail-stop |
 | Correctable read/checksum failure in protected sealed DATA | Retry after verified repair | Healthy |
 | Uncertain rename or directory sync during online DATA repair | The triggering operation reports `NotApplied`. The DATA replacement matches `ErrCommitUncertain` | Fail-stop |
-| Persistent source read/checksum failure | Explicit error including the source cause | Fail-stop |
+| Confirmed sealed DATA damage exceeds available parity protection | `ErrDataUnavailable` with the DATA file ID and underlying cause | Remains open for reads and writes |
+| Active DATA read failure, invalid live index, or unlocalized source failure | Explicit error including the source cause | Fail-stop |
 | Backup or restore finds an existing destination, including an `EEXIST` from the no-replace rename | `NotApplied`, matching `fs.ErrExist` | Choose a new destination to retry |
 | Other backup or restore destination rename failures, or a parent directory sync failure after rename | `Unknown`, matching `ErrCommitUncertain` for the destination | Inspect the destination before retry. A backup source can continue serving requests after a destination failure |
 | Preliminary log rotation fails during `Compact` | `NotApplied` for the checkpoint, even if the rotation selected a new active log | An I/O failure during publication requires close/reopen |
@@ -324,13 +326,42 @@ Backup, compaction and index checkpoint creation retry private work against
 their captured input before publication. Recovery reads and staging do not
 hold the DB writer gate. Other files remain available during reconstruction.
 
-Automatic repair is triggered by an actual source read. If the recovery file
-is missing or the damage exceeds its correction budget, Tarp reports the source
-error and leaves the damaged DATA in place. A repair needs temporary free space
-for the entire affected DATA file.
-Active DATA uses the existing commit and failure rules. Startup validation and
-verification of an immutable backup continue to report corruption. A closed
-database can be repaired explicitly before reopening.
+Automatic repair is triggered by an actual source read. A repair needs temporary
+free space for the entire affected DATA file.
+
+### Serving with unrecoverable sealed DATA
+
+When Tarp confirms local DATA damage and cannot reconstruct the original
+file, the request returns `ErrDataUnavailable`. This includes missing or invalid
+parity, damage beyond its correction budget, and insufficient temporary space
+when the unpublished repair can be safely discarded. The error retains the cause
+and the file ID in `*UnavailableDataError`. The selected bytes remain in place.
+For subsequent disk reads Tarp checks the affected file's header on the open
+descriptor as well as each requested record. An intact record in the same file
+can still be read when its file identity is valid. Repeated failures in one
+file share a short retry delay to bound the cost of reconstruction.
+
+The live index still identifies the current key versions. A failed read returns
+an error for that version. Applications can overwrite or delete the key, and
+new writes follow the ordinary commit protocol. A cache hit can return the
+current value already held in memory. `BatchGet` keeps its all-or-error result
+contract and `Scan` ends with a terminal error. `Keys` can still enumerate the
+index. Individual `Get` calls during that enumeration see the version current
+at each call.
+
+Backup, full compaction and index checkpoint creation report errors when their
+input includes unavailable DATA. They do not publish incomplete output.
+Background compaction skips affected files and can reclaim healthy ones.
+Protection of other sealed files continues. `Close` reports known unavailable
+DATA still in the selected layout and releases the directory lock. Writes
+acknowledged during this period retain their ordinary durability contract.
+
+The guarantee of continued service applies to an open DB with a trusted index
+and commit frontier. `Full` startup validation still rejects damaged selected
+DATA. `Indexed` recovery can reopen when a validated checkpoint covers the
+damaged payload, covered headers and lengths validate, and the remaining log
+can be replayed. An uncertain publication, a failure of the active DATA or an
+untrusted index retains its existing fail-stop behavior.
 
 ### Offline repair and salvage
 

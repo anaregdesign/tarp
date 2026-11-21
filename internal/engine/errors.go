@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"syscall"
 
+	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/publication"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
@@ -20,12 +21,33 @@ var (
 	ErrUnhealthy           = errors.New("tarp: database requires close and reopen")
 	ErrBackupDirectory     = storage.ErrBackupDirectory
 	ErrCorrupt             = errors.New("tarp: corrupt storage")
+	ErrDataUnavailable     = storage.ErrDataUnavailable
 	ErrUnsupportedFormat   = errors.New("tarp: unsupported format")
 	ErrUnsupportedPlatform = errors.New("tarp: unsupported platform")
 	ErrNoSpace             = errors.New("tarp: insufficient storage space")
 	ErrBusy                = errors.New("tarp: maintenance operation already active")
 	ErrCommitUncertain     = errors.New("tarp: commit outcome uncertain")
 )
+
+// UnavailableDataError identifies the immutable DATA file that could not
+// supply a requested record. Its cause is available through errors.Unwrap.
+type UnavailableDataError = storage.UnavailableDataError
+
+// Keep the underlying error tree intact so a caller can distinguish a
+// localized DATA failure from a separate failure joined during cleanup.
+type localizedReadError struct{ cause error }
+
+func (e *localizedReadError) Error() string { return e.cause.Error() }
+func (e *localizedReadError) Unwrap() error { return e.cause }
+func (e *localizedReadError) Is(target error) bool {
+	switch target {
+	case ErrCorrupt:
+		return errors.Is(e.cause, format.ErrCorrupt)
+	case ErrNoSpace:
+		return errors.Is(e.cause, syscall.ENOSPC) || errors.Is(e.cause, syscall.EDQUOT)
+	}
+	return false
+}
 
 // Outcome describes publication of the requested operation, not temporary space.
 type Outcome = publication.Outcome

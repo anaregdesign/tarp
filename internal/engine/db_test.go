@@ -1561,3 +1561,81 @@ func TestOperationOutcomePreservesItsOwnFaultBesideUncertainReadRepair(t *testin
 		}
 	}
 }
+
+func TestGetRechecksUnavailableLocationAfterConcurrentMutation(t *testing.T) {
+	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
+		for _, mutation := range []string{"put", "delete"} {
+			t.Run(fmt.Sprintf("%v/%s", mode, mutation), func(t *testing.T) {
+				entered, resume := make(chan struct{}), make(chan struct{})
+				release := sync.OnceFunc(func() { close(resume) })
+				block := sync.OnceFunc(func() { close(entered); <-resume })
+				fs := &storage.IO{Hook: func(point string) error {
+					if point == "repair.verify:before" {
+						block()
+					}
+					return nil
+				}}
+				dir := t.TempDir()
+				db, err := OpenWithHooks(dir, Options{IndexMode: mode}, fs, parkedMaintenance())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				defer release()
+				damageProtectedReadFixture(t, db)
+				sidecars, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
+				if err != nil || len(sidecars) != 1 {
+					t.Fatalf("expected one sidecar: %v, %v", sidecars, err)
+				}
+				if err := os.Remove(sidecars[0]); err != nil {
+					t.Fatal(err)
+				}
+				type readResult struct {
+					value []byte
+					err   error
+				}
+				done := make(chan readResult, 1)
+				go func() {
+					value, err := db.Get([]byte("target"))
+					done <- readResult{value, err}
+				}()
+				select {
+				case <-entered:
+				case got := <-done:
+					t.Fatalf("Get finished before repair: %q, %v", got.value, got.err)
+				case <-time.After(5 * time.Second):
+					t.Fatal("Get did not start repair")
+				}
+				switch mutation {
+				case "put":
+					mustPut(t, db, "target", "new")
+				case "delete":
+					if err := db.Delete([]byte("target")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				release()
+				got := <-done
+				if mutation == "put" && (string(got.value) != "new" || got.err != nil) ||
+					mutation == "delete" && (got.value != nil || !errors.Is(got.err, ErrNotFound)) {
+					t.Fatalf("Get after %s: %q, %v", mutation, got.value, got.err)
+				}
+				mustPut(t, db, "unrelated", "available")
+			})
+		}
+	}
+}
+
+func TestLocalizedReadErrorPreservesCauseAndRepairSpaceLimit(t *testing.T) {
+	for _, quota := range []error{syscall.ENOSPC, syscall.EDQUOT} {
+		raw := &storage.UnavailableDataError{FileID: 11, Err: errors.Join(format.ErrCorrupt, quota)}
+		err := operationError("get", "read", raw)
+		if !storage.IsDataUnavailable(err) || !errors.Is(err, ErrDataUnavailable) ||
+			!errors.Is(err, ErrCorrupt) || !errors.Is(err, ErrNoSpace) || !errors.Is(err, quota) {
+			t.Fatalf("lost localized DATA or capacity error: %v", err)
+		}
+		if storage.IsDataUnavailable(errors.Join(err, syscall.EIO)) {
+			t.Fatal("a separate I/O failure was classified as localized")
+		}
+	}
+}

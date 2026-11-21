@@ -5,14 +5,33 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
+
+	"github.com/anaregdesign/tarp/internal/format"
 )
 
 type handle struct {
 	file    *File
 	fd      *os.File
 	used    int
-	retired bool
+	retired atomic.Bool
 	node    *list.Element
+}
+
+// Once sealed DATA is known to be damaged, a valid record checksum alone
+// cannot identify a foreign inode with the same key and sequence. Check the
+// header on the descriptor that supplied the bytes. A lease can outlive both
+// replacement of the path and clearing the unavailable marker.
+func (h *handle) verifyReadIdentity() error {
+	r := h.file.sealed.Load()
+	if r == nil || r.unavailable.Load() == nil && !h.retired.Load() {
+		return nil
+	}
+	var header [format.SegmentHeaderBytes]byte
+	if _, err := h.fd.ReadAt(header[:], 0); err != nil {
+		return requiredFileError("segment header", err)
+	}
+	return verifySegmentHeader(header[:], r.uuid, r.entry)
 }
 
 type handles struct {
@@ -71,7 +90,7 @@ func (h *handles) acquire(f *File) (*handle, error) {
 func (h *handles) release(got *handle) {
 	h.mu.Lock()
 	got.used--
-	if got.retired && got.used == 0 {
+	if got.retired.Load() && got.used == 0 {
 		h.lru.Remove(got.node)
 		if err := got.fd.Close(); err != nil {
 			h.closeErr = errors.Join(h.closeErr, err)
@@ -92,7 +111,7 @@ func (h *handles) invalidate(f *File) error {
 		return nil
 	}
 	delete(h.items, f)
-	got.retired = true
+	got.retired.Store(true)
 	if got.used != 0 {
 		return nil
 	}

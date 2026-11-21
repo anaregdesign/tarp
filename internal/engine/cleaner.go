@@ -124,14 +124,22 @@ func (db *DB) cleanYield(ctx context.Context) error {
 // nextCandidate inspects committed per-file accounting under the writer gate.
 // With source bytes S and estimated output bytes W, (S-W)/(S+W) >= 1/3
 // simplifies to W <= S/2. Ranking this ratio is equivalent to minimizing W/S.
-func nextCandidate(s *storage.Store, target int64) (inputs []format.File, staging uint64) {
+func nextCandidate(s *storage.Store, target int64) (inputs []format.File, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
 	metadata := uint64(len(s.Manifest)) + format.FrontierBytes
 	var best format.File
 	for i, entry := range s.Catalog.Files {
 		if !entry.HasPhysicalFile() {
 			continue
 		}
-		records := retainedBytes(s.Files[entry.ID])
+		f := s.Files[entry.ID]
+		if err := f.UnavailableData(); err != nil {
+			if blocked == nil {
+				blocked = make(map[uint64]*storage.UnavailableDataError)
+			}
+			blocked[entry.ID] = err
+			continue
+		}
+		records := retainedBytes(f)
 		half := uint64(entry.Bytes) / 2
 		if records > half {
 			continue
@@ -156,7 +164,7 @@ func nextCandidate(s *storage.Store, target int64) (inputs []format.File, stagin
 		best, staging = entry, output
 		inputs = s.Catalog.Files[i : i+1]
 	}
-	return inputs, staging
+	return inputs, staging, blocked
 }
 
 func retainedBytes(f *storage.File) uint64 {
@@ -186,8 +194,12 @@ func obsoleteGroupAt(s *storage.Store, files []format.File, target, metadata uin
 		if !entry.HasPhysicalFile() {
 			continue // Preserve intermediate metadata-only sequence coverage.
 		}
+		f := s.Files[entry.ID]
+		if f.UnavailableData() != nil {
+			break
+		}
 		size := uint64(entry.Bytes)
-		records := retainedBytes(s.Files[entry.ID])
+		records := retainedBytes(f)
 		if records > size/2 || records > target-format.SegmentHeaderBytes-retained || size > math.MaxInt64-source {
 			break
 		}
@@ -205,7 +217,7 @@ func obsoleteGroupAt(s *storage.Store, files []format.File, target, metadata uin
 // repackGroup picks the oldest eligible run from the immutable catalog. Try at
 // most eight physical files per start. Empty log intervals contribute coverage
 // without requiring a file read. Snapshots and logs have different replay rules.
-func repackGroup(files []format.File, target int64) ([]format.File, int64) {
+func repackGroup(files []format.File, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.File, int64) {
 	const minFiles, maxFiles = 4, 8
 	for start, first := range files {
 		if !first.HasPhysicalFile() || first.Bytes > target/4 {
@@ -222,7 +234,7 @@ func repackGroup(files []format.File, target int64) ([]format.File, int64) {
 			if !entry.HasPhysicalFile() {
 				continue
 			}
-			if entry.Bytes > target/4 || entry.Bytes > target-total {
+			if blocked[entry.ID] != nil || entry.Bytes > target/4 || entry.Bytes > target-total {
 				break
 			}
 			count++
@@ -305,8 +317,9 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 	removed, pinned, pending, err := db.store.RetireCleaned()
 	var inputs []format.File
 	var staging uint64
+	var blocked map[uint64]*storage.UnavailableDataError
 	if err == nil {
-		inputs, staging = nextCandidate(db.store, db.opts.TargetSegmentBytes)
+		inputs, staging, blocked = nextCandidate(db.store, db.opts.TargetSegmentBytes)
 	}
 	files, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)
 	db.writer.Unlock()
@@ -327,12 +340,19 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		// Foreground rotations publish a new catalog slice. Inspect this one
 		// outside the writer gate; BeginClean rechecks the selection.
 		var inputBytes int64
-		inputs, inputBytes = repackGroup(files, db.opts.TargetSegmentBytes)
+		inputs, inputBytes = repackGroup(files, db.opts.TargetSegmentBytes, blocked)
 		staging = uint64(inputBytes) + uint64(manifestBytes) + format.FrontierBytes
 	}
 	if len(inputs) == 0 {
 		if pinned != 0 {
 			db.deferCleaning("pinned", nil)
+		} else if len(blocked) != 0 {
+			for _, entry := range files {
+				if unavailable := blocked[entry.ID]; unavailable != nil {
+					db.deferCleaning("unavailable DATA", publicCause(unavailable))
+					break
+				}
+			}
 		} else {
 			db.deferCleaning("", nil)
 		}
@@ -353,6 +373,10 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 	switch {
 	case err == nil:
 		db.deferCleaning("", nil)
+		return true, false
+	case storage.IsDataUnavailable(err):
+		// The next pass can reclaim other inputs without retrying the damaged file.
+		db.deferCleaning("unavailable DATA", err)
 		return true, false
 	case errors.Is(err, errManualPriority), errors.Is(err, context.Canceled):
 		return false, false

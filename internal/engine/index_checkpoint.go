@@ -141,7 +141,7 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 	if err != nil {
 		var source *storage.SourceError
 		if errors.As(err, &source) {
-			db.poison(err)
+			db.readFailure(err)
 		}
 		return operationError(op, "build", err)
 	}

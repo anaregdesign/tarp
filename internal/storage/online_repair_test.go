@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/index/memory"
@@ -215,6 +218,224 @@ func TestReadRepairRejectsUnpinnedActiveAndNonMediaFailures(t *testing.T) {
 		t.Fatalf("active repair: %v", got)
 	}
 	s.IO = nil
+}
+
+func TestUnavailableReadThrottlesRepairAndAcceptsRestoredParity(t *testing.T) {
+	fixture, s, f := openedRepairFixture(t)
+	parity := filepath.Join(s.Dir, parityName(s.Current.UUID, f.ID))
+	saved, err := os.ReadFile(parity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(parity); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(f.Path, 8500); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	s.IO = &IO{Hook: func(point string) error {
+		if point == "repair.verify:before" {
+			attempts++
+		}
+		return nil
+	}}
+	first := fmt.Errorf("first record: %w", io.ErrUnexpectedEOF)
+	err = s.RepairRead(t.Context(), f, first)
+	var local *UnavailableDataError
+	if !IsDataUnavailable(err) || !errors.As(err, &local) || local.FileID != f.ID ||
+		!errors.Is(err, ErrDataUnavailable) || !errors.Is(err, first) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first failure: %v", err)
+	}
+	// Control expiry without relying on the test process being scheduled
+	// again within the production cooldown.
+	r := f.sealed.Load()
+	r.mu.Lock()
+	startedCooldown := !r.retryAfter.IsZero()
+	r.retryAfter = time.Now().Add(time.Hour)
+	r.mu.Unlock()
+	if !startedCooldown {
+		t.Fatal("missing repair cooldown")
+	}
+	info := f.UnavailableData()
+	if info == nil || info.FileID != f.ID || errors.Is(info, first) {
+		t.Fatalf("file status includes the wrong identity or a caller-specific error: %v", info)
+	}
+	info.FileID = 0
+	err = s.RepairRead(t.Context(), f, syscall.EIO)
+	if !IsDataUnavailable(err) || !errors.Is(err, syscall.EIO) || errors.Is(err, first) ||
+		attempts != 1 || f.UnavailableData().FileID != f.ID {
+		t.Fatalf("repeated read made %d repair attempts: %v", attempts, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := s.RepairRead(ctx, f, ErrCorrupt); err != context.Canceled {
+		t.Fatalf("canceled read during cooldown: %v", err)
+	}
+	current := filepath.Join(s.Dir, "CURRENT")
+	moved := filepath.Join(t.TempDir(), "frontier")
+	if err := os.Rename(current, moved); err != nil {
+		t.Fatal(err)
+	}
+	err = s.RepairRead(t.Context(), f, syscall.EIO)
+	if IsDataUnavailable(err) || !errors.Is(err, syscall.EIO) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cooldown masked a missing root: %v", err)
+	}
+	if err := os.Rename(moved, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parity, saved, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	r.retryAfter = time.Time{}
+	r.mu.Unlock()
+	if err := s.RepairRead(t.Context(), f, io.ErrUnexpectedEOF); err != nil || f.UnavailableData() != nil || attempts != 2 {
+		t.Fatalf("retry after restoring parity: attempts %d, err %v, status %v", attempts, err, f.UnavailableData())
+	}
+	if b, err := os.ReadFile(f.Path); err != nil || !bytes.Equal(b, fixture.originals[0]) {
+		t.Fatalf("recovered bytes: %v", err)
+	}
+}
+
+func TestUnavailableReadRetriesOncePrivateStagingSpaceReturns(t *testing.T) {
+	for _, tc := range []struct {
+		point string
+		cause error
+	}{{"repair.write:before", syscall.ENOSPC}, {"repair.sync:before", syscall.EDQUOT}} {
+		t.Run(tc.point, func(t *testing.T) {
+			fixture, s, f := openedRepairFixture(t)
+			b := bytes.Clone(fixture.originals[0])
+			b[101] ^= 1
+			if err := os.WriteFile(f.Path, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+			s.IO = &IO{Hook: func(point string) error {
+				if point == tc.point {
+					return tc.cause
+				}
+				return nil
+			}}
+			err := s.RepairRead(t.Context(), f, ErrCorrupt)
+			if !IsDataUnavailable(err) || !errors.Is(err, tc.cause) {
+				t.Fatalf("repair space error: %v", err)
+			}
+			if rem, err := filepath.Glob(filepath.Join(s.Dir, workspaceName, "tarp-repair-*")); err != nil || len(rem) != 0 {
+				t.Fatalf("left private repair files: %v, %v", rem, err)
+			}
+			if got, err := os.ReadFile(f.Path); err != nil || !bytes.Equal(got, b) {
+				t.Fatalf("original DATA changed on failed staging: %v", err)
+			}
+			s.IO = nil
+			r := f.sealed.Load()
+			r.mu.Lock()
+			r.retryAfter = time.Time{}
+			r.mu.Unlock()
+			if err := s.RepairRead(t.Context(), f, ErrCorrupt); err != nil || f.UnavailableData() != nil {
+				t.Fatalf("retry after space restored: %v, %v", err, f.UnavailableData())
+			}
+			if got, err := os.ReadFile(f.Path); err != nil || !bytes.Equal(got, fixture.originals[0]) {
+				t.Fatalf("retry failed to replace DATA: %v", err)
+			}
+		})
+	}
+}
+
+func TestReconstructionDistinguishesParityReadFromOutputMediaError(t *testing.T) {
+	fixture, s, f := openedRepairFixture(t)
+	entry := s.Catalog.Files[0]
+	fd, err := OpenRegular(filepath.Join(s.Dir, parityName(s.Current.UUID, f.ID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	source := bytes.NewReader(fixture.originals[0])
+	// Read the valid parity header, then fail within its stripe.
+	parity := io.MultiReader(io.LimitReader(fd, 128), iotest.ErrReader(syscall.EIO))
+	err = format.RecoverParity(t.Context(), source, parity, io.Discard, s.Current.UUID, entry)
+	if !errors.Is(err, syscall.EIO) || !unavailableReconstruction(err) || unavailableReconstruction(&destinationError{syscall.EIO}) {
+		t.Fatalf("media read classification: %v", err)
+	}
+}
+
+func TestUnavailableReadRequiresVerifiedInputFailure(t *testing.T) {
+	for _, mode := range []string{"two damaged blocks", "invalid parity", "staged write", "staged readback", "sync", "wrong root", "absent root"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture, s, f := openedRepairFixture(t)
+			parity := filepath.Join(s.Dir, parityName(s.Current.UUID, f.ID))
+			b := bytes.Clone(fixture.originals[0])
+			b[200] ^= 1
+			if mode == "two damaged blocks" {
+				b[6500] ^= 1
+			}
+			if err := os.WriteFile(f.Path, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "invalid parity":
+				if err := os.Truncate(parity, 0); err != nil {
+					t.Fatal(err)
+				}
+			case "staged write", "sync":
+				at := map[string]string{"staged write": "repair.write:before", "sync": "repair.sync:before"}[mode]
+				s.IO = &IO{Hook: func(point string) error {
+					if point == at {
+						return ErrCorrupt
+					}
+					return nil
+				}}
+			case "staged readback":
+				s.IO = &IO{WriteAt: func(fd *os.File, p []byte, off int64) (int, error) {
+					p = bytes.Clone(p)
+					p[0] ^= 1
+					return fd.WriteAt(p, off)
+				}}
+			case "wrong root":
+				if err := os.Remove(parity); err != nil {
+					t.Fatal(err)
+				}
+				current := s.Current
+				current.UUID[0] ^= 1
+				if err := os.WriteFile(filepath.Join(s.Dir, "CURRENT"), format.EncodeFrontier(current), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "absent root":
+				moved := filepath.Join(t.TempDir(), "old")
+				if err := os.Rename(s.Dir, moved); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := os.Rename(moved, s.Dir); err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+			err := s.RepairRead(t.Context(), f, ErrCorrupt)
+			wantLocal := mode == "two damaged blocks" || mode == "invalid parity"
+			if !errors.Is(err, ErrCorrupt) || IsDataUnavailable(err) != wantLocal ||
+				errors.Is(err, ErrDataUnavailable) != wantLocal || (f.UnavailableData() != nil) != wantLocal {
+				t.Fatalf("classification: %v", err)
+			}
+			if mode == "invalid parity" && !errors.Is(err, format.ErrInvalidParity) {
+				t.Fatalf("lost sidecar error: %v", err)
+			}
+		})
+	}
+}
+
+func TestDataUnavailableClassificationPreservesIndependentFailures(t *testing.T) {
+	err := &UnavailableDataError{FileID: 19, Err: ErrCorrupt}
+	if !IsDataUnavailable(errors.Join(fmt.Errorf("copy: %w", err), err)) {
+		t.Fatal("lost source identity")
+	}
+	for _, mixed := range []error{
+		errors.Join(err, syscall.EIO), errors.Join(context.Canceled, err), &IndexWorkError{Err: err},
+		&destinationError{err}, fault("publication", publication.Unknown, true, err), &UncertainReadRepair{Err: err},
+	} {
+		if IsDataUnavailable(mixed) {
+			t.Fatalf("suppressed independent failure: %v", mixed)
+		}
+	}
 }
 
 func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {

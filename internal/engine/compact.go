@@ -206,6 +206,6 @@ func (db *DB) compactFailure(err error) {
 	var work *storage.IndexWorkError
 	if errors.As(err, &source) || !errors.As(err, &work) && (errors.Is(err, format.ErrCorrupt) ||
 		errors.Is(err, format.ErrUnsupported) || errors.Is(err, syscall.EIO)) {
-		db.poison(err)
+		db.readFailure(err)
 	}
 }

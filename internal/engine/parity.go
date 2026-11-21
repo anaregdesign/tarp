@@ -185,7 +185,7 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 		}
 		w.scannedLayout = layout
 		next := len(files)
-		var firstErr error
+		var firstErr, unavailable error
 		for i := w.next; i < len(files); i++ {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -212,6 +212,14 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 				db.notifyCleaner()
 			}
 			if err != nil {
+				if storage.IsDataUnavailable(err) {
+					// Keep protecting subsequent files. Explicit calls report
+					// the gap; the worker advances past it until a recheck.
+					if recheck && unavailable == nil {
+						unavailable = err
+					}
+					continue
+				}
 				// A failed optional output cannot invalidate an acknowledged
 				// write. Confirm DATA damage still belongs to the selected
 				// layout before reporting it as a live engine failure.
@@ -235,6 +243,6 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 			continue
 		}
 		w.next = next
-		return errors.Join(ctx.Err(), firstErr, db.health())
+		return errors.Join(ctx.Err(), unavailable, firstErr, db.health())
 	}
 }

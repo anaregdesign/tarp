@@ -106,7 +106,7 @@ func (db *DB) readAdjacent(results []BatchResult, reads []batchRead) error {
 		group[i] = storage.AdjacentRead{Location: read.loc, Key: results[read.slot].Value}
 	}
 	if err := db.store.ReadAdjacent(group[:len(reads)]); err != nil {
-		db.poison(err)
+		db.readFailure(err)
 		return operationError("batch-get", "read", err)
 	}
 	for i, read := range reads {

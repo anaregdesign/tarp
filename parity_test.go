@@ -390,13 +390,17 @@ func flipSealedTestBytes(t *testing.T, path string, wire []byte, offsets ...int)
 	}
 }
 
-func TestForegroundUnrepairableDATAStopsWritesAndPreservesEvidence(t *testing.T) {
+func TestForegroundUnrepairableDATAIsolatedWhileHealthyRecordsRemainAvailable(t *testing.T) {
 	for _, damage := range []string{"two lost blocks", "missing sidecar", "invalid sidecar"} {
 		t.Run(damage, func(t *testing.T) {
 			dir := t.TempDir()
 			seed := openPublicDB(t, dir, tarp.Options{})
+			size := 1000
+			if damage == "two lost blocks" {
+				size = 9000
+			}
 			entries := []tarp.Entry{
-				{Key: []byte("bad"), Value: bytes.Repeat([]byte{'x'}, 9000)},
+				{Key: []byte("bad"), Value: bytes.Repeat([]byte{'x'}, size)},
 				{Key: []byte("survivor"), Value: []byte("healthy record")},
 			}
 			if err := seed.BatchPut(entries); err != nil {
@@ -436,19 +440,84 @@ func TestForegroundUnrepairableDATAStopsWritesAndPreservesEvidence(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Short records use a single adjacent read. The large record
+			// is read independently in a batch with a verified neighbor.
+			keys := [][]byte{entries[0].Key, entries[1].Key}
+			if damage == "two lost blocks" {
+				keys[0], keys[1] = keys[1], keys[0]
+			}
+			results, err := db.BatchGet(keys)
+			var unavailable *tarp.UnavailableDataError
+			if results != nil || !errors.Is(err, tarp.ErrDataUnavailable) || !errors.Is(err, tarp.ErrCorrupt) ||
+				!errors.As(err, &unavailable) || (wantCause != nil && !errors.Is(err, wantCause)) {
+				t.Fatalf("failed BatchGet returned %d results, %v", len(results), err)
+			}
+			id, err := strconv.ParseUint(data[strings.LastIndexByte(data, '-')+1:], 16, 64)
+			if err != nil || unavailable.FileID != id {
+				t.Fatalf("reported DATA ID %d for %s: %v", unavailable.FileID, data, err)
+			}
+			if value, err := db.Get(entries[0].Key); value != nil || !errors.Is(err, tarp.ErrDataUnavailable) || errors.Is(err, tarp.ErrNotFound) {
+				t.Fatalf("Get unavailable key: %q, %v", value, err)
+			}
+			view, err := tarp.Bind(db, tarp.StringCodec{}, tarp.StringCodec{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value, err := view.Get("bad"); value != "" || !errors.Is(err, tarp.ErrDataUnavailable) {
+				t.Fatalf("typed Get returned %q, %v", value, err)
+			}
+			if values, err := view.BatchGet([]string{"survivor", "bad"}); values != nil || !errors.Is(err, tarp.ErrDataUnavailable) {
+				t.Fatalf("typed BatchGet returned %+v, %v", values, err)
+			}
+			var terminal bool
+			for entry, err := range db.Scan(t.Context()) {
+				if terminal {
+					t.Fatal("Scan yielded an entry after its terminal error")
+				}
+				if err != nil {
+					if !errors.Is(err, tarp.ErrDataUnavailable) || entry.Key != nil || entry.Value != nil {
+						t.Fatalf("Scan: %+v, %v", entry, err)
+					}
+					terminal = true
+				}
+			}
+			if !terminal {
+				t.Fatal("Scan hid an unavailable value")
+			}
 			if value, err := db.Get(entries[1].Key); err != nil || !bytes.Equal(value, entries[1].Value) {
 				t.Fatalf("healthy record in the same sealed file: %q, %v", value, err)
 			}
-			// An earlier valid record in the batch must not escape a failed read.
-			results, err := db.BatchGet([][]byte{[]byte("survivor"), []byte("bad")})
-			if results != nil || !errors.Is(err, tarp.ErrCorrupt) || (wantCause != nil && !errors.Is(err, wantCause)) {
-				t.Fatalf("failed BatchGet returned %d results, %v", len(results), err)
+			var keyCount int
+			for _, err := range db.Keys(t.Context()) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				keyCount++
 			}
-			if err := db.Put([]byte("next"), nil); !errors.Is(err, tarp.ErrUnhealthy) {
-				t.Fatalf("Put after unrepairable DATA: %v", err)
+			if keyCount != len(entries) {
+				t.Fatalf("Keys returned %d keys, want %d", keyCount, len(entries))
 			}
-			if err := db.Close(); !errors.Is(err, tarp.ErrCorrupt) {
-				t.Fatalf("Close lost the read failure: %v", err)
+			if err := db.Put([]byte("next"), []byte("new value")); err != nil {
+				t.Fatal(err)
+			}
+			if damage == "two lost blocks" {
+				if err := db.Delete(entries[0].Key); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Get(entries[0].Key); !errors.Is(err, tarp.ErrNotFound) {
+					t.Fatalf("Get after deleting unavailable key: %v", err)
+				}
+			}
+			if err := db.Put(entries[0].Key, []byte("replacement")); err != nil {
+				t.Fatal(err)
+			}
+			results, err = db.BatchGet([][]byte{entries[0].Key, entries[1].Key, []byte("next")})
+			if err != nil || len(results) != 3 || string(results[0].Value) != "replacement" ||
+				!bytes.Equal(results[1].Value, entries[1].Value) || string(results[2].Value) != "new value" {
+				t.Fatalf("BatchGet after replacing unavailable key: %+v, %v", results, err)
+			}
+			if err := db.Close(); !errors.Is(err, tarp.ErrDataUnavailable) || errors.Is(err, tarp.ErrUnhealthy) {
+				t.Fatalf("Close: %v", err)
 			}
 			if got, err := os.ReadFile(data); err != nil || !bytes.Equal(got, damaged) {
 				t.Fatalf("failed repair changed DATA: %v", err)
@@ -456,12 +525,8 @@ func TestForegroundUnrepairableDATAStopsWritesAndPreservesEvidence(t *testing.T)
 			if damage != "two lost blocks" {
 				return
 			}
-			id, err := strconv.ParseUint(data[strings.LastIndexByte(data, '-')+1:], 16, 64)
-			if err != nil {
-				t.Fatal(err)
-			}
 			var records []tarp.SalvagedRecord
-			report, err := tarp.SalvageData(t.Context(), dir, id, 0, func(r tarp.SalvagedRecord) error {
+			report, err := tarp.SalvageData(t.Context(), dir, unavailable.FileID, 0, func(r tarp.SalvagedRecord) error {
 				records = append(records, r)
 				return nil
 			})
@@ -471,5 +536,76 @@ func TestForegroundUnrepairableDATAStopsWritesAndPreservesEvidence(t *testing.T)
 				t.Fatalf("salvage returned %d records, report %+v, error %v", len(records), report, err)
 			}
 		})
+	}
+}
+
+func TestUnavailableForeignDATACannotSupplyAValidLookingRecord(t *testing.T) {
+	// Equal record lengths and identical commit sequences give the foreign
+	// records valid checksums and the exact addresses expected by this index.
+	seed := func(dir, value string) string {
+		t.Helper()
+		db := openPublicDB(t, dir, tarp.Options{})
+		var entries []tarp.Entry
+		for _, key := range []string{"hot", "a", "b"} {
+			entries = append(entries, tarp.Entry{Key: []byte(key), Value: []byte(value)})
+		}
+		if err := db.BatchPut(entries); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ProtectParity(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := sealedTestPaths(t, dir)
+		return data
+	}
+	dir := t.TempDir()
+	path := seed(dir, "local")
+	foreign := seed(t.TempDir(), "other")
+	db, err := tarp.Open(dir, tarp.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := db.Get([]byte("hot")); err != nil || string(value) != "local" {
+		t.Fatalf("priming verified cache: %q, %v", value, err)
+	}
+	_, parity := sealedTestPaths(t, dir)
+	if err := os.Remove(parity); err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := os.ReadFile(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, wrong, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Backup(t.Context(), filepath.Join(t.TempDir(), "backup")); !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatalf("Backup did not detect foreign DATA: %v", err)
+	}
+	if value, err := db.Get([]byte("a")); value != nil || !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatalf("Get accepted a foreign record: %q, %v", value, err)
+	}
+	if values, err := db.BatchGet([][]byte{[]byte("a"), []byte("b")}); values != nil || !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatalf("adjacent BatchGet accepted foreign records: %+v, %v", values, err)
+	}
+	failures := 0
+	for entry, err := range db.Scan(t.Context()) {
+		if !errors.Is(err, tarp.ErrDataUnavailable) || entry.Key != nil || entry.Value != nil {
+			t.Fatalf("Scan accepted a foreign record: %+v, %v", entry, err)
+		}
+		failures++
+	}
+	if failures != 1 {
+		t.Fatalf("Scan reported %d failures, want one", failures)
+	}
+	if value, err := db.Get([]byte("hot")); err != nil || string(value) != "local" {
+		t.Fatalf("cached local value: %q, %v", value, err)
 	}
 }

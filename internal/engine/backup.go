@@ -67,7 +67,7 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	if err != nil {
 		var source *storage.SourceError
 		if errors.As(err, &source) {
-			db.poison(err)
+			db.readFailure(err)
 		}
 		return operationError("backup", "copy", err)
 	}
