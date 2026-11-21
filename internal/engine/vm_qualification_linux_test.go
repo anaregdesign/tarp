@@ -79,6 +79,11 @@ func TestVMCampaignGuest(t *testing.T) {
 	}
 	guesttest.MountTarget(t, cfg.Action == "crash", cfg.Name, cfg.Seed)
 	dir, output := "/mnt/tarp-data/db", "/mnt/tarp-data/output"
+	// Run the migration fixture beside the standard initialization oracle.
+	// Its known state is rechecked in the independent cold boot.
+	if cfg.Name == "init-operation-ack-after-n1" {
+		vmLowSpaceReplay(t, cfg.Action == "crash")
+	}
 	if cfg.Action == "crash" {
 		if cfg.Mode == "exhaustion" {
 			vmExhaustion(t, dir, output, cfg.Seed)
