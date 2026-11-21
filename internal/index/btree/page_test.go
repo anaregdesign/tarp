@@ -1,12 +1,53 @@
 package btree
 
 import (
+	"cmp"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/anaregdesign/tarp/internal/index"
 )
+
+func TestKeyComparisonAllocationsDoNotGrowWithMatchedPrefix(t *testing.T) {
+	tr := openTest(t)
+	tx := tr.Begin().(*transaction)
+	defer tx.Abort()
+	inline := strings.Repeat("\x00\xff", 64)
+	long := strings.Repeat(inline, 72) + "\x80"
+	keys := []string{inline, long}
+	for i, key := range keys {
+		if err := tx.Put(key, addr(uint64(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leafPage, err := tr.p.read(tx.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, key := range keys {
+		cell, err := leafPage.raw(i)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allocs := func(query string) float64 {
+			want := strings.Compare(key, query)
+			return testing.AllocsPerRun(100, func() {
+				got, err := cell.compare(tr.p, query)
+				if err != nil || cmp.Compare(got, 0) != want {
+					t.Fatalf("compare %d-byte key with %d-byte query = %d, %v; want sign %d", len(key), len(query), got, err, want)
+				}
+			})
+		}
+		// The first-byte miss includes fixed setup costs for this cell.
+		earlyMiss := allocs("\x01")
+		for _, query := range []string{key, key[:len(key)-1], key[:len(key)-1] + "\x7f", long + "\x00"} {
+			if got := allocs(query); got > earlyMiss {
+				t.Errorf("compare %d-byte key with %d-byte query allocated %.0f times; early miss %.0f", len(key), len(query), got, earlyMiss)
+			}
+		}
+	}
+}
 
 func TestPackedCellBytesAtMergeBoundary(t *testing.T) {
 	for _, tc := range []struct {
