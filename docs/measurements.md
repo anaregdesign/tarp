@@ -27,7 +27,7 @@ The runner archives committed HEAD, pins the current stable Go Bookworm image by
 | Default-budget B+tree | Seed 196,608 shuffled 64-byte keys, then measure 1,024 distinct Value-LRU misses and four windows of 256 Get/Delete/new-Put cycles at constant live cardinality. Require index page loads, spill and eviction. Record latency distributions, throughput and logical scratch length. Reopen and check every live entry. |
 | Backup verification and restore | Time the three public APIs on the same warm, immutable backup for each of 20k, 40k and 100k distinct 16-byte keys. Count completed logical DATA replay passes and bytes, including source and stage for Restore. Hash/copy volumes follow manifest lengths. A separate invocation samples process heap and apparent scratch-file length every 2 ms; short peaks can be missed. Both restored images must match the original digest. |
 | First OpenExisting | Every arm starts from a fresh private copy of the same 4,096-key image. Vary only 0, 100 or 1,000 empty, owned, unselected DATA/MANIFEST files. Time the first Open and count storage directory listings; verify removal and the full state digest after stopping the clock. |
-| BatchPut during manual Compact | Compare a 512-entry writer on disjoint tail keys and on captured keys spaced through the checkpoint. Each key set has its own control without Compact. The timed writer runs for three seconds after installing a common tail. Record worker wall time, entries/s, batch p99, Compact duration and actual waits caused by a staged key conflict. Reopen and verify all values and the frontier. |
+| BatchPut during manual Compact | With the Memory index, compare a 512-entry writer on disjoint tail keys and on captured keys spaced through the checkpoint. Each key set has its own control without Compact. The timed writer runs for three seconds after installing a common tail. Record worker wall time, entries/s, batch p99, Compact duration and actual waits caused by a staged key conflict. Reopen and verify all values and the frontier. |
 | Sustained automatic cleaner | Maintain 256 live keys across 512 batches of 16 overwrites, deleting and reinserting a batch every eight steps. Compare no added delay and a 1 ms pause per step. Record a directory census every 32 steps, write latency, rotations, and time from the last write to the first worker pass at that frontier with no eligible cleaning or pending retirement. Sampled file lengths include staging files visible during the census and retainable tombstones. Verify every recovered value. |
 
 The runner builds a measurement-only Go source overlay with counters for directory listings, selected DATA scans, staged-key conflicts and the cleaner's first idle frontier. It fails if the instrumentation anchors change. The regular library and CI build use the original sources. Index page loads and logical DATA bytes can be served by the guest page cache. These workloads measure this container filesystem and do not exercise power loss.
@@ -37,8 +37,15 @@ The runner builds a measurement-only Go source overlay with counters for directo
 The [index-mode campaign](benchmarks/index-modes.md) compares Memory and B+tree
 at two live-key cardinalities and measures latency, page reads, heap, scratch
 and maintenance. The [full Go suite](benchmarks/index-full-suite.md) compares
-the default Memory mode with v0.8.0. The [disposable VM profiles](benchmarks/index-vm.md)
+the then-default Memory backend with v0.8.0. The [disposable VM profiles](benchmarks/index-vm.md)
 record results for 64 B, 1 KiB and 4 KiB values.
+
+At `c495e44`, a hosted Linux/ext4 run on 131,072 keys measured a median
+round p99 of 0.428 ms for cold Get and 2.077 ms for Put during manual Compact,
+using a 16 MiB B+tree budget and 4 KiB values. Of the 40,960 sampled Gets,
+40,578 incurred a thread-attributed storage read, overlapped a successful Put
+and ran entirely inside the record-copy interval.
+[Concurrent B+tree I/O measurements](https://github.com/anaregdesign/tarp/actions/runs/44921652867)
 
 ## Public batch APIs and Stats
 
@@ -300,10 +307,10 @@ The interference profiles add one separately identified writer key.
   bytes are tracked separately from obsolete Put bytes.
   Each cold Open has independently acknowledged external NBD read intervals;
   cache purge and handshake time are excluded from Open latency.
-- Complete-index retention is measured by retaining then releasing the **actual**
-  rebuilt key map, owned keys, inline locations and shared file registry after
-  closing cache/handles. It is not the old cloned-map proxy. Fixed DB/catalog/
-  frontier state is excluded; raw GC deltas remain noisy, not a process limit.
+- The B+tree profile records charged index pages and scratch-file space before
+  Close. In Memory mode the profile retains and then releases the rebuilt key
+  map and shared file registry after closing the cache and handles. The GC
+  delta estimates the heap held by those objects.
 - Thirty-two Gets per repetition clear application cache and purge **only this
   guarded guest's** clean page cache. A start/end acknowledgment through the
   independent read-only 9p channel brackets the operation against external NBD
@@ -377,9 +384,10 @@ Each repetition records:
   not deliberately evicted; physical residency is not independently verified.
 - A separately labeled state-lock hit critical-section **probe**, not an
   end-to-end operation or exact hold time of every production lock.
-- Heap, runtime Sys, process peak RSS, logical cache bytes, complete-index
-  logical fields and a retained cloned map/key heap estimate, process descriptor
-  count, handle limit, live/obsolete/data/directory bytes, and filesystem numbers.
+- Heap, runtime Sys, process peak RSS, logical cache bytes, index metrics,
+  process descriptor count, handle limit, live/obsolete/data/directory bytes,
+  and filesystem numbers. Memory-mode samples also report logical index bytes
+  and the heap held by a clone of the map and keys.
 - Two full update passes and deletion of one quarter of keys, followed by reopen
   timings before and after checkpointing. These are bounded histories, not a
   production-scale startup qualification.

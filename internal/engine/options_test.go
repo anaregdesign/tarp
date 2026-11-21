@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestIndexModeNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		opts   Options
+		mode   IndexMode
+		budget int64
+	}{
+		{"default", Options{}, IndexBTree, 16 << 20},
+		{"default with budget", Options{BTreeMemoryBudgetBytes: 4 << 20}, IndexBTree, 4 << 20},
+		{"memory", Options{IndexMode: IndexMemory}, IndexMemory, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.opts.normalized()
+			if err != nil || got.IndexMode != tc.mode || got.BTreeMemoryBudgetBytes != tc.budget || got.OpenValidation != Full {
+				t.Fatalf("normalized options: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestOptionsAdmission(t *testing.T) {
 	o := Options{ValueCacheBudgetBytes: 130, MaxRecordBytes: 50, ReadFileHandles: 1}
 	if _, err := o.normalized(); err != nil {

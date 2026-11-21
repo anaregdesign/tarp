@@ -38,7 +38,11 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 	keys, value, opts := measurementInput(size, 4)
 	opts.MaxRecordBytes = int64(format.RecordHeaderBytes + len(keys[0]) + size)
 	opts.TargetSegmentBytes = format.SegmentHeaderBytes + 32*opts.MaxRecordBytes
-	db, err := engine.OpenWithHooks(filepath.Join(t.TempDir(), "seed"), opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
+	// Keep the active tail unsealed when closing the seed. Measured clones
+	// open with the default index.
+	seedOpts := opts
+	seedOpts.IndexMode = engine.IndexMemory
+	db, err := engine.OpenWithHooks(filepath.Join(t.TempDir(), "seed"), seedOpts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +87,7 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 		t.Fatal("incorrect compaction fixture contents or frontier")
 	}
 	return compactionFixture{
-		dir: probe.Dir(), opts: probe.Options(), source: source,
+		dir: probe.Dir(), opts: opts, source: source,
 		frontier: frontier, stateHash: hash, liveKeys: keysLeft,
 	}
 }
@@ -200,17 +204,14 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 	return result
 }
 
-// Join the worker before inspecting final metadata. Check actual source
-// removal before reopen gets an opportunity to clean up orphaned files.
+// Measure the DATA layout after retirement and before Close can seal the tail
+// for its index checkpoint. Reopen independently verifies the logical state.
 func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) compactionMeasurement {
 	t.Helper()
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
 	probe := engine.Observe(db)
 	dir := probe.Dir()
 	result := compactionMeasurement{
-		Mode: mode, Options: f.opts, SealedSourceBytes: f.source.Bytes,
+		Mode: mode, Options: probe.Options(), SealedSourceBytes: f.source.Bytes,
 	}
 	original := []format.File{f.source, {ID: f.frontier.ActiveID, Bytes: f.frontier.ActiveEnd}}
 	current := probe.Frontier()
@@ -265,6 +266,9 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 		t.Fatalf("fixture did not reclaim and replace DATA: %+v", result)
 	}
 
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := engine.OpenWithHooks(dir, f.opts, nil, &engine.Hooks{CleanerStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)

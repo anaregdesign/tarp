@@ -401,10 +401,10 @@ func TestPartialWriteAndCommittedCorruption(t *testing.T) {
 func TestReopenCompatibilityBeforeTailCleanup(t *testing.T) {
 	db := newTestDB(t, testOptions(), nil)
 	mustPut(t, db, "k", strings.Repeat("v", 50))
-	path, active := db.store.Dir, testLoc(t, db, "k").File.Path
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	path, active := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path
 	f, err := os.OpenFile(active, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -644,14 +644,14 @@ func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 	db := newTestDBWithHooks(t, opts, nil, engineHooks)
 	mustPut(t, db, "sealed", "first")
 	mustPut(t, db, "active", "second")
-	frontier := db.store.Current
 	sealed := filepath.Base(testLoc(t, db, "sealed").File.Path)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	frontier := db.store.Current
 	active := storage.DataName(frontier.UUID, frontier.ActiveID)
 	if sealed == active {
 		t.Fatal("fixture did not seal the first segment")
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
 	}
 	original := directoryBytes(t, db.store.Dir)
 	orphan := storage.DataName(frontier.UUID, frontier.ManifestID+100)
@@ -812,7 +812,10 @@ func TestExistingEmptyDirectoryStillRequiresParentSync(t *testing.T) {
 func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		t.Run(fmt.Sprint(rotate), func(t *testing.T) {
-			db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: make(chan struct{})})
+			opts := testOptions()
+			// Exercise the final generation without another publication on Close.
+			opts.IndexMode = IndexMemory
+			db := newTestDBWithHooks(t, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
 			mustPut(t, db, "k", "old")
 			if rotate {
 				mustPut(t, db, "pad", string(make([]byte, 60)))
@@ -838,7 +841,7 @@ func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			reopened, err := Open(db.store.Dir, testOptions())
+			reopened, err := Open(db.store.Dir, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -902,10 +905,10 @@ func TestOpenCancellationDuringReplayAllowsRetry(t *testing.T) {
 	if err := db.Put([]byte("key"), value); err != nil {
 		t.Fatal(err)
 	}
-	dir, active := db.store.Dir, testLoc(t, db, "key").File.Path
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	dir, active := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path
 	fd, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -981,10 +984,10 @@ func TestRecoveryBoundaryFailureReleasesOwnershipAndPreservesAcknowledgment(t *t
 			t.Run(point+"/"+cause.Error(), func(t *testing.T) {
 				db := newTestDB(t, testOptions(), nil)
 				mustPut(t, db, "k", "acknowledged")
-				dir, path, end := db.store.Dir, testLoc(t, db, "k").File.Path, db.store.Current.ActiveEnd
 				if err := db.Close(); err != nil {
 					t.Fatal(err)
 				}
+				dir, path, end := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path, db.store.Current.ActiveEnd
 				fd, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 				if err != nil {
 					t.Fatal(err)
@@ -1203,7 +1206,8 @@ func TestSoftRotationBoundary(t *testing.T) {
 
 func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
 	smaller := Options{TargetSegmentBytes: 128, MaxRecordBytes: 64}
-	db := newTestDB(t, Options{TargetSegmentBytes: 260, MaxRecordBytes: 64}, nil)
+	// Preserve the oversized active segment on Close for both reopen paths.
+	db := newTestDB(t, Options{IndexMode: IndexMemory, TargetSegmentBytes: 260, MaxRecordBytes: 64}, nil)
 	value := strings.Repeat("x", 11)
 	for i := range 6 {
 		mustPut(t, db, fmt.Sprint(i), value)
@@ -1326,8 +1330,9 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := map[string]bool{
-				"CURRENT": true,
-				"LOCK":    true,
+				"CURRENT":    true,
+				"LOCK":       true,
+				".tarp-work": true,
 				storage.ManifestName(frontier.UUID, frontier.ManifestID): true,
 				storage.DataName(frontier.UUID, frontier.ActiveID):       true,
 			}

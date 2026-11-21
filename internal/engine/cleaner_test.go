@@ -105,7 +105,8 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 }
 
 func TestCleanerPublishesAdjacentObsoleteLogsAndReopens(t *testing.T) {
-	opts := Options{MaxRecordBytes: 768, TargetSegmentBytes: 1024}
+	// Keep the cleaner's publication as the final frontier across Close.
+	opts := Options{IndexMode: IndexMemory, MaxRecordBytes: 768, TargetSegmentBytes: 1024}
 	parked := &Hooks{CleanerStart: make(chan struct{})}
 	var noSpace atomic.Bool
 	fs := &storage.IO{Hook: func(point string) error {
@@ -415,7 +416,8 @@ func waitForDataFiles(t *testing.T, db *DB, want int) {
 }
 
 func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
-	opts := Options{MaxRecordBytes: 4096, TargetSegmentBytes: 8192}
+	// Keep the active log outside the repack group across both closes.
+	opts := Options{IndexMode: IndexMemory, MaxRecordBytes: 4096, TargetSegmentBytes: 8192}
 	parked := &Hooks{CleanerStart: make(chan struct{})}
 	db := newTestDBWithHooks(t, opts, nil, parked)
 	dir := db.store.Dir
@@ -495,7 +497,8 @@ func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 }
 
 func TestAutomaticRepackKeepsSnapshotsAndLogIntervalsSeparate(t *testing.T) {
-	small := Options{MaxRecordBytes: 128, TargetSegmentBytes: 192}
+	// Reopen exactly one sealed tail and one active tail.
+	small := Options{IndexMode: IndexMemory, MaxRecordBytes: 128, TargetSegmentBytes: 192}
 	db := newTestDBWithHooks(t, small, nil, &Hooks{CleanerStart: make(chan struct{})})
 	value := strings.Repeat("v", 48) // fits one record per 192-byte snapshot
 	for _, key := range []string{"a", "b", "c", "d"} {

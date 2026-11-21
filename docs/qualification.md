@@ -1,7 +1,7 @@
 # Safe qualification procedure
 
-**The recorded Linux/ext4 crash and exhaustion campaigns cover the previous
-storage implementation.** The final phase-cut matrix used revision `347a1a1`,
+**The full Linux/ext4 phase-cut matrix below covers the previous storage
+implementation.** That matrix used revision `347a1a1`,
 the exact source fingerprint and virtual device described in the
 [execution matrix](#final-selected-target-execution-matrix). The unversioned
 format, incremental publication and default worker require their own evidence
@@ -9,6 +9,15 @@ for any VM power-loss or real capacity claim. Ordinary process exits and
 deterministic error injection exercise recovery and concurrency on the local
 filesystem. Run privileged or disk-filling experiments only on a dedicated,
 disposable guest.
+
+Two focused runs at `c495e44` selected the B+tree with a 16 MiB budget on a
+256 MiB disposable ext4 device (`data=ordered`). After DATA writes ran out of
+space, freeing space and reopening recovered all 128 acknowledged values.
+When a private pager write ran out of space, the 1,536-key batch returned
+`NotApplied`. Retrying the batch after freeing space succeeded, and a
+subsequent cold boot recovered all 1,537 values.
+[DATA and compaction recovery](https://github.com/anaregdesign/tarp/actions/runs/44921477987) ·
+[Private pager recovery](https://github.com/anaregdesign/tarp/actions/runs/44921932321)
 
 ## Ordinary repeatable checks
 

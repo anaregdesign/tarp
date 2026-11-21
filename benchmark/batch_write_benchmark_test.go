@@ -17,7 +17,10 @@ func BenchmarkBatchWrite(b *testing.B) {
 		keys, payload, config := measurementInput(1024, count)
 		opts := tarp.Options(config)
 		seed := filepath.Join(b.TempDir(), "seed")
-		db, err := tarp.Open(seed, opts)
+		// Keep the seed and timed writes in one active segment.
+		seedOpts := opts
+		seedOpts.IndexMode = tarp.IndexMemory
+		db, err := tarp.Open(seed, seedOpts)
 		if err != nil {
 			b.Fatal(err)
 		}

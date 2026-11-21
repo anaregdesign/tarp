@@ -545,7 +545,10 @@ func FuzzDBHistory(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, steps []byte) {
 		// A small target rotates on the second Put. All values fit admission.
-		opts := tarp.Options{ValueCacheBudgetBytes: 144, MaxRecordBytes: 64, TargetSegmentBytes: 128, ReadFileHandles: 1}
+		opts := tarp.Options{
+			IndexMode: tarp.IndexMemory, ValueCacheBudgetBytes: 144,
+			MaxRecordBytes: 64, TargetSegmentBytes: 128, ReadFileHandles: 1,
+		}
 		if len(steps) > 0 && steps[0]&0x80 != 0 {
 			opts.IndexMode = tarp.IndexBTree
 		}
@@ -643,7 +646,8 @@ func TestIndexModesShareDataSnapshotsAndBackups(t *testing.T) {
 		name         string
 		source, dest tarp.IndexMode
 	}{
-		{"memory to disk", tarp.IndexMemory, tarp.IndexBTree}, {"disk to memory", tarp.IndexBTree, tarp.IndexMemory},
+		{"memory to default", tarp.IndexMemory, tarp.IndexDefault},
+		{"default to memory", tarp.IndexDefault, tarp.IndexMemory},
 	} {
 		t.Run(source.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "source")
@@ -803,11 +807,7 @@ func ExampleOpen_indexMode() {
 	}
 	defer os.RemoveAll(dir)
 
-	db, err := tarp.Open(dir, tarp.Options{
-		IndexMode:              tarp.IndexBTree,
-		BTreeMemoryBudgetBytes: 16 << 20,
-		ValueCacheBudgetBytes:  64 << 20,
-	})
+	db, err := tarp.Open(dir, tarp.Options{})
 	if err != nil {
 		panic(err)
 	}
@@ -831,10 +831,9 @@ func ExampleOpen_indexMode() {
 	// Output: Tokyo
 }
 
-func TestBTreeClosePersistsIndexAndReusesExactCheckpoint(t *testing.T) {
+func TestDefaultIndexCheckpointsOnCloseAndReusesExactCheckpoint(t *testing.T) {
 	dir := t.TempDir()
-	opts := tarp.Options{IndexMode: tarp.IndexBTree, OpenValidation: tarp.Indexed}
-	db := openPublicDB(t, dir, opts)
+	db := openPublicDB(t, dir, tarp.Options{})
 	if err := db.Put([]byte("key"), []byte("value")); err != nil {
 		t.Fatal(err)
 	}
@@ -853,6 +852,7 @@ func TestBTreeClosePersistsIndexAndReusesExactCheckpoint(t *testing.T) {
 		return b
 	}
 	before := frontier()
+	opts := tarp.Options{OpenValidation: tarp.Indexed}
 	db = openPublicDB(t, dir, opts)
 	if got, err := db.Get([]byte("key")); err != nil || string(got) != "value" {
 		t.Fatalf("get %q, %v", got, err)
@@ -1019,7 +1019,7 @@ func TestIndexedReopenReplaysWritesMadeWithUnavailableSealedData(t *testing.T) {
 	if err := db.Close(); !errors.Is(err, tarp.ErrDataUnavailable) || errors.Is(err, tarp.ErrUnhealthy) {
 		t.Fatalf("close with selected damage: %v", err)
 	}
-	if strict, err := tarp.OpenExisting(ctx, dir, tarp.Options{OpenValidation: tarp.Full}); strict != nil || !errors.Is(err, tarp.ErrCorrupt) {
+	if strict, err := tarp.OpenExisting(ctx, dir, tarp.Options{}); strict != nil || !errors.Is(err, tarp.ErrCorrupt) {
 		t.Fatalf("full recovery accepted damaged DATA: %v", err)
 	}
 	checkTail := func(db *tarp.DB) {

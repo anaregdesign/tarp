@@ -78,7 +78,7 @@ func (o Options) normalized() (Options, error) {
 		return o, fmt.Errorf("%w: unknown open validation %d", ErrInvalidOptions, o.OpenValidation)
 	}
 	if o.IndexMode == IndexDefault {
-		o.IndexMode = IndexMemory
+		o.IndexMode = IndexBTree
 	}
 	switch o.IndexMode {
 	case IndexMemory:

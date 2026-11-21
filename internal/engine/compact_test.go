@@ -253,7 +253,9 @@ func TestCompactCanFinishCleanupAfterWorkerSyncFailure(t *testing.T) {
 			}
 		case "clean.retire.dirsync:before":
 			workerSyncs++
-			return syscall.ENOSPC
+			if workerSyncs == 1 {
+				return syscall.ENOSPC
+			}
 		}
 		return nil
 	}}
@@ -838,7 +840,8 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 				}
 				return nil
 			}}
-			db = newTestDBWithHooks(t, Options{}, fs, &Hooks{CleanerStart: make(chan struct{})})
+			opts := Options{IndexMode: IndexMemory}
+			db = newTestDBWithHooks(t, opts, fs, &Hooks{CleanerStart: make(chan struct{})})
 			if err := db.BatchPut(entries); err != nil {
 				t.Fatal(err)
 			}
@@ -868,7 +871,7 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			reopened, err := Open(db.store.Dir, Options{})
+			reopened, err := Open(db.store.Dir, opts)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -87,7 +87,8 @@ func TestLiveReadsReportCorruptRecordLocation(t *testing.T) {
 	for _, op := range []string{"get", "batch-get", "scan"} {
 		t.Run(op, func(t *testing.T) {
 			dir := t.TempDir()
-			db := openPublicDB(t, dir, tarp.Options{})
+			// Keep this DATA active across Close so a parity repair cannot mask the read error.
+			db := openPublicDB(t, dir, tarp.Options{IndexMode: tarp.IndexMemory})
 			key := []byte("k")
 			if err := db.Put(key, []byte("first")); err != nil {
 				t.Fatal(err)

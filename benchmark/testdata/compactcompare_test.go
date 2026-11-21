@@ -37,10 +37,16 @@ func TestCompactCompare(t *testing.T) {
 	}
 	const fixture = "/mnt/tarp-data/compare-fixture"
 	keys, value, opts := measurementInput(64, qualification.MeasurementKeys)
-	// The two tags use different Go names for the same value LRU budget.
-	budget := reflect.ValueOf(&opts).Elem().FieldByName("ValueCacheBudgetBytes")
+	// This driver is also copied into v0.8.0, which has only a memory index
+	// and uses the original value LRU field name.
+	fields := reflect.ValueOf(&opts).Elem()
+	if mode := fields.FieldByName("IndexMode"); mode.IsValid() {
+		const indexMemory = 1 // engine.IndexMemory in the selectable-index arms.
+		mode.SetUint(indexMemory)
+	}
+	budget := fields.FieldByName("ValueCacheBudgetBytes")
 	if !budget.IsValid() {
-		budget = reflect.ValueOf(&opts).Elem().FieldByName("CacheBytes")
+		budget = fields.FieldByName("CacheBytes")
 	}
 	budget.SetInt(64 << 10)
 	opts.TargetSegmentBytes, opts.ReadFileHandles = 1<<20, 4

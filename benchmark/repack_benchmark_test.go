@@ -221,7 +221,7 @@ func (f repackFixture) measureTraced(t testing.TB, mode string, puts int, trace 
 	if err := errors.Join(getErr, putErr, ctx.Err()); err != nil {
 		t.Fatal(err)
 	}
-	result := repackMeasurement{Mode: mode, WriteGapNS: repackWriteGap.Nanoseconds(), Options: f.opts,
+	result := repackMeasurement{Mode: mode, WriteGapNS: repackWriteGap.Nanoseconds(), Options: engine.Observe(db).Options(),
 		WallNS: wall.Nanoseconds(), DataFilesBefore: len(f.inputs) + 1}
 	result.Get, result.OverlappingGets, result.GetDuringRepack = summarizeRepackCalls(gets, begin, retired)
 	result.Put, result.OverlappingPuts, result.PutDuringRepack = summarizeRepackCalls(writes, begin, retired)

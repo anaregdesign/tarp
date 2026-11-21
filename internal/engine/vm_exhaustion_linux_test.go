@@ -98,7 +98,7 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 		}
 		return nil
 	}}
-	db, err := OpenWithHooks(dir, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+	db, err := OpenWithHooks(dir, opts, ioHooks, parkedMaintenance())
 	if err != nil {
 		t.Fatal(err)
 	}
