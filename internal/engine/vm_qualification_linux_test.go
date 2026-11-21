@@ -81,6 +81,7 @@ func TestVMCampaignGuest(t *testing.T) {
 	dir, output := "/mnt/tarp-data/db", "/mnt/tarp-data/output"
 	if cfg.Action == "crash" {
 		if cfg.Mode == "exhaustion" {
+			vmPagerExhaustion(t, true)
 			vmExhaustion(t, dir, output, cfg.Seed)
 			t.Fatal("external exhaustion barrier returned")
 		}
@@ -94,6 +95,9 @@ func TestVMCampaignGuest(t *testing.T) {
 		}
 		TestPowerCutGuest(t)
 		t.Fatal("external phase barrier returned")
+	}
+	if cfg.Mode == "exhaustion" {
+		vmPagerExhaustion(t, false)
 	}
 	verifyVMCampaign(t, cfg, dir, output)
 }

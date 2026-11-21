@@ -3,12 +3,14 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -98,7 +100,7 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 		}
 		return nil
 	}}
-	db, err := OpenWithHooks(dir, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+	db, err := OpenWithHooks(dir, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{}), ParityStart: make(chan struct{})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,4 +253,153 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	for {
 		time.Sleep(time.Hour)
 	}
+}
+
+// vmPagerExhaustion is an additional live-index failure case on the same bounded
+// ext4 filesystem as the standard oracle fixture. The untouched source fixture,
+// capture and control verdict are still checked by the campaign host.
+func vmPagerExhaustion(t *testing.T, fill bool) {
+	t.Helper()
+	guesttest.RequireDisposableGuest(t)
+	const dir = "/mnt/tarp-data/pager-case"
+	opts := Options{IndexMode: IndexBTree, BTreeMemoryBudgetBytes: 16 << 20, ValueCacheBudgetBytes: 64 << 10, MaxRecordBytes: 8 << 10, TargetSegmentBytes: 16 << 20}
+	open := func() *DB {
+		db, err := OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{}), ParityStart: make(chan struct{})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := Observe(db).Options()
+		if got.IndexMode != IndexBTree || got.BTreeMemoryBudgetBytes != 16<<20 {
+			t.Fatalf("wrong options: %+v", got)
+		}
+		return db
+	}
+	db := open()
+	entries := make([]Entry, 1536)
+	for i := range entries {
+		key := bytes.Repeat([]byte{0x53}, 512)
+		binary.BigEndian.PutUint64(key[:8], uint64(i))
+		entries[i] = Entry{Key: key, Value: []byte(fmt.Sprintf("value-%04d", i))}
+	}
+	prior := []byte("prior-key")
+	priorValue := []byte("durable-before-full")
+	verify := func(expected bool) {
+		target := 1
+		if expected {
+			target += len(entries)
+		}
+		if n := Observe(db).LiveKeys(); n != target {
+			t.Fatalf("wrong key count %d want %d", n, target)
+		}
+		got, err := db.Get(prior)
+		if err != nil || !bytes.Equal(got, priorValue) {
+			t.Fatalf("wrong prior value %x %v", got, err)
+		}
+		for i, entry := range entries {
+			got, err := db.Get(entry.Key)
+			if expected {
+				if err != nil || !bytes.Equal(got, entry.Value) {
+					t.Fatalf("retried key %d: %x %v", i, got, err)
+				}
+			} else if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("rejected key %d: %x %v", i, got, err)
+			}
+		}
+	}
+	if !fill {
+		verify(true)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Println("PAGER_PROBE_POST_REBOOT {" + "\"verified\":1537,\"mode\":\"btree\",\"budget_bytes\":16777216}")
+		return
+	}
+	if err := db.Put(prior, priorValue); err != nil {
+		t.Fatal(err)
+	}
+	// Identify the tree's own unlinked pager before the transaction opens id logs.
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pagerPath := ""
+	for _, fd := range fds {
+		link, err := os.Readlink("/proc/self/fd/" + fd.Name())
+		if err != nil {
+			continue
+		}
+		p := strings.TrimSuffix(link, " (deleted)")
+		if p != link && filepath.Dir(p) == filepath.Join(dir, ".tarp-work") && strings.HasPrefix(filepath.Base(p), "tarp-index-") {
+			if pagerPath != "" {
+				t.Fatalf("ambiguous initial pager: %s and %s", pagerPath, p)
+			}
+			pagerPath = p
+		}
+	}
+	if pagerPath == "" {
+		t.Fatal("private pager path unavailable")
+	}
+	fmt.Printf("PAGER_PROBE_BEGIN pager=%s\n", pagerPath)
+	filler, err := os.OpenFile("/mnt/tarp-data/pager-filler", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, at := vmFill(t, filler)
+	full := guesttest.AvailableBytes(t)
+	// Leave room for the few KiB of transaction bookkeeping that precedes the
+	// first dirty pager eviction. The attempted live index needs >12 MiB of pages.
+	available := vmReleaseFiller(t, filler, 128<<10)
+	before := Observe(db).Frontier()
+	beforeMetrics := Observe(db).IndexMetrics()
+	failure := db.BatchPut(entries)
+	var operation *OpError
+	var pathError *os.PathError
+	if !errors.As(failure, &operation) || !errors.As(failure, &pathError) || !errors.Is(failure, syscall.ENOSPC) || !errors.Is(failure, ErrNoSpace) ||
+		pathError.Path != pagerPath || pathError.Op != "write" || operation.Operation != "batch-put" || operation.Outcome != NotApplied {
+		t.Fatalf("expected actual NotApplied private pager write ENOSPC: %v (pager %s) before=%+v after=%+v", failure, pagerPath, beforeMetrics, Observe(db).IndexMetrics())
+	}
+	after := Observe(db).Frontier()
+	if before.Sequence != after.Sequence || before.Generation != after.Generation {
+		t.Fatalf("frontier changed: %+v -> %+v", before, after)
+	}
+	healthy := db.health() == nil
+	if healthy {
+		verify(false)
+	} else if !errors.Is(db.health(), ErrUnhealthy) || !errors.Is(db.health(), syscall.ENOSPC) {
+		t.Fatal(db.health())
+	}
+	if err := errors.Join(filler.Close(), os.Remove(filler.Name())); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.Open("/mnt/tarp-data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(parent.Sync(), parent.Close()); err != nil {
+		t.Fatal(err)
+	}
+	afterMetrics := Observe(db).IndexMetrics()
+	if err := db.Close(); err != nil && (healthy || !errors.Is(err, syscall.ENOSPC)) {
+		t.Fatal(err)
+	}
+	db = open()
+	verify(false)
+	if err := db.BatchPut(entries); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	verify(true)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db = open()
+	verify(true)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	v := map[string]any{"mode": "btree", "budget_bytes": 16 << 20, "key_bytes": 512, "batch": len(entries), "live": len(entries) + 1, "errno": int(syscall.ENOSPC), "operation": operation.Operation, "phase": operation.Phase, "outcome": operation.Outcome, "path": pathError.Path, "io_op": pathError.Op, "full_available_bytes": full, "filler_failure_point": at, "staging_available_bytes": available, "healthy_after_failure": healthy, "sequence_before": before.Sequence, "sequence_after": after.Sequence, "pager_spills_delta": afterMetrics.SpillWrites - beforeMetrics.SpillWrites, "absent_after_reopen": len(entries), "retried_and_reopened": len(entries), "prior_preserved": true}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("PAGER_PROBE_VERDICT %s\n", encoded)
 }
