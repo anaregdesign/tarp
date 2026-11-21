@@ -71,9 +71,10 @@ Hits capture immutable cached bytes under state and return a copy outside it.
 Misses pin an indexed location, perform positional checked I/O outside state,
 then recheck health and version. A changed/deleted/reinserted key causes retry;
 an unchanged version may safely have moved physically during compaction.
-Failed/missing reads do not create cache entries. Source failures are surfaced,
-not hidden behind a cache-dependent fallback. A cache hit is not a continuous
-on-disk corruption scrub; fail-stop begins when a failure is detected.
+Failed or missing reads do not create cache entries. A source read failure
+on protected sealed DATA can trigger verified online repair and a retry. A
+persistent source error fail-stops the DB. Cache hits read memory and never
+start an on-disk scrub.
 
 ## Commit and recovery
 
@@ -161,7 +162,9 @@ Use `errors.Is` for category/underlying causes and `errors.As` for `*OpError`,
 | Source append/sync or frontier preparation before rename fails | `NotApplied` logically; unreachable bytes may remain | Fail-stop |
 | Frontier rename attempted or directory sync uncertain | `Unknown`, matching `ErrCommitUncertain` | Fail-stop |
 | All commit syncs finish but another read detects source failure before memory publication | Known `Committed`, unhealthy error | Fail-stop |
-| Source read/checksum failure | Explicit original error, no cache fallback | Fail-stop |
+| Correctable read/checksum failure in protected sealed DATA | Retry after verified repair | Healthy |
+| Uncertain rename or directory sync during online DATA repair | The triggering operation reports `NotApplied`. The DATA replacement matches `ErrCommitUncertain` | Fail-stop |
+| Persistent source read/checksum failure | Explicit error including the source cause | Fail-stop |
 | Backup or restore finds an existing destination, including an `EEXIST` from the no-replace rename | `NotApplied`, matching `fs.ErrExist` | Choose a new destination to retry |
 | Other backup or restore destination rename failures, or a parent directory sync failure after rename | `Unknown`, matching `ErrCommitUncertain` for the destination | Inspect the destination before retry. A backup source can continue serving requests after a destination failure |
 | Preliminary log rotation fails during `Compact` | `NotApplied` for the checkpoint, even if the rotation selected a new active log | An I/O failure during publication requires close/reopen |
@@ -287,9 +290,10 @@ After rotation, a background worker reads the immutable DATA using a 64 KiB
 stripe buffer. It builds parity and record anchors, checking the source against
 the SHA-256 in the selected catalog. It reads back the staged sidecar to verify
 its checksums and length before publication. Its DATA pin survives staging, file
-sync, rename and directory sync. Readers and ordinary
-commits never open PARITY or wait for its sync. The worker briefly yields between stripe reads during foreground writes or a
-backup. Background work still consumes CPU and disk bandwidth. Restored databases build
+sync, rename and directory sync. Healthy reads and ordinary commits never open
+PARITY or wait for its sync. The worker briefly yields between stripe reads
+during foreground writes or a backup. Background work still consumes CPU and
+disk bandwidth. Restored databases build
 missing sidecars on Open. Replaced DATA and its sidecar are retired together.
 Logical backups contain the original DATA and catalog hashes.
 
@@ -301,6 +305,34 @@ checkpoint. Concurrent writes after the seal can create a new active tail. Healt
 outstanding protection of sealed files. A staging space or write failure
 can delay protection or be returned by explicit maintenance or Close. Earlier
 successful commits retain their original durability contract.
+
+### Automatic repair while serving reads
+
+When a live read finds localized damage in a sealed DATA file, Tarp uses that
+file's pinned catalog identity and recovery file. Concurrent reports for the
+same file share a repair. Reconstruction uses a private file in the DB
+workspace. Before replacement Tarp verifies the actual staged bytes against
+the catalog SHA-256 and syncs the file. It publishes the replacement with a
+rename and directory sync, and refreshes the pooled read descriptor before
+retrying. This leaves the commit frontier, record addresses and sequences
+unchanged.
+
+`Get` rechecks concurrent changes to the key through its usual read path.
+`BatchGet` and `Scan` keep their original snapshots. A pinned old segment
+can be repaired after compaction while a snapshot still needs its bytes.
+Backup, compaction and index checkpoint creation retry private work against
+their captured input before publication. Recovery reads and staging do not
+hold the DB writer gate. Other files remain available during reconstruction.
+
+Automatic repair is triggered by an actual source read. If the recovery file
+is missing or the damage exceeds its correction budget, Tarp reports the source
+error and leaves the damaged DATA in place. A repair needs temporary free space
+for the entire affected DATA file.
+Active DATA uses the existing commit and failure rules. Startup validation and
+verification of an immutable backup continue to report corruption. A closed
+database can be repaired explicitly before reopening.
+
+### Offline repair and salvage
 
 `RepairParity(ctx, dir)` takes the database lock without opening the DB for
 queries. Each selected sealed DATA is checked against its catalog length and hash.

@@ -7,8 +7,10 @@ import (
 	"maps"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
@@ -32,6 +34,173 @@ func scanContents(t *testing.T, seq iter.Seq2[Entry, error]) map[string]string {
 		e.Key[0] ^= 0xff
 	}
 	return got
+}
+
+func damageProtectedReadFixture(t *testing.T, db *DB) {
+	t.Helper()
+	mustPut(t, db, "target", "original")
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	loc := testLoc(t, db, "target")
+	f, err := os.OpenFile(loc.File.Path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteAt([]byte{0xff}, loc.Offset+loc.Bytes-1)
+	if err = errors.Join(err, f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	db.state.Lock()
+	db.cache.Clear()
+	db.state.Unlock()
+}
+
+func TestForegroundRepairPreservesReadConsistencyDuringWrites(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		mode IndexMode
+	}{{"memory", IndexMemory}, {"btree", IndexBTree}} {
+		t.Run(mode.name, func(t *testing.T) {
+			paused := make(chan struct{})
+			resume := make(chan struct{})
+			reads := make(chan struct{}, 3)
+			var replacements atomic.Int32
+			fs := &storage.IO{Hook: func(point string) error {
+				switch point {
+				case "read:before":
+					select {
+					case reads <- struct{}{}:
+					default:
+					}
+				case "repair.rename:before":
+					if replacements.Add(1) == 1 {
+						close(paused)
+						<-resume
+					}
+				}
+				return nil
+			}}
+			db := newTestDBWithHooks(t, Options{IndexMode: mode.mode}, fs, parkedMaintenance())
+			damageProtectedReadFixture(t, db)
+			release := sync.OnceFunc(func() { close(resume) })
+			defer release()
+			await := func(ch <-chan struct{}) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-time.After(5 * time.Second):
+					t.Fatal("timed out waiting for a foreground operation during repair")
+				}
+			}
+
+			type result struct {
+				value string
+				err   error
+			}
+			get, batch, scan := make(chan result, 1), make(chan result, 1), make(chan result, 1)
+			go func() {
+				v, err := db.Get([]byte("target"))
+				get <- result{string(v), err}
+			}()
+			await(paused)
+			await(reads)
+			go func() {
+				v, err := db.BatchGet([][]byte{[]byte("target")})
+				var value string
+				if len(v) == 1 && v[0].Found {
+					value = string(v[0].Value)
+				}
+				batch <- result{value, err}
+			}()
+			go func() {
+				var got result
+				for e, err := range db.Scan(t.Context()) {
+					if err != nil {
+						got.err = err
+						break
+					}
+					got.value += string(e.Value)
+				}
+				scan <- got
+			}()
+			// All three calls now hold their original, still-pinned address.
+			await(reads)
+			await(reads)
+			writeDone := make(chan struct{})
+			var writeErr error
+			go func() {
+				defer close(writeDone)
+				if writeErr = db.Put([]byte("other"), []byte("active")); writeErr != nil {
+					return
+				}
+				db.state.Lock()
+				db.cache.Delete("other")
+				db.state.Unlock()
+				value, err := db.Get([]byte("other"))
+				if err != nil || string(value) != "active" {
+					writeErr = errors.New("could not read unrelated active DATA during repair")
+					return
+				}
+				writeErr = db.Put([]byte("target"), []byte("new revision"))
+			}()
+			await(writeDone)
+			if writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			release()
+			for _, op := range []struct {
+				name, want string
+				done       <-chan result
+			}{{"Get", "new revision", get}, {"BatchGet", "original", batch}, {"Scan", "original", scan}} {
+				got := <-op.done
+				if got.value != op.want || got.err != nil {
+					t.Fatalf("%s returned %q, %v; want %q", op.name, got.value, got.err, op.want)
+				}
+			}
+			if n := replacements.Load(); n != 1 {
+				t.Fatalf("%d replacements for one damaged file", n)
+			}
+		})
+	}
+}
+
+func TestScanCanceledDuringRepairReleasesTheSnapshotAndAllowsRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "repair.sync:after" {
+			cancel()
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
+	damageProtectedReadFixture(t, db)
+	f := testLoc(t, db, "target").File
+	refs := f.References()
+	requireScanError(t, db.Scan(ctx), context.Canceled)
+	if got := f.References(); got != refs {
+		t.Fatalf("references after cancellation = %d, want %d", got, refs)
+	}
+	wantValue(t, db, "target", "original")
+}
+
+func TestScanCancellationPreservesUncertainRepairOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "repair.dirsync:before" {
+			cancel()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
+	damageProtectedReadFixture(t, db)
+	requireScanError(t, db.Scan(ctx), ErrCommitUncertain)
+	if err := db.Put([]byte("next"), nil); !errors.Is(err, ErrUnhealthy) {
+		t.Fatalf("Put after uncertain DATA replacement: %v", err)
+	}
 }
 
 func TestScanReiteratesWithOwnedEntries(t *testing.T) {

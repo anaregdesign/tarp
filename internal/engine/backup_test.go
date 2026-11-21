@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
@@ -749,4 +750,146 @@ func TestVerifyBackupWithScratchMatchesReadOnlyAndRejectsSourceAlias(t *testing.
 		t.Fatalf("scratch alias: %v", err)
 	}
 	checkBackupUnchanged(t, source, before)
+}
+
+func TestBackupRepairsMultipleSealedFilesAndRetainsOriginalCut(t *testing.T) {
+	var db *DB
+	var inject atomic.Bool
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "backup.read:after" && inject.CompareAndSwap(true, false) {
+			return db.Put([]byte("later"), []byte("excluded"))
+		}
+		return nil
+	}}
+	db = newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
+	mustPut(t, db, "a", "first")
+	damageProtectedTail(t, db)
+	mustPut(t, db, "b", "second")
+	second := damageProtectedTail(t, db)
+	inject.Store(true)
+	dir := t.TempDir()
+	backup := filepath.Join(dir, "backup")
+	if err := db.Backup(t.Context(), backup); err != nil {
+		t.Fatal(err)
+	}
+	info, err := VerifyBackup(t.Context(), backup)
+	if err != nil || info.Sequence != second.Last || info.LiveKeys != 2 {
+		t.Fatalf("backup after repair: %+v, %v", info, err)
+	}
+	if names, err := os.ReadDir(dir); err != nil || len(names) != 1 {
+		t.Fatalf("discarded staging directories remain: %v, %v", names, err)
+	}
+	wantValue(t, db, "later", "excluded")
+}
+
+func TestBackupDoesNotRepairSealedDataForDestinationFault(t *testing.T) {
+	var verifies atomic.Int32
+	fs := &storage.IO{Hook: func(p string) error {
+		switch p {
+		case "repair.verify:before":
+			verifies.Add(1)
+		case "backup.copy:before":
+			return syscall.EIO
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
+	mustPut(t, db, "protected", "value")
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Backup(t.Context(), filepath.Join(t.TempDir(), "backup")); !errors.Is(err, syscall.EIO) || db.health() != nil || verifies.Load() != 0 {
+		t.Fatalf("destination fault %v, health %v, DATA verifications %d", err, db.health(), verifies.Load())
+	}
+}
+
+func TestBackupSourceRepairUncertaintyPreservesDestinationAndForcesReopen(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ioHooks := &storage.IO{Hook: func(p string) error {
+		if p == "repair.rename:after" {
+			cancel()
+			return context.Canceled
+		}
+		return nil
+	}}
+	dir := t.TempDir()
+	db, err := OpenWithHooks(dir, Options{}, ioHooks, parkedMaintenance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mustPut(t, db, "key", "original")
+	damageProtectedTail(t, db)
+	dest := filepath.Join(t.TempDir(), "backup")
+	err = db.Backup(ctx, dest)
+	var op *OpError
+	if !errors.As(err, &op) || op.Operation != "backup" || op.Outcome != NotApplied ||
+		!errors.Is(err, ErrCommitUncertain) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("uncertain source replacement and unpublished backup: %v", err)
+	}
+	if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("incomplete backup published: %v", statErr)
+	}
+	if _, err := db.Get([]byte("key")); !errors.Is(err, ErrUnhealthy) || !errors.Is(err, ErrCommitUncertain) {
+		t.Fatalf("health after uncertain source repair: %v", err)
+	}
+	if err := db.Close(); !errors.Is(err, ErrCommitUncertain) {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := Open(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	wantValue(t, reopened, "key", "original")
+}
+
+func TestBackupRepairsCapturedActivePrefixAfterConcurrentSeal(t *testing.T) {
+	entered, resume := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	defer release()
+	var once sync.Once
+	fs := &storage.IO{Hook: func(p string) error {
+		if p == "backup.metadata.write:before" {
+			once.Do(func() { close(entered); <-resume })
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
+	mustPut(t, db, "first", "original")
+	before := db.store.Current
+	file := db.store.Files[before.ActiveID]
+	dest := filepath.Join(t.TempDir(), "backup")
+	done := make(chan error, 1)
+	go func() { done <- db.Backup(t.Context(), dest) }()
+	select {
+	case <-entered:
+	case err := <-done:
+		t.Fatalf("backup failed before capture: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("backup did not capture active file")
+	}
+	mustPut(t, db, "later", "appended")
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := os.OpenFile(file.Path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fd.WriteAt([]byte("!"), before.ActiveEnd-1)
+	if err := errors.Join(err, fd.Close()); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	info, err := VerifyBackup(t.Context(), dest)
+	if err != nil || info.Sequence != before.Sequence || info.LiveKeys != 1 {
+		t.Fatalf("backup did not preserve captured prefix: %+v, %v", info, err)
+	}
+	wantValue(t, db, "first", "original")
+	wantValue(t, db, "later", "appended")
 }

@@ -460,8 +460,9 @@ If either operation reports `ErrCommitUncertain` at destination rename
 or parent directory sync, inspect the destination before retrying. For a
 backup, validate the published image with `VerifyBackup`. For a restore,
 use `OpenExisting` to inspect the published destination. A backup destination
-error alone permits continued use of the source DB. A source read or checksum
-failure puts that DB into fail-stop and requires close/reopen.
+error alone permits continued use of the source DB. If a backup encounters
+correctable damage in protected sealed DATA, it repairs the source and retries
+from the same point in time. A persistent source failure puts the DB into fail-stop.
 
 `Backup` captures a
 consistent committed point in time and copies outside the writer gate while
@@ -502,19 +503,25 @@ the lock, before starting checkpoint or backup work.
 ### Recovering damaged DATA
 
 Every open DB generates recovery files for sealed DATA in the background.
-Normal `Get`, `Put` and `BatchPut` do no parity I/O. To protect the current tail at a chosen
-point, call `db.ProtectParity(ctx)`. This seals a nonempty active DATA segment
+Healthy reads and ordinary commits do no parity I/O. To protect the current
+tail at a chosen point, call `db.ProtectParity(ctx)`. This seals a nonempty active DATA segment
 and completes protection without building an index checkpoint.
 A successful write by itself protects against crash loss according to the
 commit contract. Correction of local media damage starts after parity publication.
 
-If a read or a full Open detects damaged DATA, close the DB and run
-`tarp.RepairParity(ctx, dir)`. Each 64 KiB stripe can recover one missing or
-corrupt 4 KiB block. A full stripe adds about 6.42% including its checksums
-and record offsets. Repair verifies the reconstructed file against the original
-SHA-256 before replacing it. An independent backup covers whole-device failure.
+A checked read in an open DB automatically repairs correctable corruption in
+protected sealed DATA. The triggering operation retries after Tarp reconstructs
+the file, verifies its original SHA-256, installs the replacement and refreshes
+the read handle. Reads of other files and ordinary writes can continue during
+reconstruction. Cached values are served from memory. Detection happens when
+an operation reads the damaged bytes.
 
-If a DATA file exceeds the correction budget, use
+Each 64 KiB stripe can recover one missing or corrupt 4 KiB block. A full
+stripe adds about 6.42% including checksums and record offsets. If corruption
+prevents `Open`, run `tarp.RepairParity(ctx, dir)` while the DB is closed.
+An independent backup covers whole-device failure.
+
+If a DATA file exceeds the correction budget, close the DB and use
 `tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` with its ID from
 the failing DATA filename. The callback receives historical Put and Delete
 records. Check the returned error and the report's `Unrecoverable` byte ranges.

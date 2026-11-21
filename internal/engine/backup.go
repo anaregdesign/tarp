@@ -61,7 +61,10 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 			return ctx.Err()
 		}
 	}
-	if err := storage.BackupWithIndex(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex); err != nil {
+	err = db.store.RetryMaintenance(ctx, capture.Files, func() error {
+		return storage.BackupWithIndex(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex)
+	}, nil)
+	if err != nil {
 		var source *storage.SourceError
 		if errors.As(err, &source) {
 			db.poison(err)

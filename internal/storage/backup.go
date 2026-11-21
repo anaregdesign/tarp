@@ -200,6 +200,7 @@ type backupReaderAt struct {
 	fs         *IO
 	yield      func() error
 	batchBytes int
+	yieldErr   error
 }
 
 func (r *backupReaderAt) ReadAt(b []byte, off int64) (int, error) {
@@ -207,6 +208,7 @@ func (r *backupReaderAt) ReadAt(b []byte, off int64) (int, error) {
 		r.batchBytes = 0
 		if r.yield != nil {
 			if err := r.yield(); err != nil {
+				r.yieldErr = err
 				return 0, err
 			}
 		}
@@ -232,7 +234,7 @@ type backupStream struct {
 func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, visit recordVisitor, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
 	src, header, _, err := openSelected(captured.File.Path, capture.Current.UUID, captured.Entry, captured.File.ID == capture.Current.ActiveID)
 	if err != nil {
-		return entry, &SourceError{Err: err}
+		return entry, selectedReadFailure(captured.Entry, &SourceError{Err: err})
 	}
 	defer func() { returned = errors.Join(returned, src.Close()) }()
 	name := DataName(capture.Current.UUID, captured.File.ID)
@@ -261,13 +263,13 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 		r, key, err := format.ReadRecordKey(ctx, stream.reader, offset, captured.Entry.Bytes-offset, buffer)
 		if err != nil {
 			var destination *destinationError
-			if !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				err = &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)}
+			if stream.source.yieldErr == nil && !errors.As(err, &destination) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				err = selectedReadFailure(captured.Entry, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)})
 			}
 			return entry, err
 		}
 		if err := span.Accept(r); err != nil {
-			return entry, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)}
+			return entry, selectedReadFailure(captured.Entry, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)})
 		}
 		if err := visit(captured.File, offset, r, key); err != nil {
 			return entry, fmt.Errorf("%s: record at offset %d: %w", name, offset, err)
@@ -275,11 +277,11 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 		offset += r.Bytes()
 	}
 	if err := span.Finish(); err != nil {
-		return entry, &SourceError{Err: fmt.Errorf("%s: %w", name, err)}
+		return entry, selectedReadFailure(captured.Entry, &SourceError{Err: fmt.Errorf("%s: %w", name, err)})
 	}
 	if captured.File.ID != capture.Current.ActiveID {
 		if err := checkSealedDigest(h, captured.Entry); err != nil {
-			return entry, err
+			return entry, selectedReadFailure(captured.Entry, err)
 		}
 	}
 	if err := fs.Sync(dst, "backup.file.sync"); err != nil {

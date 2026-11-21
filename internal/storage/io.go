@@ -138,3 +138,32 @@ func (e *Fault) Unwrap() error { return e.Err }
 func fault(phase string, outcome publication.Outcome, unsafe bool, err error) error {
 	return &Fault{Phase: phase, Outcome: outcome, Unsafe: unsafe, Err: err}
 }
+
+// onlyCauses matches a wrapped or joined failure only if every leaf belongs to
+// one of the expected categories. A separate I/O or cancellation error survives.
+func onlyCauses(err, first error, equivalent ...error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		for _, cause := range causes {
+			if !onlyCauses(cause, first, equivalent...) {
+				return false
+			}
+		}
+		return len(causes) > 0
+	}
+	if cause := errors.Unwrap(err); cause != nil {
+		return onlyCauses(cause, first, equivalent...)
+	}
+	if errors.Is(err, first) {
+		return true
+	}
+	for _, target := range equivalent {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}

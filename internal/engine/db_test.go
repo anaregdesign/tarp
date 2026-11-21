@@ -1550,3 +1550,14 @@ func TestMissingDeletePrecedesExhaustedCountersAndPreservesBatch(t *testing.T) {
 		}
 	}
 }
+
+func TestOperationOutcomePreservesItsOwnFaultBesideUncertainReadRepair(t *testing.T) {
+	repair := &storage.UncertainReadRepair{Err: &storage.Fault{Phase: "repair.dirsync", Outcome: Unknown, Err: syscall.EIO}}
+	write := &storage.Fault{Phase: "commit.health", Outcome: NotApplied, Err: repair}
+	for _, err := range []error{write, errors.Join(repair, write)} {
+		got := operationError("put", "append", err)
+		if got.Phase != write.Phase || got.Outcome != NotApplied || !errors.Is(got, ErrCommitUncertain) {
+			t.Fatalf("lost outer publication or nested uncertainty: %v", got)
+		}
+	}
+}

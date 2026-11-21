@@ -76,7 +76,7 @@ func workspaceFileName(name string) bool {
 		return false
 	}
 	switch name[:sep] {
-	case "tarp-index", "tarp-replay", "tarp-relocations", "tarp-parity":
+	case "tarp-index", "tarp-replay", "tarp-relocations", "tarp-parity", "tarp-repair":
 	default:
 		return false
 	}

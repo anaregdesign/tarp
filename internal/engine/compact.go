@@ -111,8 +111,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 			}
 		}
 	}()
-	err = func() error {
-		defer live.Close()
+	err = db.store.RetryMaintenance(ctx, capture.Files, func() error {
 		history, err := db.newIndex()
 		if err != nil {
 			return &storage.IndexWorkError{Err: err}
@@ -122,7 +121,13 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 			return errors.Join(copyErr, &storage.IndexWorkError{Err: err})
 		}
 		return copyErr
-	}()
+	}, func() error {
+		discardErr := errors.Join(checkpoint.Discard(), moves.Close())
+		checkpoint = db.store.NewCheckpoint(capture)
+		moves = db.store.NewRelocations()
+		return discardErr
+	})
+	live.Close()
 	if err != nil {
 		db.compactFailure(err)
 		return result, operationError("compact", "copy", err)

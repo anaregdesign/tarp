@@ -129,7 +129,7 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 		file := image.Files[entry.ID]
 		fd, _, physical, err := openSelectedForRead(file.Path, image.Current.UUID, entry, entry.ID == image.Current.ActiveID, image.openRead, area)
 		if err != nil {
-			return err
+			return selectedReadFailure(entry, err)
 		}
 		file.Size.Store(physical)
 		var activeDigest hash.Hash
@@ -138,12 +138,17 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 			activeDigest = file.activeDigest
 		}
 		var deletions int64
+		var visitErr error
 		err = scanSelectedRecords(ctx, observeDATA(fd, image.openRead, area), entry, image.Catalog.Cutoff, func(off int64, r format.Record, key string) error {
 			if r.Kind == format.Delete {
 				deletions += r.Bytes()
 			}
-			return visit(file, off, r, key)
+			visitErr = visit(file, off, r, key)
+			return visitErr
 		}, activeDigest)
+		if err != nil && visitErr == nil {
+			err = selectedReadFailure(entry, err)
+		}
 		if err = errors.Join(err, fd.Close()); err != nil {
 			return fmt.Errorf("%s: %w", filepath.Base(file.Path), err)
 		}

@@ -106,30 +106,7 @@ func (r checkpointReadMeter) Read(b []byte) (int, error) {
 // index. An additional read, close or cancellation failure must reach the
 // caller even when a decoder also found an invalid page.
 func IsIndexMiss(err error, equivalent ...error) bool {
-	if err == nil {
-		return false
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := joined.Unwrap()
-		for _, cause := range causes {
-			if !IsIndexMiss(cause, equivalent...) {
-				return false
-			}
-		}
-		return len(causes) > 0
-	}
-	if cause := errors.Unwrap(err); cause != nil {
-		return IsIndexMiss(cause, equivalent...)
-	}
-	if errors.Is(err, ErrIndexMiss) {
-		return true
-	}
-	for _, target := range equivalent {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return false
+	return onlyCauses(err, ErrIndexMiss, equivalent...)
 }
 
 func indexReadError(err error) error {
@@ -149,6 +126,8 @@ type IndexBuild struct {
 	final         string // unselected, protected from cleanup until Release
 	filePublished bool
 }
+
+func (b *IndexBuild) Sources() []CapturedFile { return b.capture.Files }
 
 func (s *Store) BeginIndex() (*IndexBuild, error) {
 	if s.Current.ActiveEnd != format.SegmentHeaderBytes {

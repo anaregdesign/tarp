@@ -601,3 +601,29 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanSegmentRepairsGroupAndRestartsTombstoneAccounting(t *testing.T) {
+	db := newTestDBWithHooks(t, Options{}, nil, parkedMaintenance())
+	mustPut(t, db, "obsolete", "old")
+	if err := db.Delete([]byte("obsolete")); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, db, "kept", "first")
+	first := sealForCleaning(t, db)
+	mustPut(t, db, "next", "second")
+	second := damageProtectedTail(t, db)
+	tombstones := db.store.Files[first.ID].DeleteBytes.Load()
+	if err := db.cleanSegment(t.Context(), first, second); err != nil {
+		t.Fatal(err)
+	}
+	files := db.store.Catalog.Files
+	if len(files) != 1 || files[0].Kind != format.Cleaned || files[0].First != first.First ||
+		files[0].Last != second.Last || db.store.Files[files[0].ID].DeleteBytes.Load() != tombstones {
+		t.Fatalf("replacement after repair: %+v", files)
+	}
+	wantValue(t, db, "kept", "first")
+	wantValue(t, db, "next", "second")
+	if _, err := db.Get([]byte("obsolete")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted key after cleaning: %v", err)
+	}
+}

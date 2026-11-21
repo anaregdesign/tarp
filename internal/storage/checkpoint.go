@@ -141,7 +141,8 @@ func (c *Checkpoint) Install() error {
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return err
 	}
-	for _, file := range c.files {
+	for i, file := range c.files {
+		file.markSealed(catalog.UUID, c.entries[i])
 		s.Files[file.ID] = file
 	}
 	return nil

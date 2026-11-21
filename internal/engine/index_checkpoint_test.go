@@ -171,3 +171,28 @@ func TestFailedAutomaticIndexCheckpointReleasesLock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCheckpointIndexRepairsSealedDataBeforePacking(t *testing.T) {
+	db := newTestDBWithHooks(t, Options{}, nil, parkedMaintenance())
+	mustPut(t, db, "a", "first")
+	mustPut(t, db, "b", "second")
+	cut := damageProtectedTail(t, db)
+	if err := db.CheckpointIndex(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if cp := db.store.Catalog.Index; cp.ID == 0 || cp.Sequence != cut.Last {
+		t.Fatalf("index checkpoint after repair: %+v", cp)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, Options{OpenValidation: Indexed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if !reopened.store.IndexCheckpointHit {
+		t.Fatal("failed to load packed index")
+	}
+	wantValue(t, reopened, "b", "second")
+}
