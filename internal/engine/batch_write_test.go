@@ -124,7 +124,7 @@ func TestBatchWriteRejectsWholeRequestBeforeMutation(t *testing.T) {
 func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	opts := testOptions()            // 192 encoded bytes fit exactly in a new log.
 	opts.ValueCacheBudgetBytes = 144 // one key and 15 bytes of value
-	db := newTestDBWithHooks(t, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, opts, nil, parkedMaintenance())
 	mustPut(t, db, "a", "old")
 	before := db.store.Current
 	oldFile := testLoc(t, db, "a").File

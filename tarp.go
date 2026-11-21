@@ -129,6 +129,12 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	return (*engine.DB)(db).Backup(ctx, destination)
 }
 
+// ProtectParity seals a nonempty active DATA segment, then verifies or builds
+// recovery files for the sealed selection. Writes after the seal can continue.
+func (db *DB) ProtectParity(ctx context.Context) error {
+	return (*engine.DB)(db).ProtectParity(ctx)
+}
+
 // RestoreLimits bounds the logical value-cache charge and encoded size of each live
 // record in a restored image. Zero fields select the same defaults as Open.
 type RestoreLimits struct {

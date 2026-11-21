@@ -206,7 +206,7 @@ func TestCompactRetriesPendingCleanupSync(t *testing.T) {
 				}
 				return nil
 			}}
-			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			engineHooks := parkedMaintenance()
 			db := newTestDBWithHooks(t, testOptions(), fs, engineHooks)
 			mustPut(t, db, "k", "acknowledged")
 			if _, err := db.Compact(t.Context()); err != nil {

@@ -19,7 +19,7 @@ func TestKeysSnapshotUsesNoDataReadsOrFilePins(t *testing.T) {
 			reads.Add(1)
 		}
 		return nil
-	}}, &Hooks{CleanerStart: make(chan struct{})})
+	}}, parkedMaintenance())
 	keys := db.Keys(t.Context())
 	for key, err := range keys {
 		t.Fatalf("empty database yielded %q, %v", key, err)

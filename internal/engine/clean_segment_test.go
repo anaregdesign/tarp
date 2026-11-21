@@ -47,7 +47,7 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 		}
 		return nil
 	}}
-	engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+	engineHooks := parkedMaintenance()
 	db := newTestDBWithHooks(t, opts, fs, engineHooks)
 	mustPut(t, db, "raw", "old")
 	mustPut(t, db, "del", "old")
@@ -114,7 +114,7 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 	if err := Restore(ctx, RestoreRequest{Source: backupDir, Destination: restoreDir}); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := OpenWithHooks(restoreDir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
+	restored, err := OpenWithHooks(restoreDir, opts, nil, parkedMaintenance())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
+	reopened, err := OpenWithHooks(dir, opts, nil, parkedMaintenance())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestCleanStagingFailuresLeaveSelectionAndContentsIntact(t *testing.T) {
 				}
 				return nil
 			}}
-			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			engineHooks := parkedMaintenance()
 			db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
 			mustPut(t, db, "obsoleted", "old")
 			mustPut(t, db, "live", "value")
@@ -274,7 +274,7 @@ func TestCleanerRetriesFailedStagingDiscard(t *testing.T) {
 				}
 				return nil
 			}}
-			db := newTestDBWithHooks(t, Options{}, fs, &Hooks{CleanerStart: make(chan struct{})})
+			db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
 			mustPut(t, db, "live", "value")
 			entry := sealForCleaning(t, db)
 			db.cleanPass(t.Context()) // Retire the old manifest before injecting faults.
@@ -305,7 +305,7 @@ func TestCleanerRetriesFailedStagingDiscard(t *testing.T) {
 }
 
 func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testing.T) {
-	db := newTestDBWithHooks(t, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
+	db := newTestDBWithHooks(t, Options{}, nil, parkedMaintenance())
 	mustPut(t, db, "unrelated", "keep")
 	unrelated := sealForCleaning(t, db)
 	mustPut(t, db, "target", "obsolete")
@@ -435,7 +435,7 @@ func TestCleanCatalogPreparationPreservesForegroundOutcome(t *testing.T) {
 				}
 				return nil
 			}}
-			engineHooks := &Hooks{CleanerStart: make(chan struct{})}
+			engineHooks := parkedMaintenance()
 			db := newTestDBWithHooks(t, Options{}, fs, engineHooks)
 			mustPut(t, db, "key", "old")
 			source := sealForCleaning(t, db)
@@ -492,7 +492,7 @@ func TestCleanCatalogPreparationPreservesForegroundOutcome(t *testing.T) {
 			if err := db.Close(); err != nil && !errors.Is(err, syscall.EIO) {
 				t.Fatal(err)
 			}
-			reopened, err := OpenWithHooks(dir, Options{}, nil, &Hooks{CleanerStart: make(chan struct{})})
+			reopened, err := OpenWithHooks(dir, Options{}, nil, parkedMaintenance())
 			if err != nil {
 				t.Fatal(err)
 			}

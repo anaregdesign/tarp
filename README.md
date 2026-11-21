@@ -499,6 +499,28 @@ If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
 
+### Recovering damaged DATA
+
+Every open DB generates recovery files for sealed DATA in the background.
+Normal `Get`, `Put` and `BatchPut` do no parity I/O. To protect the current tail at a chosen
+point, call `db.ProtectParity(ctx)`. This seals a nonempty active DATA segment
+and completes protection without building an index checkpoint.
+A successful write by itself protects against crash loss according to the
+commit contract. Correction of local media damage starts after parity publication.
+
+If a read or a full Open detects damaged DATA, close the DB and run
+`tarp.RepairParity(ctx, dir)`. Each 64 KiB stripe can recover one missing or
+corrupt 4 KiB block. A full stripe adds about 6.42% including its checksums
+and record offsets. Repair verifies the reconstructed file against the original
+SHA-256 before replacing it. An independent backup covers whole-device failure.
+
+If a DATA file exceeds the correction budget, use
+`tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` with its ID from
+the failing DATA filename. The callback receives historical Put and Delete
+records. Check the returned error and the report's `Unrecoverable` byte ranges.
+The source stays in place and the caller chooses where to export the records.
+[Recovery guarantees](docs/durability.md#sealed-data-protection-and-offline-recovery)
+
 ## Metrics
 
 Use `db.Stats()` on a raw or typed DB to collect storage size, cache activity

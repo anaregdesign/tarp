@@ -22,8 +22,10 @@ type failure struct{ err error }
 // Hooks observes engine events for deterministic tests and measurement drivers.
 // Set hooks before starting the operations that use them.
 type Hooks struct {
-	// CleanerStart gates the worker before its first pass until the channel closes.
+	// CleanerStart gates the automatic cleaner until the channel closes.
 	CleanerStart <-chan struct{}
+	// ParityStart gates the automatic parity worker until the channel closes.
+	ParityStart <-chan struct{}
 	// PutCopied counts key and value bytes copied for the index and cache.
 	PutCopied func(keyBytes, valueBytes int)
 	// WriterWait observes a mutation before (false) and after (true) acquiring the writer gate.
@@ -71,6 +73,7 @@ type DB struct {
 	// Only Compact sets or clears this under writer while it owns the cleaner
 	// gate. indexGate guards the staged keys during that interval.
 	memoryRemap *memoryCheckpointRemap
+	parity      parityWorker
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
@@ -131,7 +134,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	if err := ctx.Err(); err != nil && !s.Created {
 		return nil, operationError("open", "recovery", errors.Join(err, keys.Close(), s.Close()))
 	}
-	db.startCleaner()
+	db.startMaintenance()
 	return db, nil
 }
 
@@ -340,6 +343,9 @@ func (db *DB) unlockMutation(previousActive uint64, invalidatedSealed bool) {
 	if db.cleaner.writers.Add(-1) == 0 {
 		db.resumeCleaner()
 	}
+	if rotated {
+		db.notifyParity()
+	}
 	if rotated || invalidatedSealed {
 		db.notifyCleaner()
 	}
@@ -468,14 +474,22 @@ func (db *DB) Close() error {
 	}
 	db.closing = true
 	db.cleaner.cancel()
+	db.parity.cancel()
 	for db.active != 0 {
 		db.cond.Wait()
 	}
 	db.life.Unlock()
 	<-db.cleaner.done
+	<-db.parity.done
 	var checkpointErr error
 	if db.opts.IndexMode == IndexBTree && db.health() == nil {
 		checkpointErr = db.checkpointIndex(context.Background(), true)
+	}
+	var parityErr error
+	if db.health() == nil {
+		if err := db.protectSealed(context.Background(), nil); err != nil {
+			parityErr = operationError("close", "protect parity", err)
+		}
 	}
 	for _, file := range db.files {
 		file.LiveKeys.Store(0)
@@ -484,7 +498,7 @@ func (db *DB) Close() error {
 	db.readStatsLocked(&db.stats)
 	db.files, db.cache = nil, nil
 	db.state.Unlock()
-	err := publicCause(errors.Join(checkpointErr, db.keys.Close(), db.store.Close()))
+	err := publicCause(errors.Join(checkpointErr, parityErr, db.keys.Close(), db.store.Close()))
 	if f := db.failed.Load(); f != nil {
 		err = errors.Join(f.err, err)
 	}

@@ -113,6 +113,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 		return publicErr
 	}
 	keepOutput = true
+	db.resetParity()
 	// Cleaning retains every tombstone. Replace only the physical file counts
 	// and sizes, including a possible metadata-only cleaned interval.
 	var oldData, newData dataTotals

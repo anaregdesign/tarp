@@ -279,7 +279,10 @@ func TestScanHandlesReadAtResults(t *testing.T) {
 }
 
 func FuzzDecoders(f *testing.F) {
+	data, sealed, _ := parityFixture(100)
+	parity := parityFor(f, data, sealed)
 	for _, b := range [][]byte{
+		parity,
 		EncodeSegment(Segment{ID: 1, Kind: Cleaned}),
 		EncodeCatalog(Catalog{ActiveID: 1}),
 		EncodeCatalog(Catalog{ActiveID: 1, Index: IndexCheckpoint{ID: 2, Bytes: 1024, Digest: [32]byte{1}, Layout: [32]byte{2}}}),
@@ -300,6 +303,10 @@ func FuzzDecoders(f *testing.F) {
 		_, _ = DecodeCatalog(b)
 		_, _ = DecodeBackup(b)
 		_, _ = DecodeIndexedValue(b, []byte("k"), 1)
+		_ = ValidateParity(t.Context(), bytes.NewReader(b), parityTestUUID, sealed)
+		if len(b) >= 8 && string(b[:8]) == "TARPPAR1" {
+			_ = RecoverParity(t.Context(), bytes.NewReader(nil), bytes.NewReader(b), io.Discard, parityTestUUID, sealed)
+		}
 		if len(b) >= RecordHeaderBytes {
 			_, _ = DecodeRecord(b[:RecordHeaderBytes], int64(len(b)))
 		}

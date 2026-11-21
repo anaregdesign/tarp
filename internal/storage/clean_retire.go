@@ -100,6 +100,13 @@ func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result er
 			result = err
 			continue
 		}
+		// Release recovery information before its source. Keep the registry
+		// entry until both names are gone so a partial retirement can retry.
+		removedParity, err := remove(filepath.Join(s.Dir, parityName(s.Current.UUID, id)))
+		if err != nil || !removedParity || remaining == 0 {
+			result = err
+			continue
+		}
 		removed, err := remove(f.Path)
 		if removed {
 			delete(s.retired, id)

@@ -373,3 +373,47 @@ func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
 		t.Fatalf("retry used location %+v, wanted file %d, error %v", loc, candidate, err)
 	}
 }
+
+func TestOpenRetiresOnlyParityBelongingToThisDatabase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Handles: 1}
+	store, _, err := Open(dir, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuid, activeID := store.Current.UUID, store.Current.ActiveID
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	foreignUUID := uuid
+	foreignUUID[0] ^= 0xff
+	foreign := filepath.Join(dir, parityName(foreignUUID, activeID))
+	stray := filepath.Join(dir, parityName(uuid, activeID))
+	for _, path := range []string{foreign, stray} {
+		if err := os.WriteFile(path, []byte("unchanged"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s, _, err := Open(dir, cfg, nil); !errors.Is(err, ErrCorrupt) {
+		if s != nil {
+			s.Close()
+		}
+		t.Fatalf("foreign object: %v", err)
+	}
+	for _, path := range []string{foreign, stray} {
+		if b, err := os.ReadFile(path); err != nil || string(b) != "unchanged" {
+			t.Fatalf("validation modified %s: %v", path, err)
+		}
+	}
+	if err := os.Remove(foreign); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _, err := Open(dir, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := os.Lstat(stray); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("parity for active segment was not retired: %v", err)
+	}
+}

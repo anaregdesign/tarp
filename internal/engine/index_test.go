@@ -80,7 +80,7 @@ func TestIndexedReadsRejectMissingDataFileAndReleasePins(t *testing.T) {
 		for _, op := range []string{"get", "batch-get", "scan"} {
 			t.Run(backend.name+"/"+op, func(t *testing.T) {
 				opts := Options{IndexMode: backend.mode, MaxRecordBytes: 64, TargetSegmentBytes: 128}
-				db := newTestDBWithHooks(t, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
+				db := newTestDBWithHooks(t, opts, nil, parkedMaintenance())
 				mustPut(t, db, "a", "v")
 				mustPut(t, db, "b", "v")
 				first, missing := testLoc(t, db, "a").File, testLoc(t, db, "b").File

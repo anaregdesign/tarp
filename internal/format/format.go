@@ -119,6 +119,12 @@ func EncodeRecord(kind uint8, sequence uint64, key, value []byte) []byte {
 }
 
 func DecodeRecord(b []byte, available int64) (Record, error) {
+	var scratch [RecordHeaderBytes]byte
+	return decodeRecord(b, available, &scratch)
+}
+
+// A sequential decoder can reuse its checksum scratch across a whole file.
+func decodeRecord(b []byte, available int64, scratch *[RecordHeaderBytes]byte) (Record, error) {
 	var r Record
 	if len(b) != RecordHeaderBytes || available < RecordHeaderBytes {
 		return r, bad("incomplete committed record header")
@@ -126,10 +132,9 @@ func DecodeRecord(b []byte, available int64) (Record, error) {
 	if string(b[:8]) != "TARPRECD" || !zero(b[8:10]) {
 		return r, bad("record signature or reserved bytes")
 	}
-	h := [RecordHeaderBytes]byte{}
-	copy(h[:], b)
-	clear(h[12:16])
-	if crc32.Checksum(h[:], table) != order.Uint32(b[12:]) {
+	copy(scratch[:], b)
+	clear(scratch[12:16])
+	if crc32.Checksum(scratch[:], table) != order.Uint32(b[12:]) {
 		return r, bad("record header checksum")
 	}
 	if b[11] != 0 {
