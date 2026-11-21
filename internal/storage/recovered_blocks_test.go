@@ -82,18 +82,20 @@ func TestRecoveredBlocksUseRawBytesOnlyFromIdentifiedOriginal(t *testing.T) {
 func TestRecoveryStageSeparatesSourceOutageFromPrivateWriteDamage(t *testing.T) {
 	fs := &IO{}
 	_, c, src, _ := protectedRecoveryFixture(t, fs)
-	fs.Hook = func(point string) error {
-		if point == "compact.recover.source:before" {
-			return syscall.EIO
+	for _, fault := range []string{"compact.recover.source:before", "compact.recover.parity:before"} {
+		fs.Hook = func(point string) error {
+			if point == fault {
+				return syscall.EIO
+			}
+			return nil
 		}
-		return nil
-	}
-	stage, err := c.stageBlocks(t.Context(), src)
-	if stage != nil {
-		stage.Close()
-	}
-	if !IsDataUnavailable(err) || !errors.Is(err, syscall.EIO) {
-		t.Fatalf("source read: %v", err)
+		stage, err := c.stageBlocks(t.Context(), src)
+		if stage != nil {
+			stage.Close()
+		}
+		if !IsDataUnavailable(err) || !errors.Is(err, syscall.EIO) {
+			t.Fatalf("%s: %v", fault, err)
+		}
 	}
 	fs.Hook = nil
 	fs.WriteAt = func(f *os.File, b []byte, off int64) (int, error) {
@@ -103,7 +105,7 @@ func TestRecoveryStageSeparatesSourceOutageFromPrivateWriteDamage(t *testing.T) 
 		}
 		return f.WriteAt(b, off)
 	}
-	stage, err = c.stageBlocks(t.Context(), src)
+	stage, err := c.stageBlocks(t.Context(), src)
 	if stage != nil {
 		defer stage.Close()
 	}

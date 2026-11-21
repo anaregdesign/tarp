@@ -71,7 +71,7 @@ One optional PARITY file belongs to one selected immutable DATA file, including
 its 64-byte segment header. The filename reuses its DATA ID. The trusted source
 of the expected identity, length and SHA-256 is the selected MANIFEST.
 Compaction requires stripes bound to this identity. Tarp regenerates older
-sidecars from healthy sealed DATA. DATA, MANIFEST and INDEX encodings are unchanged.
+sidecars from healthy sealed DATA.
 
 | Header offset | Bytes | Field |
 | --- | --- | --- |

@@ -114,6 +114,11 @@ func (r *checkpointRecovery) file(src CapturedFile) (result error) {
 				defer func() { result = errors.Join(result, stage.Close()) }()
 			}
 			if stageErr != nil {
+				if IsDataUnavailable(stageErr) {
+					// Keep the original DATA failure as well as the reason a
+					// fresh PARITY pass could not recover the captured file.
+					return errors.Join(err, stageErr)
+				}
 				return stageErr
 			}
 			if err := r.scanDamaged(src, stage); err != nil {
@@ -201,7 +206,7 @@ func (r *checkpointRecovery) scanDamaged(src CapturedFile, b *recoveredBlocks) e
 			if err != nil {
 				return err
 			}
-			if err := b.addRange(off, next, true); err != nil {
+			if err := b.addRange(off, next, rangeUnparsed); err != nil {
 				return err
 			}
 			off = next
@@ -244,9 +249,7 @@ func (r *checkpointRecovery) scanDamaged(src CapturedFile, b *recoveredBlocks) e
 			if !gap {
 				return err
 			}
-			if err := b.addRange(off, off+rec.Bytes(), false); err != nil {
-				return err
-			}
+			var flags byte
 			// The header has its own checksum. If parity also verifies
 			// the key bytes, the event is known even when its value is lost.
 			keyGap, e := b.overlapsGap(off+format.RecordHeaderBytes, rec.KeyBytes)
@@ -258,18 +261,22 @@ func (r *checkpointRecovery) scanDamaged(src CapturedFile, b *recoveredBlocks) e
 					return err
 				}
 			} else {
-				// A damaged key is ambiguous. Do not revive a captured older
-				// version if these raw key bytes could identify its successor.
+				// A damaged key can equal another key by accident. Require
+				// an exact owner of the newer Put before retaining the
+				// other key's older, independently verified version.
 				current, ok, err := r.live.Lookup(key)
 				if err != nil {
 					return &IndexWorkError{Err: err}
 				}
-				if ok && current.Sequence < rec.Sequence {
-					return fmt.Errorf("%w: captured address may precede an unreadable update", ErrCorrupt)
+				if rec.Kind == format.Put && ok && current.Sequence < rec.Sequence {
+					flags = rangeNeedsOwner
 				}
 				if rec.Kind == format.Delete {
 					r.possibleDelete = max(r.possibleDelete, rec.Sequence)
 				}
+			}
+			if err := b.addRange(off, off+rec.Bytes(), flags); err != nil {
+				return err
 			}
 		}
 		off += rec.Bytes()
@@ -296,7 +303,7 @@ func (r *checkpointRecovery) copyDamaged(src CapturedFile, b *recoveredBlocks) e
 			callbackErr = fmt.Errorf("%w: invalid recovery address", ErrCorrupt)
 			return false
 		}
-		marked, err := b.containsDamage(a.Offset, a.Offset+a.Bytes)
+		marked, err := b.claimDamage(a.Offset, a.Offset+a.Bytes)
 		if err != nil {
 			callbackErr = err
 			return false
@@ -311,6 +318,9 @@ func (r *checkpointRecovery) copyDamaged(src CapturedFile, b *recoveredBlocks) e
 	})
 	if err != nil {
 		return &IndexWorkError{Err: err}
+	}
+	if callbackErr == nil && b.unowned != 0 {
+		return &UnavailableDataError{FileID: src.Entry.ID, Err: fmt.Errorf("%w: captured address may precede an unreadable update", ErrCorrupt)}
 	}
 	return callbackErr
 }

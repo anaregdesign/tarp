@@ -24,7 +24,7 @@ import (
 // or corrected blocks from raw bytes in stripes exceeding their parity budget.
 type recoveredBlocks struct {
 	*os.File
-	end, rangesAt, ranges int64
+	end, rangesAt, ranges, unowned int64
 }
 
 // An EIO is not authority to permanently discard a key. The parity codec
@@ -32,9 +32,8 @@ type recoveredBlocks struct {
 // here so a best-effort checkpoint cannot turn an I/O outage into data loss.
 type recoveringReader struct {
 	io.ReaderAt
-	fs     *IO
-	header []byte // original identity was invalid; canonical bytes follow from the selected catalog
-	err    error
+	fs  *IO
+	err error
 }
 
 func (r *recoveringReader) ReadAt(b []byte, off int64) (int, error) {
@@ -42,12 +41,29 @@ func (r *recoveringReader) ReadAt(b []byte, off int64) (int, error) {
 	err := r.fs.Check("compact.recover.source:before")
 	if err == nil {
 		n, err = r.ReaderAt.ReadAt(b, off)
-		if off < int64(len(r.header)) && off >= 0 {
-			copy(b[:n], r.header[off:])
-		}
 	}
 	if errors.Is(err, syscall.EIO) {
 		r.err = err
+	}
+	return n, err
+}
+
+// Classify failures on the PARITY descriptor before the decoder can also
+// encounter a failure on the separate private recovery output.
+type recoveryParityReader struct {
+	io.Reader
+	fs          *IO
+	unavailable func(error) error
+}
+
+func (r recoveryParityReader) Read(b []byte) (int, error) {
+	var n int
+	err := r.fs.Check("compact.recover.parity:before")
+	if err == nil {
+		n, err = r.Reader.Read(b)
+	}
+	if errors.Is(err, syscall.EIO) {
+		err = r.unavailable(err)
 	}
 	return n, err
 }
@@ -62,7 +78,7 @@ func (c *Checkpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *reco
 	}
 	side, err := OpenRegular(filepath.Join(c.store.Dir, parityName(c.capture.Current.UUID, e.ID)))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.EIO) {
 			return nil, unavailable(err)
 		}
 		return nil, err
@@ -73,6 +89,8 @@ func (c *Checkpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *reco
 	if err == nil {
 		defer func() { result = errors.Join(result, fd.Close()) }()
 		original = fd
+	} else if errors.Is(err, syscall.EIO) {
+		return nil, unavailable(err)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -89,12 +107,6 @@ func (c *Checkpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *reco
 		return nil, err
 	}
 	useRaw := n == len(header) && verifySegmentHeader(header[:], c.capture.Current.UUID, e) == nil
-	if !useRaw && n == len(header) {
-		// A valid segment header includes its own trailing CRC, so changing
-		// just the UUID and recomputing that CRC can leave the enclosing
-		// block CRC unchanged. Its exact selected encoding is already known.
-		data.header = format.EncodeSegment(format.Segment{UUID: c.capture.Current.UUID, ID: e.ID, Kind: e.Kind})
-	}
 	dir, err := c.store.WorkspaceDir()
 	if err != nil {
 		return nil, err
@@ -113,7 +125,7 @@ func (c *Checkpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *reco
 	dataHash, descHash := sha256.New(), sha256.New()
 	var raw [format.ParityBlockBytes]byte
 	var desc [3]byte
-	reader := bufio.NewReaderSize(side, parityBufferSize(e.Bytes))
+	reader := bufio.NewReaderSize(recoveryParityReader{side, c.store.IO, unavailable}, parityBufferSize(e.Bytes))
 	err = format.WalkParityBlocks(ctx, data, reader, c.capture.Current.UUID, e, func(off int64, first uint16, block []byte) error {
 		if data.err != nil {
 			return unavailable(data.err)
@@ -219,48 +231,66 @@ func (b *recoveredBlocks) nextAnchor(ctx context.Context, off int64) (int64, err
 // parsed interval belongs to exactly one record. The sorted private spool
 // bounds memory for very large files and rejects forged offsets inside
 // readable records even if another byte in the same parity block was damaged.
-const recoveryRangeBytes = 20
+const recoveryRangeBytes = 21
+const (
+	rangeUnparsed byte = 1 << iota
+	rangeNeedsOwner
+	rangeClaimed
+)
 
-func (b *recoveredBlocks) addRange(start, end int64, unparsed bool) error {
+func (b *recoveredBlocks) addRange(start, end int64, flags byte) error {
 	var p [recoveryRangeBytes]byte
-	a := uint64(start)
-	if unparsed {
-		a |= 1 << 63
-	}
-	binary.LittleEndian.PutUint64(p[:], a)
+	binary.LittleEndian.PutUint64(p[:], uint64(start))
 	binary.LittleEndian.PutUint64(p[8:], uint64(end))
-	binary.LittleEndian.PutUint32(p[16:], crc32.ChecksumIEEE(p[:16]))
+	p[16] = flags
 	if b.ranges >= (math.MaxInt64-b.rangesAt)/recoveryRangeBytes {
 		return errors.New("storage: recovery range spool too large")
 	}
-	_, err := b.WriteAt(p[:], b.rangesAt+b.ranges*recoveryRangeBytes)
-	if err == nil {
-		b.ranges++
+	if err := b.writeRange(b.ranges, &p); err != nil {
+		return err
 	}
+	b.ranges++
+	if flags&rangeNeedsOwner != 0 {
+		b.unowned++
+	}
+	return nil
+}
+
+func (b *recoveredBlocks) writeRange(index int64, p *[recoveryRangeBytes]byte) error {
+	binary.LittleEndian.PutUint32(p[17:], crc32.ChecksumIEEE(p[:17]))
+	_, err := b.WriteAt(p[:], b.rangesAt+index*recoveryRangeBytes)
 	return err
 }
 
-func (b *recoveredBlocks) containsDamage(start, end int64) (bool, error) {
+func (b *recoveredBlocks) claimDamage(start, end int64) (bool, error) {
 	for lo, hi := int64(0), b.ranges; lo < hi; {
 		mid := lo + (hi-lo)/2
 		var p [recoveryRangeBytes]byte
 		if _, err := b.ReadAt(p[:], b.rangesAt+mid*recoveryRangeBytes); err != nil {
 			return false, err
 		}
-		if crc32.ChecksumIEEE(p[:16]) != binary.LittleEndian.Uint32(p[16:]) {
+		if crc32.ChecksumIEEE(p[:17]) != binary.LittleEndian.Uint32(p[17:]) {
 			return false, errors.New("storage: recovery range checksum mismatch")
 		}
-		raw := binary.LittleEndian.Uint64(p[:])
-		a, z := int64(raw&math.MaxInt64), int64(binary.LittleEndian.Uint64(p[8:]))
+		a, z := int64(binary.LittleEndian.Uint64(p[:])), int64(binary.LittleEndian.Uint64(p[8:]))
 		switch {
 		case start < a:
 			hi = mid
 		case start >= z:
 			lo = mid + 1
-		case raw>>63 != 0:
+		case p[16]&rangeUnparsed != 0:
 			return end <= z, nil
+		case start != a || end != z:
+			return false, nil
 		default:
-			return start == a && end == z, nil
+			if p[16]&rangeClaimed != 0 {
+				return false, fmt.Errorf("%w: multiple keys claim one damaged record", ErrCorrupt)
+			}
+			if p[16]&rangeNeedsOwner != 0 {
+				b.unowned--
+			}
+			p[16] |= rangeClaimed
+			return true, b.writeRange(mid, &p)
 		}
 	}
 	return false, nil

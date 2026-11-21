@@ -98,13 +98,41 @@ func TestParityFixesIndependentErasuresAndPartialTail(t *testing.T) {
 	}
 }
 
+func TestParityRepairsCatalogHeaderAndPayloadInOneStripe(t *testing.T) {
+	raw, entry, _ := parityFixture(3 * ParityBlockBytes)
+	sidecar := parityFor(t, raw, entry)
+	for _, foreign := range []bool{false, true} {
+		input := bytes.Clone(raw)
+		if foreign {
+			copy(input, EncodeSegment(Segment{UUID: parityTestUUID, ID: entry.ID + 1, Kind: Snapshot}))
+			if crc32.Checksum(input[:ParityBlockBytes], table) != crc32.Checksum(raw[:ParityBlockBytes], table) {
+				t.Fatal("fixture requires equivalent CRCs for two valid segment headers")
+			}
+		} else {
+			input[8] ^= 1
+		}
+		input[ParityBlockBytes+17] ^= 1
+		var recovered bytes.Buffer
+		err := RecoverParity(t.Context(), bytes.NewReader(input), bytes.NewReader(sidecar), &recovered, parityTestUUID, entry)
+		if err != nil || sha256.Sum256(recovered.Bytes()) != entry.Digest || !bytes.Equal(recovered.Bytes(), raw) {
+			t.Fatalf("restore header and payload (foreign header %t): %v", foreign, err)
+		}
+		// Header replacement alone cannot certify the remaining bytes of block zero.
+		input[SegmentHeaderBytes+1] ^= 1
+		err = RecoverParity(t.Context(), bytes.NewReader(input), bytes.NewReader(sidecar), io.Discard, parityTestUUID, entry)
+		if !errors.Is(err, ErrParityGap) {
+			t.Fatalf("accepted a second damaged payload block (foreign header %t): %v", foreign, err)
+		}
+	}
+}
+
 func TestParityAnchorsCrossStripeHeadersAndReportOnlyLostBlocks(t *testing.T) {
 	// Start a header 7 bytes before a stripe boundary, and one at the next
 	// block boundary. Include long payloads and multiple headers per block.
 	raw, e, headers := parityFixture(parityStripeBytes-7-SegmentHeaderBytes-RecordHeaderBytes-2, ParityBlockBytes+7-RecordHeaderBytes-2, 0, 91, parityStripeBytes, 100)
 	sidecar := parityFor(t, raw, e)
 	input := slices.Clone(raw)
-	input[0] ^= 1
+	input[SegmentHeaderBytes+200] ^= 1
 	input[2*ParityBlockBytes+4] ^= 1
 	input[parityStripeBytes+2] ^= 1 // independently recoverable in next stripe
 	count := 0

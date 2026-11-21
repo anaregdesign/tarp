@@ -377,13 +377,17 @@ manual compaction only retries cleanup. It does not scrub the snapshot.
 The checkpoint uses the selected file identity, catalog digest, sidecar block
 checksums and record anchors. Each stripe checksum includes the selected DATA
 identity, so copying an intact stripe from another sidecar fails validation.
+The catalog supplies the canonical segment header, so damage limited to that
+header can be corrected before applying XOR to another block in the stripe.
 Tarp reconstructs correctable stripes, validates
 records individually in damaged stripes and preserves verified live records
 from the rest of the file. Raw records in a damaged block require a matching
 original segment header. Tarp can use a matching live cache value when the
 record header confirms the expected payload checksum. Obsolete damaged records
 do not count as lost keys. A missing or invalid sidecar, a temporary staging
-failure, or an unverified source error does not establish record loss.
+failure, or an unverified source error does not establish record loss. If a
+damaged key could belong to an ambiguous update and the captured index cannot
+resolve ownership, compaction returns `ErrDataUnavailable` and keeps serving.
 
 At publication, concurrent Put and Delete operations keep their normal ordering.
 A key dropped by the committed checkpoint is absent from Get, Keys, backups and

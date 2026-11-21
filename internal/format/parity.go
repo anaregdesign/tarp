@@ -320,7 +320,7 @@ func unreadableParityBlock(err error) bool {
 }
 
 // recoverStripe returns a bit mask of chunks that could not be recovered.
-func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw []byte, s *parityStripe) (uint16, error) {
+func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw, header []byte, s *parityStripe) (uint16, error) {
 	// Use one sequential read on healthy stripes. Isolate a short read or
 	// media error to an individual block before charging it as an erasure.
 	stripeErr := readChunk(ctx, data, raw, off)
@@ -336,6 +336,12 @@ func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw []byte,
 		}
 		if err != nil && !unreadableParityBlock(err) {
 			return 0, err
+		}
+		// The catalog specifies the exact segment header. Its own trailing
+		// CRC lets even a valid foreign header have the same enclosing block
+		// CRC. Normalize those bytes before checking the complete first block.
+		if err == nil && off == 0 && pos == 0 {
+			copy(block, header)
 		}
 		if err != nil || crc32.Checksum(block, table) != s.dataCRC(pos/ParityBlockBytes) {
 			gaps |= 1 << (pos / ParityBlockBytes)
@@ -364,11 +370,12 @@ func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw []byte,
 
 func walkParityData(ctx context.Context, data io.ReaderAt, parity io.Reader, uuid [16]byte, entry File, visit func(*parityStripe, int64, []byte, uint16) error) error {
 	var raw [parityStripeBytes]byte
+	header := EncodeSegment(Segment{UUID: uuid, ID: entry.ID, Kind: entry.Kind})
 	digest := sha256.New()
 	complete := true
 	err := walkParity(ctx, parity, uuid, entry, func(s *parityStripe, off int64, size int) error {
 		chunk := raw[:size]
-		gaps, err := recoverStripe(ctx, data, off, chunk, s)
+		gaps, err := recoverStripe(ctx, data, off, chunk, header, s)
 		if err != nil {
 			return err
 		}
