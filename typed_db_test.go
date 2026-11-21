@@ -343,3 +343,73 @@ func TestTypedCheckpointIndexReopensEncodedKeys(t *testing.T) {
 		t.Fatalf("Get = %v, %v", got, err)
 	}
 }
+
+func TestTypedPrefixDecodesOnlyMatchingKeysAndValues(t *testing.T) {
+	type edgeKey struct{ Tail, Head string }
+	type tailKey struct{ Tail string }
+	keys, err := tarp.NewCodec[edgeKey]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tails, err := tarp.NewCodec[tailKey]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := tails.Encode(tailKey{"a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mode := range map[string]tarp.IndexMode{"btree": tarp.IndexBTree, "memory": tarp.IndexMemory} {
+		t.Run(name, func(t *testing.T) {
+			raw := openPublicDB(t, t.TempDir(), tarp.Options{IndexMode: mode})
+			valueErr := errors.New("invalid edge value")
+			edges, err := tarp.Bind(raw, keys, rejectingStringCodec{valueErr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			match := edgeKey{"a", "z"}
+			if err := edges.Put(match, "valid"); err != nil {
+				t.Fatal(err)
+			}
+			if err := edges.Put(edgeKey{"ab", "z"}, "invalid"); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Put([]byte{0xff}, nil); err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for entry, err := range edges.ScanPrefix(t.Context(), prefix) {
+				if err != nil || entry.Key != match || entry.Value != "valid" {
+					t.Fatalf("ScanPrefix = %+v, %v", entry, err)
+				}
+				count++
+			}
+			if count != 1 {
+				t.Fatalf("ScanPrefix yielded %d entries", count)
+			}
+			if err := edges.Put(match, "invalid"); err != nil {
+				t.Fatal(err)
+			}
+			count = 0
+			for key, err := range edges.KeysPrefix(t.Context(), prefix) {
+				if err != nil || key != match {
+					t.Fatalf("KeysPrefix = %+v, %v", key, err)
+				}
+				count++
+			}
+			if count != 1 {
+				t.Fatalf("KeysPrefix yielded %d keys", count)
+			}
+			count = 0
+			for entry, err := range edges.ScanPrefix(t.Context(), prefix) {
+				if !errors.Is(err, valueErr) || entry != (tarp.TypedEntry[edgeKey, string]{}) {
+					t.Fatalf("ScanPrefix with invalid value = %+v, %v", entry, err)
+				}
+				count++
+			}
+			if count != 1 {
+				t.Fatalf("ScanPrefix yielded %d codec errors", count)
+			}
+		})
+	}
+}

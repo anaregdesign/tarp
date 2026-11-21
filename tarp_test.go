@@ -1195,3 +1195,73 @@ func TestCompactSalvagesLiveRecordsAndDropsOnlyLostKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestScanPrefixTakesFreshSnapshotsAndReleasesOnBreak(t *testing.T) {
+	for name, mode := range map[string]tarp.IndexMode{"btree": tarp.IndexBTree, "memory": tarp.IndexMemory} {
+		t.Run(name, func(t *testing.T) {
+			db := openPublicDB(t, t.TempDir(), tarp.Options{IndexMode: mode})
+			prefix := []byte("a/")
+			seq := db.ScanPrefix(t.Context(), prefix)
+			clear(prefix)
+			if err := db.BatchPut([]tarp.Entry{
+				{Key: []byte("a/1"), Value: []byte("old")},
+				{Key: []byte("a/2"), Value: []byte("old")},
+				{Key: []byte("b/1"), Value: []byte("other")},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for entry, err := range seq {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) == 0 {
+					if err := db.BatchPut([]tarp.Entry{
+						{Key: []byte("a/1"), Value: []byte("new")},
+						{Key: []byte("a/2"), Value: []byte("new")},
+						{Key: []byte("a/3"), Value: []byte("new")},
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				got[string(entry.Key)] = string(entry.Value)
+				clear(entry.Key)
+				clear(entry.Value)
+			}
+			if !maps.Equal(got, map[string]string{"a/1": "old", "a/2": "old"}) {
+				t.Fatalf("first snapshot = %v", got)
+			}
+			clear(got)
+			for entry, err := range seq {
+				if err != nil {
+					t.Fatal(err)
+				}
+				got[string(entry.Key)] = string(entry.Value)
+			}
+			if !maps.Equal(got, map[string]string{"a/1": "new", "a/2": "new", "a/3": "new"}) {
+				t.Fatalf("fresh snapshot = %v", got)
+			}
+			for _, err := range seq {
+				if err != nil {
+					t.Fatal(err)
+				}
+				break
+			}
+			if result, err := db.Compact(t.Context()); err != nil || result.PinnedRetiredDataBytes != 0 {
+				t.Fatalf("compact after early break = %+v, %v", result, err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			count := 0
+			for entry, err := range db.ScanPrefix(ctx, []byte("missing")) {
+				if !errors.Is(err, context.Canceled) || entry.Key != nil || entry.Value != nil {
+					t.Fatalf("canceled scan = %+v, %v", entry, err)
+				}
+				count++
+			}
+			if count != 1 {
+				t.Fatalf("canceled scan yielded %d times", count)
+			}
+		})
+	}
+}

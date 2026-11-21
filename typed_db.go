@@ -144,24 +144,38 @@ type TypedEntry[K, V any] struct {
 // one zero TypedEntry and ends iteration. Breaking early releases the snapshot.
 func (db *View[K, V]) Scan(ctx context.Context) iter.Seq2[TypedEntry[K, V], error] {
 	return func(yield func(TypedEntry[K, V], error) bool) {
-		for entry, err := range db.core.Scan(ctx) {
-			if err != nil {
-				yield(TypedEntry[K, V]{}, err)
-				return
-			}
-			key, err := db.keyCodec.Decode(entry.Key)
-			if err != nil {
-				yield(TypedEntry[K, V]{}, fmt.Errorf("tarp: decode key: %w", err))
-				return
-			}
-			value, err := db.decodeValue(entry.Value)
-			if err != nil {
-				yield(TypedEntry[K, V]{}, err)
-				return
-			}
-			if !yield(TypedEntry[K, V]{Key: key, Value: value}, nil) {
-				return
-			}
+		db.decodeEntries(db.core.Scan(ctx), yield)
+	}
+}
+
+// ScanPrefix decodes the entries selected by [DB.ScanPrefix]. The prefix is a
+// prefix of the stored key bytes and does not need to encode a complete K.
+func (db *View[K, V]) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[TypedEntry[K, V], error] {
+	view := *db
+	rows := view.core.ScanPrefix(ctx, encodedPrefix)
+	return func(yield func(TypedEntry[K, V], error) bool) {
+		view.decodeEntries(rows, yield)
+	}
+}
+
+func (db *View[K, V]) decodeEntries(seq iter.Seq2[Entry, error], yield func(TypedEntry[K, V], error) bool) {
+	for entry, err := range seq {
+		if err != nil {
+			yield(TypedEntry[K, V]{}, err)
+			return
+		}
+		key, err := db.keyCodec.Decode(entry.Key)
+		if err != nil {
+			yield(TypedEntry[K, V]{}, fmt.Errorf("tarp: decode key: %w", err))
+			return
+		}
+		value, err := db.decodeValue(entry.Value)
+		if err != nil {
+			yield(TypedEntry[K, V]{}, err)
+			return
+		}
+		if !yield(TypedEntry[K, V]{Key: key, Value: value}, nil) {
+			return
 		}
 	}
 }
