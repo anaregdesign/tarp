@@ -56,7 +56,9 @@ func (e *CompatibilityError) Error() string {
 }
 
 type File struct {
-	activeDigest hash.Hash // writer gate owns the committed active byte stream
+	// Only the serialized parity builder reads or writes these flags.
+	parityReady, parityNeedsSync bool
+	activeDigest                 hash.Hash // writer gate owns the committed active byte stream
 
 	ID                     uint64
 	Kind                   uint32
@@ -112,6 +114,10 @@ type Store struct {
 
 func DataName(uuid [16]byte, id uint64) string {
 	return fmt.Sprintf("DATA-%x-%016x", uuid, id)
+}
+
+func parityName(uuid [16]byte, id uint64) string {
+	return fmt.Sprintf("PARITY-%x-%016x", uuid, id)
 }
 
 func ManifestName(uuid [16]byte, id uint64) string {
@@ -665,6 +671,8 @@ func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry) (bool, 
 			s.nextID = max(s.nextID, id)
 		} else if id, ok := parseID(name, "INDEX", s.Current.UUID); ok {
 			s.nextID = max(s.nextID, id)
+		} else if id, ok := parseID(name, "PARITY", s.Current.UUID); ok {
+			s.nextID = max(s.nextID, id)
 		} else if !s.ownedTemp(name) {
 			return false, fmt.Errorf("%w: unknown engine object %s", ErrCorrupt, name)
 		}
@@ -713,6 +721,13 @@ func (s *Store) cleanupValidated(ctx context.Context, entries []os.DirEntry) (re
 		if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {
 			remove = id != s.Current.ManifestID
 			manifestID = id
+		}
+		if id, ok := parseID(name, "PARITY", s.Current.UUID); ok {
+			remove = id == s.Current.ActiveID || !selected[id]
+			if f := s.Files[id]; f != nil && f.References() != 0 && !selected[id] {
+				// A parity publisher may still own its source pin.
+				remove = false
+			}
 		}
 		if id, ok := parseID(name, "DATA", s.Current.UUID); ok && !selected[id] {
 			if f := s.Files[id]; f != nil && f.References() != 0 {

@@ -281,6 +281,47 @@ the staged image and its size requirements before publishing a new closed
 database. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
 explicitly and does not poison an otherwise healthy source DB.
 
+## Sealed DATA protection and offline recovery
+
+After rotation, a background worker reads the immutable DATA using a 64 KiB
+stripe buffer. It builds parity and record anchors, checking the source against
+the SHA-256 in the selected catalog. It reads back the staged sidecar to verify
+its checksums and length before publication. Its DATA pin survives staging, file
+sync, rename and directory sync. Readers and ordinary
+commits never open PARITY or wait for its sync. The worker briefly yields between stripe reads during foreground writes or a
+backup. Background work still consumes CPU and disk bandwidth. Restored databases build
+missing sidecars on Open. Replaced DATA and its sidecar are retired together.
+Logical backups contain the original DATA and catalog hashes.
+
+Protection starts when the complete sidecar reaches disk. Active DATA and newly
+sealed DATA waiting for the worker remain exposed to local media damage. Calling
+`ProtectParity(ctx)` explicitly seals a nonempty active tail, validates existing
+sidecars and builds missing or damaged ones from healthy DATA. It uses no index
+checkpoint. Concurrent writes after the seal can create a new active tail. Healthy Close finishes
+outstanding protection of sealed files. A staging space or write failure
+can delay protection or be returned by explicit maintenance or Close. Earlier
+successful commits retain their original durability contract.
+
+`RepairParity(ctx, dir)` takes the database lock without opening the DB for
+queries. Each selected sealed DATA is checked against its catalog length and hash.
+For a damaged file it checks the recovery material, reconstructs one bad block per
+stripe, verifies the private candidate against the original SHA-256, syncs it,
+replaces the DATA atomically and syncs the directory. Files that exceed the
+correction budget retain their original bytes. Independent repairable files can
+still be restored in the same run. Inspect a returned error even when some files
+were repaired. Retry an uncertain publication under the directory lock.
+Successful completion includes validation of the committed database. Keep a
+backup on independent storage for loss of the volume or the commit metadata.
+
+For an unrepairable sealed file with a valid sidecar, `SalvageData` exports
+checked historical records in physical order. It reconstructs singly damaged
+stripes, drops records touching unreadable blocks, then resumes at a verified
+record start. Reported byte ranges identify the remaining gaps. A missing region
+can hold a newer Put, Delete or another member of a batch. The callback can also
+receive superseded values. Keep this output separate from a live DB and preserve
+the error and gap report with the exported records. Stage external output until
+the final result is known. The report uses one range per disjoint damaged area.
+
 ## Index checkpoints
 
 `CheckpointIndex` seals a nonempty active log under the writer gate and pins

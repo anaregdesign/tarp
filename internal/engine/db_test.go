@@ -29,6 +29,13 @@ func testOptions() Options {
 	return Options{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 128, TargetSegmentBytes: 256, ReadFileHandles: 2}
 }
 
+// parkedMaintenance isolates manual storage operations and their fault hooks
+// from the asynchronous cleaner and parity builder.
+func parkedMaintenance() *Hooks {
+	gate := make(chan struct{})
+	return &Hooks{CleanerStart: gate, ParityStart: gate}
+}
+
 func newTestDB(t *testing.T, opts Options, fs *storage.IO) *DB {
 	t.Helper()
 	return newTestDBWithHooks(t, opts, fs, nil)

@@ -50,6 +50,7 @@ func (db *DB) sealActive() error {
 	previous := db.store.Current.ActiveID
 	err := db.store.Rotate()
 	if db.store.Current.ActiveID != previous {
+		db.notifyParity()
 		db.replaceDataStats(dataTotals{}, dataTotals{segments: 1, bytes: format.SegmentHeaderBytes})
 	}
 	return err

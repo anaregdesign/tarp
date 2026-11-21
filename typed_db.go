@@ -176,6 +176,11 @@ func (db *TypedDB[K, V]) CheckpointIndex(ctx context.Context) error {
 	return db.core.CheckpointIndex(ctx)
 }
 
+// ProtectParity seals the active DATA and completes protection for the underlying DB.
+func (db *TypedDB[K, V]) ProtectParity(ctx context.Context) error {
+	return db.core.ProtectParity(ctx)
+}
+
 // Compact builds an online checkpoint of the underlying DB.
 func (db *TypedDB[K, V]) Compact(ctx context.Context) (CompactResult, error) {
 	return db.core.Compact(ctx)

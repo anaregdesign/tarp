@@ -320,7 +320,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 			}
 			return nil
 		}}
-		db := newTestDBWithHooks(t, opts, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
+		db := newTestDBWithHooks(t, opts, ioHooks, parkedMaintenance())
 		mustPut(t, db, "a", "A")
 		mustPut(t, db, "b", "B")
 		mustPut(t, db, "z", "Z")

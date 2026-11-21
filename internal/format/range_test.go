@@ -66,3 +66,24 @@ func TestFrontierDefinesFinalRawInterval(t *testing.T) {
 		t.Fatalf("empty final log: %+v, %v", got, err)
 	}
 }
+
+func TestRecordRangeSkipsOnlyAcrossReportedGaps(t *testing.T) {
+	r := NewRecordRange(File{ID: 1, Kind: Log, First: 10, Last: 18}, 0)
+	for _, seq := range []uint64{8, 19} {
+		if !errors.Is(r.AcceptAfterGap(Record{Kind: Put, Sequence: seq}), ErrCorrupt) {
+			t.Fatalf("accepted out-of-range sequence %d", seq)
+		}
+	}
+	if err := r.AcceptAfterGap(Record{Kind: Put, Sequence: 14}); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(r.AcceptAfterGap(Record{Kind: Put, Sequence: 13}), ErrCorrupt) {
+		t.Fatal("accepted decreasing sequence after a gap")
+	}
+	if !errors.Is(r.Accept(Record{Kind: Put, Sequence: 16}), ErrCorrupt) {
+		t.Fatal("accepted unexplained gap")
+	}
+	if err := r.Accept(Record{Kind: Put, Sequence: 15}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -328,6 +328,9 @@ func TestTypedCheckpointIndexReopensEncodedKeys(t *testing.T) {
 	if err := db.CheckpointIndex(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -55,6 +55,17 @@ func NewRecordRange(file File, cutoff uint64) RecordRange {
 }
 
 func (r *RecordRange) Accept(record Record) error {
+	return r.accept(record, false)
+}
+
+// AcceptAfterGap checks the first surviving record after an unreadable region.
+// A raw log may skip sequences across that region, but still increases within
+// the selected interval. Call Accept for subsequent contiguous records.
+func (r *RecordRange) AcceptAfterGap(record Record) error {
+	return r.accept(record, true)
+}
+
+func (r *RecordRange) accept(record Record, afterGap bool) error {
 	if r.file.Kind == Snapshot {
 		if record.Kind != Put || record.Sequence == 0 || record.Sequence > r.cutoff {
 			return bad("snapshot record outside checkpoint")
@@ -64,7 +75,7 @@ func (r *RecordRange) Accept(record Record) error {
 	if !r.file.HasPhysicalFile() || record.Sequence <= r.last || record.Sequence > r.file.Last {
 		return bad("record outside selected interval")
 	}
-	if r.file.Kind == Log && record.Sequence != r.last+1 {
+	if r.file.Kind == Log && !afterGap && record.Sequence != r.last+1 {
 		return bad("noncontiguous raw log")
 	}
 	r.last = record.Sequence

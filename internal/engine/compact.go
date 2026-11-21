@@ -136,6 +136,7 @@ func (db *DB) Compact(ctx context.Context) (result CompactResult, returned error
 	maxBatch := storage.RelocationBatchCount
 	err = checkpoint.Install()
 	if err == nil {
+		db.resetParity()
 		db.replaceDataStats(oldData, newData)
 		if resident, ok := db.keys.(index.ResidentRelocator); ok && db.opts.IndexMode == IndexMemory {
 			db.memoryRemap = &memoryCheckpointRemap{index: resident, staged: make(map[string]struct{})}
