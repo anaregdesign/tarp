@@ -132,6 +132,14 @@ func (s *Store) buildParity(ctx context.Context, path string, uuid [16]byte, sou
 	if err := writer.Flush(); err != nil {
 		return err
 	}
+	// Read back the actual staged bytes. A write may have reported success
+	// while producing an incomplete or corrupted optional file.
+	if _, err := fd.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := format.ValidateParity(ctx, bufio.NewReaderSize(fd, parityBufferSize(source.Entry.Bytes)), uuid, source.Entry); err != nil {
+		return err
+	}
 	if err := s.IO.Sync(fd, "parity.sync"); err != nil {
 		return err
 	}

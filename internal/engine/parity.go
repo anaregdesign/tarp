@@ -105,6 +105,9 @@ func (db *DB) ProtectParity(ctx context.Context) error {
 	if ctx == nil {
 		return validContextError(op)
 	}
+	if err := ctx.Err(); err != nil {
+		return operationError(op, "context", err)
+	}
 	db.writer.Lock()
 	if err := errors.Join(ctx.Err(), db.health()); err != nil {
 		db.writer.Unlock()

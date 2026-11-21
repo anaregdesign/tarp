@@ -295,3 +295,28 @@ func TestParityProtectsCleanedDataAndSkipsMetadataOnlyIntervals(t *testing.T) {
 		t.Fatalf("cleaned parity %v, error %v", found, err)
 	}
 }
+
+func TestProtectParityRejectsStagedOutputCorruptionAndRetries(t *testing.T) {
+	var damaged atomic.Bool
+	fs := &storage.IO{WriteAt: func(fd *os.File, b []byte, offset int64) (int, error) {
+		if strings.HasPrefix(filepath.Base(fd.Name()), "tarp-parity-") && damaged.CompareAndSwap(false, true) {
+			b = append([]byte(nil), b...)
+			b[len(b)-1] ^= 0x80
+		}
+		return fd.WriteAt(b, offset)
+	}}
+	db := newTestDBWithHooks(t, testOptions(), fs, parkedMaintenance())
+	mustPut(t, db, "key", "value")
+	if err := db.ProtectParity(t.Context()); !errors.Is(err, format.ErrInvalidParity) || db.health() != nil {
+		t.Fatalf("damaged stage classification: %v, health %v", err, db.health())
+	}
+	entry := db.store.Catalog.Files[0]
+	if _, err := os.Stat(selectedParity(t, db, entry)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published invalid sidecar: %v", err)
+	}
+	wantValue(t, db, "key", "value")
+	mustPut(t, db, "new", "commit")
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}

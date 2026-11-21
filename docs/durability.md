@@ -285,10 +285,11 @@ explicitly and does not poison an otherwise healthy source DB.
 
 After rotation, a background worker reads the immutable DATA using a 64 KiB
 stripe buffer. It builds parity and record anchors, checking the source against
-the SHA-256 in the selected catalog before publishing the sidecar. Its DATA pin
-survives staging, file sync, rename and directory sync. Readers and ordinary
-commits never open PARITY or wait for its sync. Background work consumes CPU and
-disk bandwidth and can compete with foreground work. Restored databases build
+the SHA-256 in the selected catalog. It reads back the staged sidecar to verify
+its checksums and length before publication. Its DATA pin survives staging, file
+sync, rename and directory sync. Readers and ordinary
+commits never open PARITY or wait for its sync. The worker briefly yields between stripe reads during foreground writes or a
+backup. Background work still consumes CPU and disk bandwidth. Restored databases build
 missing sidecars on Open. Replaced DATA and its sidecar are retired together.
 Logical backups contain the original DATA and catalog hashes.
 
