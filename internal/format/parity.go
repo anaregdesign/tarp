@@ -72,17 +72,22 @@ func parityStripeCRC(headerCRC uint32, meta []byte) uint32 {
 }
 
 type parityStripe struct {
-	meta [parityMetaBytes]byte
-	xor  [ParityBlockBytes]byte
+	meta []byte
+	xor  []byte
+}
+
+func newParityStripe(dataBytes int64) parityStripe {
+	image := make([]byte, parityMetaBytes+min(dataBytes, ParityBlockBytes))
+	return parityStripe{meta: image[:parityMetaBytes:parityMetaBytes], xor: image[parityMetaBytes:]}
 }
 
 func (s *parityStripe) dataCRC(i int) uint32 { return order.Uint32(s.meta[8+i*4:]) }
 func (s *parityStripe) anchor(i int) uint16  { return order.Uint16(s.meta[parityAnchorStart+i*2:]) }
 
 func (s *parityStripe) reset(ordinal uint64, data []byte) {
-	clear(s.meta[:])
-	clear(s.xor[:])
-	order.PutUint64(s.meta[:], ordinal)
+	clear(s.meta)
+	clear(s.xor)
+	order.PutUint64(s.meta, ordinal)
 	for i := range ParityDataBlocks {
 		order.PutUint16(s.meta[parityAnchorStart+2*i:], ParityNoAnchor)
 	}
@@ -174,8 +179,8 @@ func WriteParity(ctx context.Context, data io.ReaderAt, out io.Writer, uuid [16]
 	if err := writeChunk(ctx, out, h[:]); err != nil {
 		return err
 	}
-	var stripe parityStripe
-	var raw [parityStripeBytes]byte
+	stripe := newParityStripe(entry.Bytes)
+	raw := make([]byte, min(entry.Bytes, parityStripeBytes))
 	scan := anchorScan{headerAt: SegmentHeaderBytes}
 	digest := sha256.New()
 	for off := int64(0); off < entry.Bytes; {
@@ -199,8 +204,8 @@ func WriteParity(ctx context.Context, data io.ReaderAt, out io.Writer, uuid [16]
 		}
 		p := stripe.xor[:min(ParityBlockBytes, len(chunk))]
 		order.PutUint32(stripe.meta[parityCRCOffset:], crc32.Checksum(p, table))
-		order.PutUint32(stripe.meta[parityCRCOffset+4:], parityStripeCRC(order.Uint32(h[84:]), stripe.meta[:]))
-		if err := writeChunk(ctx, out, stripe.meta[:]); err != nil {
+		order.PutUint32(stripe.meta[parityCRCOffset+4:], parityStripeCRC(order.Uint32(h[84:]), stripe.meta))
+		if err := writeChunk(ctx, out, stripe.meta); err != nil {
 			return err
 		}
 		if err := writeChunk(ctx, out, p); err != nil {
@@ -236,7 +241,7 @@ func readParityBytes(r io.Reader, dst []byte) error {
 	return err
 }
 
-func walkParity(ctx context.Context, r io.Reader, uuid [16]byte, e File, visit func(*parityStripe, int64, int) error) error {
+func walkParity(ctx context.Context, r io.Reader, uuid [16]byte, e File, visit func(parityStripe, int64, int) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -251,17 +256,17 @@ func walkParity(ctx context.Context, r io.Reader, uuid [16]byte, e File, visit f
 	if actual != want {
 		return fmt.Errorf("%w: header or sealed identity", ErrInvalidParity)
 	}
-	var s parityStripe
+	s := newParityStripe(e.Bytes)
 	for off := int64(0); off < e.Bytes; {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := readParityBytes(r, s.meta[:]); err != nil {
+		if err := readParityBytes(r, s.meta); err != nil {
 			return err
 		}
 		size := int(min(int64(parityStripeBytes), e.Bytes-off))
-		if order.Uint64(s.meta[:]) != uint64(off/parityStripeBytes) ||
-			order.Uint32(s.meta[parityCRCOffset+4:]) != parityStripeCRC(order.Uint32(want[84:]), s.meta[:]) {
+		if order.Uint64(s.meta) != uint64(off/parityStripeBytes) ||
+			order.Uint32(s.meta[parityCRCOffset+4:]) != parityStripeCRC(order.Uint32(want[84:]), s.meta) {
 			return fmt.Errorf("%w: stripe metadata at DATA offset %d", ErrInvalidParity, off)
 		}
 		for i := range ParityDataBlocks {
@@ -286,7 +291,7 @@ func walkParity(ctx context.Context, r io.Reader, uuid [16]byte, e File, visit f
 			return fmt.Errorf("%w: parity block checksum at DATA offset %d", ErrInvalidParity, off)
 		}
 		if visit != nil {
-			if err := visit(&s, off, size); err != nil {
+			if err := visit(s, off, size); err != nil {
 				return err
 			}
 		}
@@ -320,7 +325,7 @@ func unreadableParityBlock(err error) bool {
 }
 
 // recoverStripe returns a bit mask of chunks that could not be recovered.
-func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw, header []byte, s *parityStripe) (uint16, error) {
+func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw, header []byte, s parityStripe) (uint16, error) {
 	// Use one sequential read on healthy stripes. Isolate a short read or
 	// media error to an individual block before charging it as an erasure.
 	stripeErr := readChunk(ctx, data, raw, off)
@@ -368,12 +373,15 @@ func recoverStripe(ctx context.Context, data io.ReaderAt, off int64, raw, header
 	return 0, nil
 }
 
-func walkParityData(ctx context.Context, data io.ReaderAt, parity io.Reader, uuid [16]byte, entry File, visit func(*parityStripe, int64, []byte, uint16) error) error {
-	var raw [parityStripeBytes]byte
+func walkParityData(ctx context.Context, data io.ReaderAt, parity io.Reader, uuid [16]byte, entry File, visit func(parityStripe, int64, []byte, uint16) error) error {
+	var raw []byte
 	header := EncodeSegment(Segment{UUID: uuid, ID: entry.ID, Kind: entry.Kind})
 	digest := sha256.New()
 	complete := true
-	err := walkParity(ctx, parity, uuid, entry, func(s *parityStripe, off int64, size int) error {
+	err := walkParity(ctx, parity, uuid, entry, func(s parityStripe, off int64, size int) error {
+		if off == 0 {
+			raw = make([]byte, size)
+		}
 		chunk := raw[:size]
 		gaps, err := recoverStripe(ctx, data, off, chunk, header, s)
 		if err != nil {
@@ -402,7 +410,7 @@ func walkParityData(ctx context.Context, data io.ReaderAt, parity io.Reader, uui
 // there are no gaps, success additionally verifies the complete DATA digest.
 // Discard staged output if a later check or callback fails.
 func WalkParityBlocks(ctx context.Context, data io.ReaderAt, parity io.Reader, uuid [16]byte, entry File, visit func(blockOffset int64, first uint16, data []byte) error) error {
-	return walkParityData(ctx, data, parity, uuid, entry, func(s *parityStripe, off int64, raw []byte, gaps uint16) error {
+	return walkParityData(ctx, data, parity, uuid, entry, func(s parityStripe, off int64, raw []byte, gaps uint16) error {
 		for pos := 0; pos < len(raw); pos += ParityBlockBytes {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -425,7 +433,7 @@ func WalkParityBlocks(ctx context.Context, data io.ReaderAt, parity io.Reader, u
 // the exact candidate against its authoritative SHA-256, and never modifies
 // source DATA. Discard the private output on any error.
 func RecoverParity(ctx context.Context, data io.ReaderAt, parity io.Reader, out io.Writer, uuid [16]byte, entry File) error {
-	return walkParityData(ctx, data, parity, uuid, entry, func(_ *parityStripe, off int64, raw []byte, gaps uint16) error {
+	return walkParityData(ctx, data, parity, uuid, entry, func(_ parityStripe, off int64, raw []byte, gaps uint16) error {
 		if gaps != 0 {
 			return fmt.Errorf("%w at DATA offset %d (mask %#x)", ErrParityGap, off, gaps)
 		}

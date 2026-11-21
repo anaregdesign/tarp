@@ -6,14 +6,14 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses v0.9.1. For the previous release, see the
-[v0.9.0 documentation](https://github.com/anaregdesign/tarp/tree/v0.9.0).
+uses v0.10.0. For the previous release, see the
+[v0.9.1 documentation](https://github.com/anaregdesign/tarp/tree/v0.9.1).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.9.1
+go get github.com/anaregdesign/tarp@v0.10.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -317,7 +317,7 @@ limits entries kept in the value LRU. `MaxBatchGetValueBytes` limits encoded
 value bytes returned by one batch read. Long-running readers can
 hold previous page generations and DATA files on disk.
 
-The checkpoint API on `main` uses a newer storage format than v0.9.1.
+The checkpoint API introduced in v0.10.0 uses a newer storage format than v0.9.1.
 Both index modes can reuse the same immutable `INDEX` file. A healthy B+tree handle
 refreshes a missing or outdated checkpoint at `Close`. To checkpoint a
 long-running DB or an in-memory index, call `db.CheckpointIndex(ctx)`. It seals
@@ -379,6 +379,13 @@ Lowering the target still allows `Open` and `Restore` to read larger existing
 files. If a live entry exceeds the new cache or record limit, they return
 `ErrIncompatibleOptions`. Minimum settings are 129 cache bytes, 49 record
 bytes and one read handle.
+
+### Upgrading from v0.9.1 to v0.10.0
+
+v0.10.0 changes the database and backup formats. To keep existing data,
+export the live keys and values with v0.9.1, write them into a fresh v0.10.0
+database, and verify the imported data before switching directories. Keep the
+v0.9.1 directory and its backups available until verification is complete.
 
 ### Upgrading from v0.9.0 to v0.9.1
 

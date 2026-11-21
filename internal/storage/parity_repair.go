@@ -87,7 +87,7 @@ func lockParityImage(ctx context.Context, dir string, fs *IO) (_ *Store, _ *Imag
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := s.inspectNames(ctx, entries); err != nil {
+	if err := s.inspectNames(ctx, entries, nil); err != nil {
 		return nil, nil, err
 	}
 	return s, image, nil
