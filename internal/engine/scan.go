@@ -102,7 +102,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, yield func(string, 
 					result = operationError(op, "context", result)
 					return false
 				}
-				db.poison(result)
+				db.readFailure(result)
 				db.done()
 				result = operationError(op, "read", result)
 				return false

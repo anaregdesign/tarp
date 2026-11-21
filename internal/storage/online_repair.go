@@ -3,11 +3,14 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/publication"
@@ -19,14 +22,70 @@ type sealedRepair struct {
 	uuid  [16]byte
 	entry format.File
 
-	mu        sync.Mutex
-	running   *readRepair
-	uncertain error
+	mu          sync.Mutex
+	running     *readRepair
+	uncertain   error
+	unavailable atomic.Pointer[UnavailableDataError]
+	retryAfter  time.Time
 }
 
 type readRepair struct {
 	done chan struct{}
 	err  error
+}
+
+var ErrDataUnavailable = errors.New("tarp: sealed DATA unavailable")
+
+// UnavailableDataError identifies a damaged sealed file that could not be
+// restored from its recovery material. Err retains the read and recovery causes.
+type UnavailableDataError struct {
+	FileID uint64
+	Err    error
+}
+
+func (e *UnavailableDataError) Error() string {
+	return fmt.Sprintf("%s (file %d): %v", ErrDataUnavailable, e.FileID, e.Err)
+}
+func (e *UnavailableDataError) Unwrap() error        { return e.Err }
+func (e *UnavailableDataError) Is(target error) bool { return target == ErrDataUnavailable }
+
+// IsDataUnavailable permits continued service only when every failure in
+// the result is a known file-local error.
+func IsDataUnavailable(err error) bool {
+	for err != nil {
+		switch e := err.(type) {
+		case *UnavailableDataError:
+			return true
+		case *Fault, *UncertainReadRepair, *IndexWorkError, *destinationError:
+			return false
+		case interface{ Unwrap() []error }:
+			causes := e.Unwrap()
+			for _, cause := range causes {
+				if !IsDataUnavailable(cause) {
+					return false
+				}
+			}
+			return len(causes) > 0
+		default:
+			err = errors.Unwrap(err)
+		}
+	}
+	return false
+}
+
+// UnavailableData returns the last confirmed physical failure. Values whose
+// record checks pass can still be read from the same file.
+func (f *File) UnavailableData() *UnavailableDataError {
+	r := f.sealed.Load()
+	if r == nil {
+		return nil
+	}
+	local := r.unavailable.Load()
+	if local == nil {
+		return nil
+	}
+	saved := *local
+	return &saved
 }
 
 // UncertainReadRepair retains the original read failure and the publication
@@ -54,7 +113,7 @@ func (s *Store) RepairRead(ctx context.Context, f *File, cause error) error {
 	if r == nil || r.entry.ID != f.ID || f.Path != filepath.Join(s.Dir, DataName(r.uuid, f.ID)) {
 		return cause
 	}
-	err := r.run(ctx, func() error {
+	err := r.run(ctx, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
 		if err := s.IO.Check("repair.verify:before"); err != nil {
 			return err
 		}
@@ -68,6 +127,9 @@ func (s *Store) RepairRead(ctx context.Context, f *File, cause error) error {
 	})
 	if err == nil {
 		return nil
+	}
+	if local, ok := err.(*UnavailableDataError); ok {
+		return &UnavailableDataError{FileID: local.FileID, Err: errors.Join(cause, local.Err)}
 	}
 	var fault *Fault
 	if errors.As(err, &fault) {
@@ -95,10 +157,11 @@ func repairableRead(err error) bool {
 	return onlyCauses(err, ErrCorrupt, syscall.EIO, io.EOF, io.ErrUnexpectedEOF, os.ErrNotExist)
 }
 
-// Share attempts in progress, but never cache a successful verification across
-// distinct failures: a previously repaired file can suffer new media damage.
+// Share attempts in progress and briefly suppress repeated full-file recovery
+// of confirmed damage. An operator may later restore the recovery material.
+// A successful verification cannot be cached across distinct failures.
 // A directory publication with unknown durability can only be resolved by reopen.
-func (r *sealedRepair) run(ctx context.Context, repair func() error) error {
+func (r *sealedRepair) run(ctx context.Context, checkRoot, repair func() error) error {
 	for {
 		r.mu.Lock()
 		if r.uncertain != nil {
@@ -109,6 +172,15 @@ func (r *sealedRepair) run(ctx context.Context, repair func() error) error {
 		if err := ctx.Err(); err != nil {
 			r.mu.Unlock()
 			return err
+		}
+		if local := r.unavailable.Load(); local != nil && time.Now().Before(r.retryAfter) {
+			r.mu.Unlock()
+			// A new fault may affect the entire DB, including a caller
+			// still reading a bad inode after the directory disappeared.
+			if err := checkRoot(); err != nil {
+				return errors.Join(local.Err, err)
+			}
+			return local
 		}
 		if call := r.running; call != nil {
 			r.mu.Unlock()
@@ -132,6 +204,12 @@ func (r *sealedRepair) run(ctx context.Context, repair func() error) error {
 		var f *Fault
 		if errors.As(call.err, &f) && f.Outcome == publication.Unknown {
 			r.uncertain = call.err
+		}
+		if local, ok := call.err.(*UnavailableDataError); ok {
+			r.unavailable.Store(local)
+			r.retryAfter = time.Now().Add(time.Second)
+		} else if call.err == nil || r.uncertain != nil {
+			r.unavailable.Store(nil)
 		}
 		r.running = nil
 		close(call.done)

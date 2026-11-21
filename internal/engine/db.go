@@ -147,6 +147,14 @@ func (db *DB) health() error {
 
 func (db *DB) poison(err error) { db.failed.CompareAndSwap(nil, &failure{err: publicCause(err)}) }
 
+// A failed read of one immutable DATA record can be reported to its caller
+// while the index and the writer's commit frontier remain usable.
+func (db *DB) readFailure(err error) {
+	if !storage.IsDataUnavailable(err) {
+		db.poison(err)
+	}
+}
+
 func (db *DB) admit() error {
 	db.life.Lock()
 	defer db.life.Unlock()
@@ -254,7 +262,19 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 			db.notifyCleaner()
 		}
 		if err != nil {
-			db.poison(err)
+			if storage.IsDataUnavailable(err) {
+				// A writer may have replaced or deleted this key while the
+				// read was trying to reconstruct the old immutable file.
+				current, exists, lookupErr := db.lookupLocation(k)
+				if lookupErr != nil {
+					return nil, lookupErr
+				}
+				if !exists || current != loc {
+					continue
+				}
+			} else {
+				db.poison(err)
+			}
 			return nil, operationError("get", "read", err)
 		}
 		db.state.Lock()
@@ -491,6 +511,16 @@ func (db *DB) Close() error {
 			parityErr = operationError("close", "protect parity", err)
 		}
 	}
+	// Close still releases ownership and never changes committed writes.
+	// Report any selected DATA damage even when its sidecar was already built.
+	var unavailable []error
+	for _, entry := range db.store.Catalog.Files {
+		if entry.HasPhysicalFile() {
+			if err := db.store.Files[entry.ID].UnavailableData(); err != nil {
+				unavailable = append(unavailable, err)
+			}
+		}
+	}
 	for _, file := range db.files {
 		file.LiveKeys.Store(0)
 	}
@@ -498,7 +528,7 @@ func (db *DB) Close() error {
 	db.readStatsLocked(&db.stats)
 	db.files, db.cache = nil, nil
 	db.state.Unlock()
-	err := publicCause(errors.Join(checkpointErr, parityErr, db.keys.Close(), db.store.Close()))
+	err := publicCause(errors.Join(checkpointErr, parityErr, errors.Join(unavailable...), db.keys.Close(), db.store.Close()))
 	if f := db.failed.Load(); f != nil {
 		err = errors.Join(f.err, err)
 	}
@@ -512,6 +542,9 @@ func (db *DB) Close() error {
 func publicCause(err error) error {
 	if err == nil {
 		return nil
+	}
+	if storage.IsDataUnavailable(err) {
+		return &localizedReadError{cause: err}
 	}
 	var repaired *storage.UncertainReadRepair
 	if errors.As(err, &repaired) && !errors.Is(err, ErrCommitUncertain) {

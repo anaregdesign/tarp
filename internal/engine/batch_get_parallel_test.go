@@ -18,6 +18,35 @@ type batchGetOutcome struct {
 	err     error
 }
 
+func TestBatchWorkersPreserveIndependentFailureAfterUnavailableRecord(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		db := &DB{batchReadSlots: make(chan struct{}, 2)}
+		db.batchReadSlots <- struct{}{}
+		db.batchReadSlots <- struct{}{}
+		unavailable := &storage.UnavailableDataError{FileID: 1, Err: format.ErrCorrupt}
+		other := errors.New("independent read failure")
+		releaseLocal, releaseOther := make(chan struct{}), make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- db.runBatchWorkers(2, 2, func(i int) error {
+				if i == 0 {
+					<-releaseLocal
+					return operationError("batch-get", "read", unavailable)
+				}
+				<-releaseOther
+				return operationError("batch-get", "read", other)
+			})
+		}()
+		synctest.Wait()
+		close(releaseLocal)
+		synctest.Wait()
+		close(releaseOther)
+		if err := <-done; !errors.Is(err, other) || errors.Is(err, ErrDataUnavailable) {
+			t.Fatalf("batch error after both workers finished: %v", err)
+		}
+	})
+}
+
 func startBatchGet(db *DB, keys [][]byte) <-chan batchGetOutcome {
 	done := make(chan batchGetOutcome, 1)
 	go func() {

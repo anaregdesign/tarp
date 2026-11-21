@@ -320,3 +320,46 @@ func TestProtectParityRejectsStagedOutputCorruptionAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestParityWorkerProtectsLaterFilesAfterUnrecoverableSource(t *testing.T) {
+	var scans atomic.Int32
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "parity.scan:before" {
+			scans.Add(1)
+		}
+		return nil
+	}}
+	db := openMaintenanceDamageDB(t, Options{}, fs)
+	mustPut(t, db, "unprotected", "original")
+	bad := sealForCleaning(t, db)
+	f := db.store.Files[bad.ID]
+	data, err := os.ReadFile(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)-1] ^= 1
+	if err := os.WriteFile(f.Path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, db, "second", "intact")
+	later := sealForCleaning(t, db)
+	if err := db.protectSealed(t.Context(), nil); err != nil || db.health() != nil {
+		t.Fatalf("worker stopped on damaged DATA: %v, health %v", err, db.health())
+	}
+	if f.UnavailableData() == nil || db.parity.next != 2 || scans.Load() != 2 {
+		t.Fatalf("worker did not advance: unavailable=%v cursor=%d scans=%d", f.UnavailableData(), db.parity.next, scans.Load())
+	}
+	if _, err := os.Stat(selectedParity(t, db, bad)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("parity built from damaged input: %v", err)
+	}
+	if _, err := os.Stat(selectedParity(t, db, later)); err != nil {
+		t.Fatalf("healthy file left unprotected: %v", err)
+	}
+	if err := db.ProtectParity(t.Context()); !errors.Is(err, ErrDataUnavailable) || scans.Load() != 2 {
+		t.Fatalf("explicit protection: %v, scans %d", err, scans.Load())
+	}
+	mustPut(t, db, "continued", "value")
+	if err := db.Close(); !errors.Is(err, ErrDataUnavailable) || errors.Is(err, ErrUnhealthy) {
+		t.Fatalf("close: %v", err)
+	}
+}

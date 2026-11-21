@@ -462,14 +462,21 @@ func openSelectedForRead(path string, uuid [16]byte, entry format.File, mayGrow 
 	if _, err := observeDATA(fd, observe, area).ReadAt(header, 0); err != nil {
 		return nil, nil, 0, requiredFileError("segment header", err)
 	}
-	decoded, err := format.DecodeSegment(header)
-	if err != nil {
+	if err := verifySegmentHeader(header, uuid, entry); err != nil {
 		return nil, nil, 0, err
 	}
-	if decoded.UUID != uuid || decoded.ID != entry.ID || decoded.Kind != entry.Kind {
-		return nil, nil, 0, fmt.Errorf("%w: segment identity", ErrCorrupt)
-	}
 	return fd, header, st.Size(), nil
+}
+
+func verifySegmentHeader(header []byte, uuid [16]byte, entry format.File) error {
+	decoded, err := format.DecodeSegment(header)
+	if err != nil {
+		return err
+	}
+	if decoded.UUID != uuid || decoded.ID != entry.ID || decoded.Kind != entry.Kind {
+		return fmt.Errorf("%w: segment identity", ErrCorrupt)
+	}
+	return nil
 }
 
 func validateKey(kind uint32, record format.Record, present bool, prunedThrough uint64) error {

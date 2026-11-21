@@ -26,6 +26,14 @@ var (
 // Use [VerifyBackup] to check its contents or [Restore] to create a database.
 var ErrBackupDirectory = engine.ErrBackupDirectory
 
+// ErrDataUnavailable identifies a localized failure reading sealed DATA.
+// Other operations can continue. Use errors.As to retrieve [UnavailableDataError].
+var ErrDataUnavailable = engine.ErrDataUnavailable
+
+// UnavailableDataError identifies the affected sealed DATA by FileID and
+// retains the original read and repair errors. FileID can be used with [SalvageData].
+type UnavailableDataError = engine.UnavailableDataError
+
 // Outcome describes publication of the requested operation.
 type Outcome = publication.Outcome
 

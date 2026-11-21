@@ -1,12 +1,69 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/anaregdesign/tarp/internal/format"
 )
+
+func TestLeasedForeignDataStillFailsIdentityAfterAnotherReaderRepairs(t *testing.T) {
+	fixture, s, f := openedRepairFixture(t)
+	h, err := s.readers.acquire(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.readers.release(h)
+	parity := filepath.Join(s.Dir, parityName(s.Current.UUID, f.ID))
+	sidecar, err := os.ReadFile(parity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(parity); err != nil {
+		t.Fatal(err)
+	}
+	// The key, sequence, length and record CRC are all valid. Only the first
+	// parity block differs, so restoring the sidecar enables the later repair.
+	foreignUUID := s.Current.UUID
+	foreignUUID[3] ^= 2
+	key := "0"
+	value := bytes.Clone(fixture.originals[0][format.SegmentHeaderBytes+format.RecordHeaderBytes+len(key):])
+	value[0] ^= 1
+	record := format.EncodeRecord(format.Put, 1, []byte(key), value)
+	header := format.EncodeSegment(format.Segment{UUID: foreignUUID, ID: f.ID, Kind: f.Kind})
+	if err := os.WriteFile(f.Path, append(header, record...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RepairRead(t.Context(), f, ErrCorrupt); !IsDataUnavailable(err) {
+		t.Fatalf("expected detected foreign DATA: %v", err)
+	}
+	if err := os.WriteFile(parity, sidecar, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := f.sealed.Load()
+	r.mu.Lock()
+	r.retryAfter = time.Time{}
+	r.mu.Unlock()
+	if err := s.RepairRead(t.Context(), f, ErrCorrupt); err != nil || f.UnavailableData() != nil {
+		t.Fatalf("replacement: %v, status %v", err, f.UnavailableData())
+	}
+	// The first reader resumes after replacement, still holding its original
+	// descriptor. Record checks pass on that inode.
+	got, err := format.ReadValue(h.fd, format.SegmentHeaderBytes, int64(len(record)), key, 1)
+	if err != nil || !bytes.Equal(got, value) {
+		t.Fatalf("fixture record on old descriptor: %v", err)
+	}
+	if err := h.verifyReadIdentity(); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("accepted retired descriptor for another DB: %v", err)
+	}
+	if b, err := os.ReadFile(f.Path); err != nil || !bytes.Equal(b, fixture.originals[0]) {
+		t.Fatalf("verified replacement contents: %v", err)
+	}
+}
 
 func TestHandleLimitWaitsForEveryLeaseAndClosesEvictions(t *testing.T) {
 	dir := t.TempDir()

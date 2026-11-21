@@ -669,7 +669,14 @@ func (s *Store) readValue(loc Location, key string) ([]byte, error) {
 		return nil, err
 	}
 	defer s.readers.release(h)
-	return format.ReadValue(h.fd, loc.Offset, loc.Bytes, key, loc.Sequence)
+	value, err := format.ReadValue(h.fd, loc.Offset, loc.Bytes, key, loc.Sequence)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.verifyReadIdentity(); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func (loc Location) readError(err error) error {

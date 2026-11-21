@@ -462,7 +462,8 @@ backup, validate the published image with `VerifyBackup`. For a restore,
 use `OpenExisting` to inspect the published destination. A backup destination
 error alone permits continued use of the source DB. If a backup encounters
 correctable damage in protected sealed DATA, it repairs the source and retries
-from the same point in time. A persistent source failure puts the DB into fail-stop.
+from the same point in time. If sealed DATA is confirmed unavailable, the backup
+fails before publication and the open DB can keep serving other requests.
 
 `Backup` captures a
 consistent committed point in time and copies outside the writer gate while
@@ -521,9 +522,19 @@ stripe adds about 6.42% including checksums and record offsets. If corruption
 prevents `Open`, run `tarp.RepairParity(ctx, dir)` while the DB is closed.
 An independent backup covers whole-device failure.
 
-If a DATA file exceeds the correction budget, close the DB and use
-`tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` with its ID from
-the failing DATA filename. The callback receives historical Put and Delete
+If a sealed DATA file exceeds the correction budget, the read returns an error
+matching `tarp.ErrDataUnavailable`. Keep the DB open. Healthy records, including
+ones in the same file, remain readable, and `Put` and `Delete` continue to
+commit. A replacement value supplied by the application can overwrite an
+unreadable key. Retrieve the affected file ID with
+`errors.As(err, &damage)`, where `damage` is a `*tarp.UnavailableDataError`.
+A failed `BatchGet` returns no results. `Scan` reports the error and ends that
+iteration. To read individual keys while serving traffic, enumerate them with
+`Keys` and handle each `Get` result separately.
+
+For offline recovery of historical records, run
+`tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` after closing the
+DB. It requires a valid parity file. The callback receives historical Put and Delete
 records. Check the returned error and the report's `Unrecoverable` byte ranges.
 The source stays in place and the caller chooses where to export the records.
 [Recovery guarantees](docs/durability.md#sealed-data-protection-and-offline-recovery)

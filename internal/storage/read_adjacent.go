@@ -67,10 +67,17 @@ func (s *Store) readAdjacentValues(group []AdjacentRead, b []byte) (loc Location
 		return first, err, false
 	}
 	n, err := h.fd.ReadAt(b, first.Offset)
-	s.readers.release(h)
 	if n == len(b) && err == io.EOF {
 		err = nil
 	}
+	if err == nil && n == len(b) {
+		err = h.verifyReadIdentity()
+		if err != nil {
+			s.readers.release(h)
+			return first, err, true
+		}
+	}
+	s.readers.release(h)
 	if err == nil && n != len(b) {
 		err = io.ErrUnexpectedEOF
 	}

@@ -122,21 +122,35 @@ func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.Fi
 	}
 	stage, err := s.stageParityRepair(ctx, data, uuid, entry, online)
 	if fd != nil {
-		err = errors.Join(err, fd.Close())
+		if closeErr := fd.Close(); closeErr != nil {
+			stage.unavailable = false
+			err = errors.Join(err, closeErr)
+		}
 	}
 	if err != nil {
+		removeErr := discardRepair(stage.path)
 		if onlyCauses(err, context.Canceled, context.DeadlineExceeded) {
-			return false, errors.Join(err, discardRepair(stage))
+			return false, errors.Join(err, removeErr)
 		}
-		return false, errors.Join(damage, err, discardRepair(stage))
+		err = errors.Join(damage, err, removeErr)
+		if online && stage.unavailable && removeErr == nil {
+			// Missing DATA and PARITY can also signal a missing database
+			// directory. Confirm the live root before isolating this file.
+			// A concurrent publication may select a different generation.
+			if rootErr := s.checkRepairRoot(uuid); rootErr != nil {
+				return false, errors.Join(err, rootErr)
+			}
+			return false, &UnavailableDataError{FileID: entry.ID, Err: err}
+		}
+		return false, err
 	}
 	// Sync and close the complete, verified candidate before a single atomic
 	// replacement. A later offline retry rechecks the authoritative digest.
 	if err := errors.Join(ctx.Err(), s.IO.Check("repair.rename:before")); err != nil {
-		return false, errors.Join(err, discardRepair(stage))
+		return false, errors.Join(err, discardRepair(stage.path))
 	}
-	if err := os.Rename(stage, path); err != nil {
-		return false, fault("repair.rename", publication.Unknown, false, errors.Join(err, discardRepair(stage)))
+	if err := os.Rename(stage.path, path); err != nil {
+		return false, fault("repair.rename", publication.Unknown, false, errors.Join(err, discardRepair(stage.path)))
 	}
 	if err := s.IO.Check("repair.rename:after"); err != nil {
 		return false, fault("repair.rename", publication.Unknown, false, err)
@@ -145,6 +159,18 @@ func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.Fi
 		return false, fault("repair.dirsync", publication.Unknown, false, err)
 	}
 	return true, nil
+}
+
+func (s *Store) checkRepairRoot(uuid [16]byte) error {
+	b, err := readCurrent(filepath.Join(s.Dir, "CURRENT"))
+	if err != nil {
+		return err
+	}
+	current, err := format.DecodeFrontier(b)
+	if err == nil && current.UUID != uuid {
+		return fmt.Errorf("%w: database identity changed during DATA repair", ErrCorrupt)
+	}
+	return err
 }
 
 func discardRepair(name string) error {
@@ -158,12 +184,39 @@ func discardRepair(name string) error {
 	return err
 }
 
-func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [16]byte, entry format.File, online bool) (stage string, result error) {
+type repairStage struct {
+	path        string
+	unavailable bool // Unusable inputs or insufficient private staging space, without another failure.
+}
+
+func repairSpaceError(err error) bool {
+	return onlyCauses(err, syscall.ENOSPC, syscall.EDQUOT)
+}
+
+// The decoder forwards errors from the opened inputs and the private output.
+// A media read failure is local to this recovery attempt. An output I/O
+// failure can indicate a broader storage fault.
+func unavailableReconstruction(err error) bool {
+	var output *destinationError
+	if errors.As(err, &output) {
+		return repairSpaceError(err)
+	}
+	return onlyCauses(err, ErrCorrupt, syscall.EIO)
+}
+
+func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [16]byte, entry format.File, online bool) (stage repairStage, result error) {
 	sidecar, err := OpenRegular(filepath.Join(s.Dir, parityName(uuid, entry.ID)))
 	if err != nil {
-		return "", err
+		stage.unavailable = errors.Is(err, os.ErrNotExist)
+		return stage, err
 	}
-	defer func() { result = errors.Join(result, sidecar.Close()) }()
+	closeFile := func(fd *os.File) {
+		if err := fd.Close(); err != nil {
+			stage.unavailable = false
+			result = errors.Join(result, err)
+		}
+	}
+	defer closeFile(sidecar)
 	// Live cleanup enumerates the database root while an online repair can be
 	// writing. The private workspace is swept only after Open validation or
 	// after all admitted operations have drained on Close.
@@ -171,21 +224,25 @@ func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [1
 	if online {
 		dir, err = s.WorkspaceDir()
 		if err != nil {
-			return "", err
+			stage.unavailable = repairSpaceError(err)
+			return stage, err
 		}
 		pattern = "tarp-repair-*"
 	}
 	fd, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return "", err
+		stage.unavailable = repairSpaceError(err)
+		return stage, err
 	}
-	defer func() { result = errors.Join(result, fd.Close()) }()
-	stage = fd.Name()
+	defer closeFile(fd)
+	stage.path = fd.Name()
 	out := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: "repair.write"}, parityBufferSize(entry.Bytes))
 	if err := format.RecoverParity(ctx, data, sidecar, out, uuid, entry); err != nil {
+		stage.unavailable = unavailableReconstruction(err)
 		return stage, err
 	}
 	if err := out.Flush(); err != nil {
+		stage.unavailable = repairSpaceError(err)
 		return stage, err
 	}
 	info, err := fd.Stat()
@@ -200,5 +257,7 @@ func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [1
 	if err := verifySelectedDigest(ctx, fd, entry); err != nil {
 		return stage, err
 	}
-	return stage, s.IO.Sync(fd, "repair.sync")
+	err = s.IO.Sync(fd, "repair.sync")
+	stage.unavailable = repairSpaceError(err)
+	return stage, err
 }

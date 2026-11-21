@@ -305,7 +305,7 @@ func TestCleanerRetriesFailedStagingDiscard(t *testing.T) {
 }
 
 func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testing.T) {
-	db := newTestDBWithHooks(t, Options{}, nil, parkedMaintenance())
+	db := openMaintenanceDamageDB(t, Options{}, nil)
 	mustPut(t, db, "unrelated", "keep")
 	unrelated := sealForCleaning(t, db)
 	mustPut(t, db, "target", "obsolete")
@@ -340,9 +340,10 @@ func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testin
 	if err := os.WriteFile(path, b, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.cleanSegment(context.Background(), corrupt); !errors.Is(err, ErrCorrupt) || !errors.Is(db.health(), ErrUnhealthy) {
-		t.Fatalf("discarded corruption went unnoticed: %v", err)
+	if err := db.cleanSegment(context.Background(), corrupt); !errors.Is(err, ErrCorrupt) || !errors.Is(err, ErrDataUnavailable) || db.health() != nil {
+		t.Fatalf("unrecoverable source: %v, health %v", err, db.health())
 	}
+	wantValue(t, db, "corrupt", "replacement")
 }
 
 func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
