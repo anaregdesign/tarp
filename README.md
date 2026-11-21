@@ -6,13 +6,13 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses [v0.11.0](https://github.com/anaregdesign/tarp/tree/v0.11.0).
+uses [v0.12.0](https://github.com/anaregdesign/tarp/tree/v0.12.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.11.0
+go get github.com/anaregdesign/tarp@v0.12.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -65,6 +65,11 @@ During v0, each revision supports its current Go API, database format and
 backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
+
+v0.12.0 can open v0.11.0 databases and restore v0.11.0 backups directly.
+`Options{}` now selects the disk-backed B+tree. Allow space on the database
+volume for index pages and checkpoints, or set `IndexMode: tarp.IndexMemory`
+to keep using the previous in-memory default. See [Choosing the key index](#choosing-the-key-index).
 
 v0.11.0 changes the BACKUP header. You can open a v0.10.0 database directly
 with v0.11.0 and create a new backup. If you have only a v0.10.0 backup,
