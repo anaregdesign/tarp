@@ -18,8 +18,14 @@ type Entry struct {
 
 // Scan captures a new point-in-time view each time iteration begins.
 func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
+	return db.ScanPrefix(ctx, nil)
+}
+
+// ScanPrefix reads matching records from the same index and DATA snapshot.
+func (db *DB) ScanPrefix(ctx context.Context, prefix []byte) iter.Seq2[Entry, error] {
+	bounds := index.PrefixBounds(prefix)
 	return func(yield func(Entry, error) bool) {
-		err := db.walkSnapshot(ctx, true, func(k string, value []byte) bool { return yield(Entry{Key: []byte(k), Value: value}, nil) })
+		err := db.walkSnapshot(ctx, true, bounds, func(k string, value []byte) bool { return yield(Entry{Key: []byte(k), Value: value}, nil) })
 		if err != nil {
 			yield(Entry{}, err)
 		}
@@ -28,7 +34,7 @@ func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 
 // walkSnapshot pins the DATA layout only for a value scan. Index cursors never
 // hold a DB lock or admission across user code, which may close or mutate it.
-func (db *DB) walkSnapshot(ctx context.Context, values bool, yield func(string, []byte) bool) error {
+func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds, yield func(string, []byte) bool) error {
 	op := "keys"
 	if values {
 		op = "scan"
@@ -79,7 +85,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, yield func(string, 
 		return err
 	}
 	var result error
-	err := v.All(func(k string, a index.Address) bool {
+	err := bounds.Walk(ctx, v, func(k string, a index.Address) bool {
 		if result = check(); result != nil {
 			return false
 		}
@@ -118,7 +124,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, yield func(string, 
 		return result
 	}
 	if err != nil {
-		if errors.Is(err, os.ErrClosed) {
+		if errors.Is(err, os.ErrClosed) || err == ctx.Err() {
 			if lifeErr := check(); lifeErr != nil {
 				return lifeErr
 			}

@@ -460,3 +460,45 @@ func TestScanCloseFromConsumer(t *testing.T) {
 		t.Fatalf("after Close: yielded %v, reads %d, refs %d", ok, reads.Load(), file.References())
 	}
 }
+
+func TestPrefixReadsOnlyMatchingData(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode IndexMode
+	}{{"btree", IndexBTree}, {"memory", IndexMemory}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reads atomic.Int64
+			db := newTestDBWithHooks(t, Options{IndexMode: tc.mode}, &storage.IO{Hook: func(point string) error {
+				if point == "read:before" {
+					reads.Add(1)
+				}
+				return nil
+			}}, parkedMaintenance())
+			for _, k := range []string{"a/1", "a/2", "b/1", "c/1"} {
+				mustPut(t, db, k, k)
+			}
+			db.cache.Clear()
+			reads.Store(0)
+			var n int
+			for _, err := range db.KeysPrefix(t.Context(), []byte("a/")) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				n++
+			}
+			if n != 2 || reads.Load() != 0 {
+				t.Fatalf("KeysPrefix returned %d keys with %d DATA reads", n, reads.Load())
+			}
+			for _, prefix := range []string{"missing", "a/"} {
+				for e, err := range db.ScanPrefix(t.Context(), []byte(prefix)) {
+					if err != nil || !strings.HasPrefix(string(e.Key), prefix) || string(e.Value) != string(e.Key) {
+						t.Fatalf("ScanPrefix(%q) = %q, %q, %v", prefix, e.Key, e.Value, err)
+					}
+				}
+			}
+			if n := reads.Load(); n != 2 {
+				t.Fatalf("ScanPrefix made %d DATA reads, want 2", n)
+			}
+		})
+	}
+}
