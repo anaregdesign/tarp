@@ -231,6 +231,29 @@ func TestOpenDetectsBackupMarkerBeforeVerifyingItsContents(t *testing.T) {
 	}
 }
 
+func TestUnsupportedBackupSignaturePreventsVerificationAndRestore(t *testing.T) {
+	ctx := t.Context()
+	source := t.TempDir()
+	marker := filepath.Join(source, "BACKUP")
+	const previousSignature = "TARPBACK"
+	if err := os.WriteFile(marker, []byte(previousSignature), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := tarp.VerifyBackup(ctx, source); !errors.Is(err, tarp.ErrUnsupportedFormat) || info != (tarp.BackupInfo{}) {
+		t.Fatalf("verify returned %+v, %v", info, err)
+	}
+	dest := filepath.Join(t.TempDir(), "restored")
+	if err := tarp.Restore(ctx, tarp.RestoreRequest{Source: source, Destination: dest}); !errors.Is(err, tarp.ErrUnsupportedFormat) {
+		t.Fatalf("restore returned %v", err)
+	}
+	if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination after rejection: %v", err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != previousSignature {
+		t.Fatalf("source after rejection: %q, %v", got, err)
+	}
+}
+
 func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 	// A record larger than the default limit must still be inspectable.
 	const valueBytes = 1 << 20

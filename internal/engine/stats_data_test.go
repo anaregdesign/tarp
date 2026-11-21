@@ -27,9 +27,7 @@ func checkStatsAgainstReplay(t *testing.T, db *DB) {
 	}
 	for _, file := range image.Files {
 		tombstones += uint64(file.DeleteBytes.Load())
-	}
-	for _, loc := range image.Index {
-		live += uint64(loc.Bytes)
+		live += uint64(file.LiveBytes.Load())
 	}
 	obsolete := selected - segments*format.SegmentHeaderBytes - live - tombstones
 	got := db.Stats()

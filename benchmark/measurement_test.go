@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -25,55 +24,6 @@ import (
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
-
-// Measurement rows keep their published JSON keys across API renames. Conversions
-// from the engine structs check that every field is represented here.
-type measurementOptions struct {
-	IndexMode               engine.IndexMode      `json:"IndexMode"`
-	OpenValidation          engine.OpenValidation `json:"OpenValidation,omitempty"`
-	BTreeMemoryBudgetBytes  int64                 `json:"IndexMemoryBytes"`
-	ValueCacheBudgetBytes   int64                 `json:"CacheBytes"`
-	MaxRecordBytes          int64                 `json:"MaxRecordBytes"`
-	TargetSegmentBytes      int64                 `json:"TargetSegmentBytes"`
-	ReadFileHandles         int                   `json:"ReadFileHandles"`
-	BatchGetReadConcurrency int                   `json:"BatchReadConcurrency"`
-	MaxBatchGetValueBytes   int64                 `json:"MaxBatchResultBytes"`
-}
-
-type measurementCompactResult struct {
-	DroppedKeys            uint64 `json:"DroppedKeys,omitempty"`
-	UnlinkedBytes          int64  `json:"ReclaimedBytes"`
-	PinnedRetiredDataBytes int64  `json:"PinnedBytes"`
-}
-
-func TestMeasurementJSONKeepsPublishedFieldNames(t *testing.T) {
-	options := engine.Options{
-		IndexMode: engine.IndexBTree, BTreeMemoryBudgetBytes: 1 << 20, ValueCacheBudgetBytes: 512,
-		MaxRecordBytes: 256, TargetSegmentBytes: 4096, ReadFileHandles: 4,
-		BatchGetReadConcurrency: 2, MaxBatchGetValueBytes: 128,
-	}
-	compact := engine.CompactResult{UnlinkedBytes: 100, PinnedRetiredDataBytes: 200, DroppedKeys: 3}
-	for _, tc := range []struct {
-		row  any
-		want map[string]int64
-	}{
-		{measurementOptions(options), map[string]int64{
-			"IndexMode": 2, "IndexMemoryBytes": 1 << 20, "CacheBytes": 512,
-			"MaxRecordBytes": 256, "TargetSegmentBytes": 4096, "ReadFileHandles": 4,
-			"BatchReadConcurrency": 2, "MaxBatchResultBytes": 128,
-		}},
-		{measurementCompactResult(compact), map[string]int64{"ReclaimedBytes": 100, "PinnedBytes": 200, "DroppedKeys": 3}},
-	} {
-		data, err := json.Marshal(tc.row)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got map[string]int64
-		if err := json.Unmarshal(data, &got); err != nil || !maps.Equal(got, tc.want) {
-			t.Errorf("measurement JSON for %T = %s, %v; want %v", tc.row, data, err, tc.want)
-		}
-	}
-}
 
 func measurementInput(size, count int) ([][]byte, []byte, engine.Options) {
 	keys := make([][]byte, count)
@@ -654,7 +604,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}
 	close(stop)
 	output := map[string]any{
-		"maintenance_ns": maintenanceNS, "compact": measurementCompactResult(compact),
+		"maintenance_ns": maintenanceNS, "compact": compact,
 		"fixture_sequence_before_workers": fixtureSequence, "fixture_live_keys": expectedKeys,
 		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestHash),
 		"automatic_cleaner": "held from Open through the measured foreground and manual-checkpoint window",
@@ -794,7 +744,7 @@ func TestMeasurementProfiles(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				write("options", size, repetition, measurementOptions(engine.Observe(db).Options()))
+				write("options", size, repetition, engine.Observe(db).Options())
 				get := func(i int) error {
 					got, err := db.Get(keys[i%len(keys)])
 					runtime.KeepAlive(got)
@@ -906,7 +856,7 @@ func TestMeasurementProfiles(t *testing.T) {
 					if err := writer.Put(keys[0], value); err != nil {
 						t.Fatal(err)
 					}
-					write(fmt.Sprintf("durable_put_options_rotate_%t", rotate), size, repetition, measurementOptions(engine.Observe(writer).Options()))
+					write(fmt.Sprintf("durable_put_options_rotate_%t", rotate), size, repetition, engine.Observe(writer).Options())
 					write(fmt.Sprintf("durable_put_rotate_%t", rotate), size, repetition,
 						measureCalls(t, 32, 1, func(int) error { return writer.Put(keys[0], value) }))
 					if !rotate {

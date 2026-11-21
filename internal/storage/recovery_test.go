@@ -22,7 +22,7 @@ import (
 // build starts from the same empty backend.
 func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 	dir := t.TempDir()
-	src, _, err := Open(dir, Config{Handles: 1, TargetSegmentBytes: 1 << 20}, nil)
+	src, err := openTestStore(t, dir, Config{Handles: 1, TargetSegmentBytes: 1 << 20}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := Validate(t.Context(), dir)
+	raw, err := validateReadOnly(t.Context(), dir, verifyWindowBytes)
 	if err != nil || image.Required != raw.Required || image.LiveKeys != uint64(len(puts)) || m.Count() != len(puts) {
 		t.Fatalf("replayed %d, limits %+v, err=%v", image.LiveKeys, image.Required, err)
 	}
@@ -81,7 +81,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	dir, scratch := t.TempDir(), t.TempDir()
 	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 2048, RecordBytes: 1024, TargetSegmentBytes: 4096}
-	s, _, err := Open(dir, cfg, nil)
+	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 1024, RecordBytes: 200, TargetSegmentBytes: 1024, IndexedOpen: true}
 	dir, clone, scratch := t.TempDir(), t.TempDir(), t.TempDir()
-	db, _, err := Open(dir, cfg, nil)
+	db, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 	}
 	makeCheckpoint := func(dir, key string) (format.Frontier, string) {
 		t.Helper()
-		db, _, err := Open(dir, cfg, nil)
+		db, err := openTestStore(t, dir, cfg, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

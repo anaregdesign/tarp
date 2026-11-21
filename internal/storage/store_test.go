@@ -13,8 +13,24 @@ import (
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/index/btree"
+	"github.com/anaregdesign/tarp/internal/index/memory"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
+
+func newMemoryIndex(*Store) (index.Backend, error) { return memory.New(), nil }
+
+// Most storage tests use the recovered store without its key index.
+func openTestStore(t *testing.T, dir string, cfg Config, fs *IO) (*Store, error) {
+	t.Helper()
+	store, keys, err := OpenIndexed(t.Context(), dir, cfg, false, fs, newMemoryIndex, nil)
+	if err != nil {
+		return store, err
+	}
+	if err := keys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return store, nil
+}
 
 func TestReadMissingSegmentPreservesPathErrorAndRecordOffset(t *testing.T) {
 	filename := DataName([16]byte{}, 1)
@@ -32,7 +48,7 @@ func TestReadMissingSegmentPreservesPathErrorAndRecordOffset(t *testing.T) {
 func TestOpenPreservesUnrecognizedFilesBeforeCleanup(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{Handles: 1}
-	store, _, err := Open(dir, cfg, nil)
+	store, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +77,7 @@ func TestOpenPreservesUnrecognizedFilesBeforeCleanup(t *testing.T) {
 		if err := os.WriteFile(path, []byte("preserve me"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		got, _, err := Open(dir, cfg, nil)
+		got, err := openTestStore(t, dir, cfg, nil)
 		if got != nil {
 			got.Close()
 		}
@@ -78,7 +94,7 @@ func TestOpenPreservesUnrecognizedFilesBeforeCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	reopened, _, err := Open(dir, cfg, nil)
+	reopened, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +107,7 @@ func TestOpenPreservesUnrecognizedFilesBeforeCleanup(t *testing.T) {
 func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 256, TargetSegmentBytes: 1024, Handles: 1}
-	s, _, err := Open(dir, cfg, nil)
+	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,16 +173,17 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	if err := os.Remove(unknown); err != nil {
 		t.Fatal(err)
 	}
-	reopened, live, err := Open(dir, cfg, nil)
+	reopened, live, err := OpenIndexed(t.Context(), dir, cfg, false, nil, newMemoryIndex, nil)
 	if err != nil {
 		t.Fatalf("retry Open: %v", err)
 	}
 	defer reopened.Close()
-	loc, ok := live["k"]
-	if !ok {
-		t.Fatal("committed key missing after retry")
+	defer live.Close()
+	addr, ok, err := live.Lookup("k")
+	if err != nil || !ok {
+		t.Fatalf("committed key after retry: found=%t, err=%v", ok, err)
 	}
-	if got, err := reopened.Read(loc, "k"); err != nil || string(got) != "saved" {
+	if got, err := reopened.Read(At(reopened.Files[addr.FileID], addr), "k"); err != nil || string(got) != "saved" {
 		t.Fatalf("retry read: %q, %v", got, err)
 	}
 	if _, err := os.Lstat(owned); !errors.Is(err, os.ErrNotExist) {
@@ -180,7 +197,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 1024, Handles: 1}
-	s, _, err := Open(dir, cfg, nil)
+	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +215,7 @@ func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
 	}
 	// The unselected DATA sorts before the invalid MANIFEST. Neither is
 	// eligible for cleanup until every entry has passed type and name checks.
-	rejected, _, err := Open(dir, cfg, nil)
+	rejected, err := openTestStore(t, dir, cfg, nil)
 	if rejected != nil {
 		rejected.Close()
 	}
@@ -217,7 +234,7 @@ func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, _, err = Open(dir, cfg, nil)
+	s, err = openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +280,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 				if rotate {
 					cfg.TargetSegmentBytes = format.SegmentHeaderBytes + batchBytes
 				}
-				s, _, err := Open(dir, cfg, nil)
+				s, err := openTestStore(t, dir, cfg, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -318,28 +335,29 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 				if err := s.Close(); err != nil {
 					t.Fatal(err)
 				}
-				reopened, index, err := Open(dir, cfg, nil)
+				reopened, keys, err := OpenIndexed(t.Context(), dir, cfg, false, nil, newMemoryIndex, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer reopened.Close()
+				defer keys.Close()
 				after := reopened.Current
 				if tc.committed {
 					if after.Sequence != before.Sequence+2 || after.Generation != before.Generation+1 || (after.ActiveID != before.ActiveID) != rotate {
 						t.Fatalf("frontier after batch: %+v -> %+v", before, after)
 					}
 					for _, e := range entries {
-						loc, ok := index[string(e.Key)]
-						if !ok {
-							t.Fatalf("missing %q", e.Key)
+						addr, ok, err := keys.Lookup(string(e.Key))
+						if err != nil || !ok {
+							t.Fatalf("lookup %q after reopen: found=%t, err=%v", e.Key, ok, err)
 						}
-						v, err := reopened.Read(loc, string(e.Key))
+						v, err := reopened.Read(At(reopened.Files[addr.FileID], addr), string(e.Key))
 						if err != nil || !bytes.Equal(v, e.Value) {
 							t.Fatalf("reopened %q: %q, %v", e.Key, v, err)
 						}
 					}
-				} else if after != before || len(index) != 1 {
-					t.Fatalf("unpublished batch appeared: %+v -> %+v, keys %v", before, after, index)
+				} else if after != before || keys.Count() != 1 {
+					t.Fatalf("unpublished batch appeared: %+v -> %+v, keys %d", before, after, keys.Count())
 				}
 			})
 		}
@@ -357,7 +375,7 @@ func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
 
 func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
 	cfg := Config{ValueCacheBudgetBytes: 4096, RecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
-	s, _, err := Open(t.TempDir(), cfg, nil)
+	s, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +404,7 @@ func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
 func TestOpenRetiresOnlyParityBelongingToThisDatabase(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{Handles: 1}
-	store, _, err := Open(dir, cfg, nil)
+	store, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +421,7 @@ func TestOpenRetiresOnlyParityBelongingToThisDatabase(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if s, _, err := Open(dir, cfg, nil); !errors.Is(err, ErrCorrupt) {
+	if s, err := openTestStore(t, dir, cfg, nil); !errors.Is(err, ErrCorrupt) {
 		if s != nil {
 			s.Close()
 		}
@@ -417,7 +435,7 @@ func TestOpenRetiresOnlyParityBelongingToThisDatabase(t *testing.T) {
 	if err := os.Remove(foreign); err != nil {
 		t.Fatal(err)
 	}
-	reopened, _, err := Open(dir, cfg, nil)
+	reopened, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,7 @@ func (c *repairWaitContext) Done() <-chan struct{} {
 func openedRepairFixture(t *testing.T) (repairFixture, *Store, *File) {
 	t.Helper()
 	fixture := newRepairFixture(t, 9000)
-	s, _, err := Open(fixture.dir, Config{Handles: 2, RecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
+	s, err := openTestStore(t, fixture.dir, Config{Handles: 2, RecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +442,7 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 	for _, name := range []string{"checkpoint", "cleaner"} {
 		t.Run(name, func(t *testing.T) {
 			cfg := Config{Handles: 1, RecordBytes: 1024, ValueCacheBudgetBytes: 1024, TargetSegmentBytes: 4096}
-			s, _, err := Open(t.TempDir(), cfg, nil)
+			s, err := openTestStore(t, t.TempDir(), cfg, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

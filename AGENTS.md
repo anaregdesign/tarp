@@ -6,6 +6,8 @@ Keep the public `tarp` API, its package documentation, and its public API tests 
 
 Keep runnable Go examples with their public API tests. Place measurement drivers in `benchmark/`, qualification commands in `benchmark/cmd/`, and guest scripts in `benchmark/scripts/`. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
 
+During v0, implement the current public API and formats without backward-compatibility shims, legacy readers, or dual writes. Update callers, tests and specifications together. Preserve safe rejection of unsupported input.
+
 ## Build, Test, and Development Commands
 
 Run from the repository root with Go 1.26.0 or newer.

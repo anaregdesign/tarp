@@ -349,7 +349,7 @@ func payload(b []byte, magic string) ([]byte, error) {
 		return nil, bad("incomplete metadata signature")
 	}
 	if string(b[:8]) != magic {
-		if magic == "TARPBACK" {
+		if magic == backupSignature {
 			return nil, ErrUnsupported
 		}
 		return nil, bad("selected metadata signature")
@@ -507,10 +507,15 @@ type Backup struct {
 	Files                               []BackupFile
 }
 
+const (
+	backupSignature   = "TARPBKUP"
+	backupPrefixBytes = 56
+)
+
 func EncodeBackup(b Backup) []byte {
-	p := make([]byte, 64)
+	p := make([]byte, backupPrefixBytes)
 	copy(p, b.UUID[:])
-	for i, n := range []uint64{b.Sequence, b.Cutoff, uint64(b.SourceCacheBytes), uint64(b.SourceRecordBytes), 0, uint64(len(b.Files))} {
+	for i, n := range []uint64{b.Sequence, b.Cutoff, uint64(b.SourceCacheBytes), uint64(b.SourceRecordBytes), uint64(len(b.Files))} {
 		order.PutUint64(p[16+8*i:], n)
 	}
 	for _, f := range b.Files {
@@ -521,28 +526,27 @@ func EncodeBackup(b Backup) []byte {
 		copy(q[10+len(f.Name):], f.Hash[:])
 		p = append(p, q...)
 	}
-	return envelope("TARPBACK", p)
+	return envelope(backupSignature, p)
 }
 
 func DecodeBackup(b []byte) (Backup, error) {
 	var result Backup
-	p, err := payload(b, "TARPBACK")
+	p, err := payload(b, backupSignature)
 	if err != nil {
 		return result, err
 	}
-	if len(p) < 64 || order.Uint64(p[56:]) > uint64((len(p)-64)/43) {
+	if len(p) < backupPrefixBytes || order.Uint64(p[48:]) > uint64((len(p)-backupPrefixBytes)/43) {
 		return result, bad("backup count")
 	}
 	copy(result.UUID[:], p[:16])
 	result.Sequence, result.Cutoff = order.Uint64(p[16:]), order.Uint64(p[24:])
 	result.SourceCacheBytes = int64(order.Uint64(p[32:]))
 	result.SourceRecordBytes = int64(order.Uint64(p[40:]))
-	// Older backups used the slot at offset 48 for an advisory file size limit.
-	if result.SourceCacheBytes < 0 || result.SourceRecordBytes < 0 || order.Uint64(p[48:]) > math.MaxInt64 {
+	if result.SourceCacheBytes < 0 || result.SourceRecordBytes < 0 {
 		return result, bad("backup source settings")
 	}
-	count := order.Uint64(p[56:])
-	p = p[64:]
+	count := order.Uint64(p[48:])
+	p = p[backupPrefixBytes:]
 	seen := make(map[string]bool)
 	for i := uint64(0); i < count; i++ {
 		if len(p) < 2 {

@@ -146,7 +146,7 @@ func TestIndexCreationFailureReleasesWorkspaceAndReportsInitialization(t *testin
 			dir := filepath.Join(t.TempDir(), "db")
 			cfg := Config{Handles: 1, RecordBytes: 256, TargetSegmentBytes: 1024, ValueCacheBudgetBytes: 1024}
 			if tc.existing {
-				s, _, err := Open(dir, cfg, nil)
+				s, err := openTestStore(t, dir, cfg, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -168,9 +168,12 @@ func TestIndexCreationFailureReleasesWorkspaceAndReportsInitialization(t *testin
 			if _, err := os.Lstat(filepath.Join(dir, workspaceName)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("workspace after failed OpenIndexed: %v", err)
 			}
-			s, _, err = OpenContext(t.Context(), dir, cfg, true, nil)
+			s, backend, err = OpenIndexed(t.Context(), dir, cfg, true, nil, newMemoryIndex, nil)
 			if err != nil {
 				t.Fatalf("reopen existing database: %v", err)
+			}
+			if err := backend.Close(); err != nil {
+				t.Fatal(err)
 			}
 			if err := s.Close(); err != nil {
 				t.Fatal(err)

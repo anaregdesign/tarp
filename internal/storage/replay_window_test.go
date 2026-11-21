@@ -12,7 +12,7 @@ import (
 
 func TestReadOnlyReplayWindowsMatchFullValidation(t *testing.T) {
 	dir := t.TempDir()
-	s, _, err := Open(dir, Config{Handles: 1, TargetSegmentBytes: 1 << 20}, nil)
+	s, err := openTestStore(t, dir, Config{Handles: 1, TargetSegmentBytes: 1 << 20}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestReadOnlyReplayWindowsMatchFullValidation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if img.Index != nil || img.LiveKeys != uint64(len(full.Index)) || img.Required != full.Required || img.MaxValueBytes != full.MaxValueBytes {
+		if img.LiveKeys != full.LiveKeys || img.Required != full.Required || img.MaxValueBytes != full.MaxValueBytes {
 			t.Fatalf("budget %d: live=%d required=%+v maxValue=%d", budget, img.LiveKeys, img.Required, img.MaxValueBytes)
 		}
 	}

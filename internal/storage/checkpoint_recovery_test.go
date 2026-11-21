@@ -47,7 +47,7 @@ func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 
 func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
-	s, _, err := Open(t.TempDir(), cfg, nil)
+	s, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

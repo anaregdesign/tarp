@@ -89,20 +89,20 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 }
 
 type compactionMeasurement struct {
-	Mode               string             `json:"mode"`
-	ElapsedNS          int64              `json:"elapsed_ns"`
-	Options            measurementOptions `json:"options"`
-	SealedSourceBytes  int64              `json:"sealed_source_bytes"`
-	UnlinkedDataBytes  int64              `json:"unlinked_data_bytes"`
-	PublishedDataBytes int64              `json:"published_data_bytes"`
-	NetDataBytesFreed  int64              `json:"net_data_bytes_freed"`
-	Sequence           uint64             `json:"committed_sequence"`
-	Cutoff             uint64             `json:"checkpoint_cutoff"`
-	PrunedThrough      uint64             `json:"pruned_through"`
-	CleanedIntervals   int                `json:"cleaned_intervals"`
-	SnapshotFiles      int                `json:"snapshot_files"`
-	ReopenedStateHash  string             `json:"reopened_state_sha256"`
-	LiveKeys           int                `json:"live_keys"`
+	Mode               string         `json:"mode"`
+	ElapsedNS          int64          `json:"elapsed_ns"`
+	Options            engine.Options `json:"options"`
+	SealedSourceBytes  int64          `json:"sealed_source_bytes"`
+	UnlinkedDataBytes  int64          `json:"unlinked_data_bytes"`
+	PublishedDataBytes int64          `json:"published_data_bytes"`
+	NetDataBytesFreed  int64          `json:"net_data_bytes_freed"`
+	Sequence           uint64         `json:"committed_sequence"`
+	Cutoff             uint64         `json:"checkpoint_cutoff"`
+	PrunedThrough      uint64         `json:"pruned_through"`
+	CleanedIntervals   int            `json:"cleaned_intervals"`
+	SnapshotFiles      int            `json:"snapshot_files"`
+	ReopenedStateHash  string         `json:"reopened_state_sha256"`
+	LiveKeys           int            `json:"live_keys"`
 }
 
 // The two arms run on private copies of one closed store. Only worker admission
@@ -210,7 +210,7 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 	probe := engine.Observe(db)
 	dir := probe.Dir()
 	result := compactionMeasurement{
-		Mode: mode, Options: measurementOptions(f.opts), SealedSourceBytes: f.source.Bytes,
+		Mode: mode, Options: f.opts, SealedSourceBytes: f.source.Bytes,
 	}
 	original := []format.File{f.source, {ID: f.frontier.ActiveID, Bytes: f.frontier.ActiveEnd}}
 	current := probe.Frontier()
