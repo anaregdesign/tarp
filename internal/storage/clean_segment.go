@@ -42,6 +42,7 @@ func (c *CleanSegment) ResetCopy(fs *IO) error {
 		return err
 	}
 	c.created = false
+	c.output.parityReady, c.output.parityNeedsSync = false, false
 	c.output.Size.Store(0)
 	c.output.DeleteBytes.Store(0)
 	c.digest = [sha256.Size]byte{}
@@ -246,13 +247,38 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 	})
 }
 
+func (c *CleanSegment) replacement() format.File {
+	replacement := format.File{Kind: c.output.Kind, First: c.entries[0].First, Last: c.entries[len(c.entries)-1].Last}
+	if c.created {
+		replacement.ID, replacement.Bytes, replacement.Digest = c.output.ID, c.output.Size.Load(), c.digest
+	}
+	return replacement
+}
+
+// ProtectCleaned verifies and syncs the replacement sidecar outside the writer
+// gate. A metadata-only interval has no physical DATA to protect.
+func (s *Store) ProtectCleaned(ctx context.Context, c *CleanSegment, yield func() error) error {
+	if !c.created {
+		return nil
+	}
+	src := CapturedFile{File: c.output, Entry: c.replacement()}
+	if err := s.buildParity(ctx, c.uuid, src, false, yield, "clean.parity"); err != nil {
+		return err
+	}
+	if err := s.IO.SyncDir(s.Dir, "clean.parity.dirsync"); err != nil {
+		return err
+	}
+	c.output.parityReady, c.output.parityNeedsSync = true, false
+	return nil
+}
+
 // Discard removes only an exclusively created, unpublished output. Once the
 // CURRENT replacement has been attempted, recovery owns ambiguous layouts.
 func (c *CleanSegment) Discard(fs *IO) error {
 	if !c.created {
 		return nil
 	}
-	err := fs.Do("clean.discard", func() error { return os.Remove(c.output.Path) })
+	err := c.output.discardReplacement(fs, c.uuid, "clean.discard")
 	if err != nil {
 		return err
 	}
@@ -262,6 +288,9 @@ func (c *CleanSegment) Discard(fs *IO) error {
 // InstallCleaned splices the replacement into the latest catalog under the
 // writer gate. Every tail rotation and append since BeginClean survives.
 func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error) error {
+	if c.created && !c.output.parityReady {
+		return errors.New("storage: cleaner replacement is not protected")
+	}
 	start, end := c.position, c.position+len(c.entries)
 	if end > len(s.Catalog.Files) || !slices.Equal(s.Catalog.Files[start:end], c.entries) {
 		return fmt.Errorf("%w: cleaner source selection changed", ErrCorrupt)
@@ -278,10 +307,7 @@ func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error
 	catalog.Index = format.IndexCheckpoint{}
 	catalog.Files = slices.Clone(catalog.Files)
 	catalog.PrunedThrough = s.Current.Sequence
-	replacement := format.File{Kind: c.output.Kind, First: c.entries[0].First, Last: c.entries[len(c.entries)-1].Last}
-	if c.created {
-		replacement.ID, replacement.Bytes, replacement.Digest = c.output.ID, c.output.Size.Load(), c.digest
-	}
+	replacement := c.replacement()
 	if !c.created && replacement.Kind == format.Snapshot {
 		catalog.Files = slices.Delete(catalog.Files, start, end)
 	} else {

@@ -17,11 +17,12 @@ import (
 // Checkpoint owns the private snapshot files until Install attempts publication.
 // Copy runs outside the writer gate. ReserveSnapshotFile and Install require it.
 type Checkpoint struct {
-	store     *Store
-	capture   *Capture
-	files     []*File
-	entries   []format.File
-	attempted bool
+	store       *Store
+	capture     *Capture
+	files       []*File
+	entries     []format.File
+	lossSources []lossSource
+	attempted   bool
 }
 
 func (s *Store) NewCheckpoint(capture *Capture) *Checkpoint {
@@ -39,7 +40,39 @@ func (c *Checkpoint) Entries() []format.File { return c.entries }
 
 // Copy validates the captured history, copies live records in physical order and
 // records their new addresses in moves. Only reserve takes the writer gate.
-func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*File, error)) (result error) {
+func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*File, error)) error {
+	err := c.writeSnapshot(ctx, moves, reserve, func(emit func(string, Location) (io.Writer, error)) error {
+		return c.capture.replayLive(ctx, c.store.IO, history, live, emit)
+	})
+	if err != nil {
+		return err
+	}
+	// Verify the complete set against independently replayed DATA before the
+	// new checkpoint is allowed to replace its sources. An inconsistent derived
+	// index must never suppress the only surviving authoritative copy of a Put.
+	if moves.count != history.Count() {
+		return fmt.Errorf("%w: checkpoint index live count disagrees with replay", ErrCorrupt)
+	}
+	tx := history.Begin()
+	defer tx.Abort()
+	return moves.Each(func(key string, old, _ Location) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		loc, exists, err := tx.Lookup(key)
+		if err != nil {
+			return &IndexWorkError{Err: err}
+		}
+		if !exists || loc.FileID != old.File.ID || loc.Offset != old.Offset || loc.Sequence != old.Sequence {
+			return fmt.Errorf("%w: checkpoint index location disagrees with replay", ErrCorrupt)
+		}
+		return nil
+	})
+}
+
+// writeSnapshot owns private outputs through the complete source scan. Both
+// normal replay and recovery use the same rollover, sync and relocation path.
+func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, reserve func() (*File, error), scan func(func(string, Location) (io.Writer, error)) error) (result error) {
 	var file *File
 	var fd *os.File
 	var offset int64
@@ -63,7 +96,7 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 			result = errors.Join(result, fd.Close())
 		}
 	}()
-	err := c.capture.replayLive(ctx, fs, history, live, func(key string, old Location) (io.Writer, error) {
+	err := scan(func(key string, old Location) (io.Writer, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -97,36 +130,39 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 	if err := finish(); err != nil {
 		return err
 	}
-	if err := moves.seal(); err != nil {
-		return err
+	return moves.seal()
+}
+
+// Protect validates each staged snapshot against the digest computed during
+// Copy. Sync all new sidecar names together before publishing their catalog.
+func (c *Checkpoint) Protect(ctx context.Context) error {
+	if len(c.entries) == 0 {
+		return nil
 	}
-	// Verify the complete set against independently replayed DATA before the
-	// new checkpoint is allowed to replace its sources. An inconsistent derived
-	// index must never suppress the only surviving authoritative copy of a Put.
-	if moves.count != history.Count() {
-		return fmt.Errorf("%w: checkpoint index live count disagrees with replay", ErrCorrupt)
-	}
-	tx := history.Begin()
-	defer tx.Abort()
-	return moves.Each(func(key string, old, _ Location) error {
-		if err := ctx.Err(); err != nil {
+	for i, entry := range c.entries {
+		src := CapturedFile{File: c.files[i], Entry: entry}
+		if err := c.store.buildParity(ctx, c.capture.Current.UUID, src, false, nil, "compact.parity"); err != nil {
 			return err
 		}
-		loc, exists, err := tx.Lookup(key)
-		if err != nil {
-			return &IndexWorkError{Err: err}
-		}
-		if !exists || loc.FileID != old.File.ID || loc.Offset != old.Offset || loc.Sequence != old.Sequence {
-			return fmt.Errorf("%w: checkpoint index location disagrees with replay", ErrCorrupt)
-		}
-		return nil
-	})
+	}
+	if err := c.store.IO.SyncDir(c.store.Dir, "compact.parity.dirsync"); err != nil {
+		return err
+	}
+	for _, f := range c.files {
+		f.parityReady, f.parityNeedsSync = true, false
+	}
+	return nil
 }
 
 // Install splices the captured prefix into the current tail under the writer
 // gate. A failed publication may have selected the snapshot files on disk.
 func (c *Checkpoint) Install() error {
 	s := c.store
+	for _, f := range c.files {
+		if !f.parityReady {
+			return errors.New("storage: checkpoint replacement is not protected")
+		}
+	}
 	if s.Current.Generation == math.MaxUint64 {
 		return fault("compact.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
@@ -156,10 +192,7 @@ func (c *Checkpoint) Discard() error {
 	}
 	var result error
 	for _, f := range c.files {
-		err := c.store.IO.Do("compact.discard", func() error { return os.Remove(f.Path) })
-		if !errors.Is(err, os.ErrNotExist) {
-			result = errors.Join(result, err)
-		}
+		result = errors.Join(result, f.discardReplacement(c.store.IO, c.capture.Current.UUID, "compact.discard"))
 	}
 	return errors.Join(result, c.store.IO.SyncDir(c.store.Dir, "compact.discard.dirsync"))
 }

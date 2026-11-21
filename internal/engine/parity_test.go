@@ -257,16 +257,8 @@ func TestParitySourceReadFailurePoisonsOnlyStillSelectedData(t *testing.T) {
 }
 
 func TestParityProtectsCleanedDataAndSkipsMetadataOnlyIntervals(t *testing.T) {
-	start := make(chan struct{})
-	ready := make(chan struct{})
-	var once sync.Once
-	fs := &storage.IO{Hook: func(point string) error {
-		if point == "parity.dirsync:after" {
-			once.Do(func() { close(ready) })
-		}
-		return nil
-	}}
-	db := newTestDBWithHooks(t, Options{}, fs, &Hooks{CleanerStart: make(chan struct{}), ParityStart: start})
+	// Neither worker runs. A successful clean must already own durable parity.
+	db := newTestDBWithHooks(t, Options{}, nil, parkedMaintenance())
 	mustPut(t, db, "obsolete", "old")
 	empty := sealForCleaning(t, db)
 	mustPut(t, db, "stable", "live")
@@ -283,12 +275,6 @@ func TestParityProtectsCleanedDataAndSkipsMetadataOnlyIntervals(t *testing.T) {
 	entries := db.store.Catalog.Files
 	if len(entries) != 2 || entries[0].HasPhysicalFile() || entries[1].Kind != format.Cleaned || !entries[1].HasPhysicalFile() {
 		t.Fatalf("invalid fixture %+v", entries)
-	}
-	close(start)
-	select {
-	case <-ready:
-	case <-time.After(10 * time.Second):
-		t.Fatal("worker did not protect cleaned file")
 	}
 	found, err := filepath.Glob(filepath.Join(db.store.Dir, "PARITY-*"))
 	if err != nil || len(found) != 1 || found[0] != selectedParity(t, db, entries[1]) {

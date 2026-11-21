@@ -427,9 +427,16 @@ func TestForegroundUnrepairableDATAIsolatedWhileHealthyRecordsRemainAvailable(t 
 			}
 			flipSealedTestBytes(t, data, damaged, 200)
 			var wantCause error
+			var offlineParity string
 			switch damage {
 			case "two lost blocks":
 				flipSealedTestBytes(t, data, damaged, 4096+200)
+				// This test exercises continued service before recovery, then
+				// offline salvage. Keep the worker from publishing a checkpoint
+				// between the foreground assertions.
+				offlineParity = filepath.Join(t.TempDir(), "parity")
+				err = os.Rename(parity, offlineParity)
+				wantCause = os.ErrNotExist
 			case "missing sidecar":
 				wantCause = os.ErrNotExist
 				err = os.Remove(parity)
@@ -524,6 +531,9 @@ func TestForegroundUnrepairableDATAIsolatedWhileHealthyRecordsRemainAvailable(t 
 			}
 			if damage != "two lost blocks" {
 				return
+			}
+			if err := os.Rename(offlineParity, parity); err != nil {
+				t.Fatal(err)
 			}
 			var records []tarp.SalvagedRecord
 			report, err := tarp.SalvageData(t.Context(), dir, unavailable.FileID, 0, func(r tarp.SalvagedRecord) error {

@@ -222,7 +222,8 @@ the unselected manifest. Under the gate again, it publishes against the latest
 committed frontier. If a foreground rotation selected a different manifest,
 the worker discards its staging manifest and rebuilds it once under the gate.
 A repacked log covers its inputs' full sequence interval and retains their
-Delete records. Replacement data and catalog reach stable storage before the
+Delete records. Each replacement DATA file and its matching PARITY are verified
+and synced before catalog publication. The catalog reaches stable storage before the
 temporary CURRENT is synced, renamed and directory-synced.
 An uncertain publication fail-stops while the writer gate is still held and
 retains both layouts for validated reopen. After durable publication, remapping
@@ -297,7 +298,8 @@ PARITY or wait for its sync. The worker briefly yields between stripe reads
 during foreground writes or a backup. Background work still consumes CPU and
 disk bandwidth. Restored databases build
 missing sidecars on Open. Replaced DATA and its sidecar are retired together.
-Logical backups contain the original DATA and catalog hashes.
+Compaction protects its private output before it becomes selected. Logical
+backups contain the original DATA and catalog hashes.
 
 Protection starts when the complete sidecar reaches disk. Active DATA and newly
 sealed DATA waiting for the worker remain exposed to local media damage. Calling
@@ -349,11 +351,10 @@ contract and `Scan` ends with a terminal error. `Keys` can still enumerate the
 index. Individual `Get` calls during that enumeration see the version current
 at each call.
 
-Backup, full compaction and index checkpoint creation report errors when their
-input includes unavailable DATA. They do not publish incomplete output.
-Background compaction skips affected files and can reclaim healthy ones.
-Protection of other sealed files continues. `Close` reports known unavailable
-DATA still in the selected layout and releases the directory lock. Writes
+Backup and index checkpoint creation report an error while their captured input
+contains unavailable DATA. A successful recovery checkpoint lets subsequent
+backups use the new, validated layout. Protection of other sealed files continues.
+`Close` reports known unavailable DATA still in the selected layout and releases the directory lock. Writes
 acknowledged during this period retain their ordinary durability contract.
 
 The guarantee of continued service applies to an open DB with a trusted index
@@ -362,6 +363,35 @@ DATA. `Indexed` recovery can reopen when a validated checkpoint covers the
 damaged payload, covered headers and lengths validate, and the remaining log
 can be replayed. An uncertain publication, a failure of the active DATA or an
 untrusted index retains its existing fail-stop behavior.
+
+### Recovering records during compaction
+
+Manual and automatic compaction first attempt ordinary repair of the original
+file. When a valid sidecar confirms multiple lost blocks in a stripe, the
+automatic worker can run a full checkpoint even if the damaged file would
+normally be too small or too live to clean. Replacing all history through
+the cutoff lets Tarp discard a lost current value without exposing an older Put.
+If the current sequence is already checkpointed and there is no known DATA damage,
+manual compaction only retries cleanup. It does not scrub the snapshot.
+
+The checkpoint uses the selected file identity, catalog digest, sidecar block
+checksums and record anchors. Each stripe checksum includes the selected DATA
+identity, so copying an intact stripe from another sidecar fails validation.
+Tarp reconstructs correctable stripes, validates
+records individually in damaged stripes and preserves verified live records
+from the rest of the file. Raw records in a damaged block require a matching
+original segment header. Tarp can use a matching live cache value when the
+record header confirms the expected payload checksum. Obsolete damaged records
+do not count as lost keys. A missing or invalid sidecar, a temporary staging
+failure, or an unverified source error does not establish record loss.
+
+At publication, concurrent Put and Delete operations keep their normal ordering.
+A key dropped by the committed checkpoint is absent from Get, Keys, backups and
+subsequent Full or Indexed opens. Put can create it again. Manual
+`CompactResult.DroppedKeys` counts live keys discarded by the committed
+checkpoint. `AutoCompactionStatus.DroppedKeys` accumulates the corresponding
+automatic count since Open. File reclamation waits for pins on the old layout,
+including scans or backups that began before recovery.
 
 ### Offline repair and salvage
 

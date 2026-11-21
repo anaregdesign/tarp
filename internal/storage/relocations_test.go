@@ -127,8 +127,9 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 			if err := moves.seal(); err != nil {
 				t.Fatal(err)
 			}
-			if (moves.fd != nil) != tc.spill {
-				t.Fatalf("spilled = %t, want %t", moves.fd != nil, tc.spill)
+			resident, ok := moves.Resident()
+			if ok == tc.spill || ok && len(resident) != tc.count || !ok && resident != nil {
+				t.Fatalf("resident batch has %d moves, ok=%t, expected spill=%t", len(resident), ok, tc.spill)
 			}
 			workspace := filepath.Join(store.Dir, workspaceName)
 			if tc.spill {

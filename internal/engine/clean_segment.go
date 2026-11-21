@@ -81,6 +81,9 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 		db.compactFailure(err)
 		return operationError("clean", "copy", err)
 	}
+	if err := db.store.ProtectCleaned(ctx, work, func() error { return db.cleanYield(ctx) }); err != nil {
+		return operationError("clean", "protect output", err)
+	}
 	db.writer.Lock()
 	if err := errors.Join(ctx.Err(), db.health()); err != nil {
 		db.writer.Unlock()

@@ -90,6 +90,9 @@ type Location struct {
 }
 
 type Store struct {
+	// DamageChanged wakes maintenance when known repair eligibility changes.
+	// The owner sets it once before starting any workers or serving requests.
+	DamageChanged         func()
 	Dir                   string
 	Config                Config
 	IO                    *IO

@@ -964,7 +964,7 @@ func TestIndexedReopenReplaysWritesMadeWithUnavailableSealedData(t *testing.T) {
 	if err := seed.Close(); err != nil {
 		t.Fatal(err)
 	}
-	path, _ := sealedTestPaths(t, dir)
+	path, parity := sealedTestPaths(t, dir)
 	wire, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -975,7 +975,15 @@ func TestIndexedReopenReplaysWritesMadeWithUnavailableSealedData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// Keep this fixture unavailable across Close and Open; the later tail
+	// must replay even when online compaction cannot prove irrecoverable loss.
+	if err := db.ProtectParity(ctx); err != nil {
+		t.Fatal(err)
+	}
 	flipSealedTestBytes(t, path, wire, 200, 4096+200)
+	if err := os.Remove(parity); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Get(badKey); !errors.Is(err, tarp.ErrDataUnavailable) {
 		t.Fatalf("damaged read: %v", err)
 	}
@@ -1038,5 +1046,129 @@ func TestIndexedReopenReplaysWritesMadeWithUnavailableSealedData(t *testing.T) {
 	checkTail(recovered)
 	if got, err := recovered.Get(badKey); err != nil || !bytes.Equal(got, replacement) {
 		t.Fatalf("replacement after full recovery: %q, %v", got, err)
+	}
+}
+
+func TestCompactSalvagesLiveRecordsAndDropsOnlyLostKeys(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		mode tarp.IndexMode
+	}{{"memory", tarp.IndexMemory}, {"btree", tarp.IndexBTree}} {
+		t.Run(mode.name, func(t *testing.T) {
+			ctx := t.Context()
+			dir := t.TempDir()
+			opts := tarp.Options{IndexMode: mode.mode}
+			seed := openPublicDB(t, dir, opts)
+			put := func(db *tarp.DB, key string, value []byte) {
+				t.Helper()
+				if err := db.Put([]byte(key), value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			put(seed, "lost", []byte("previous version must stay hidden"))
+			put(seed, "neighbor", []byte("intact in the first damaged block"))
+			put(seed, "lost", []byte("lost-current-record"))
+			put(seed, "hot", []byte("cached-current-record"))
+			put(seed, "deleted", []byte("deleted-record"))
+			put(seed, "updated", bytes.Repeat([]byte{'o'}, 5000))
+			// This live record begins in the second bad block, crosses a stripe
+			// boundary, and has one byte that parity can correct in the next stripe.
+			crossing := bytes.Repeat([]byte{'v'}, 68<<10)
+			put(seed, "crossing", crossing)
+			put(seed, "updated", []byte("newer intact version"))
+			if err := seed.Delete([]byte("deleted")); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.ProtectParity(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := sealedTestPaths(t, dir)
+			db := openPublicDB(t, dir, opts)
+			if err := db.ProtectParity(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := db.Get([]byte("hot")); err != nil || string(got) != "cached-current-record" {
+				t.Fatalf("prime cache: %q, %v", got, err)
+			}
+			wire, err := os.ReadFile(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var offsets []int
+			for _, value := range []string{"lost-current-record", "cached-current-record", "deleted-record"} {
+				at := bytes.Index(wire, []byte(value))
+				if at < 0 || at >= 4096 {
+					t.Fatalf("fixture %q in wrong block at %d", value, at)
+				}
+				offsets = append(offsets, at)
+			}
+			if wire[4300] != 'o' || wire[66<<10] != 'v' {
+				t.Fatal("large records at unexpected offsets")
+			}
+			flipSealedTestBytes(t, data, wire, append(offsets, 4300, 66<<10)...)
+			result, err := db.Compact(ctx)
+			if err != nil || result.DroppedKeys != 1 {
+				t.Fatalf("Compact: %+v, %v", result, err)
+			}
+			check := func(db *tarp.DB) {
+				t.Helper()
+				for key, value := range map[string][]byte{
+					"neighbor": []byte("intact in the first damaged block"),
+					"hot":      []byte("cached-current-record"),
+					"updated":  []byte("newer intact version"),
+					"crossing": crossing,
+				} {
+					if got, err := db.Get([]byte(key)); err != nil || !bytes.Equal(got, value) {
+						t.Fatalf("Get(%s): got %d bytes, want %d, err=%v", key, len(got), len(value), err)
+					}
+				}
+				for _, key := range []string{"lost", "deleted"} {
+					if _, err := db.Get([]byte(key)); !errors.Is(err, tarp.ErrNotFound) {
+						t.Fatalf("Get(%s) after checkpoint: %v", key, err)
+					}
+				}
+				keys := make(map[string]bool)
+				for key, err := range db.Keys(ctx) {
+					if err != nil {
+						t.Fatal(err)
+					}
+					keys[string(key)] = true
+				}
+				if !maps.Equal(keys, map[string]bool{"hot": true, "neighbor": true, "updated": true, "crossing": true}) {
+					t.Fatalf("Keys after checkpoint: %v", keys)
+				}
+			}
+			check(db)
+			backup := filepath.Join(t.TempDir(), "backup")
+			if err := db.Backup(ctx, backup); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := tarp.VerifyBackup(ctx, backup); err != nil || report.LiveKeys != 4 {
+				t.Fatalf("backup: %+v, %v", report, err)
+			}
+			if err := db.CheckpointIndex(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for _, validation := range []tarp.OpenValidation{tarp.Indexed, tarp.Full} {
+				opts.OpenValidation = validation
+				reopened := openPublicDB(t, dir, opts)
+				check(reopened)
+				if validation == tarp.Full {
+					put(reopened, "lost", []byte("written after recovery"))
+					if got, err := reopened.Get([]byte("lost")); err != nil || string(got) != "written after recovery" {
+						t.Fatalf("Put after recovery: %q, %v", got, err)
+					}
+				}
+				if err := reopened.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }

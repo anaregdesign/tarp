@@ -24,6 +24,7 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	if !db.backup.CompareAndSwap(false, true) {
 		return ErrBusy
 	}
+	db.cancelAutoRecovery()
 	defer func() {
 		db.backup.Store(false)
 		db.resumeCleaner()

@@ -478,6 +478,9 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 				if err := work.Copy(t.Context(), history, view, moves, s.ReserveSnapshotFile); err != nil {
 					t.Fatal(err)
 				}
+				if err := work.Protect(t.Context()); err != nil {
+					t.Fatal(err)
+				}
 				if err := work.Install(); err != nil {
 					t.Fatal(err)
 				}
@@ -488,6 +491,9 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 				}
 				defer work.Release()
 				if err := work.Copy(t.Context(), s.IO, moves, history, ready, func(string, Location) (bool, error) { return true, nil }); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.ProtectCleaned(t.Context(), work, ready); err != nil {
 					t.Fatal(err)
 				}
 				if err := s.InstallCleaned(work, nil); err != nil {
@@ -501,9 +507,6 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 			}
 			f.Pin()
 			defer f.Unpin()
-			if err := s.EnsureParity(t.Context(), s.Current.UUID, CapturedFile{File: f, Entry: entry}, false, nil); err != nil {
-				t.Fatal(err)
-			}
 			if err := os.Remove(f.Path); err != nil {
 				t.Fatal(err)
 			}

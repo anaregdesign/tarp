@@ -18,6 +18,7 @@ import (
 // AutoCompactionStatus describes the automatic compaction worker since this Open.
 type AutoCompactionStatus struct {
 	DeferredReason         string
+	DroppedKeys            uint64 // Cumulative unrecoverable live versions discarded by the worker.
 	PinnedRetiredDataBytes int64  // Retired DATA bytes held by leases at the last retirement pass.
 	UnlinkedBytes          uint64 // Cumulative logical lengths of files unlinked by the worker, including obsolete manifests.
 	LastError              error
@@ -33,6 +34,10 @@ type cleaner struct {
 	pinned  atomic.Bool
 	mu      sync.Mutex
 	status  AutoCompactionStatus
+
+	recoverPending      atomic.Bool
+	cleanBeforeRecovery bool               // gate owner lets a healthy clean reclaim space before retrying
+	recoverCancel       context.CancelFunc // mu guards preemption by manual Compact
 }
 
 // AutoCompactionStatus returns the latest observed worker status, including after Close.
@@ -52,6 +57,10 @@ func (db *DB) startCleaner() {
 	w.gate <- struct{}{}
 	w.cancel = cancel
 	w.done = make(chan struct{})
+	db.store.DamageChanged = func() {
+		w.recoverPending.Store(true)
+		db.notifyCleaner()
+	}
 	var start <-chan struct{}
 	if db.hooks != nil {
 		start = db.hooks.CleanerStart
@@ -252,6 +261,45 @@ func repackGroup(files []format.File, target int64, blocked map[uint64]*storage.
 	return nil, 0
 }
 
+// The automatic recovery checkpoint owns the same slot as manual Compact.
+// A manual request can cancel private work. Once CURRENT has been installed
+// relocation and cleanup still finish before the slot changes hands.
+func (db *DB) cancelAutoRecovery() {
+	w := &db.cleaner
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.recoverCancel != nil {
+		w.recoverCancel()
+	}
+}
+
+func (db *DB) recoverDamaged(ctx context.Context) error {
+	w := &db.cleaner
+	ctx, cancel := context.WithCancel(ctx)
+	w.mu.Lock()
+	w.recoverCancel = cancel
+	if db.compact.Load() || db.backup.Load() {
+		cancel()
+	}
+	w.mu.Unlock()
+	defer func() {
+		cancel()
+		w.mu.Lock()
+		w.recoverCancel = nil
+		w.mu.Unlock()
+	}()
+	result, err := db.compactCheckpoint(ctx, true)
+	w.mu.Lock()
+	w.status.DroppedKeys += min(result.DroppedKeys, math.MaxUint64-w.status.DroppedKeys)
+	w.status.UnlinkedBytes += min(uint64(result.UnlinkedBytes), math.MaxUint64-w.status.UnlinkedBytes)
+	w.status.PinnedRetiredDataBytes = result.PinnedRetiredDataBytes
+	w.mu.Unlock()
+	if result.PinnedRetiredDataBytes != 0 {
+		w.pinned.Store(true)
+	}
+	return err
+}
+
 // Each pass yields the slot to manual maintenance before selecting more work.
 func (db *DB) runCleaner(ctx context.Context) {
 	delay := time.Duration(0)
@@ -343,6 +391,39 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		inputs, inputBytes = repackGroup(files, db.opts.TargetSegmentBytes, blocked)
 		staging = uint64(inputBytes) + uint64(manifestBytes) + format.FrontierBytes
 	}
+	if len(blocked) != 0 && w.recoverPending.Load() && (!w.cleanBeforeRecovery || len(inputs) == 0) {
+		// Never drop tombstones in a partial clean. Full checkpoint recovery
+		// must validate every selected file, so a known missing sidecar or
+		// staging failure would prevent publication for this cutoff.
+		eligible := true
+		for _, unavailable := range blocked {
+			if !errors.Is(unavailable.Err, format.ErrParityGap) {
+				eligible = false
+				break
+			}
+		}
+		if eligible && w.recoverPending.Swap(false) {
+			err := db.recoverDamaged(ctx)
+			switch {
+			case err == nil:
+				db.deferCleaning("", nil)
+				return true, false
+			case errors.Is(err, context.Canceled):
+				w.recoverPending.Store(true)
+				return false, false
+			case errors.Is(err, ErrNoSpace) && db.health() == nil:
+				w.recoverPending.Store(true)
+				w.cleanBeforeRecovery = true
+				db.deferCleaning("space", err)
+				return len(inputs) > 0, len(inputs) == 0
+			default:
+				// A missing/invalid proof does not improve on another pass.
+				// Further damage-state transitions or manual Compact can retry.
+				db.deferCleaning("recovery checkpoint", err)
+				return len(inputs) > 0 || pending && removed > 0, pending && removed == 0
+			}
+		}
+	}
 	if len(inputs) == 0 {
 		if pinned != 0 {
 			db.deferCleaning("pinned", nil)
@@ -358,12 +439,15 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		}
 		return pending && removed > 0, pending && removed == 0
 	}
+	w.cleanBeforeRecovery = false
 	err = db.store.IO.Check("clean.headroom:before")
 	if err == nil {
 		var available uint64
 		available, err = platform.AvailableBytes(db.store.Dir)
-		// Allow additional filesystem allocation blocks for catalog and CURRENT.
-		if err == nil && available < staging+3*4096 {
+		// Reserve space for the sidecar and allocation blocks alongside DATA,
+		// the catalog and CURRENT. Staging already includes catalog metadata.
+		outputBytes := staging - uint64(manifestBytes) - format.FrontierBytes
+		if err == nil && available < staging+format.ParityBytes(outputBytes)+4*4096 {
 			err = ErrNoSpace
 		}
 	}

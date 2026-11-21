@@ -203,6 +203,9 @@ func TestCheckpointSpoolsTenfoldGrowthWithinFixedPageCaches(t *testing.T) {
 			if len(moves.files) > len(capture.Files)+len(checkpoint.Entries()) {
 				t.Fatalf("spool retained %d DATA files", len(moves.files))
 			}
+			if err := checkpoint.Protect(t.Context()); err != nil {
+				t.Fatal(err)
+			}
 			if err := checkpoint.Install(); err != nil {
 				t.Fatal(err)
 			}

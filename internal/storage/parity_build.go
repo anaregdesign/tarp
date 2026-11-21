@@ -48,7 +48,7 @@ func (s *Store) EnsureParity(ctx context.Context, uuid [16]byte, source Captured
 	case err == nil:
 	case missing || errors.Is(err, format.ErrInvalidParity):
 		if err := s.RetryMaintenance(ctx, []CapturedFile{source}, func() error {
-			return s.buildParity(ctx, path, uuid, source, !missing, yield)
+			return s.buildParity(ctx, uuid, source, !missing, yield, "parity")
 		}, nil); err != nil {
 			return err
 		}
@@ -93,7 +93,7 @@ func (r paritySource) ReadAt(b []byte, off int64) (int, error) {
 	return r.ReaderAt.ReadAt(b, off)
 }
 
-func (s *Store) buildParity(ctx context.Context, path string, uuid [16]byte, source CapturedFile, replace bool, yield func() error) (result error) {
+func (s *Store) buildParity(ctx context.Context, uuid [16]byte, source CapturedFile, replace bool, yield func() error, point string) (result error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -134,8 +134,8 @@ func (s *Store) buildParity(ctx context.Context, path string, uuid [16]byte, sou
 			return paceErr
 		}}
 	}
-	writer := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: "parity.write"}, parityBufferSize(source.Entry.Bytes))
-	err = s.IO.Do("parity.scan", func() error {
+	writer := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: point + ".write"}, parityBufferSize(source.Entry.Bytes))
+	err = s.IO.Do(point+".scan", func() error {
 		err := format.WriteParity(ctx, input, writer, uuid, source.Entry)
 		if err != nil && paceErr == nil {
 			return selectedReadFailure(source.Entry.ID, err)
@@ -160,7 +160,7 @@ func (s *Store) buildParity(ctx context.Context, path string, uuid [16]byte, sou
 	if err := format.ValidateParity(ctx, bufio.NewReaderSize(fd, parityBufferSize(source.Entry.Bytes)), uuid, source.Entry); err != nil {
 		return err
 	}
-	if err := s.IO.Sync(fd, "parity.sync"); err != nil {
+	if err := s.IO.Sync(fd, point+".sync"); err != nil {
 		return err
 	}
 	err = fd.Close()
@@ -171,17 +171,35 @@ func (s *Store) buildParity(ctx context.Context, path string, uuid [16]byte, sou
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.IO.Do("parity.rename", func() error {
+	path := filepath.Join(s.Dir, parityName(uuid, source.Entry.ID))
+	return s.IO.Do(point+".rename", func() error {
 		// An I/O error from rename can follow an applied replacement.
-		source.File.parityNeedsSync = true
 		if replace {
 			err = os.Rename(temp, path)
 		} else {
 			err = platform.RenameNoReplace(temp, path)
 		}
+		source.File.parityNeedsSync = !errors.Is(err, os.ErrExist)
 		if err == nil {
 			temp = ""
 		}
 		return err
 	})
+}
+
+// Remove only names owned by this unpublished output. An after-rename error
+// can leave an installed sidecar even though preparation did not finish.
+func (f *File) discardReplacement(fs *IO, uuid [16]byte, point string) error {
+	remove := func(path string) error {
+		err := fs.Do(point, func() error { return os.Remove(path) })
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var parityErr error
+	if f.parityNeedsSync || f.parityReady {
+		parityErr = remove(filepath.Join(filepath.Dir(f.Path), parityName(uuid, f.ID)))
+	}
+	return errors.Join(parityErr, remove(f.Path))
 }

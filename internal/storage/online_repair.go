@@ -25,6 +25,7 @@ type sealedRepair struct {
 	mu          sync.Mutex
 	running     *readRepair
 	uncertain   error
+	generation  atomic.Uint64 // successful full-file verifications or repairs
 	unavailable atomic.Pointer[UnavailableDataError]
 	retryAfter  time.Time
 }
@@ -113,7 +114,7 @@ func (s *Store) RepairRead(ctx context.Context, f *File, cause error) error {
 	if r == nil || r.entry.ID != f.ID || f.Path != filepath.Join(s.Dir, DataName(r.uuid, f.ID)) {
 		return cause
 	}
-	err := r.run(ctx, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
+	err := r.run(ctx, s.DamageChanged, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
 		if err := s.IO.Check("repair.verify:before"); err != nil {
 			return err
 		}
@@ -161,7 +162,7 @@ func repairableRead(err error) bool {
 // of confirmed damage. An operator may later restore the recovery material.
 // A successful verification cannot be cached across distinct failures.
 // A directory publication with unknown durability can only be resolved by reopen.
-func (r *sealedRepair) run(ctx context.Context, checkRoot, repair func() error) error {
+func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot, repair func() error) error {
 	for {
 		r.mu.Lock()
 		if r.uncertain != nil {
@@ -205,11 +206,24 @@ func (r *sealedRepair) run(ctx context.Context, checkRoot, repair func() error) 
 		if errors.As(call.err, &f) && f.Outcome == publication.Unknown {
 			r.uncertain = call.err
 		}
+		if call.err == nil {
+			r.generation.Add(1)
+		}
+		prior := r.unavailable.Load()
 		if local, ok := call.err.(*UnavailableDataError); ok {
 			r.unavailable.Store(local)
 			r.retryAfter = time.Now().Add(time.Second)
 		} else if call.err == nil || r.uncertain != nil {
 			r.unavailable.Store(nil)
+		}
+		next := r.unavailable.Load()
+		// A cached read failure cannot schedule the same expensive checkpoint
+		// again. Reconsider the work when loss is first observed or a formerly
+		// blocked file can be fully read again.
+		newGap := next != nil && errors.Is(next.Err, format.ErrParityGap) &&
+			(prior == nil || !errors.Is(prior.Err, format.ErrParityGap))
+		if damageChanged != nil && (newGap || prior != nil && next == nil) {
+			damageChanged()
 		}
 		r.running = nil
 		close(call.done)

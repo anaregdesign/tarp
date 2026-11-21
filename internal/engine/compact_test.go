@@ -939,7 +939,7 @@ func openMaintenanceDamageDB(t *testing.T, opts Options, fs *storage.IO) *DB {
 }
 
 func TestMaintenanceKeepsDamagedDataAndLeavesWritersAvailable(t *testing.T) {
-	for _, op := range []string{"backup", "compact", "index", "clean"} {
+	for _, op := range []string{"backup", "index", "clean"} {
 		t.Run(op, func(t *testing.T) {
 			db := openMaintenanceDamageDB(t, Options{IndexMode: IndexBTree}, nil)
 			mustPut(t, db, "intact", "healthy")
@@ -962,8 +962,6 @@ func TestMaintenanceKeepsDamagedDataAndLeavesWritersAvailable(t *testing.T) {
 				if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
 					t.Fatalf("incomplete backup was published: %v", statErr)
 				}
-			case "compact":
-				_, err = db.Compact(t.Context())
 			case "index":
 				err = db.CheckpointIndex(t.Context())
 			case "clean":
@@ -986,4 +984,209 @@ func TestMaintenanceKeepsDamagedDataAndLeavesWritersAvailable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func corruptUncachedCheckpointValue(t *testing.T, db *DB) {
+	t.Helper()
+	mustPut(t, db, "keep", "healthy")
+	mustPut(t, db, "lost", strings.Repeat("v", 10000))
+	entry := damageProtectedTail(t, db)
+	raw, err := os.ReadFile(db.store.Files[entry.ID].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[300] ^= 1 // Together with the tail, two DATA blocks in one stripe.
+	if err := os.WriteFile(db.store.Files[entry.ID].Path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	Observe(db).ClearCache()
+}
+
+func TestCompactRecapturesConcurrentChangeToUnrecoverableVersion(t *testing.T) {
+	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
+		for _, putAfterDelete := range []bool{false, true} {
+			t.Run(fmt.Sprintf("mode%d/put%t", mode, putAfterDelete), func(t *testing.T) {
+				paused, resume := make(chan struct{}), make(chan struct{})
+				var armed atomic.Bool
+				fs := &storage.IO{Hook: func(point string) error {
+					if point == "index.moves.flush:after" && armed.CompareAndSwap(true, false) {
+						close(paused)
+						<-resume
+					}
+					return nil
+				}}
+				opts := Options{IndexMode: mode}
+				db := openMaintenanceDamageDB(t, opts, fs)
+				corruptUncachedCheckpointValue(t, db)
+				armed.Store(true)
+				type completion struct {
+					CompactResult
+					error
+				}
+				done := make(chan completion, 1)
+				go func() {
+					result, err := db.Compact(t.Context())
+					done <- completion{result, err}
+				}()
+				select {
+				case early := <-done:
+					t.Fatalf("checkpoint ended before concurrent update: %+v", early)
+				case <-paused:
+				}
+				err := db.Delete([]byte("lost"))
+				if err == nil && putAfterDelete {
+					err = db.Put([]byte("lost"), []byte("new"))
+				}
+				close(resume)
+				finished := <-done
+				if err != nil || finished.error != nil || finished.DroppedKeys != 0 {
+					t.Fatalf("concurrent mutation %v, checkpoint %+v", err, finished)
+				}
+				check := func(d *DB) {
+					wantValue(t, d, "keep", "healthy")
+					if putAfterDelete {
+						wantValue(t, d, "lost", "new")
+					} else if _, err := d.Get([]byte("lost")); !errors.Is(err, ErrNotFound) {
+						t.Fatalf("deleted key: %v", err)
+					}
+				}
+				check(db)
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := Open(db.store.Dir, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				check(reopened)
+			})
+		}
+	}
+}
+
+func TestCompactPublishesLossOnlyWithCompleteCheckpoint(t *testing.T) {
+	for _, point := range []string{"compact.sync:after", "compact.remap:after"} {
+		t.Run(point, func(t *testing.T) {
+			var armed atomic.Bool
+			fs := &storage.IO{Hook: func(p string) error {
+				if p == point && armed.CompareAndSwap(true, false) {
+					return syscall.ENOSPC
+				}
+				return nil
+			}}
+			opts := Options{IndexMode: IndexBTree}
+			db := openMaintenanceDamageDB(t, opts, fs)
+			corruptUncachedCheckpointValue(t, db)
+			before, stats := db.store.Current, db.Stats()
+			armed.Store(true)
+			result, err := db.Compact(t.Context())
+			var op *OpError
+			if !errors.As(err, &op) || !errors.Is(err, ErrNoSpace) {
+				t.Fatalf("result %+v, err %v", result, err)
+			}
+			if point == "compact.sync:after" {
+				if result.DroppedKeys != 0 || op.Outcome != NotApplied || db.store.Current != before || db.Stats() != stats {
+					t.Fatalf("unpublished loss: result %+v, err %v, frontier %+v, stats %+v", result, err, db.store.Current, db.Stats())
+				}
+				if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
+					t.Fatalf("source after failed publication: %v", err)
+				}
+				mustPut(t, db, "tail", "acknowledged")
+				result, err = db.Compact(t.Context())
+				if err != nil || result.DroppedKeys != 1 {
+					t.Fatalf("retry: result %+v, err %v", result, err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if result.DroppedKeys != 1 || op.Outcome != Committed || !errors.Is(db.health(), ErrUnhealthy) {
+					t.Fatalf("published loss: result %+v, err %v, health %v", result, err, db.health())
+				}
+				_ = db.Close()
+			}
+			reopened, err := Open(db.store.Dir, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if _, err := reopened.Get([]byte("lost")); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("lost key after Full Open: %v", err)
+			}
+			wantValue(t, reopened, "keep", "healthy")
+			if point == "compact.sync:after" {
+				wantValue(t, reopened, "tail", "acknowledged")
+			}
+		})
+	}
+}
+
+func TestCompactKeepsVersionRepairedAfterRecoveryCopy(t *testing.T) {
+	paused, resume := make(chan struct{}), make(chan struct{})
+	var armed atomic.Bool
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "index.moves.flush:after" && armed.CompareAndSwap(true, false) {
+			close(paused)
+			<-resume
+		}
+		return nil
+	}}
+	opts := Options{IndexMode: IndexBTree}
+	db := openMaintenanceDamageDB(t, opts, fs)
+	corruptUncachedCheckpointValue(t, db)
+	source := testLoc(t, db, "lost").File
+	armed.Store(true)
+	done := make(chan error, 1)
+	go func() {
+		result, err := db.Compact(t.Context())
+		if err == nil && result.DroppedKeys != 0 {
+			err = fmt.Errorf("dropped %d keys after their source was repaired", result.DroppedKeys)
+		}
+		done <- err
+	}()
+	select {
+	case early := <-done:
+		t.Fatalf("checkpoint ended before repair: %v", early)
+	case <-paused:
+	}
+	// An operator restores one of the two damaged blocks. The next ordinary
+	// online repair after the one-second retry delay can reconstruct the other.
+	repair := func() error {
+		raw, err := os.ReadFile(source.Path)
+		if err != nil {
+			return err
+		}
+		raw[300] ^= 1
+		if err := os.WriteFile(source.Path, raw, 0600); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		for {
+			_, err := db.Get([]byte("lost"))
+			if !errors.Is(err, ErrDataUnavailable) {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
+	}()
+	close(resume)
+	if err := <-done; repair != nil || err != nil {
+		t.Fatalf("repair %v, checkpoint %v", repair, err)
+	}
+	wantValue(t, db, "lost", strings.Repeat("v", 10000))
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	wantValue(t, reopened, "lost", strings.Repeat("v", 10000))
 }

@@ -26,8 +26,9 @@
 // new DB if needed. Both accept a context to cancel recovery during startup.
 // Open starts one incremental compaction worker on each new or reopened DB.
 // It reclaims obsolete records, repacks small files and yields for writers
-// and backup. Compact explicitly builds a full checkpoint. AutoCompactionStatus
-// reports worker activity, deferred retirement and logical bytes unlinked. Provide temporary
+// and backup. Compact explicitly builds a full checkpoint. Compaction uses
+// PARITY to recover sealed DATA and can discard a proven irrecoverable live key.
+// CompactResult and AutoCompactionStatus report the number of dropped keys. Provide temporary
 // space for both maintenance and backup. Close joins the worker. Stats returns
 // a constant-time snapshot of storage, cache and foreground activity.
 //
