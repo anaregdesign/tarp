@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/anaregdesign/tarp/benchmark/guesttest"
 	"github.com/anaregdesign/tarp/benchmark/qualification"
+	"github.com/anaregdesign/tarp/internal/storage"
 )
 
 func TestVMBlockControls(t *testing.T) {
@@ -79,6 +81,14 @@ func TestVMCampaignGuest(t *testing.T) {
 	}
 	guesttest.MountTarget(t, cfg.Action == "crash", cfg.Name, cfg.Seed)
 	dir, output := "/mnt/tarp-data/db", "/mnt/tarp-data/output"
+	if cfg.Mode == "close-index" {
+		if cfg.Action == "crash" {
+			vmCutCloseIndex(t, cfg, dir)
+		} else {
+			vmRecoverCloseIndex(t, cfg, dir)
+		}
+		return
+	}
 	if cfg.Action == "crash" {
 		if cfg.Mode == "exhaustion" {
 			vmExhaustion(t, dir, output, cfg.Seed)
@@ -223,4 +233,120 @@ func reportVMRecovery(t *testing.T, verdict qualification.RecoveryVerdict) {
 		t.Fatal(err)
 	}
 	fmt.Printf("TARP_RECOVERY_PASS %s\n", data)
+}
+
+// The first Close installs a real, usable older generation. Park automatic
+// maintenance to isolate the subsequent Close's rotation and publication.
+func vmCutCloseIndex(t *testing.T, cfg qualification.PowerCase, dir string) {
+	db, err := OpenWithHooks(dir, Options{}, nil, parkedMaintenance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(key, value string) {
+		fmt.Printf("TARP_INTENT %x %x\n", key, value)
+		if err := db.Put([]byte(key), []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("TARP_ACK %x %x\n", key, value)
+	}
+	for i := 0; i < 64; i++ {
+		put(fmt.Sprintf("key-%02d", i), fmt.Sprintf("seed-%02d", i))
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only this handle's synchronous Close may emit the chosen marker.
+	var armed atomic.Bool
+	fs := &storage.IO{Hook: func(point string) error {
+		if armed.Load() && point == cfg.Phase {
+			fmt.Printf("TARP_PHASE %s\n", point)
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		return nil
+	}}
+	db, err = OpenWithHooks(dir, Options{}, fs, parkedMaintenance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !db.store.IndexCheckpointHit || db.store.Catalog.Index.Sequence != 64 || db.store.Catalog.Index.ID == 0 ||
+		db.opts.IndexMode != IndexBTree || db.opts.BTreeMemoryBudgetBytes != 16<<20 || db.opts.OpenValidation != Full {
+		t.Fatalf("bad baseline: index=%+v hit=%v opts=%+v", db.store.Catalog.Index, db.store.IndexCheckpointHit, db.opts)
+	}
+	put("key-11", "acknowledged-overwrite")
+	fmt.Printf("TARP_INTENT_DELETE %x\n", "key-23")
+	if err := db.Delete([]byte("key-23")); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("TARP_ACK_DELETE %x\n", "key-23")
+	put("new-key", "acknowledged-insert")
+	if db.store.Catalog.Index.Sequence != 64 || db.store.Current.Sequence != 67 || Observe(db).LiveKeys() != 64 {
+		t.Fatal("old checkpoint and durable mutation suffix required")
+	}
+	t.Logf("before Close old_index_id=%d old_index_sequence=64 committed_sequence=67 live_keys=64", db.store.Catalog.Index.ID)
+	armed.Store(true)
+	t.Fatalf("Close returned before power cut at %s: %v", cfg.Phase, db.Close())
+}
+
+func vmRecoverCloseIndex(t *testing.T, cfg qualification.PowerCase, dir string) {
+	// The independent witness becomes available only after file-only recovery.
+	db, err := openDB(t.Context(), dir, Options{}, true, nil, parkedMaintenance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle := guestOracle(t, "oracle.jsonl", false)
+	digest := verifyVMDatabase(t, db, oracle, cfg.Mode)
+	seq, live := Observe(db).Frontier().Sequence, Observe(db).LiveKeys()
+	selected := db.store.Catalog.Index.Sequence
+	if seq != 67 || live != 64 || !db.store.IndexCheckpointHit || (selected != 64 && selected != 67) {
+		t.Fatalf("recovery state seq=%d keys=%d checkpoint=%d hit=%t", seq, live, selected, db.store.IndexCheckpointHit)
+	}
+	switch cfg.Phase {
+	case "index.rename:after", "index.dirsync:before", "index.dirsync:after", "index.current.rename:before":
+		if selected != 64 {
+			t.Fatalf("premature update of selected checkpoint at %s: %d", cfg.Phase, selected)
+		}
+	case "index.current.dirsync:after":
+		if selected != 67 {
+			t.Fatalf("lost fully synced checkpoint: %d", selected)
+		}
+	}
+	const probe = "post-recovery-new-key"
+	if _, err := db.Get([]byte(probe)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("probe already present: %v", err)
+	}
+	if err := db.Put([]byte(probe), []byte("post-recovery-value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = OpenContext(t.Context(), dir, Options{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotSeq, gotLive := Observe(db).Frontier().Sequence, Observe(db).LiveKeys()
+	if gotSeq != seq+1 || gotLive != live+1 {
+		t.Fatalf("retry state seq=%d live=%d", gotSeq, gotLive)
+	}
+	wantValue(t, db, probe, "post-recovery-value")
+	again, err := oracle.VerifyAt(seq, gotLive-1, func(key []byte) ([]byte, bool, error) {
+		value, err := db.Get(key)
+		if errors.Is(err, ErrNotFound) {
+			return nil, false, nil
+		}
+		return value, err == nil, err
+	})
+	if err != nil || again != digest {
+		t.Fatalf("pre-cut state changed after retry: digest=%s err=%v", again, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("recovered index_sequence=%d data_sequence=%d live_keys=%d post_write_sequence=%d post_write_keys=%d oracle_hash=%s", selected, seq, live, gotSeq, gotLive, digest)
+	reportVMRecovery(t, qualification.RecoveryVerdict{
+		Source: "file_only", SourceSequence: seq, SourceLiveKeys: live, StateSHA256: digest, Output: "not_applicable",
+	})
 }

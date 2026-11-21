@@ -39,7 +39,7 @@ on:
         required: true
         default: smoke
         type: choice
-        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, all]
+        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, close-index, all]
       case:
         description: Optional exact case name for a focused reproduction
         required: false

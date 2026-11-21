@@ -75,6 +75,8 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	add("recovery", "overlap", "compact.remap:after", 1)
 	add("recovery", "overlap", "operation.ack:after", 1)
 	add("exhaustion", "exhaustion", "exhaustion.complete", 1)
+	add("close-index", "close-index", "index.rename:after", 1)
+	pair("close-index", "close-index", 1, "index.dirsync", "index.current.rename", "index.current.dirsync")
 	if group == "smoke" {
 		wanted := map[string]string{
 			"init": "current.rename:after", "put": "data.sync:after", "insert": "current.dirsync:after",
