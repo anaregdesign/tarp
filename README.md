@@ -317,7 +317,8 @@ limits entries kept in the value LRU. `MaxBatchGetValueBytes` limits encoded
 value bytes returned by one batch read. Long-running readers can
 hold previous page generations and DATA files on disk.
 
-Both modes can reuse the same immutable `INDEX` file. A healthy B+tree handle
+The checkpoint API on `main` uses a newer storage format than v0.9.1.
+Both index modes can reuse the same immutable `INDEX` file. A healthy B+tree handle
 refreshes a missing or outdated checkpoint at `Close`. To checkpoint a
 long-running DB or an in-memory index, call `db.CheckpointIndex(ctx)`. It seals
 the active log and verifies and packs the committed prefix. Writes can continue
@@ -336,6 +337,7 @@ with `Full` to check the complete selected history, including obsolete values.
 Both modes rebuild from DATA when INDEX is missing or unusable. Compaction
 invalidates indexes tied to the superseded files. Backups omit INDEX and remain
 independently verifiable. See the [format](docs/format.md) and the
+[checkpoint measurements](docs/benchmarks/index-checkpoints.md) and
 [runtime index measurements](docs/benchmarks/index-modes.md).
 
 ## Limits
