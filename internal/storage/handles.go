@@ -8,18 +8,20 @@ import (
 )
 
 type handle struct {
-	file *File
-	fd   *os.File
-	used int
-	node *list.Element
+	file    *File
+	fd      *os.File
+	used    int
+	retired bool
+	node    *list.Element
 }
 
 type handles struct {
-	mu    sync.Mutex
-	cond  *sync.Cond
-	limit int
-	items map[*File]*handle
-	lru   list.List
+	mu       sync.Mutex
+	cond     *sync.Cond
+	limit    int
+	items    map[*File]*handle
+	lru      list.List
+	closeErr error // deferred errors from returning invalidated descriptors
 }
 
 func newHandles(limit int) *handles {
@@ -37,7 +39,7 @@ func (h *handles) acquire(f *File) (*handle, error) {
 			h.lru.MoveToFront(got.node)
 			return got, nil
 		}
-		if len(h.items) < h.limit {
+		if h.lru.Len() < h.limit {
 			fd, err := OpenRegular(f.Path)
 			if err != nil {
 				return nil, err
@@ -69,8 +71,34 @@ func (h *handles) acquire(f *File) (*handle, error) {
 func (h *handles) release(got *handle) {
 	h.mu.Lock()
 	got.used--
+	if got.retired && got.used == 0 {
+		h.lru.Remove(got.node)
+		if err := got.fd.Close(); err != nil {
+			h.closeErr = errors.Join(h.closeErr, err)
+		}
+	}
 	h.cond.Broadcast()
 	h.mu.Unlock()
+}
+
+// invalidate detaches a descriptor from the lookup table immediately. Existing
+// positional reads retain their lease on that inode. It still counts toward the
+// descriptor limit until the last lease closes it.
+func (h *handles) invalidate(f *File) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	got := h.items[f]
+	if got == nil {
+		return nil
+	}
+	delete(h.items, f)
+	got.retired = true
+	if got.used != 0 {
+		return nil
+	}
+	h.lru.Remove(got.node)
+	h.cond.Broadcast()
+	return got.fd.Close()
 }
 
 func (h *handles) forget(f *File) error {
@@ -91,8 +119,9 @@ func (h *handles) forget(f *File) error {
 func (h *handles) close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	var err error
-	for _, got := range h.items {
+	err := h.closeErr
+	for n := h.lru.Front(); n != nil; n = n.Next() {
+		got := n.Value.(*handle)
 		if got.used != 0 {
 			err = errors.Join(err, errors.New("storage: active lease at close"))
 		}

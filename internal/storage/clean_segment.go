@@ -33,6 +33,21 @@ type CleanSegment struct {
 // An empty cleaned interval has zero bytes.
 func (c *CleanSegment) OutputBytes() int64 { return c.output.Size.Load() }
 
+func (c *CleanSegment) Sources() []CapturedFile { return c.sources }
+
+// ResetCopy prepares the same pinned input and reserved output ID for another
+// attempt. Nothing has been installed or relocated at this point.
+func (c *CleanSegment) ResetCopy(fs *IO) error {
+	if err := c.Discard(fs); err != nil {
+		return err
+	}
+	c.created = false
+	c.output.Size.Store(0)
+	c.output.DeleteBytes.Store(0)
+	c.digest = [sha256.Size]byte{}
+	return nil
+}
+
 // BeginClean runs under the writer gate. The selected catalog is immutable.
 // New log rotations may append to the catalog while these sources are copied.
 func (s *Store) BeginClean(entries []format.File) (*CleanSegment, error) {
@@ -103,7 +118,7 @@ type pacedOutput struct {
 
 func (w pacedOutput) Write(b []byte) (int, error) {
 	if err := w.yield(); err != nil {
-		return 0, err
+		return 0, &destinationError{err}
 	}
 	return w.w.Write(b)
 }
@@ -122,6 +137,12 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 	choose := func(r format.Record, key string, old Location) (io.Writer, error) {
 		if c.output.Kind == format.Snapshot {
 			if err := replay.apply(old.File, old.Offset, r, key); err != nil {
+				// A damaged key can look like a duplicate before the
+				// streaming decoder reaches the record's payload CRC.
+				var input *SourceError
+				if errors.As(err, &input) {
+					err = selectedReadFailure(old.File.ID, err)
+				}
 				return nil, err
 			}
 		}
@@ -182,7 +203,7 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 	}
 	fd, header, _, err := openSelected(source.File.Path, c.uuid, source.Entry, false)
 	if err != nil {
-		return &SourceError{Err: err}
+		return selectedReadFailure(source.Entry.ID, &SourceError{Err: err})
 	}
 	defer func() {
 		if err := fd.Close(); err != nil {
@@ -191,26 +212,37 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 	}()
 	digest := sha256.New()
 	digest.Write(header)
-	input := &digestReader{ReaderAt: pacedSource{fd: fd, yield: yield}, hash: digest, next: format.SegmentHeaderBytes}
+	var pacedErr error
+	input := &digestReader{ReaderAt: pacedSource{fd: fd, yield: func() error {
+		pacedErr = yield()
+		return pacedErr
+	}}, hash: digest, next: format.SegmentHeaderBytes}
 	span := format.NewRecordRange(source.Entry, c.cutoff)
 	return fs.Do("clean.scan", func() error {
 		for off := int64(format.SegmentHeaderBytes); off < source.Entry.Bytes; {
+			var callbackErr error
 			r, err := format.SelectRecord(ctx, input, off, source.Entry.Bytes-off, buf, func(r format.Record, key string) (io.Writer, error) {
 				if err := span.Accept(r); err != nil {
-					return nil, err
+					return nil, selectedReadFailure(source.Entry.ID, err)
 				}
 				old := Location{File: source.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
-				return choose(r, key, old)
+				var w io.Writer
+				w, callbackErr = choose(r, key, old)
+				return w, callbackErr
 			})
 			if err != nil {
-				return err
+				var destination *destinationError
+				if callbackErr != nil || pacedErr != nil || errors.As(err, &destination) {
+					return err
+				}
+				return selectedReadFailure(source.Entry.ID, err)
 			}
 			off += r.Bytes()
 		}
 		if err := span.Finish(); err != nil {
-			return err
+			return selectedReadFailure(source.Entry.ID, err)
 		}
-		return checkSealedDigest(digest, source.Entry)
+		return selectedReadFailure(source.Entry.ID, checkSealedDigest(digest, source.Entry))
 	})
 }
 
@@ -266,6 +298,7 @@ func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error
 		return err
 	}
 	if c.created {
+		c.output.markSealed(catalog.UUID, replacement)
 		s.Files[c.output.ID] = c.output
 	}
 	for _, source := range c.sources {

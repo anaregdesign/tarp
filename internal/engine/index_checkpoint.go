@@ -131,7 +131,13 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 	if err != nil {
 		return operationError(op, "workspace", err)
 	}
-	err = errors.Join(work.Write(ctx, tree, btree.ExportPacked), tree.Close())
+	err = db.store.RetryMaintenance(ctx, work.Sources(), func() error {
+		return errors.Join(work.Write(ctx, tree, btree.ExportPacked), tree.Close())
+	}, func() error {
+		var err error
+		tree, err = openIndex(db.store, IndexBTree, budget)
+		return err
+	})
 	if err != nil {
 		var source *storage.SourceError
 		if errors.As(err, &source) {

@@ -887,3 +887,58 @@ func TestCheckpointIndexBackupRestoresWithoutIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestIndexedOpenRepairsCoveredDataOnFirstValueRead(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("covered")
+	value := bytes.Repeat([]byte("checked payload"), 550)
+	db := openPublicDB(t, dir, tarp.Options{IndexMode: tarp.IndexBTree})
+	if err := db.Put(key, value); err != nil {
+		t.Fatal(err)
+	}
+	// A healthy B+tree Close checkpoints the covered DATA and completes parity.
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("parity files %v, %v", files, err)
+	}
+	path := filepath.Join(dir, strings.Replace(filepath.Base(files[0]), "PARITY-", "DATA-", 1))
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged := bytes.Clone(original)
+	damaged[len(damaged)-1] ^= 1
+	if err := os.WriteFile(path, damaged, 0600); err != nil {
+		t.Fatal(err)
+	}
+	frontier, err := os.ReadFile(filepath.Join(dir, "CURRENT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = openPublicDB(t, dir, tarp.Options{IndexMode: tarp.IndexBTree, OpenValidation: tarp.Indexed})
+	if before, err := os.ReadFile(path); err != nil || !bytes.Equal(before, damaged) {
+		t.Fatalf("indexed open changed covered DATA: %v", err)
+	}
+	if got, err := db.Get(key); err != nil || !bytes.Equal(got, value) {
+		t.Fatalf("cold read after indexed reopen: %v, matched=%t", err, bytes.Equal(got, value))
+	}
+	if repaired, err := os.ReadFile(path); err != nil || !bytes.Equal(repaired, original) {
+		t.Fatalf("DATA differs after automatic repair: %v", err)
+	}
+	if now, err := os.ReadFile(filepath.Join(dir, "CURRENT")); err != nil || !bytes.Equal(now, frontier) {
+		t.Fatalf("physical repair changed the commit frontier: %v", err)
+	}
+	if stats := db.Stats(); stats.WriteCommits != 0 || stats.WrittenRecords != 0 {
+		t.Fatalf("repair counted as a user write: %+v", stats)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openPublicDB(t, dir, tarp.Options{OpenValidation: tarp.Full})
+	if got, err := reopened.Get(key); err != nil || !bytes.Equal(got, value) {
+		t.Fatalf("full reopen after repair: %v", err)
+	}
+}

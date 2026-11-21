@@ -51,7 +51,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 			}
 		}
 	}()
-	err = func() (result error) {
+	err = db.store.RetryMaintenance(ctx, work.Sources(), func() (result error) {
 		var history index.Backend
 		if entries[0].Kind == format.Snapshot {
 			var err error
@@ -72,7 +72,11 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 			}
 			return exists && current == old, nil
 		})
-	}()
+	}, func() error {
+		err := errors.Join(work.ResetCopy(db.store.IO), moves.Close())
+		moves = db.store.NewRelocations()
+		return err
+	})
 	if err != nil {
 		db.compactFailure(err)
 		return operationError("clean", "copy", err)

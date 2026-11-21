@@ -871,3 +871,52 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 		})
 	}
 }
+
+// Damage the last payload byte, after a complete sidecar is durable. Streaming
+// maintenance may already have written private output before noticing this CRC.
+func damageProtectedTail(t *testing.T, db *DB) format.File {
+	t.Helper()
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	e := db.store.Catalog.Files[len(db.store.Catalog.Files)-1]
+	fd, err := os.OpenFile(db.store.Files[e.ID].Path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if _, err := fd.ReadAt(b[:], e.Bytes-1); err != nil {
+		fd.Close()
+		t.Fatal(err)
+	}
+	b[0] ^= 1
+	_, err = fd.WriteAt(b[:], e.Bytes-1)
+	if err := errors.Join(err, fd.Close()); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestCompactRepairsProtectedSourceAndRestartsPrivateOutputs(t *testing.T) {
+	db := newTestDBWithHooks(t, Options{}, nil, parkedMaintenance())
+	mustPut(t, db, "original", "one")
+	mustPut(t, db, "other", "two")
+	cut := damageProtectedTail(t, db)
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if db.store.Catalog.Cutoff != cut.Last || len(db.store.Catalog.Files) != 1 || db.store.Catalog.Files[0].Kind != format.Snapshot {
+		t.Fatalf("checkpoint after repair: %+v", db.store.Catalog)
+	}
+	wantValue(t, db, "original", "one")
+	wantValue(t, db, "other", "two")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db.store.Dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	wantValue(t, reopened, "other", "two")
+}

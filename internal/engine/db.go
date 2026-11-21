@@ -513,6 +513,13 @@ func publicCause(err error) error {
 	if err == nil {
 		return nil
 	}
+	var repaired *storage.UncertainReadRepair
+	if errors.As(err, &repaired) && !errors.Is(err, ErrCommitUncertain) {
+		var fault *storage.Fault
+		if errors.As(repaired, &fault) {
+			err = &OpError{Operation: "repair DATA", Phase: fault.Phase, Outcome: Unknown, Err: err}
+		}
+	}
 	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		err = errors.Join(ErrNoSpace, err)
 	}
@@ -536,11 +543,32 @@ func publicCause(err error) error {
 
 func operationError(op, phase string, err error) *OpError {
 	outcome := NotApplied
-	var fault *storage.Fault
-	if errors.As(err, &fault) {
+	if fault := operationFault(err); fault != nil {
 		phase, outcome = fault.Phase, fault.Outcome
 	}
 	return &OpError{Operation: op, Phase: phase, Outcome: outcome, Err: publicCause(err)}
+}
+
+// A physical repair can be uncertain before the requested operation publishes.
+// Preserve its nested error and look for the requested operation's own fault.
+func operationFault(err error) *storage.Fault {
+	for err != nil {
+		switch e := err.(type) {
+		case *storage.UncertainReadRepair:
+			return nil
+		case *storage.Fault:
+			return e
+		case interface{ Unwrap() []error }:
+			for _, cause := range e.Unwrap() {
+				if fault := operationFault(cause); fault != nil {
+					return fault
+				}
+			}
+			return nil
+		}
+		err = errors.Unwrap(err)
+	}
+	return nil
 }
 
 func validContextError(op string) error {

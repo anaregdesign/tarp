@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"io"
 	"math"
 	"sync"
@@ -38,45 +39,62 @@ func (s *Store) ReadAdjacent(group []AdjacentRead) error {
 		}
 		end += r.Bytes
 	}
-	h, err := s.readers.acquire(first.File)
-	if err != nil {
-		return first.readError(err)
-	}
 	buf := adjacentBuffers.Get().(*[MaxAdjacentReadBytes]byte)
 	defer adjacentBuffers.Put(buf)
 	b := buf[:end-first.Offset]
-	var n int
-	if err = s.IO.Check("read.adjacent:before"); err == nil {
-		n, err = h.fd.ReadAt(b, first.Offset)
-		if n == len(b) && err == io.EOF {
-			err = nil
+	loc, err, physical := s.readAdjacentValues(group, b)
+	if physical {
+		if err = s.RepairRead(context.Background(), first.File, err); err != nil {
+			return loc.readError(err)
 		}
-		if err == nil && n != len(b) {
-			err = io.ErrUnexpectedEOF
-		}
-		if err == nil {
-			err = s.IO.Check("read.adjacent:after")
-		}
+		loc, err, _ = s.readAdjacentValues(group, b)
 	}
+	if err != nil {
+		return loc.readError(err)
+	}
+	return nil
+}
+
+// physical identifies DATA read or decoding errors eligible for repair.
+func (s *Store) readAdjacentValues(group []AdjacentRead, b []byte) (loc Location, err error, physical bool) {
+	first := group[0].Location
+	h, err := s.readers.acquire(first.File)
+	if err != nil {
+		return first, err, true
+	}
+	if err := s.IO.Check("read.adjacent:before"); err != nil {
+		s.readers.release(h)
+		return first, err, false
+	}
+	n, err := h.fd.ReadAt(b, first.Offset)
 	s.readers.release(h)
+	if n == len(b) && err == io.EOF {
+		err = nil
+	}
+	if err == nil && n != len(b) {
+		err = io.ErrUnexpectedEOF
+	}
 	if err != nil {
 		for _, r := range group {
 			if r.Offset+r.Bytes-first.Offset > int64(n) {
-				return r.readError(err)
+				return r.Location, err, true
 			}
 		}
-		return group[len(group)-1].readError(err)
+		return group[len(group)-1].Location, err, true
+	}
+	if err := s.IO.Check("read.adjacent:after"); err != nil {
+		return group[len(group)-1].Location, err, false
 	}
 	for i := range group {
 		r := &group[i]
 		offset := r.Offset - first.Offset
 		r.Value, err = format.DecodeIndexedValue(b[offset:offset+r.Bytes], r.Key, r.Sequence)
 		if err != nil {
-			return r.readError(err)
+			return r.Location, err, true
 		}
 		if err := s.IO.Check("read:after"); err != nil {
-			return r.readError(err)
+			return r.Location, err, false
 		}
 	}
-	return nil
+	return first, nil, false
 }

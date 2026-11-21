@@ -95,8 +95,13 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, yield func(string, 
 			if result = db.admit(); result != nil {
 				return false
 			}
-			value, result = db.store.Read(storage.At(f, a), k)
+			value, result = db.store.ReadContext(ctx, storage.At(f, a), k)
 			if result != nil {
+				if result == ctx.Err() {
+					db.done()
+					result = operationError(op, "context", result)
+					return false
+				}
 				db.poison(result)
 				db.done()
 				result = operationError(op, "read", result)

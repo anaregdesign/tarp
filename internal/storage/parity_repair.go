@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -37,7 +38,7 @@ func RepairParity(ctx context.Context, dir string, fs *IO) (result error) {
 		if !entry.HasPhysicalFile() {
 			continue
 		}
-		changed, err := s.repairSealed(ctx, entry)
+		changed, err := s.repairSealed(ctx, s.Current.UUID, entry, false)
 		repaired = repaired || changed
 		if err != nil {
 			err = fmt.Errorf("%s: %w", DataName(s.Current.UUID, entry.ID), err)
@@ -92,8 +93,8 @@ func lockParityImage(ctx context.Context, dir string, fs *IO) (_ *Store, _ *Imag
 	return s, image, nil
 }
 
-func (s *Store) repairSealed(ctx context.Context, entry format.File) (bool, error) {
-	path := filepath.Join(s.Dir, DataName(s.Current.UUID, entry.ID))
+func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.File, online bool) (bool, error) {
+	path := filepath.Join(s.Dir, DataName(uuid, entry.ID))
 	// A completely missing short segment can still be reconstructed when
 	// each stripe is missing only one block. The codec decides from lengths.
 	var data io.ReaderAt = bytes.NewReader(nil)
@@ -119,11 +120,14 @@ func (s *Store) repairSealed(ctx context.Context, entry format.File) (bool, erro
 			damage = fmt.Errorf("%w: expected %d bytes, found %d", ErrCorrupt, entry.Bytes, info.Size())
 		}
 	}
-	stage, err := s.stageParityRepair(ctx, data, entry)
+	stage, err := s.stageParityRepair(ctx, data, uuid, entry, online)
 	if fd != nil {
 		err = errors.Join(err, fd.Close())
 	}
 	if err != nil {
+		if onlyCauses(err, context.Canceled, context.DeadlineExceeded) {
+			return false, errors.Join(err, discardRepair(stage))
+		}
 		return false, errors.Join(damage, err, discardRepair(stage))
 	}
 	// Sync and close the complete, verified candidate before a single atomic
@@ -154,21 +158,34 @@ func discardRepair(name string) error {
 	return err
 }
 
-func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, entry format.File) (stage string, result error) {
-	sidecar, err := OpenRegular(filepath.Join(s.Dir, parityName(s.Current.UUID, entry.ID)))
+func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [16]byte, entry format.File, online bool) (stage string, result error) {
+	sidecar, err := OpenRegular(filepath.Join(s.Dir, parityName(uuid, entry.ID)))
 	if err != nil {
 		return "", err
 	}
 	defer func() { result = errors.Join(result, sidecar.Close()) }()
-	pattern := fmt.Sprintf(".tarp-current-%x-*.tmp", s.Current.UUID)
-	fd, err := os.CreateTemp(s.Dir, pattern)
+	// Live cleanup enumerates the database root while an online repair can be
+	// writing. The private workspace is swept only after Open validation or
+	// after all admitted operations have drained on Close.
+	dir, pattern := s.Dir, fmt.Sprintf(".tarp-current-%x-*.tmp", uuid)
+	if online {
+		dir, err = s.WorkspaceDir()
+		if err != nil {
+			return "", err
+		}
+		pattern = "tarp-repair-*"
+	}
+	fd, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", err
 	}
 	defer func() { result = errors.Join(result, fd.Close()) }()
 	stage = fd.Name()
-	out := &outputWriter{fs: s.IO, fd: fd, point: "repair.write"}
-	if err := format.RecoverParity(ctx, data, sidecar, out, s.Current.UUID, entry); err != nil {
+	out := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: "repair.write"}, parityBufferSize(entry.Bytes))
+	if err := format.RecoverParity(ctx, data, sidecar, out, uuid, entry); err != nil {
+		return stage, err
+	}
+	if err := out.Flush(); err != nil {
 		return stage, err
 	}
 	info, err := fd.Stat()

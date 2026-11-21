@@ -56,6 +56,9 @@ func (e *CompatibilityError) Error() string {
 }
 
 type File struct {
+	// Published once the catalog selects this immutable DATA. Readers that
+	// already pinned the file can still use its binding after compaction.
+	sealed atomic.Pointer[sealedRepair]
 	// Only the serialized parity builder reads or writes these flags.
 	parityReady, parityNeedsSync bool
 	activeDigest                 hash.Hash // writer gate owns the committed active byte stream
@@ -317,6 +320,11 @@ func (s *Store) recover(ctx context.Context, image *Image, entries []os.DirEntry
 		s.cleanWorkspaceOnClose = true
 	}
 	s.Catalog, s.Manifest, s.Files = image.Catalog, image.Manifest, image.Files
+	for _, entry := range s.Catalog.Files {
+		if entry.HasPhysicalFile() {
+			s.Files[entry.ID].markSealed(s.Catalog.UUID, entry)
+		}
+	}
 	s.MaxValueBytes = image.MaxValueBytes
 	active, err := os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
 	if err != nil {
@@ -470,7 +478,10 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return errors.Join(err, fd.Close())
 	}
-	s.Files[catalog.Files[len(catalog.Files)-1].ID].activeDigest = nil
+	sealed := catalog.Files[len(catalog.Files)-1]
+	prior := s.Files[sealed.ID]
+	prior.activeDigest = nil
+	prior.markSealed(catalog.UUID, sealed)
 	old := s.active
 	s.active = fd
 	if err := errors.Join(old.Close(), s.IO.Check("rotation.close:after")); err != nil {
@@ -626,22 +637,39 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 }
 
 func (s *Store) Read(loc Location, key string) ([]byte, error) {
+	return s.ReadContext(context.Background(), loc, key)
+}
+
+func (s *Store) ReadContext(ctx context.Context, loc Location, key string) ([]byte, error) {
 	if err := s.IO.Check("read:before"); err != nil {
 		return nil, loc.readError(err)
 	}
-	h, err := s.readers.acquire(loc.File)
+	value, err := s.readValue(loc, key)
 	if err != nil {
-		return nil, loc.readError(err)
-	}
-	value, err := format.ReadValue(h.fd, loc.Offset, loc.Bytes, key, loc.Sequence)
-	s.readers.release(h)
-	if err != nil {
-		return nil, loc.readError(err)
+		if err = s.RepairRead(ctx, loc.File, err); err != nil {
+			if err == ctx.Err() {
+				return nil, err
+			}
+			return nil, loc.readError(err)
+		}
+		value, err = s.readValue(loc, key)
+		if err != nil {
+			return nil, loc.readError(err)
+		}
 	}
 	if err := s.IO.Check("read:after"); err != nil {
 		return value, loc.readError(err)
 	}
 	return value, nil
+}
+
+func (s *Store) readValue(loc Location, key string) ([]byte, error) {
+	h, err := s.readers.acquire(loc.File)
+	if err != nil {
+		return nil, err
+	}
+	defer s.readers.release(h)
+	return format.ReadValue(h.fd, loc.Offset, loc.Bytes, key, loc.Sequence)
 }
 
 func (loc Location) readError(err error) error {

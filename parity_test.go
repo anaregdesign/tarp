@@ -3,8 +3,10 @@ package tarp_test
 import (
 	"bytes"
 	"errors"
+	"iter"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -198,5 +200,276 @@ func TestParityRebuildsAfterRestoreAndCompaction(t *testing.T) {
 		if got, err := repaired.Get([]byte(k)); err != nil || string(got) != v {
 			t.Fatalf("Get(%q) after recovering compacted snapshot: %q, %v", k, got, err)
 		}
+	}
+}
+
+func TestScanRepairsPinnedDataAfterCompaction(t *testing.T) {
+	dir := t.TempDir()
+	db := openPublicDB(t, dir, tarp.Options{})
+	old := map[string][]byte{"a": bytes.Repeat([]byte("first value"), 600), "b": bytes.Repeat([]byte("second value"), 600)}
+	if err := db.BatchPut([]tarp.Entry{{Key: []byte("a"), Value: old["a"]}, {Key: []byte("b"), Value: old["b"]}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ProtectParity(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	parity, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
+	if err != nil || len(parity) != 1 {
+		t.Fatalf("expected one protected file: %v, %v", parity, err)
+	}
+	path := filepath.Join(dir, strings.Replace(filepath.Base(parity[0]), "PARITY-", "DATA-", 1))
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, stop := iter.Pull2(db.Scan(t.Context()))
+	defer stop()
+	first, err, ok := next()
+	if err != nil || !ok {
+		t.Fatalf("first record: %v, %t", err, ok)
+	}
+	key := "a"
+	if key == string(first.Key) {
+		key = "b"
+	}
+	newValue := []byte("replacement")
+	if err := db.Put([]byte(key), newValue); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// The scan owns a historical layout. Its old path and parity must remain
+	// repairable even though a new snapshot is already serving current reads.
+	at := bytes.Index(original, old[key])
+	if at < 0 {
+		t.Fatal("old record not in original file")
+	}
+	fd, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fd.WriteAt([]byte{original[at] ^ 1}, int64(at))
+	if err = errors.Join(err, fd.Close()); err != nil {
+		t.Fatal(err)
+	}
+	second, err, ok := next()
+	if !ok || err != nil || string(second.Key) != key || !bytes.Equal(second.Value, old[key]) {
+		t.Fatalf("historical read returned key %q, ok=%t, err=%v", second.Key, ok, err)
+	}
+	if _, err, ok = next(); ok || err != nil {
+		t.Fatalf("unexpected third record: %v", err)
+	}
+	if value, err := db.Get([]byte(key)); err != nil || !bytes.Equal(value, newValue) {
+		t.Fatalf("live record after historical repair: %q, %v", value, err)
+	}
+}
+
+func TestForegroundReadsRepairSealedDATA(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		mode tarp.IndexMode
+	}{{"memory", tarp.IndexMemory}, {"btree", tarp.IndexBTree}} {
+		for _, method := range []string{"Get", "BatchGetSerial", "BatchGetParallel", "BatchGetAdjacent", "Scan"} {
+			t.Run(mode.name+"/"+method, func(t *testing.T) {
+				dir := t.TempDir()
+				opts := tarp.Options{IndexMode: mode.mode, BatchGetReadConcurrency: 4}
+				if method == "BatchGetSerial" {
+					opts.BatchGetReadConcurrency = 1
+				}
+				seed := openPublicDB(t, dir, opts)
+				want := map[string][]byte{
+					"a":     []byte("before"),
+					"b":     []byte("damaged record value"),
+					"c":     []byte("after"),
+					"large": bytes.Repeat([]byte{'v'}, 5000),
+					"warm":  []byte("cached"),
+				}
+				var entries []tarp.Entry
+				for _, k := range []string{"a", "b", "c", "large", "warm"} {
+					entries = append(entries, tarp.Entry{Key: []byte(k), Value: want[k]})
+				}
+				if err := seed.BatchPut(entries); err != nil {
+					t.Fatal(err)
+				}
+				if err := seed.ProtectParity(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				if err := seed.Close(); err != nil {
+					t.Fatal(err)
+				}
+
+				db := openPublicDB(t, dir, opts)
+				// Prime a reusable descriptor on the inode that will be damaged.
+				if got, err := db.Get([]byte("warm")); err != nil || !bytes.Equal(got, want["warm"]) {
+					t.Fatalf("priming Get: %q, %v", got, err)
+				}
+				data, _ := sealedTestPaths(t, dir)
+				original, err := os.ReadFile(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				offset := bytes.Index(original, want["b"])
+				if offset < 0 {
+					t.Fatal("missing fixture record")
+				}
+				flipSealedTestBytes(t, data, bytes.Clone(original), offset)
+
+				switch method {
+				case "Get":
+					if got, err := db.Get([]byte("b")); err != nil || !bytes.Equal(got, want["b"]) {
+						t.Fatalf("Get: %q, %v", got, err)
+					}
+				case "Scan":
+					seen := make(map[string]bool)
+					for e, err := range db.Scan(t.Context()) {
+						k := string(e.Key)
+						if err != nil || seen[k] || !bytes.Equal(e.Value, want[k]) {
+							t.Fatalf("Scan key %q, value length %d, error %v", k, len(e.Value), err)
+						}
+						seen[k] = true
+					}
+					if len(seen) != len(want) {
+						t.Fatalf("scanned %d keys, want %d", len(seen), len(want))
+					}
+				default:
+					// The backwards jump precludes coalescing. The 5 KB
+					// record bypasses the adaptive small-read serial path.
+					keys := [][]byte{[]byte("large"), []byte("b"), []byte("a"), []byte("b")}
+					if method == "BatchGetAdjacent" {
+						keys = [][]byte{[]byte("a"), []byte("b"), []byte("c")}
+					}
+					got, err := db.BatchGet(keys)
+					if err != nil || len(got) != len(keys) {
+						t.Fatalf("BatchGet returned %d entries: %v", len(got), err)
+					}
+					for i, key := range keys {
+						if !got[i].Found || !bytes.Equal(got[i].Value, want[string(key)]) {
+							t.Fatalf("BatchGet slot %d did not return %q", i, key)
+						}
+					}
+				}
+				if got, err := os.ReadFile(data); err != nil || !bytes.Equal(got, original) {
+					t.Fatalf("sealed DATA differs after %s: %v", method, err)
+				}
+				if err := db.Put([]byte("live"), []byte("next commit")); err != nil {
+					t.Fatalf("Put after %s: %v", method, err)
+				}
+			})
+		}
+	}
+}
+
+func sealedTestPaths(t *testing.T, dir string) (data, parity string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("expected one protected file, got %v, %v", files, err)
+	}
+	name := strings.Replace(filepath.Base(files[0]), "PARITY-", "DATA-", 1)
+	return filepath.Join(dir, name), files[0]
+}
+
+// Keep the file and the expected bytes in sync without ever truncating DATA.
+func flipSealedTestBytes(t *testing.T, path string, wire []byte, offsets ...int) {
+	t.Helper()
+	fd, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := fd.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	for _, offset := range offsets {
+		wire[offset] ^= 0xff
+		if _, err := fd.WriteAt(wire[offset:offset+1], int64(offset)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestForegroundUnrepairableDATAStopsWritesAndPreservesEvidence(t *testing.T) {
+	for _, damage := range []string{"two lost blocks", "missing sidecar", "invalid sidecar"} {
+		t.Run(damage, func(t *testing.T) {
+			dir := t.TempDir()
+			seed := openPublicDB(t, dir, tarp.Options{})
+			entries := []tarp.Entry{
+				{Key: []byte("bad"), Value: bytes.Repeat([]byte{'x'}, 9000)},
+				{Key: []byte("survivor"), Value: []byte("healthy record")},
+			}
+			if err := seed.BatchPut(entries); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.ProtectParity(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := tarp.Open(dir, tarp.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := db.ProtectParity(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			data, parity := sealedTestPaths(t, dir)
+			damaged, err := os.ReadFile(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			flipSealedTestBytes(t, data, damaged, 200)
+			var wantCause error
+			switch damage {
+			case "two lost blocks":
+				flipSealedTestBytes(t, data, damaged, 4096+200)
+			case "missing sidecar":
+				wantCause = os.ErrNotExist
+				err = os.Remove(parity)
+			case "invalid sidecar":
+				wantCause = tarp.ErrInvalidParity
+				err = os.Truncate(parity, 0)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value, err := db.Get(entries[1].Key); err != nil || !bytes.Equal(value, entries[1].Value) {
+				t.Fatalf("healthy record in the same sealed file: %q, %v", value, err)
+			}
+			// An earlier valid record in the batch must not escape a failed read.
+			results, err := db.BatchGet([][]byte{[]byte("survivor"), []byte("bad")})
+			if results != nil || !errors.Is(err, tarp.ErrCorrupt) || (wantCause != nil && !errors.Is(err, wantCause)) {
+				t.Fatalf("failed BatchGet returned %d results, %v", len(results), err)
+			}
+			if err := db.Put([]byte("next"), nil); !errors.Is(err, tarp.ErrUnhealthy) {
+				t.Fatalf("Put after unrepairable DATA: %v", err)
+			}
+			if err := db.Close(); !errors.Is(err, tarp.ErrCorrupt) {
+				t.Fatalf("Close lost the read failure: %v", err)
+			}
+			if got, err := os.ReadFile(data); err != nil || !bytes.Equal(got, damaged) {
+				t.Fatalf("failed repair changed DATA: %v", err)
+			}
+			if damage != "two lost blocks" {
+				return
+			}
+			id, err := strconv.ParseUint(data[strings.LastIndexByte(data, '-')+1:], 16, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var records []tarp.SalvagedRecord
+			report, err := tarp.SalvageData(t.Context(), dir, id, 0, func(r tarp.SalvagedRecord) error {
+				records = append(records, r)
+				return nil
+			})
+			if err != nil || len(records) != 1 || !bytes.Equal(records[0].Key, entries[1].Key) ||
+				!bytes.Equal(records[0].Value, entries[1].Value) || report.Records != 1 ||
+				len(report.Unrecoverable) != 1 || report.Unrecoverable[0] != (tarp.DataRange{Start: 0, End: 8192}) {
+				t.Fatalf("salvage returned %d records, report %+v, error %v", len(records), report, err)
+			}
+		})
 	}
 }
