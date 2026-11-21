@@ -1,0 +1,44 @@
+name: Explicit BTree cold Get with writes and compaction
+on:
+  push:
+    branches: ['qualification/btree-get-overlap-143']
+permissions:
+  contents: read
+jobs:
+  measurement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Run matched arms on the runner data filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qual-data" "$RUNNER_TEMP/evidence"
+          image=docker.io/library/golang@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea
+          {
+            git rev-parse HEAD
+            echo "$image"
+            date -u
+            uname -a
+            lscpu
+            lsblk -o NAME,MAJ:MIN,SIZE,TYPE,ROTA,MODEL,FSTYPE,MOUNTPOINTS
+            findmnt -T "$RUNNER_TEMP/qual-data" -o TARGET,SOURCE,FSTYPE,MAJ:MIN,OPTIONS
+            df -h "$RUNNER_TEMP/qual-data"
+          } > "$RUNNER_TEMP/evidence/environment.txt"
+          docker pull "$image"
+          docker run --rm --cpus 4 --network none \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/src,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/qual-data,dst=/work" \
+            --mount "type=bind,src=$RUNNER_TEMP/evidence,dst=/evidence" \
+            -w /src -e GOMAXPROCS=4 -e GOTOOLCHAIN=local -e GOWORK=off -e GOPROXY=off \
+            -e TARP_COLD_OVERLAP=/evidence -e TMPDIR=/work/tmp -e GOCACHE=/work/cache \
+            "$image" sh -ec 'mkdir -p "$TMPDIR" "$GOCACHE"; go version; go test -c -o /work/probe ./benchmark; sha256sum /work/probe; /work/probe -test.v -test.run "^TestBTreeColdOverlap$" -test.timeout 49m' | tee "$RUNNER_TEMP/evidence/run.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: btree-cold-overlap
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 14
