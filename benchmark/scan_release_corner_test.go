@@ -237,16 +237,18 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 	}
 
 	if row.IDWitness {
-		// A broad same-value overwrite after the sampled Put demands more pages
-		// than a single point update. Prove actual IDs from under the pins now
-		// store live pages, independently of the high-water mark.
-		for i := range rows {
-			rows[i].Value = []byte(model[string(rows[i].Key)])
+		// Grow the tree after release. The last few transaction pages alone
+		// cannot supply this many new live leaf pages.
+		added := make([]tarp.Entry, 4096)
+		keys := make([][]byte, len(added))
+		for i := range added {
+			keys[i] = []byte(fmt.Sprintf("witness/%08d", i))
+			added[i] = tarp.Entry{Key: keys[i], Value: values[35]}
 		}
-		if err := db.BatchPut(rows); err != nil {
+		if err := db.BatchPut(added); err != nil {
 			t.Fatal(err)
 		}
-		sequence += uint64(len(rows))
+		sequence += uint64(len(added))
 		_, live, err := observe.Corner145IDSets()
 		if err != nil {
 			t.Fatal(err)
@@ -260,6 +262,16 @@ func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRele
 		if len(row.QueuedPageIDsReused) == 0 {
 			t.Fatalf("no retired ID found under latest root: %+v", row)
 		}
+		for _, entry := range added {
+			value, err := db.Get(entry.Key)
+			if err != nil || string(value) != string(entry.Value) {
+				t.Fatalf("new key verification failed at %q: %v", entry.Key, err)
+			}
+		}
+		if err := db.BatchDelete(keys); err != nil {
+			t.Fatal(err)
+		}
+		sequence += uint64(len(added))
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
