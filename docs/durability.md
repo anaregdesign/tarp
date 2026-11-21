@@ -286,9 +286,9 @@ explicitly and does not poison an otherwise healthy source DB.
 `CheckpointIndex` seals a nonempty active log under the writer gate and pins
 the captured DATA. It shares the maintenance slot with compaction. Foreground
 writes and rotation can proceed while a private B+tree is bulk-built from the
-validated record stream. After syncing the staging file, the publisher checks
-its layout against the latest catalog under the gate, renames the INDEX and
-syncs the database directory. A new MANIFEST and CURRENT then select it
+validated record stream. After syncing the staging file, the publisher renames the INDEX and syncs
+the database directory. Under the gate, it checks the prefix against the latest
+catalog. A new MANIFEST and CURRENT then select it
 together with the latest committed tail. Cleaning and compaction invalidate
 the descriptor when replacing its physical layout. Sealed DATA digests also
 protect maintenance reads of segments opened with Indexed validation.

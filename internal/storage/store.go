@@ -99,6 +99,7 @@ type Store struct {
 	retired               map[uint64]*File
 	retiredCatalogs       map[uint64]struct{}
 	retiredIndexes        map[uint64]struct{}
+	buildingIndex         atomic.Uint64
 	retireSyncPending     bool
 	cleanWorkspaceOnClose bool
 	// Created reports that this Open published the initial CURRENT.
@@ -246,6 +247,9 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		if s.IO != nil {
+			image.openRead = s.IO.OpenRead
+		}
 		s.Current = image.Current
 		s.nextID = max(s.nextID, image.Catalog.Index.ID)
 		hadWorkspace, err = s.inspectNames(ctx, entries)
@@ -287,9 +291,6 @@ func openStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 }
 
 func (s *Store) recover(ctx context.Context, image *Image, entries []os.DirEntry, keys index.Backend, hadWorkspace bool) error {
-	if s.IO != nil {
-		image.openRead = s.IO.OpenRead
-	}
 	var err error
 	if s.IndexCheckpointHit {
 		err = image.replayAfterCheckpoint(ctx, keys, s.Config.IndexedOpen)
@@ -706,7 +707,7 @@ func (s *Store) cleanupValidated(ctx context.Context, entries []os.DirEntry) (re
 		remove := s.ownedTemp(name)
 		var removedID, manifestID, indexID uint64
 		if id, ok := parseID(name, "INDEX", s.Current.UUID); ok {
-			remove = id != s.Catalog.Index.ID
+			remove = id != s.Catalog.Index.ID && id != s.buildingIndex.Load()
 			indexID = id
 		}
 		if id, ok := parseID(name, "MANIFEST", s.Current.UUID); ok {

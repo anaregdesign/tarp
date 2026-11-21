@@ -234,6 +234,9 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 	if err != nil || layout != cp.Layout {
 		return nil, nil
 	}
+	if err := image.checkSelectedFiles(ctx, cp.Entries); err != nil {
+		return nil, err
+	}
 	covered := make(map[uint64]*coveredFile)
 	for _, entry := range c.Files[:cp.Entries] {
 		if entry.HasPhysicalFile() {
@@ -260,7 +263,7 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 		return nil
 	}
 	keys, deletes, err := s.readIndexCheckpoint(ctx, c, load, visit)
-	if errors.Is(err, ErrIndexMiss) {
+	if IsIndexMiss(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -304,26 +307,59 @@ func validCheckpointAddress(key string, addr index.Address, entry format.File, c
 	return addr.Sequence >= entry.First && addr.Sequence <= entry.Last
 }
 
-func (image *Image) replayAfterCheckpoint(ctx context.Context, keys index.Backend, indexedOpen bool) error {
-	cp := image.Catalog.Index
-	for _, entry := range image.Catalog.Files[:cp.Entries] {
+// Check every authoritative file before consulting the optional checkpoint.
+func (image *Image) checkSelectedFiles(ctx context.Context, covered uint64) error {
+	active, err := image.Catalog.ActiveFile(image.Current)
+	if err != nil {
+		return err
+	}
+	for i, entry := range append(append([]format.File(nil), image.Catalog.Files...), active) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if !entry.HasPhysicalFile() {
 			continue
 		}
+		area := "tail"
+		if uint64(i) < covered {
+			area = "covered"
+		}
 		file := image.Files[entry.ID]
-		fd, _, physical, err := openSelectedForRead(file.Path, image.Current.UUID, entry, false, image.openRead, "covered")
+		fd, _, physical, err := openSelectedForRead(file.Path, image.Current.UUID, entry, entry.ID == active.ID, image.openRead, area)
 		if err != nil {
 			return err
 		}
 		file.Size.Store(physical)
-		if !indexedOpen {
-			err = verifySelectedDigest(ctx, observeDATA(fd, image.openRead, "covered"), entry)
+		if err := fd.Close(); err != nil {
+			return err
 		}
-		if err := errors.Join(err, fd.Close()); err != nil {
+	}
+	return nil
+}
+
+func (image *Image) verifyCoveredFiles(ctx context.Context, entries uint64) error {
+	for _, entry := range image.Catalog.Files[:entries] {
+		if !entry.HasPhysicalFile() {
+			continue
+		}
+		file := image.Files[entry.ID]
+		fd, err := OpenRegular(file.Path)
+		if err != nil {
+			return requiredFileError(filepath.Base(file.Path), err)
+		}
+		err = verifySelectedDigest(ctx, observeDATA(fd, image.openRead, "covered"), entry)
+		if err = errors.Join(err, fd.Close()); err != nil {
 			return fmt.Errorf("%s: %w", filepath.Base(file.Path), err)
+		}
+	}
+	return ctx.Err()
+}
+
+func (image *Image) replayAfterCheckpoint(ctx context.Context, keys index.Backend, indexedOpen bool) error {
+	cp := image.Catalog.Index
+	if !indexedOpen {
+		if err := image.verifyCoveredFiles(ctx, cp.Entries); err != nil {
+			return err
 		}
 	}
 	// Both optimized builders require an empty backend. Apply suffix records

@@ -38,8 +38,8 @@ func (o Options) importCheckpoint(ctx context.Context, s *storage.Store, src io.
 		}
 	}
 	tree, err := btree.ImportPacked(ctx, src, size, dir, budget, visit)
-	if errors.Is(err, btree.ErrInvalidPacked) {
-		err = errors.Join(storage.ErrIndexMiss, err)
+	if storage.IsIndexMiss(err, btree.ErrInvalidPacked) {
+		err = storage.ErrIndexMiss
 	}
 	if err != nil {
 		if build != nil {
@@ -138,6 +138,12 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 			db.poison(err)
 		}
 		return operationError(op, "build", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return operationError(op, "pre-publication", err)
+	}
+	if err := work.PublishFile(); err != nil {
+		return operationError(op, "index file", err)
 	}
 	db.writer.Lock()
 	defer db.writer.Unlock()

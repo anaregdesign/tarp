@@ -79,56 +79,69 @@ func TestCheckpointIndexFailureOutcomeAndReopen(t *testing.T) {
 }
 
 func TestCheckpointIndexConcurrentRotationPreservesTail(t *testing.T) {
-	scanning, resume := make(chan struct{}), make(chan struct{})
-	var arm atomic.Bool
-	fs := &storage.IO{Hook: func(p string) error {
-		if p == "index.scan:before" && arm.CompareAndSwap(true, false) {
-			close(scanning)
-			<-resume
-		}
-		return nil
-	}}
-	dir := t.TempDir()
-	opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128, OpenValidation: Indexed}
-	db, err := OpenWithHooks(dir, opts, fs, &Hooks{CleanerStart: make(chan struct{})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustPut(t, db, "a", "original")
-	arm.Store(true)
-	done := make(chan error, 1)
-	go func() { done <- db.CheckpointIndex(t.Context()) }()
-	<-scanning
-	if err := db.CheckpointIndex(t.Context()); !errors.Is(err, ErrBusy) {
-		close(resume)
-		t.Fatalf("second checkpoint: %v", err)
-	}
-	mustPut(t, db, "a", "tail")
-	mustPut(t, db, "b", "second")
-	close(resume)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if db.store.Catalog.Index.Sequence != 1 || db.store.Current.Sequence != 3 {
-		t.Fatalf("frontiers %d %d", db.store.Catalog.Index.Sequence, db.store.Current.Sequence)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err = OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if !db.store.IndexCheckpointHit {
-		t.Fatal("miss on rotated suffix")
-	}
-	wantValue(t, db, "a", "tail")
-	wantValue(t, db, "b", "second")
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if err := db.CheckpointIndex(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled checkpoint: %v", err)
+	for _, point := range []string{"index.scan:before", "index.dirsync:before"} {
+		t.Run(point, func(t *testing.T) {
+			scanning, resume := make(chan struct{}), make(chan struct{})
+			var arm atomic.Bool
+			fs := &storage.IO{Hook: func(p string) error {
+				if p == point && arm.CompareAndSwap(true, false) {
+					close(scanning)
+					<-resume
+				}
+				return nil
+			}}
+			dir := t.TempDir()
+			opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 128, OpenValidation: Indexed}
+			db, err := OpenWithHooks(dir, opts, fs, &Hooks{CleanerStart: make(chan struct{})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustPut(t, db, "a", "original")
+			arm.Store(true)
+			done := make(chan error, 1)
+			go func() { done <- db.CheckpointIndex(t.Context()) }()
+			<-scanning
+			if err := db.CheckpointIndex(t.Context()); !errors.Is(err, ErrBusy) {
+				close(resume)
+				t.Fatalf("second checkpoint: %v", err)
+			}
+			if point == "index.dirsync:before" {
+				db.writer.Lock()
+				_, _, err := db.store.Cleanup()
+				db.writer.Unlock()
+				if err != nil {
+					close(resume)
+					t.Fatal(err)
+				}
+			}
+			mustPut(t, db, "a", "tail")
+			mustPut(t, db, "b", "second")
+			close(resume)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if db.store.Catalog.Index.Sequence != 1 || db.store.Current.Sequence != 3 {
+				t.Fatalf("frontiers %d %d", db.store.Catalog.Index.Sequence, db.store.Current.Sequence)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err = OpenWithHooks(dir, opts, nil, &Hooks{CleanerStart: make(chan struct{})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if !db.store.IndexCheckpointHit {
+				t.Fatal("miss on rotated suffix")
+			}
+			wantValue(t, db, "a", "tail")
+			wantValue(t, db, "b", "second")
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			if err := db.CheckpointIndex(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled checkpoint: %v", err)
+			}
+		})
 	}
 }
 

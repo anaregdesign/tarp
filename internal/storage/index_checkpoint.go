@@ -102,8 +102,38 @@ func (r checkpointReadMeter) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// IsIndexMiss reports whether every cause describes an unusable optional
+// index. An additional read, close or cancellation failure must reach the
+// caller even when a decoder also found an invalid page.
+func IsIndexMiss(err error, equivalent ...error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		for _, cause := range causes {
+			if !IsIndexMiss(cause, equivalent...) {
+				return false
+			}
+		}
+		return len(causes) > 0
+	}
+	if cause := errors.Unwrap(err); cause != nil {
+		return IsIndexMiss(cause, equivalent...)
+	}
+	if errors.Is(err, ErrIndexMiss) {
+		return true
+	}
+	for _, target := range equivalent {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
 func indexReadError(err error) error {
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if IsIndexMiss(err, io.EOF, io.ErrUnexpectedEOF) {
 		return ErrIndexMiss
 	}
 	return err
@@ -112,10 +142,12 @@ func indexReadError(err error) error {
 // IndexBuild owns a pinned DATA selection and a private, named staging file.
 // Only BeginIndex and Install require the writer gate.
 type IndexBuild struct {
-	store      *Store
-	capture    *Capture
-	descriptor format.IndexCheckpoint
-	stage      string
+	store         *Store
+	capture       *Capture
+	descriptor    format.IndexCheckpoint
+	stage         string
+	final         string // unselected, protected from cleanup until Release
+	filePublished bool
 }
 
 func (s *Store) BeginIndex() (*IndexBuild, error) {
@@ -135,19 +167,28 @@ func (s *Store) BeginIndex() (*IndexBuild, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.buildingIndex.Store(id)
 	return &IndexBuild{store: s, capture: c, descriptor: format.IndexCheckpoint{ID: id, Entries: n, Sequence: seq, Layout: layout}}, nil
 }
 
 func (b *IndexBuild) Release() error {
 	b.capture.Release()
-	if b.stage == "" {
+	defer b.store.buildingIndex.CompareAndSwap(b.descriptor.ID, 0)
+	path := b.stage
+	if b.final != "" {
+		path = b.final
+	}
+	if path == "" {
 		return nil
 	}
-	err := os.Remove(b.stage)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	err := os.Remove(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	return err
+	if b.final != "" {
+		return b.store.IO.SyncDir(b.store.Dir, "index.discard.dirsync")
+	}
+	return nil
 }
 
 func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(context.Context, index.Backend, io.Writer) error) (result error) {
@@ -213,7 +254,29 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 	return nil
 }
 
+// PublishFile durably names the candidate outside the writer gate. Its
+// reserved ID protects it from cleanup until selector publication or discard.
+func (b *IndexBuild) PublishFile() error {
+	s := b.store
+	path := filepath.Join(s.Dir, IndexName(b.capture.Current.UUID, b.descriptor.ID))
+	if err := s.IO.Do("index.rename", func() error {
+		if err := platform.RenameNoReplace(b.stage, path); err != nil {
+			return err
+		}
+		b.final, b.stage = path, ""
+		return nil
+	}); err != nil {
+		return err
+	}
+	err := s.IO.SyncDir(s.Dir, "index.dirsync")
+	b.filePublished = err == nil
+	return err
+}
+
 func (b *IndexBuild) Install() error {
+	if !b.filePublished || b.final == "" {
+		return errors.New("storage: checkpoint file has not been published")
+	}
 	s := b.store
 	cp := b.descriptor
 	layout, err := s.Catalog.IndexLayout(cp.Entries, cp.Sequence)
@@ -223,43 +286,17 @@ func (b *IndexBuild) Install() error {
 	if s.Current.Generation == math.MaxUint64 {
 		return errors.New("storage: publication generation exhausted")
 	}
-	path := filepath.Join(s.Dir, IndexName(s.Current.UUID, cp.ID))
-	renamed := false
-	discard := func(cause error) error {
-		if !renamed {
-			return cause
-		}
-		err := os.Remove(path)
-		s.retireSyncPending = true
-		if err != nil {
-			s.retireIndex(cp.ID)
-		}
-		return errors.Join(cause, err, s.syncRetirements("index.discard.dirsync"))
-	}
-	err = s.IO.Do("index.rename", func() error {
-		err := platform.RenameNoReplace(b.stage, path)
-		if err == nil {
-			renamed = true
-			b.stage = ""
-		}
-		return err
-	})
-	if err != nil {
-		return discard(err)
-	}
-	if err := s.IO.SyncDir(s.Dir, "index.dirsync"); err != nil {
-		return discard(err)
-	}
 	catalog, frontier := s.Catalog, s.Current
 	catalog.Index = cp
 	frontier.Generation++
 	if err := s.publishCatalogFor(catalog, frontier, "index.", nil); err != nil {
 		var f *Fault
 		if errors.As(err, &f) && f.Outcome == publication.Unknown {
-			return err
+			b.final = "" // Reopen decides which catalog won.
 		}
-		return discard(err)
+		return err
 	}
+	b.final = "" // The catalog now owns the file.
 	s.IndexCheckpointHit = true
 	// A cleanup failure represents an already published checkpoint.
 	if _, _, _, err := s.RetireCleaned(); err != nil {
