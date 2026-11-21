@@ -76,7 +76,7 @@ type releaseSample struct {
 	CommitSequence          uint64
 }
 
-func scanReleaseEpisode(t *testing.T, round, pair, position int, lateRelease, newerFirst bool) releaseSample {
+func scanReleaseEpisode(t *testing.T, round, pair, position, steps int, lateRelease, newerFirst bool) releaseSample {
 	t.Helper()
 	dir, err := os.MkdirTemp(os.Getenv("TMPDIR"), "tarp-scan-release-")
 	if err != nil {
@@ -120,7 +120,8 @@ func scanReleaseEpisode(t *testing.T, round, pair, position int, lateRelease, ne
 		row.Arm = "first-after-release"
 	}
 	sequence := uint64(len(rows))
-	for step := 1; step <= 16; step++ {
+	for step := 1; step <= steps; step++ {
+		version := (step-1)%16 + 1
 		// 32 overwritten keys and eight different keys deleted/reinserted per
 		// step. The offset varies by matched pair; both arms use the same trace.
 		var edits, reinserts []tarp.Entry
@@ -129,12 +130,12 @@ func scanReleaseEpisode(t *testing.T, round, pair, position int, lateRelease, ne
 			n := (step*17 + j*29 + pair*7 + round*23) % len(rows)
 			key := rows[n].Key
 			if j < 32 {
-				edits = append(edits, tarp.Entry{Key: key, Value: values[step*2-1]})
-				model[string(key)] = string(values[step*2-1])
+				edits = append(edits, tarp.Entry{Key: key, Value: values[version*2-1]})
+				model[string(key)] = string(values[version*2-1])
 			} else {
 				deletes = append(deletes, key)
-				reinserts = append(reinserts, tarp.Entry{Key: key, Value: values[step*2]})
-				model[string(key)] = string(values[step*2])
+				reinserts = append(reinserts, tarp.Entry{Key: key, Value: values[version*2]})
+				model[string(key)] = string(values[version*2])
 			}
 		}
 		if err := db.BatchPut(edits); err != nil {
@@ -151,12 +152,12 @@ func scanReleaseEpisode(t *testing.T, round, pair, position int, lateRelease, ne
 			b = holdReleaseCursor(t, db, model)
 			defer b.stop()
 		}
-		if step == 8 || step == 16 {
+		if step == steps/2 || step == steps {
 			r, err := db.Compact(t.Context())
 			if err != nil || r.DroppedKeys != 0 || r.PinnedRetiredDataBytes == 0 {
 				t.Fatalf("Compact at step %d: %+v, %v", step, r, err)
 			}
-			row.PinnedDATA[step/8-1] = uint64(r.PinnedRetiredDataBytes)
+			row.PinnedDATA[step/(steps/2)-1] = uint64(r.PinnedRetiredDataBytes)
 		}
 	}
 	a.drainHeld(t)
@@ -247,11 +248,15 @@ func TestCorner145ScanRelease(t *testing.T) {
 		}
 		return n
 	}
+	steps := readCount("TARP_SCAN_RELEASE_STEPS")
+	if steps < 16 || steps%2 != 0 {
+		t.Fatal("steps must be even and at least 16")
+	}
 	rounds, pairs := readCount("TARP_SCAN_RELEASE_ROUNDS"), readCount("TARP_SCAN_RELEASE_PAIRS")
 	for round := range rounds {
 		for pair := range pairs {
 			for pos := range 2 {
-				one := scanReleaseEpisode(t, round, pair, pos, (round+pair+pos)%2 == 0, (round+pair/2)%2 == 0)
+				one := scanReleaseEpisode(t, round, pair, pos, steps, (round+pair+pos)%2 == 0, (round+pair/2)%2 == 0)
 				if err := enc.Encode(one); err != nil {
 					t.Fatal(err)
 				}
