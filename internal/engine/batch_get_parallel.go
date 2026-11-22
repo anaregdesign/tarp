@@ -16,8 +16,8 @@ const (
 
 func (db *DB) releaseBatchPins(reads []batchRead) {
 	for _, r := range reads {
-		if r.loc.File != nil {
-			db.releaseScanPin(r.loc.File)
+		if r.loc.Segment != nil {
+			db.releaseScanPin(r.loc.Segment)
 		}
 	}
 }
@@ -30,7 +30,7 @@ func (db *DB) readBatchMisses(keys [][]byte, results []BatchResult, reads []batc
 	// Source slots now contain their checked values. Each duplicate owns its
 	// bytes, regardless of the order in which workers finished reading.
 	for _, r := range reads {
-		if r.loc.File == nil {
+		if r.loc.Segment == nil {
 			results[r.slot] = BatchResult{Value: bytes.Clone(results[r.source].Value), Found: true}
 		}
 	}
@@ -39,7 +39,7 @@ func (db *DB) readBatchMisses(keys [][]byte, results []BatchResult, reads []batc
 
 func (db *DB) readBatchData(keys [][]byte, results []BatchResult, reads []batchRead) error {
 	// A copy-only plan can arise from duplicate cached nil values.
-	for len(reads) > 0 && reads[0].loc.File == nil {
+	for len(reads) > 0 && reads[0].loc.Segment == nil {
 		reads = reads[1:]
 	}
 	if len(reads) == 0 {
@@ -60,7 +60,7 @@ func (db *DB) readBatchData(keys [][]byte, results []BatchResult, reads []batchR
 	var count int
 	small := true
 	for _, r := range reads {
-		if r.loc.File != nil {
+		if r.loc.Segment != nil {
 			count++
 			if r.loc.RecordBytes > smallBatchRecordBytes {
 				small = false
@@ -108,7 +108,7 @@ func (db *DB) readSmallBatchWhileFast(keys [][]byte, results []BatchResult, read
 	groupSize, inGroup := 1, 0
 	var started time.Time
 	for i, r := range reads {
-		if r.loc.File == nil {
+		if r.loc.Segment == nil {
 			continue
 		}
 		if err := db.health(); err != nil {
@@ -153,7 +153,7 @@ func (db *DB) readBatchRecord(key []byte, result *BatchResult, r batchRead, samp
 func (db *DB) readBatchSerial(keys [][]byte, results []BatchResult, reads []batchRead, sampleFirst bool) error {
 	defer func() { <-db.batchReadSlots }()
 	for i, r := range reads {
-		if r.loc.File == nil {
+		if r.loc.Segment == nil {
 			continue
 		}
 		if err := db.health(); err != nil {
@@ -172,13 +172,13 @@ func (db *DB) readBatchParallel(keys [][]byte, results []BatchResult, reads []ba
 	// This keeps the caller's slice of key headers out of the worker closures
 	// without allocating a second job list.
 	for _, r := range reads {
-		if r.loc.File != nil {
+		if r.loc.Segment != nil {
 			results[r.slot].Value = keys[r.slot]
 		}
 	}
 	return db.runBatchWorkers(workers, len(reads), func(i int) error {
 		r := reads[i]
-		if r.loc.File == nil {
+		if r.loc.Segment == nil {
 			return nil
 		}
 		result := &results[r.slot]

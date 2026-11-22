@@ -91,7 +91,7 @@ func (f *DataSegment) Unpin() {
 
 // Location binds a DATA record address to the process-local segment used for I/O.
 type Location struct {
-	File         *DataSegment
+	Segment      *DataSegment
 	RecordOffset int64
 	RecordBytes  int64
 	ValueBytes   int64
@@ -108,7 +108,7 @@ type Store struct {
 	Current               format.Frontier
 	Catalog               format.Catalog
 	Manifest              []byte
-	Files                 map[uint64]*DataSegment
+	Segments              map[uint64]*DataSegment
 	active                *os.File
 	lock                  *platform.DirectoryLock
 	readers               *handles
@@ -206,7 +206,7 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{Dir: absolute, Config: cfg, IO: fs, lock: lock, readers: newHandles(cfg.Handles), Files: make(map[uint64]*DataSegment)}
+	s := &Store{Dir: absolute, Config: cfg, IO: fs, lock: lock, readers: newHandles(cfg.Handles), Segments: make(map[uint64]*DataSegment)}
 	defer func() {
 		if result != nil {
 			result = errors.Join(result, s.Close())
@@ -320,26 +320,26 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 		}
 		s.cleanWorkspaceOnClose = true
 	}
-	s.Catalog, s.Manifest, s.Files = image.Catalog, image.Manifest, image.Files
+	s.Catalog, s.Manifest, s.Segments = image.Catalog, image.Manifest, image.Segments
 	for _, entry := range s.Catalog.Entries {
 		if entry.HasPhysicalFile() {
-			s.Files[entry.ID].markSealed(s.Catalog.UUID, entry)
+			s.Segments[entry.ID].markSealed(s.Catalog.UUID, entry)
 		}
 	}
 	s.LargestLiveValueBytes = image.LargestLiveValueBytes
-	active, err := os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
+	active, err := os.OpenFile(s.Segments[s.Current.ActiveID].Path, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
 	s.active = active
-	if s.Files[s.Current.ActiveID].Size.Load() != s.Current.ActiveCommittedEndOffset {
+	if s.Segments[s.Current.ActiveID].Size.Load() != s.Current.ActiveCommittedEndOffset {
 		if err := s.IO.Do("recover.truncate", func() error { return s.active.Truncate(s.Current.ActiveCommittedEndOffset) }); err != nil {
 			return err
 		}
 		if err := s.IO.Sync(s.active, "recover.sync"); err != nil {
 			return err
 		}
-		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveCommittedEndOffset)
+		s.Segments[s.Current.ActiveID].Size.Store(s.Current.ActiveCommittedEndOffset)
 	}
 	if _, _, err := s.cleanupValidated(ctx, listing.objects); err != nil {
 		return err
@@ -371,14 +371,14 @@ func (s *Store) initialize() error {
 		return err
 	}
 	s.Catalog.UUID = s.Current.UUID
-	file, fd, err := s.newLog(appendData{})
+	segment, fd, err := s.newLog(appendData{})
 	if err != nil {
 		return err
 	}
 	s.active = fd
-	s.Catalog.ActiveID = file.ID
+	s.Catalog.ActiveID = segment.ID
 	candidate := s.Current
-	candidate.PublicationGeneration, candidate.ActiveID, candidate.ActiveCommittedEndOffset = 1, file.ID, format.SegmentHeaderBytes
+	candidate.PublicationGeneration, candidate.ActiveID, candidate.ActiveCommittedEndOffset = 1, segment.ID, format.SegmentHeaderBytes
 	return s.publishCatalog(s.Catalog, candidate)
 }
 
@@ -398,7 +398,7 @@ func (s *Store) newLog(initialRecords appendData) (*DataSegment, *os.File, error
 	if err != nil {
 		return nil, nil, err
 	}
-	s.Files[f.ID] = f
+	s.Segments[f.ID] = f
 	return f, fd, nil
 }
 
@@ -452,7 +452,7 @@ func (s *Store) Rotate() error {
 // selects the new segment, catalog and user sequence in one publication.
 // Explicit checkpoint sealing selects a header-only log at the old sequence.
 func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy func() error) error {
-	file, fd, err := s.newLog(initialRecords)
+	segment, fd, err := s.newLog(initialRecords)
 	if err != nil {
 		var prepare *prepareError
 		if errors.As(err, &prepare) {
@@ -469,18 +469,18 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 	catalog.Entries = append(append([]format.CatalogEntry(nil), catalog.Entries...), format.CatalogEntry{
 		ID: s.Current.ActiveID, Bytes: s.Current.ActiveCommittedEndOffset, Kind: format.RawLogKind,
 		FirstSequence: s.Catalog.SealedThroughSequence() + 1, LastSequence: s.Current.LastUserSequence,
-		DataFileDigest: [sha256.Size]byte(s.Files[s.Current.ActiveID].activeDigest.Sum(nil)),
+		DataFileDigest: [sha256.Size]byte(s.Segments[s.Current.ActiveID].activeDigest.Sum(nil)),
 	})
-	catalog.ActiveID = file.ID
+	catalog.ActiveID = segment.ID
 	candidate := s.Current
 	candidate.PublicationGeneration++
-	candidate.ActiveID, candidate.ActiveCommittedEndOffset = file.ID, file.Size.Load()
+	candidate.ActiveID, candidate.ActiveCommittedEndOffset = segment.ID, segment.Size.Load()
 	candidate.LastUserSequence = lastSequence
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return errors.Join(err, fd.Close())
 	}
 	sealed := catalog.Entries[len(catalog.Entries)-1]
-	prior := s.Files[sealed.ID]
+	prior := s.Segments[sealed.ID]
 	prior.activeDigest = nil
 	prior.markSealed(catalog.UUID, sealed)
 	old := s.active
@@ -523,14 +523,14 @@ func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() err
 	}}
 	if prepare != nil {
 		data.prepare = func(f *DataSegment, off int64) error {
-			return prepare(Location{File: f, RecordOffset: off, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
+			return prepare(Location{Segment: f, RecordOffset: off, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
 		}
 	}
-	file, offset, err := s.appendRecords(data, sequence, healthy)
+	segment, offset, err := s.appendRecords(data, sequence, healthy)
 	if err != nil {
 		return Location{}, err
 	}
-	return Location{File: file, RecordOffset: offset, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence}, nil
+	return Location{Segment: segment, RecordOffset: offset, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence}, nil
 }
 
 // AppendBatch publishes all records at one frontier. The caller validates the
@@ -573,7 +573,7 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 	if prepare != nil {
 		data.prepare = func(f *DataSegment, off int64) error {
 			for i, loc := range locations {
-				loc.File, loc.RecordOffset = f, off+loc.RecordOffset
+				loc.Segment, loc.RecordOffset = f, off+loc.RecordOffset
 				if err := prepare(i, loc); err != nil {
 					return err
 				}
@@ -581,12 +581,12 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 			return nil
 		}
 	}
-	file, offset, err := s.appendRecords(data, locations[len(locations)-1].Sequence, healthy)
+	segment, offset, err := s.appendRecords(data, locations[len(locations)-1].Sequence, healthy)
 	if err != nil {
 		return nil, err
 	}
 	for i := range locations {
-		locations[i].File = file
+		locations[i].Segment = segment
 		locations[i].RecordOffset += offset
 	}
 	return locations, nil
@@ -610,14 +610,14 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 		if err := s.rotate(data, lastSequence, healthy); err != nil {
 			return nil, 0, err
 		}
-		return s.Files[s.Current.ActiveID], format.SegmentHeaderBytes, nil
+		return s.Segments[s.Current.ActiveID], format.SegmentHeaderBytes, nil
 	}
 	if data.prepare != nil {
-		if err := data.prepare(s.Files[s.Current.ActiveID], offset); err != nil {
+		if err := data.prepare(s.Segments[s.Current.ActiveID], offset); err != nil {
 			return nil, 0, err
 		}
 	}
-	if err := data.writeAt(s.active, offset, s.Files[s.Current.ActiveID].activeDigest); err != nil {
+	if err := data.writeAt(s.active, offset, s.Segments[s.Current.ActiveID].activeDigest); err != nil {
 		return nil, 0, fault("data.write", publication.NotApplied, true, err)
 	}
 	if err := s.IO.Sync(s.active, "data.sync"); err != nil {
@@ -632,9 +632,9 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 	if err := s.publish(candidate); err != nil {
 		return nil, 0, err
 	}
-	file := s.Files[s.Current.ActiveID]
-	file.Size.Store(candidate.ActiveCommittedEndOffset)
-	return file, offset, nil
+	segment := s.Segments[s.Current.ActiveID]
+	segment.Size.Store(candidate.ActiveCommittedEndOffset)
+	return segment, offset, nil
 }
 
 func (s *Store) Read(loc Location, key string) ([]byte, error) {
@@ -647,7 +647,7 @@ func (s *Store) ReadContext(ctx context.Context, loc Location, key string) ([]by
 	}
 	value, err := s.readValue(loc, key)
 	if err != nil {
-		if err = s.RepairRead(ctx, loc.File, err); err != nil {
+		if err = s.RepairRead(ctx, loc.Segment, err); err != nil {
 			if err == ctx.Err() {
 				return nil, err
 			}
@@ -665,7 +665,7 @@ func (s *Store) ReadContext(ctx context.Context, loc Location, key string) ([]by
 }
 
 func (s *Store) readValue(loc Location, key string) ([]byte, error) {
-	h, err := s.readers.acquire(loc.File)
+	h, err := s.readers.acquire(loc.Segment)
 	if err != nil {
 		return nil, err
 	}
@@ -681,7 +681,7 @@ func (s *Store) readValue(loc Location, key string) ([]byte, error) {
 }
 
 func (loc Location) readError(err error) error {
-	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.RecordOffset, err)
+	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.Segment.Path), loc.RecordOffset, err)
 }
 
 // directoryListing retains the type and ID of every object cleanup may retire.
@@ -785,7 +785,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 			if id != s.Current.ActiveID && selected[id] {
 				continue
 			}
-			if f := s.Files[id]; !selected[id] && f != nil && f.References() != 0 {
+			if f := s.Segments[id]; !selected[id] && f != nil && f.References() != 0 {
 				// A parity publisher may still own its source pin.
 				continue
 			}
@@ -793,7 +793,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 			if selected[id] {
 				continue
 			}
-			if f := s.Files[id]; f != nil {
+			if f := s.Segments[id]; f != nil {
 				if f.References() != 0 {
 					s.retireData(f)
 					pinned += f.Size.Load()
@@ -823,7 +823,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 			s.retireSyncPending = true
 			switch obj.kind {
 			case "DATA":
-				delete(s.Files, id)
+				delete(s.Segments, id)
 				delete(s.retired, id)
 			case "INDEX":
 				delete(s.retiredIndexes, id)

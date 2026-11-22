@@ -64,10 +64,10 @@ func prepareRepackFixture(t testing.TB, size int) repackFixture {
 		if len(fixture.inputs) != logs {
 			t.Fatalf("fixture has %d sealed logs, want %d", len(fixture.inputs), logs)
 		}
-		for _, file := range fixture.inputs {
-			if file.Kind != format.RawLogKind || file.Bytes != opts.TargetSegmentBytes ||
-				s.Files[file.ID].LiveBytes.Load() != file.Bytes-format.SegmentHeaderBytes {
-				t.Fatalf("fixture log %d is not full of live records", file.ID)
+		for _, entry := range fixture.inputs {
+			if entry.Kind != format.RawLogKind || entry.Bytes != opts.TargetSegmentBytes ||
+				s.Segments[entry.ID].LiveBytes.Load() != entry.Bytes-format.SegmentHeaderBytes {
+				t.Fatalf("fixture log %d is not full of live records", entry.ID)
 			}
 		}
 	})

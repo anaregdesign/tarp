@@ -266,7 +266,7 @@ func vmCompleteIndexRelease(t *testing.T, db *engine.DB) map[string]any {
 		"before_heap_bytes": before.HeapAlloc, "after_heap_bytes": after.HeapAlloc,
 		"complete_index_and_registry_retained_heap_delta_bytes": delta,
 		"complete_index_and_registry_bytes_per_live_key":        bytesPerLiveKey,
-		"scope": "actual rebuilt key map, owned keys, inline locations and shared file registry released after closing cache/handles; fixed DB/catalog/frontier excluded; raw GC delta, not a process bound",
+		"scope": "actual rebuilt key map, owned keys, inline locations and shared DATA segment registry released after closing cache/handles; fixed DB/catalog/frontier excluded; raw GC delta, not a process bound",
 	}
 }
 

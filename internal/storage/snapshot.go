@@ -16,8 +16,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/index"
 )
 
-type CapturedFile struct {
-	File                *DataSegment
+// CapturedSegment binds a pinned DATA segment to the catalog entry used to read it.
+type CapturedSegment struct {
+	Segment             *DataSegment
 	Entry               format.CatalogEntry
 	liveKeys, liveBytes int64 // owned by the logical index at capture
 }
@@ -26,7 +27,7 @@ type Capture struct {
 	Current  format.Frontier
 	Catalog  format.Catalog
 	Manifest []byte
-	Files    []CapturedFile
+	Segments []CapturedSegment
 }
 
 // Capture pins the selected DATA segments and captures the committed end
@@ -41,22 +42,22 @@ func (s *Store) Capture() (*Capture, error) {
 	c.Catalog.Entries = append([]format.CatalogEntry(nil), s.Catalog.Entries...)
 	for _, entry := range s.Catalog.Entries {
 		if entry.HasPhysicalFile() {
-			c.Files = append(c.Files, CapturedFile{File: s.Files[entry.ID], Entry: entry})
+			c.Segments = append(c.Segments, CapturedSegment{Segment: s.Segments[entry.ID], Entry: entry})
 		}
 	}
-	c.Files = append(c.Files, CapturedFile{File: s.Files[active.ID], Entry: active})
-	for i := range c.Files {
-		captured := &c.Files[i]
-		captured.liveKeys = captured.File.LiveKeys.Load()
-		captured.liveBytes = captured.File.LiveBytes.Load()
-		captured.File.Pin()
+	c.Segments = append(c.Segments, CapturedSegment{Segment: s.Segments[active.ID], Entry: active})
+	for i := range c.Segments {
+		captured := &c.Segments[i]
+		captured.liveKeys = captured.Segment.LiveKeys.Load()
+		captured.liveBytes = captured.Segment.LiveBytes.Load()
+		captured.Segment.Pin()
 	}
 	return c, nil
 }
 
 func (c *Capture) Release() {
-	for _, entry := range c.Files {
-		entry.File.Unpin()
+	for _, entry := range c.Segments {
+		entry.Segment.Unpin()
 	}
 }
 
@@ -108,11 +109,11 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 	defer replay.abort()
 	buffer := make([]byte, 32<<10)
 	reader := bufio.NewReaderSize(nil, len(buffer))
-	for _, captured := range c.Files {
+	for _, captured := range c.Segments {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		fd, header, _, err := openSelected(captured.File.Path, c.Current.UUID, captured.Entry, captured.File.ID == c.Current.ActiveID)
+		fd, header, _, err := openSelected(captured.Segment.Path, c.Current.UUID, captured.Entry, captured.Segment.ID == c.Current.ActiveID)
 		if err != nil {
 			return selectedReadFailure(captured.Entry.ID, &SourceError{Err: err})
 		}
@@ -136,7 +137,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 					if err := span.Accept(r); err != nil {
 						return nil, selectedReadFailure(captured.Entry.ID, err)
 					}
-					if err := replay.apply(captured.File, off, r, key); err != nil {
+					if err := replay.apply(captured.Segment, off, r, key); err != nil {
 						// The key is decoded before SelectStreamRecord reaches its
 						// payload checksum. A damaged Delete can fail replay first.
 						var source *SourceError
@@ -152,7 +153,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 					if err != nil {
 						return nil, &SourceError{Err: err}
 					}
-					if !exists || loc.FileID != captured.File.ID || loc.RecordOffset != off {
+					if !exists || loc.FileID != captured.Segment.ID || loc.RecordOffset != off {
 						return nil, nil
 					}
 					if loc.RecordBytes != r.EncodedRecordBytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
@@ -165,7 +166,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 						copying = true
 					}
 					copied = true
-					return selectOutput(key, Location{File: captured.File, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
+					return selectOutput(key, Location{Segment: captured.Segment, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
 				})
 				if err != nil {
 					var destination *destinationError
@@ -196,7 +197,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 			err = errors.Join(err, &SourceError{Err: closeErr})
 		}
 		if err != nil {
-			return fmt.Errorf("%s: %w", filepath.Base(captured.File.Path), err)
+			return fmt.Errorf("%s: %w", filepath.Base(captured.Segment.Path), err)
 		}
 	}
 	if err := replay.finish(); err != nil {

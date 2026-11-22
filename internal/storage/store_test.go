@@ -36,7 +36,7 @@ func TestReadMissingSegmentPreservesPathErrorAndRecordOffset(t *testing.T) {
 	filename := DataName([16]byte{}, 1)
 	path := filepath.Join(t.TempDir(), filename)
 	s := &Store{readers: newHandles(1)}
-	loc := Location{File: &DataSegment{Path: path}, RecordOffset: format.SegmentHeaderBytes}
+	loc := Location{Segment: &DataSegment{Path: path}, RecordOffset: format.SegmentHeaderBytes}
 	_, err := s.Read(loc, "k")
 	var pathErr *os.PathError
 	want := fmt.Sprintf("%s: record at offset %d:", filename, loc.RecordOffset)
@@ -115,7 +115,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 		s.Close()
 		t.Fatal(err)
 	}
-	data := s.Files[s.Current.ActiveID].Path
+	data := s.Segments[s.Current.ActiveID].Path
 	end := s.Current.ActiveCommittedEndOffset
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("committed key after retry: found=%t, err=%v", ok, err)
 	}
-	if got, err := reopened.Read(At(reopened.Files[addr.FileID], addr), "k"); err != nil || string(got) != "saved" {
+	if got, err := reopened.Read(At(reopened.Segments[addr.FileID], addr), "k"); err != nil || string(got) != "saved" {
 		t.Fatalf("retry read: %q, %v", got, err)
 	}
 	if _, err := os.Lstat(owned); !errors.Is(err, os.ErrNotExist) {
@@ -351,7 +351,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 						if err != nil || !ok {
 							t.Fatalf("lookup %q after reopen: found=%t, err=%v", e.Key, ok, err)
 						}
-						v, err := reopened.Read(At(reopened.Files[addr.FileID], addr), string(e.Key))
+						v, err := reopened.Read(At(reopened.Segments[addr.FileID], addr), string(e.Key))
 						if err != nil || !bytes.Equal(v, e.Value) {
 							t.Fatalf("reopened %q: %q, %v", e.Key, v, err)
 						}
@@ -385,18 +385,18 @@ func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
 	if _, err := s.Append(format.Put, []byte("before"), value, healthy); err != nil {
 		t.Fatal(err)
 	}
-	before, lastID, files := s.Current, s.nextID, len(s.Files)
+	before, lastID, files := s.Current, s.nextID, len(s.Segments)
 	rejected := errors.New("reject staged index")
 	var candidate uint64
 	_, err = s.AppendPrepared(format.Put, []byte("after"), value, healthy, func(loc Location) error {
-		candidate = loc.File.ID
+		candidate = loc.Segment.ID
 		return rejected
 	})
-	if !errors.Is(err, rejected) || s.Current != before || s.nextID != lastID || len(s.Files) != files {
-		t.Fatalf("rejected rotation: error %v, frontier %+v, last ID %d (was %d), files %d (was %d)", err, s.Current, s.nextID, lastID, len(s.Files), files)
+	if !errors.Is(err, rejected) || s.Current != before || s.nextID != lastID || len(s.Segments) != files {
+		t.Fatalf("rejected rotation: error %v, frontier %+v, last ID %d (was %d), files %d (was %d)", err, s.Current, s.nextID, lastID, len(s.Segments), files)
 	}
 	loc, err := s.Append(format.Put, []byte("after"), value, healthy)
-	if err != nil || candidate == before.ActiveID || loc.File.ID != candidate || loc.Sequence != before.LastUserSequence+1 {
+	if err != nil || candidate == before.ActiveID || loc.Segment.ID != candidate || loc.Sequence != before.LastUserSequence+1 {
 		t.Fatalf("retry used location %+v, wanted file %d, error %v", loc, candidate, err)
 	}
 }

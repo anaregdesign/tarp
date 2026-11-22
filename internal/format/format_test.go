@@ -314,8 +314,8 @@ func TestCatalogRejectsAmbiguousCoverage(t *testing.T) {
 	snapshot := CatalogEntry{ID: 3, DataFileDigest: [32]byte{3}, Bytes: size, Kind: SnapshotKind}
 	valid := Catalog{CheckpointCutoffSequence: 3, PrunedThroughSequence: 6, ActiveID: 7}
 	for _, tc := range []struct {
-		name  string
-		files []CatalogEntry
+		name    string
+		entries []CatalogEntry
 	}{
 		{"start gap", []CatalogEntry{{ID: 2, DataFileDigest: [32]byte{2}, Bytes: size, Kind: RawLogKind, FirstSequence: 5, LastSequence: 5}}},
 		{"start overlap", []CatalogEntry{{ID: 2, DataFileDigest: [32]byte{2}, Bytes: size, Kind: RawLogKind, FirstSequence: 3, LastSequence: 4}}},
@@ -333,7 +333,7 @@ func TestCatalogRejectsAmbiguousCoverage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := valid
-			c.Entries = tc.files
+			c.Entries = tc.entries
 			if _, err := DecodeCatalog(EncodeCatalog(c)); !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("accepted invalid coverage: %v", err)
 			}

@@ -31,8 +31,8 @@ func contiguousReadFixture(t *testing.T) (*Store, []ContiguousRead) {
 	for i, loc := range locs {
 		group[i] = ContiguousRead{Location: loc, Key: entries[i].Key}
 	}
-	locs[0].File.Pin()
-	t.Cleanup(locs[0].File.Unpin)
+	locs[0].Segment.Pin()
+	t.Cleanup(locs[0].Segment.Unpin)
 	return s, group
 }
 
@@ -57,7 +57,7 @@ func TestReadContiguousReportsSecondRecordAfterTruncationOrCorruption(t *testing
 				t.Fatal(err)
 			}
 			err = s.ReadContiguous(group)
-			location := fmt.Sprintf("%s: record at offset %d:", filepath.Base(second.File.Path), second.RecordOffset)
+			location := fmt.Sprintf("%s: record at offset %d:", filepath.Base(second.Segment.Path), second.RecordOffset)
 			if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), location) {
 				t.Fatalf("read error %v, want %v at %s", err, wantErr, location)
 			}

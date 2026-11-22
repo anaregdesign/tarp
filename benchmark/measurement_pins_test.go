@@ -25,13 +25,13 @@ type pinnedBackupMeasurement struct {
 
 func retiredPinnedBytes(s *storage.Store, files map[uint64]int64) int64 {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, file := range s.Catalog.Entries {
-		selected[file.ID] = true
+	for _, entry := range s.Catalog.Entries {
+		selected[entry.ID] = true
 	}
 	var total int64
-	for id, file := range s.Files {
-		if !selected[id] && file.References() > 0 {
-			size := file.Size.Load()
+	for id, segment := range s.Segments {
+		if !selected[id] && segment.References() > 0 {
+			size := segment.Size.Load()
 			total += size
 			if files != nil {
 				files[id] = size
@@ -60,7 +60,7 @@ func verifyBackupReclamation(ctx context.Context, probe engine.Observer, hooks *
 	var references int64
 	probe.Store(func(s *storage.Store) {
 		for id := range files {
-			if f := s.Files[id]; f != nil {
+			if f := s.Segments[id]; f != nil {
 				references += f.References()
 			} else {
 				err = fmt.Errorf("retired DATA %d vanished before cleaner release", id)

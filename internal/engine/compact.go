@@ -120,7 +120,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		if err := db.health(); err != nil {
 			return nil, err
 		}
-		return db.store.ReserveSnapshotFile()
+		return db.store.ReserveSnapshotSegment()
 	}
 	moves, lost := db.store.NewRelocations(), db.store.NewRelocations()
 	defer func() {
@@ -153,7 +153,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		}
 		return checkpoint.Copy(ctx, history, live, moves, reserve)
 	}
-	err = db.store.RetryMaintenance(ctx, capture.Files, func() error { return copyData(false) }, reset)
+	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error { return copyData(false) }, reset)
 	if storage.IsDataUnavailable(err) && !errors.Is(err, syscall.ENOSPC) && !errors.Is(err, syscall.EDQUOT) {
 		if err = reset(); err == nil {
 			err = copyData(true)
@@ -280,10 +280,10 @@ func (db *DB) prepareLosses(ctx context.Context, lost *storage.Relocations) (*ch
 		if !found || addr != old.Address() {
 			return errCheckpointChanged
 		}
-		total := losses.files[old.File]
+		total := losses.files[old.Segment]
 		total.keys++
 		total.bytes += old.RecordBytes
-		losses.files[old.File] = total
+		losses.files[old.Segment] = total
 		return nil
 	})
 	if err != nil && losses != nil {
@@ -315,11 +315,11 @@ func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations,
 	}
 	db.revision++
 	var dropped uint64
-	for file, total := range losses.files {
-		if file.LiveKeys.Add(-total.keys) == 0 {
-			delete(db.files, file.ID)
+	for segment, total := range losses.files {
+		if segment.LiveKeys.Add(-total.keys) == 0 {
+			delete(db.segments, segment.ID)
 		}
-		file.LiveBytes.Add(-total.bytes)
+		segment.LiveBytes.Add(-total.bytes)
 		dropped += uint64(total.keys)
 		db.stats.LiveRecordBytes -= uint64(total.bytes)
 	}
@@ -331,7 +331,7 @@ func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations,
 // Only the selected catalog matters: a retired file may still be pinned.
 func (db *DB) hasUnavailableSource() bool {
 	for _, entry := range db.store.Catalog.Entries {
-		if entry.HasPhysicalFile() && db.store.Files[entry.ID].UnavailableData() != nil {
+		if entry.HasPhysicalFile() && db.store.Segments[entry.ID].UnavailableData() != nil {
 			return true
 		}
 	}

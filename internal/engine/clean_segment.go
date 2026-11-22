@@ -126,11 +126,11 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.CatalogEntry) 
 	var oldData, newData dataTotals
 	for _, source := range entries {
 		if source.HasPhysicalFile() {
-			oldData.addFile(source.Bytes, 0)
+			oldData.addSegment(source.Bytes, 0)
 		}
 	}
 	if n := work.OutputBytes(); n > 0 {
-		newData.addFile(n, 0)
+		newData.addSegment(n, 0)
 	}
 	db.replaceDataStats(oldData, newData)
 	db.writer.Unlock()

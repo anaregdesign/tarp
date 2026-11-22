@@ -110,7 +110,7 @@ func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result er
 		removed, err := remove(f.Path)
 		if removed {
 			delete(s.retired, id)
-			delete(s.Files, id)
+			delete(s.Segments, id)
 		}
 		result = err
 	}

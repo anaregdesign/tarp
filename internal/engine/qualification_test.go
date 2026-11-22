@@ -287,7 +287,7 @@ func TestPowerCutGuest(t *testing.T) {
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		active := db.store.Files[db.store.Current.ActiveID].Path
+		active := db.store.Segments[db.store.Current.ActiveID].Path
 		fd, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
 			t.Fatal(err)

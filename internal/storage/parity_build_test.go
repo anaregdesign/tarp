@@ -38,9 +38,9 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 				t.Fatal(err)
 			}
 			entry := s.Catalog.Entries[0]
-			source := CapturedFile{File: s.Files[entry.ID], Entry: entry}
-			source.File.Pin()
-			defer source.File.Unpin()
+			source := CapturedSegment{Segment: s.Segments[entry.ID], Entry: entry}
+			source.Segment.Pin()
+			defer source.Segment.Unpin()
 			ensure := func() error { return s.EnsureParitySidecar(t.Context(), s.Current.UUID, source, true, nil) }
 			if err := ensure(); err != nil {
 				t.Fatal(err)
@@ -65,8 +65,8 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 				t.Fatal(err)
 			}
 			var sourceErr *SourceError
-			if err := ensure(); !errors.Is(err, ErrCorrupt) || errors.As(err, &sourceErr) || source.File.parityReady {
-				t.Fatalf("unsafe sidecar misclassified: %v, ready %t", err, source.File.parityReady)
+			if err := ensure(); !errors.Is(err, ErrCorrupt) || errors.As(err, &sourceErr) || source.Segment.parityReady {
+				t.Fatalf("unsafe sidecar misclassified: %v, ready %t", err, source.Segment.parityReady)
 			}
 			if target, err := os.Readlink(path); err != nil || target != unrelated {
 				t.Fatalf("changed symlink: %q, %v", target, err)

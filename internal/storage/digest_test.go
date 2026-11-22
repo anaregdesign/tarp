@@ -39,7 +39,7 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 	}
 	before := store.Current
 	source := store.Catalog.Entries[0]
-	path := store.Files[source.ID].Path
+	path := store.Segments[source.ID].Path
 	b, err := os.ReadFile(path)
 	if err != nil || sha256.Sum256(b) != source.DataFileDigest {
 		t.Fatalf("sealed bytes %x: %v", source.DataFileDigest, err)
@@ -63,7 +63,7 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 	work := memory.New()
 	defer work.Close()
 	compact := store.NewDataCheckpoint(capture)
-	if err := compact.Copy(t.Context(), work, view, moves, store.ReserveSnapshotFile); !errors.Is(err, ErrCorrupt) {
+	if err := compact.Copy(t.Context(), work, view, moves, store.ReserveSnapshotSegment); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("compaction: %v", err)
 	}
 	if err := compact.Discard(); err != nil {

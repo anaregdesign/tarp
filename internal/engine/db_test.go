@@ -381,7 +381,7 @@ func TestPartialWriteAndCommittedCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantValue(t, db2, "k", "old")
-	active := testLoc(t, db2, "k").File.Path
+	active := testLoc(t, db2, "k").Segment.Path
 	end := db2.store.Current.ActiveCommittedEndOffset
 	if err := db2.Close(); err != nil {
 		t.Fatal(err)
@@ -404,7 +404,7 @@ func TestReopenCompatibilityBeforeTailCleanup(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	path, active := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path
+	path, active := db.store.Dir, db.store.Segments[db.store.Current.ActiveID].Path
 	f, err := os.OpenFile(active, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -644,7 +644,7 @@ func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 	db := newTestDBWithHooks(t, opts, nil, engineHooks)
 	mustPut(t, db, "sealed", "first")
 	mustPut(t, db, "active", "second")
-	sealed := filepath.Base(testLoc(t, db, "sealed").File.Path)
+	sealed := filepath.Base(testLoc(t, db, "sealed").Segment.Path)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -908,7 +908,7 @@ func TestOpenCancellationDuringReplayAllowsRetry(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	dir, active := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path
+	dir, active := db.store.Dir, db.store.Segments[db.store.Current.ActiveID].Path
 	fd, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -987,7 +987,7 @@ func TestRecoveryBoundaryFailureReleasesOwnershipAndPreservesAcknowledgment(t *t
 				if err := db.Close(); err != nil {
 					t.Fatal(err)
 				}
-				dir, path, end := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path, db.store.Current.ActiveCommittedEndOffset
+				dir, path, end := db.store.Dir, db.store.Segments[db.store.Current.ActiveID].Path, db.store.Current.ActiveCommittedEndOffset
 				fd, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 				if err != nil {
 					t.Fatal(err)
@@ -1214,11 +1214,11 @@ func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
 	}
 	dir := db.store.Dir
 	db.writer.Lock()
-	files := db.store.Catalog.Entries
+	entries := db.store.Catalog.Entries
 	current := db.store.Current
 	db.writer.Unlock()
-	if len(files) != 1 || files[0].Bytes <= smaller.TargetSegmentBytes || current.ActiveCommittedEndOffset <= smaller.TargetSegmentBytes {
-		t.Fatalf("fixture: %v, active %d", files, current.ActiveCommittedEndOffset)
+	if len(entries) != 1 || entries[0].Bytes <= smaller.TargetSegmentBytes || current.ActiveCommittedEndOffset <= smaller.TargetSegmentBytes {
+		t.Fatalf("fixture: %v, active %d", entries, current.ActiveCommittedEndOffset)
 	}
 	backup := filepath.Join(t.TempDir(), "backup")
 	if err := db.Backup(context.Background(), backup); err != nil {
@@ -1336,9 +1336,9 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 				storage.ManifestName(frontier.UUID, frontier.ManifestID): true,
 				storage.DataName(frontier.UUID, frontier.ActiveID):       true,
 			}
-			for _, file := range image.store.Catalog.Entries {
-				if file.HasPhysicalFile() {
-					want[storage.DataName(frontier.UUID, file.ID)] = true
+			for _, entry := range image.store.Catalog.Entries {
+				if entry.HasPhysicalFile() {
+					want[storage.DataName(frontier.UUID, entry.ID)] = true
 				}
 			}
 			got := make(map[string]bool, len(entries))

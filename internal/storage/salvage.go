@@ -144,7 +144,7 @@ func SalvageData(ctx context.Context, dir string, id uint64, limit int64, visit 
 	}
 	metadata.Reset(side)
 	var source io.ReaderAt = bytes.NewReader(nil)
-	fd, err := OpenRegular(image.Files[id].Path)
+	fd, err := OpenRegular(image.Segments[id].Path)
 	if err == nil {
 		defer func() { result = errors.Join(result, fd.Close()) }()
 		source = fd

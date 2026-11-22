@@ -25,8 +25,8 @@ func parityIOBufferBytes(bytes int64) int {
 // EnsureParitySidecar verifies or creates the sidecar for one pinned immutable DATA
 // file. The caller serializes builders and holds the DATA pin through publication.
 // No store-wide metadata or writer lock is needed during these operations.
-func (s *Store) EnsureParitySidecar(ctx context.Context, uuid [16]byte, source CapturedFile, recheck bool, yield func() error) error {
-	f := source.File
+func (s *Store) EnsureParitySidecar(ctx context.Context, uuid [16]byte, source CapturedSegment, recheck bool, yield func() error) error {
+	f := source.Segment
 	if unavailable := f.UnavailableData(); unavailable != nil {
 		if !recheck {
 			return unavailable
@@ -47,7 +47,7 @@ func (s *Store) EnsureParitySidecar(ctx context.Context, uuid [16]byte, source C
 	switch {
 	case err == nil:
 	case missing || errors.Is(err, format.ErrInvalidParity):
-		if err := s.RetryMaintenance(ctx, []CapturedFile{source}, func() error {
+		if err := s.RetryMaintenance(ctx, []CapturedSegment{source}, func() error {
 			return s.buildParity(ctx, uuid, source, !missing, yield, "parity")
 		}, nil); err != nil {
 			return err
@@ -93,11 +93,11 @@ func (r paritySource) ReadAt(b []byte, off int64) (int, error) {
 	return r.ReaderAt.ReadAt(b, off)
 }
 
-func (s *Store) buildParity(ctx context.Context, uuid [16]byte, source CapturedFile, replace bool, yield func() error, point string) (result error) {
+func (s *Store) buildParity(ctx context.Context, uuid [16]byte, source CapturedSegment, replace bool, yield func() error, point string) (result error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	data, _, _, err := openSelected(source.File.Path, uuid, source.Entry, false)
+	data, _, _, err := openSelected(source.Segment.Path, uuid, source.Entry, false)
 	if err != nil {
 		return selectedReadFailure(source.Entry.ID, &SourceError{Err: err})
 	}
@@ -179,7 +179,7 @@ func (s *Store) buildParity(ctx context.Context, uuid [16]byte, source CapturedF
 		} else {
 			err = platform.RenameNoReplace(temp, path)
 		}
-		source.File.parityNeedsSync = !errors.Is(err, os.ErrExist)
+		source.Segment.parityNeedsSync = !errors.Is(err, os.ErrExist)
 		if err == nil {
 			temp = ""
 		}

@@ -30,7 +30,7 @@ func (s *Store) ReadContiguous(group []ContiguousRead) error {
 	end := first.RecordOffset
 	for i := range group {
 		r := &group[i]
-		if r.File != first.File || r.RecordOffset != end || end < 0 || r.RecordBytes <= 0 ||
+		if r.Segment != first.Segment || r.RecordOffset != end || end < 0 || r.RecordBytes <= 0 ||
 			r.RecordBytes > MaxContiguousReadBytes-(end-first.RecordOffset) || end > math.MaxInt64-r.RecordBytes {
 			return r.readError(ErrCorrupt)
 		}
@@ -44,7 +44,7 @@ func (s *Store) ReadContiguous(group []ContiguousRead) error {
 	b := buf[:end-first.RecordOffset]
 	loc, err, sourceFailure := s.readContiguousValues(group, b)
 	if sourceFailure {
-		if err = s.RepairRead(context.Background(), first.File, err); err != nil {
+		if err = s.RepairRead(context.Background(), first.Segment, err); err != nil {
 			return loc.readError(err)
 		}
 		loc, err, _ = s.readContiguousValues(group, b)
@@ -58,7 +58,7 @@ func (s *Store) ReadContiguous(group []ContiguousRead) error {
 // sourceFailure identifies DATA read or decoding errors eligible for repair.
 func (s *Store) readContiguousValues(group []ContiguousRead, b []byte) (loc Location, err error, sourceFailure bool) {
 	first := group[0].Location
-	h, err := s.readers.acquire(first.File)
+	h, err := s.readers.acquire(first.Segment)
 	if err != nil {
 		return first, err, true
 	}

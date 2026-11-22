@@ -41,7 +41,7 @@ func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 			t.Fatal(err)
 		}
 		entry := db.Catalog.Entries[i]
-		path := db.Files[entry.ID].Path
+		path := db.Segments[entry.ID].Path
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

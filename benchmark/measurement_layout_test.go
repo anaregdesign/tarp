@@ -47,7 +47,7 @@ func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 		Sequence: s.Current.LastUserSequence, CheckpointCutoff: s.Catalog.CheckpointCutoffSequence, PrunedThrough: s.Catalog.PrunedThroughSequence,
 		SelectedDataFiles: 1, SelectedDataBytes: s.Current.ActiveCommittedEndOffset,
 		SelectedMetadataBytes: int64(len(s.Manifest)) + format.FrontierBytes,
-		RetainedDeleteBytes:   s.Files[s.Current.ActiveID].DeleteBytes.Load(),
+		RetainedDeleteBytes:   s.Segments[s.Current.ActiveID].DeleteBytes.Load(),
 	}
 	selected := map[uint64]bool{s.Current.ActiveID: true}
 	for _, e := range s.Catalog.Entries {
@@ -66,15 +66,15 @@ func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 		selected[e.ID] = true
 		layout.SelectedDataFiles++
 		layout.SelectedDataBytes += e.Bytes
-		layout.RetainedDeleteBytes += s.Files[e.ID].DeleteBytes.Load()
+		layout.RetainedDeleteBytes += s.Segments[e.ID].DeleteBytes.Load()
 	}
 	layout.SelectedRecordBytes = layout.SelectedDataBytes - int64(layout.SelectedDataFiles)*format.SegmentHeaderBytes
 	layout.LivePutBytes = liveBytes
 	layout.ObsoletePutBytes = layout.SelectedRecordBytes - layout.LivePutBytes - layout.RetainedDeleteBytes
-	for id, file := range s.Files {
-		size := file.Size.Load()
+	for id, segment := range s.Segments {
+		size := segment.Size.Load()
 		layout.RegisteredDataBytes += size
-		if !selected[id] && file.References() > 0 {
+		if !selected[id] && segment.References() > 0 {
 			layout.UnselectedPinnedBytes += size
 		}
 	}

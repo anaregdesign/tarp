@@ -62,7 +62,7 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 			return ctx.Err()
 		}
 	}
-	err = db.store.RetryMaintenance(ctx, capture.Files, func() error {
+	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error {
 		return storage.BackupWithIndex(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex)
 	}, nil)
 	if err != nil {

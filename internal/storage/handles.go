@@ -11,7 +11,7 @@ import (
 )
 
 type handle struct {
-	file    *DataSegment
+	segment *DataSegment
 	fd      *os.File
 	used    int
 	retired atomic.Bool
@@ -23,7 +23,7 @@ type handle struct {
 // header on the descriptor that supplied the bytes. A read-handle lease can outlive both
 // replacement of the path and clearing the unavailable marker.
 func (h *handle) verifyReadIdentity() error {
-	r := h.file.sealed.Load()
+	r := h.segment.sealed.Load()
 	if r == nil || r.unavailable.Load() == nil && !h.retired.Load() {
 		return nil
 	}
@@ -63,7 +63,7 @@ func (h *handles) acquire(f *DataSegment) (*handle, error) {
 			if err != nil {
 				return nil, err
 			}
-			got := &handle{file: f, fd: fd, used: 1}
+			got := &handle{segment: f, fd: fd, used: 1}
 			got.node = h.lru.PushFront(got)
 			h.items[f] = got
 			return got, nil
@@ -76,7 +76,7 @@ func (h *handles) acquire(f *DataSegment) (*handle, error) {
 			}
 		}
 		if idle != nil {
-			delete(h.items, idle.file)
+			delete(h.items, idle.segment)
 			h.lru.Remove(idle.node)
 			if err := idle.fd.Close(); err != nil {
 				return nil, err

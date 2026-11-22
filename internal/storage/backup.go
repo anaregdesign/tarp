@@ -103,7 +103,7 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 }
 
 func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error, newIndex func() (index.Backend, error)) (returned error) {
-	target, err := destinationPath(filepath.Dir(capture.Files[0].File.Path), destination)
+	target, err := destinationPath(filepath.Dir(capture.Segments[0].Segment.Path), destination)
 	if err != nil {
 		return err
 	}
@@ -161,7 +161,7 @@ func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, 
 			return nil
 		}
 	}
-	for _, captured := range capture.Files {
+	for _, captured := range capture.Segments {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -231,13 +231,13 @@ type backupStream struct {
 	source backupReaderAt
 }
 
-func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, visit recordVisitor, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
-	src, header, _, err := openSelected(captured.File.Path, capture.Current.UUID, captured.Entry, captured.File.ID == capture.Current.ActiveID)
+func copySegment(ctx context.Context, capture *Capture, captured CapturedSegment, visit recordVisitor, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
+	src, header, _, err := openSelected(captured.Segment.Path, capture.Current.UUID, captured.Entry, captured.Segment.ID == capture.Current.ActiveID)
 	if err != nil {
 		return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: err})
 	}
 	defer func() { returned = errors.Join(returned, src.Close()) }()
-	name := DataName(capture.Current.UUID, captured.File.ID)
+	name := DataName(capture.Current.UUID, captured.Segment.ID)
 	dst, err := os.OpenFile(filepath.Join(stage, name), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return entry, err
@@ -271,7 +271,7 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 		if err := span.Accept(r); err != nil {
 			return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)})
 		}
-		if err := visit(captured.File, offset, r, key); err != nil {
+		if err := visit(captured.Segment, offset, r, key); err != nil {
 			return entry, fmt.Errorf("%s: record at offset %d: %w", name, offset, err)
 		}
 		offset += r.EncodedRecordBytes()
@@ -279,7 +279,7 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 	if err := span.Finish(); err != nil {
 		return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: fmt.Errorf("%s: %w", name, err)})
 	}
-	if captured.File.ID != capture.Current.ActiveID {
+	if captured.Segment.ID != capture.Current.ActiveID {
 		if err := checkSealedDigest(h, captured.Entry); err != nil {
 			return entry, selectedReadFailure(captured.Entry.ID, err)
 		}
@@ -500,10 +500,10 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 	if image.Current.UUID != meta.UUID || image.Current.LastUserSequence != meta.LastUserSequence || image.Catalog.CheckpointCutoffSequence != meta.CheckpointCutoffSequence {
 		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: identity, sequence or cutoff differs from the selected image", ErrCorrupt)
 	}
-	if image.Files[image.Current.ActiveID].Size.Load() != image.Current.ActiveCommittedEndOffset {
+	if image.Segments[image.Current.ActiveID].Size.Load() != image.Current.ActiveCommittedEndOffset {
 		return verifiedBackup{}, fmt.Errorf("%s: %w: length differs from committed end", DataName(meta.UUID, image.Current.ActiveID), ErrCorrupt)
 	}
-	if len(files) != len(image.Files)+2 {
+	if len(files) != len(image.Segments)+2 {
 		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: number of files differs from selected image", ErrCorrupt)
 	}
 	if _, ok := files["CURRENT"]; !ok {
@@ -513,7 +513,7 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 	if _, ok := files[name]; !ok {
 		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %s entry", ErrCorrupt, name)
 	}
-	for id := range image.Files {
+	for id := range image.Segments {
 		name := DataName(meta.UUID, id)
 		if _, ok := files[name]; !ok {
 			return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %s entry", ErrCorrupt, name)

@@ -126,7 +126,7 @@ type IndexCheckpointBuild struct {
 	filePublished bool
 }
 
-func (b *IndexCheckpointBuild) Sources() []CapturedFile { return b.capture.Files }
+func (b *IndexCheckpointBuild) Sources() []CapturedSegment { return b.capture.Segments }
 
 func (s *Store) BeginIndexCheckpoint() (*IndexCheckpointBuild, error) {
 	if s.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
@@ -175,10 +175,10 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 	c := b.capture
 	image := Image{
 		Current: c.Current, Catalog: c.Catalog,
-		Files: make(map[uint64]*DataSegment, len(c.Files)), liveCapture: true,
+		Segments: make(map[uint64]*DataSegment, len(c.Segments)), liveCapture: true,
 	}
-	for _, f := range c.Files {
-		image.Files[f.File.ID] = &DataSegment{ID: f.File.ID, Kind: f.File.Kind, Path: f.File.Path}
+	for _, f := range c.Segments {
+		image.Segments[f.Segment.ID] = &DataSegment{ID: f.Segment.ID, Kind: f.Segment.Kind, Path: f.Segment.Path}
 	}
 	if err := b.store.IO.Check("index.scan:before"); err != nil {
 		return err
@@ -214,7 +214,7 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 	for _, entry := range c.Catalog.Entries {
 		var count int64
 		if entry.HasPhysicalFile() {
-			count = image.Files[entry.ID].DeleteBytes.Load()
+			count = image.Segments[entry.ID].DeleteBytes.Load()
 		}
 		binary.LittleEndian.PutUint64(raw[:], uint64(count))
 		if _, err := out.Write(raw[:]); err != nil {

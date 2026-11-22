@@ -50,7 +50,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 		t.Fatalf("replayed %d, limits %+v, err=%v", image.LiveKeys, image.LiveRecordSizes, err)
 	}
 	var live int64
-	for _, f := range image.Files {
+	for _, f := range image.Segments {
 		live += f.LiveKeys.Load()
 	}
 	if live != int64(len(puts)) {
@@ -123,7 +123,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	indexPath := filepath.Join(dir, IndexName(s.Current.UUID, s.Catalog.Index.ID))
-	coveredPath := s.Files[s.Catalog.Entries[0].ID].Path
+	coveredPath := s.Segments[s.Catalog.Entries[0].ID].Path
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +172,8 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 				t.Fatalf("%s: checkpoint (%+v, %t, %v), oracle (%+v, %t, %v)", key, got, found, err, addr, live, oracleErr)
 			}
 		}
-		for id, f := range db.Files {
-			expect := want.Files[id]
+		for id, f := range db.Segments {
+			expect := want.Segments[id]
 			if f.LiveBytes.Load() != expect.LiveBytes.Load() || f.LiveKeys.Load() != expect.LiveKeys.Load() || f.DeleteBytes.Load() != expect.DeleteBytes.Load() {
 				t.Fatalf("file %d: checkpoint live keys/bytes/deletes %d/%d/%d, full replay %d/%d/%d", id, f.LiveKeys.Load(), f.LiveBytes.Load(), f.DeleteBytes.Load(), expect.LiveKeys.Load(), expect.LiveBytes.Load(), expect.DeleteBytes.Load())
 			}
@@ -308,7 +308,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, found, err := keys.Lookup("ours")
-		if db.IndexCheckpointValidated || !found || err != nil || keys.Count() != 1 || db.Files[got.FileID].LiveKeys.Load() != 1 {
+		if db.IndexCheckpointValidated || !found || err != nil || keys.Count() != 1 || db.Segments[got.FileID].LiveKeys.Load() != 1 {
 			t.Fatalf("retry recovered checkpoint=%t, key=%+v, live=%d, err=%v", db.IndexCheckpointValidated, got, keys.Count(), err)
 		}
 		if err := errors.Join(keys.Close(), db.Close()); err != nil {
@@ -349,7 +349,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []uint64{image.Current.ActiveID, image.Catalog.Entries[0].ID} {
-		path := image.Files[id].Path
+		path := image.Segments[id].Path
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

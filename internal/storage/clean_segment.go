@@ -19,7 +19,7 @@ import (
 // SegmentCleaning pins DATA segments represented by consecutive catalog entries. Its
 // private output is unreachable until InstallCleaned publishes the replacement.
 type SegmentCleaning struct {
-	sources  []CapturedFile
+	sources  []CapturedSegment
 	entries  []format.CatalogEntry
 	position int
 	output   *DataSegment
@@ -33,7 +33,7 @@ type SegmentCleaning struct {
 // An empty cleaned interval has zero bytes.
 func (c *SegmentCleaning) OutputBytes() int64 { return c.output.Size.Load() }
 
-func (c *SegmentCleaning) Sources() []CapturedFile { return c.sources }
+func (c *SegmentCleaning) Sources() []CapturedSegment { return c.sources }
 
 // ResetCopy prepares the same pinned input and reserved output ID for another
 // attempt. Nothing has been installed or relocated at this point.
@@ -75,11 +75,11 @@ func (s *Store) BeginClean(entries []format.CatalogEntry) (*SegmentCleaning, err
 		if !entry.HasPhysicalFile() {
 			continue // Metadata-only coverage, carried forward by the merged interval.
 		}
-		f := s.Files[entry.ID]
+		f := s.Segments[entry.ID]
 		if f == nil || f.Kind != entry.Kind || entry.ID == s.Current.ActiveID {
 			return nil, fmt.Errorf("%w: cleaner source registry", ErrCorrupt)
 		}
-		c.sources = append(c.sources, CapturedFile{File: f, Entry: entry})
+		c.sources = append(c.sources, CapturedSegment{Segment: f, Entry: entry})
 	}
 	id, err := s.allocateID()
 	if err != nil {
@@ -87,14 +87,14 @@ func (s *Store) BeginClean(entries []format.CatalogEntry) (*SegmentCleaning, err
 	}
 	c.output = &DataSegment{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}
 	for _, source := range c.sources {
-		source.File.Pin()
+		source.Segment.Pin()
 	}
 	return c, nil
 }
 
 func (c *SegmentCleaning) Release() {
 	for _, source := range c.sources {
-		source.File.Unpin()
+		source.Segment.Unpin()
 	}
 }
 
@@ -137,12 +137,12 @@ func (c *SegmentCleaning) Copy(ctx context.Context, fs *IO, moves *Relocations, 
 	defer replay.abort()
 	choose := func(r format.RecordHeader, key string, old Location) (io.Writer, error) {
 		if c.output.Kind == format.SnapshotKind {
-			if err := replay.apply(old.File, old.RecordOffset, r, key); err != nil {
+			if err := replay.apply(old.Segment, old.RecordOffset, r, key); err != nil {
 				// A damaged key can look like a duplicate before the
 				// streaming decoder reaches the record's payload CRC.
 				var input *SourceError
 				if errors.As(err, &input) {
-					err = selectedReadFailure(old.File.ID, err)
+					err = selectedReadFailure(old.Segment.ID, err)
 				}
 				return nil, err
 			}
@@ -170,7 +170,7 @@ func (c *SegmentCleaning) Copy(ctx context.Context, fs *IO, moves *Relocations, 
 		}
 		if r.Kind == format.Put {
 			next := old
-			next.File, next.RecordOffset = c.output, writer.offset
+			next.Segment, next.RecordOffset = c.output, writer.offset
 			if err := moves.append(key, old, next); err != nil {
 				return nil, err
 			}
@@ -198,11 +198,11 @@ func (c *SegmentCleaning) Copy(ctx context.Context, fs *IO, moves *Relocations, 
 
 // Validate each file with its own original kind and sequence interval before
 // moving to the next input. Only one source descriptor is open at a time.
-func (c *SegmentCleaning) scanSource(ctx context.Context, fs *IO, source CapturedFile, buf []byte, yield func() error, choose func(format.RecordHeader, string, Location) (io.Writer, error)) (result error) {
+func (c *SegmentCleaning) scanSource(ctx context.Context, fs *IO, source CapturedSegment, buf []byte, yield func() error, choose func(format.RecordHeader, string, Location) (io.Writer, error)) (result error) {
 	if err := yield(); err != nil {
 		return err
 	}
-	fd, header, _, err := openSelected(source.File.Path, c.uuid, source.Entry, false)
+	fd, header, _, err := openSelected(source.Segment.Path, c.uuid, source.Entry, false)
 	if err != nil {
 		return selectedReadFailure(source.Entry.ID, &SourceError{Err: err})
 	}
@@ -226,7 +226,7 @@ func (c *SegmentCleaning) scanSource(ctx context.Context, fs *IO, source Capture
 				if err := span.Accept(r); err != nil {
 					return nil, selectedReadFailure(source.Entry.ID, err)
 				}
-				old := Location{File: source.File, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+				old := Location{Segment: source.Segment, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 				var w io.Writer
 				w, callbackErr = choose(r, key, old)
 				return w, callbackErr
@@ -261,7 +261,7 @@ func (s *Store) ProtectCleaned(ctx context.Context, c *SegmentCleaning, yield fu
 	if !c.created {
 		return nil
 	}
-	src := CapturedFile{File: c.output, Entry: c.replacement()}
+	src := CapturedSegment{Segment: c.output, Entry: c.replacement()}
 	if err := s.buildParity(ctx, c.uuid, src, false, yield, "clean.parity"); err != nil {
 		return err
 	}
@@ -296,7 +296,7 @@ func (s *Store) InstallCleaned(c *SegmentCleaning, offGate func(func() error) er
 		return fmt.Errorf("%w: cleaner source selection changed", ErrCorrupt)
 	}
 	for _, source := range c.sources {
-		if s.Files[source.Entry.ID] != source.File || source.Entry.ID == s.Current.ActiveID {
+		if s.Segments[source.Entry.ID] != source.Segment || source.Entry.ID == s.Current.ActiveID {
 			return fmt.Errorf("%w: cleaner source registry changed", ErrCorrupt)
 		}
 	}
@@ -325,10 +325,10 @@ func (s *Store) InstallCleaned(c *SegmentCleaning, offGate func(func() error) er
 	}
 	if c.created {
 		c.output.markSealed(catalog.UUID, replacement)
-		s.Files[c.output.ID] = c.output
+		s.Segments[c.output.ID] = c.output
 	}
 	for _, source := range c.sources {
-		s.retireData(source.File)
+		s.retireData(source.Segment)
 	}
 	return nil
 }

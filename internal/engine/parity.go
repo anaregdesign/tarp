@@ -202,11 +202,11 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 				db.writer.Unlock()
 				break
 			}
-			f := db.store.Files[entry.ID]
+			f := db.store.Segments[entry.ID]
 			f.Pin()
 			db.writer.Unlock()
 
-			err := db.store.EnsureParitySidecar(ctx, uuid, storage.CapturedFile{File: f, Entry: entry}, recheck, yield)
+			err := db.store.EnsureParitySidecar(ctx, uuid, storage.CapturedSegment{Segment: f, Entry: entry}, recheck, yield)
 			f.Unpin()
 			if db.cleaner.pinned.Load() {
 				db.notifyCleaner()

@@ -18,9 +18,9 @@ func TestRelocationsStreamCheckedAddressesAcrossBufferBoundaries(t *testing.T) {
 	key := strings.Repeat("\x00key\xff", 10_000)
 	in := &DataSegment{ID: 4}
 	out := &DataSegment{ID: 12}
-	old := Location{File: in, RecordOffset: 100, ValueBytes: 2, Sequence: 23, RecordBytes: format.RecordHeaderBytes + int64(len(key)) + 2}
+	old := Location{Segment: in, RecordOffset: 100, ValueBytes: 2, Sequence: 23, RecordBytes: format.RecordHeaderBytes + int64(len(key)) + 2}
 	next := old
-	next.File = out
+	next.Segment = out
 	next.RecordOffset = 200
 	for range 3 {
 		if err := moves.append(key, old, next); err != nil {
@@ -69,9 +69,9 @@ func TestRelocationsBatchLimitsOnReplay(t *testing.T) {
 	src, dst := &DataSegment{ID: 1}, &DataSegment{ID: 2}
 	appendKey := func(key string) {
 		t.Helper()
-		old := Location{File: src, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + int64(len(key))}
+		old := Location{Segment: src, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + int64(len(key))}
 		next := old
-		next.File = dst
+		next.Segment = dst
 		if err := moves.append(key, old, next); err != nil {
 			t.Fatal(err)
 		}
@@ -114,9 +114,9 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 			t.Setenv("TMPDIR", filepath.Join(store.Dir, "missing-temp"))
 			moves := store.NewRelocations()
 			defer moves.Close()
-			base := Location{File: &DataSegment{ID: 1}, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + int64(tc.keyBytes)}
+			base := Location{Segment: &DataSegment{ID: 1}, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + int64(tc.keyBytes)}
 			next := base
-			next.File = &DataSegment{ID: 2}
+			next.Segment = &DataSegment{ID: 2}
 			key := strings.Repeat("k", tc.keyBytes)
 			for i := range tc.count {
 				base.Sequence, next.Sequence = uint64(i+1), uint64(i+1)
@@ -146,7 +146,7 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 				}
 				for _, move := range batch {
 					seen++
-					if move.Key != key || move.Old.File != base.File || move.Next.File != next.File || move.Old.Sequence != uint64(seen) || move.Next.Sequence != uint64(seen) {
+					if move.Key != key || move.Old.Segment != base.Segment || move.Next.Segment != next.Segment || move.Old.Sequence != uint64(seen) || move.Next.Sequence != uint64(seen) {
 						t.Fatalf("move %d: %+v", seen, move)
 					}
 				}
@@ -167,9 +167,9 @@ func TestRelocationSpillCanRetryAfterWorkspaceFailure(t *testing.T) {
 	}
 	moves := store.NewRelocations()
 	defer moves.Close()
-	old := Location{File: &DataSegment{ID: 1}, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + 1}
+	old := Location{Segment: &DataSegment{ID: 1}, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + 1}
 	next := old
-	next.File = &DataSegment{ID: 2}
+	next.Segment = &DataSegment{ID: 2}
 	for range RelocationBatchCount {
 		if err := moves.append("k", old, next); err != nil {
 			t.Fatal(err)

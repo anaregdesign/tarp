@@ -59,8 +59,8 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	}
 	var pinnedSegments map[uint64]*storage.DataSegment
 	if values {
-		pinnedSegments = make(map[uint64]*storage.DataSegment, len(db.files))
-		for id, f := range db.files {
+		pinnedSegments = make(map[uint64]*storage.DataSegment, len(db.segments))
+		for id, f := range db.segments {
 			f.Pin()
 			pinnedSegments[id] = f
 		}
@@ -156,9 +156,9 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	return nil
 }
 
-func (db *DB) releaseScanPin(file *storage.DataSegment) {
-	file.Unpin()
-	if file.References() == 0 {
+func (db *DB) releaseScanPin(segment *storage.DataSegment) {
+	segment.Unpin()
+	if segment.References() == 0 {
 		db.notifyCleaner()
 	}
 }

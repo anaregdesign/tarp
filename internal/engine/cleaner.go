@@ -140,7 +140,7 @@ func selectCleaningInputs(s *storage.Store, target int64) (inputs []format.Catal
 		if !entry.HasPhysicalFile() {
 			continue
 		}
-		f := s.Files[entry.ID]
+		f := s.Segments[entry.ID]
 		if err := f.UnavailableData(); err != nil {
 			if blocked == nil {
 				blocked = make(map[uint64]*storage.UnavailableDataError)
@@ -192,18 +192,18 @@ func replacementBytes(records uint64) uint64 {
 // of DATA scanned off the gate: at most eight entries, each at most one target.
 // Sealed live bytes only decrease as writers advance. Include every tombstone
 // and keep the resulting DATA file within one target even at its estimate.
-func groupedLogCleaningAt(s *storage.Store, files []format.CatalogEntry, target, metadata uint64) (group []format.CatalogEntry, staging uint64) {
+func groupedLogCleaningAt(s *storage.Store, entries []format.CatalogEntry, target, metadata uint64) (group []format.CatalogEntry, staging uint64) {
 	const maxEntries = 8
 	var source, retained uint64
 	var count int
-	for i, entry := range files[:min(len(files), maxEntries)] {
+	for i, entry := range entries[:min(len(entries), maxEntries)] {
 		if entry.Kind == format.SnapshotKind || uint64(entry.Bytes) > target {
 			break
 		}
 		if !entry.HasPhysicalFile() {
 			continue // Preserve intermediate metadata-only sequence coverage.
 		}
-		f := s.Files[entry.ID]
+		f := s.Segments[entry.ID]
 		if f.UnavailableData() != nil {
 			break
 		}
@@ -217,7 +217,7 @@ func groupedLogCleaningAt(s *storage.Store, files []format.CatalogEntry, target,
 		retained += records
 		output := replacementBytes(retained)
 		if count >= 2 && output <= source/2 && metadata <= source/2-output {
-			group, staging = files[:i+1], output+metadata
+			group, staging = entries[:i+1], output+metadata
 		}
 	}
 	return group, staging
@@ -227,17 +227,17 @@ func groupedLogCleaningAt(s *storage.Store, files []format.CatalogEntry, target,
 // catalog entries, even when all records are live. Empty log intervals add
 // sequence coverage without a physical file. Each group contains only snapshot
 // segments or only log segments.
-func smallSegmentRepackGroup(files []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
+func smallSegmentRepackGroup(entries []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
 	const minFiles, maxFiles = 4, 8
-	for start, first := range files {
+	for start, first := range entries {
 		if !first.HasPhysicalFile() || first.Bytes > target/4 {
 			continue
 		}
 		var group []format.CatalogEntry
 		var total, largest, groupBytes int64
 		count := 0
-		for i := start; i < len(files) && count < maxFiles; i++ {
-			entry := files[i]
+		for i := start; i < len(entries) && count < maxFiles; i++ {
+			entry := entries[i]
 			if (entry.Kind == format.SnapshotKind) != (first.Kind == format.SnapshotKind) {
 				break
 			}
@@ -252,7 +252,7 @@ func smallSegmentRepackGroup(files []format.CatalogEntry, target int64, blocked 
 			largest = max(largest, entry.Bytes)
 			// Avoid copying a previously packed file for a few small additions.
 			if count >= minFiles && largest <= total-largest {
-				group, groupBytes = files[start:i+1], total
+				group, groupBytes = entries[start:i+1], total
 			}
 		}
 		if len(group) != 0 {
@@ -370,7 +370,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 	if err == nil {
 		inputs, staging, blocked = selectCleaningInputs(db.store, db.opts.TargetSegmentBytes)
 	}
-	files, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)
+	entries, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)
 	db.writer.Unlock()
 	w.mu.Lock()
 	w.status.PinnedRetiredDataBytes = pinned
@@ -389,7 +389,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		// Foreground rotations publish a new catalog slice. Inspect this one
 		// outside the writer gate; BeginClean rechecks the selection.
 		var inputBytes int64
-		inputs, inputBytes = smallSegmentRepackGroup(files, db.opts.TargetSegmentBytes, blocked)
+		inputs, inputBytes = smallSegmentRepackGroup(entries, db.opts.TargetSegmentBytes, blocked)
 		staging = uint64(inputBytes) + uint64(manifestBytes) + format.FrontierBytes
 	}
 	if len(blocked) != 0 && w.recoverPending.Load() && (!w.cleanBeforeRecovery || len(inputs) == 0) {
@@ -429,7 +429,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		if pinned != 0 {
 			db.deferCleaning("pinned", nil)
 		} else if len(blocked) != 0 {
-			for _, entry := range files {
+			for _, entry := range entries {
 				if unavailable := blocked[entry.ID]; unavailable != nil {
 					db.deferCleaning("unavailable DATA", publicCause(unavailable))
 					break

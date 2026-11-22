@@ -42,7 +42,7 @@ type DB struct {
 	// indexGate coordinates point/batch lookup and DATA segment pin acquisition with publication.
 	// Neither DATA reads nor caller callbacks run under this lock.
 	indexGate sync.RWMutex
-	files     map[uint64]*storage.DataSegment
+	segments  map[uint64]*storage.DataSegment
 	revision  uint64 // protected by state
 	cache     *cache.Cache
 	failed    atomic.Pointer[failure]
@@ -118,13 +118,13 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	if err != nil {
 		return nil, operationError("open", "recovery", err)
 	}
-	db := &DB{opts: opts, store: s, keys: keys, files: make(map[uint64]*storage.DataSegment), cache: cache.New(opts.ValueCacheBudgetBytes), closed: make(chan struct{}), hooks: hooks}
+	db := &DB{opts: opts, store: s, keys: keys, segments: make(map[uint64]*storage.DataSegment), cache: cache.New(opts.ValueCacheBudgetBytes), closed: make(chan struct{}), hooks: hooks}
 	db.resident, _ = keys.(index.ResidentLookup)
 	db.batchReadSlots = make(chan struct{}, opts.BatchGetReadConcurrency)
 	db.cond = sync.NewCond(&db.life)
-	for id, f := range s.Files {
+	for id, f := range s.Segments {
 		if live := f.LiveBytes.Load(); live != 0 {
-			db.files[id] = f
+			db.segments[id] = f
 			db.stats.LiveRecordBytes += uint64(live)
 		}
 	}
@@ -220,14 +220,14 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		if db.resident != nil {
 			addr, ok := db.resident.LookupResident(key)
 			if ok {
-				file := db.files[addr.FileID]
-				if file == nil {
+				segment := db.segments[addr.FileID]
+				if segment == nil {
 					err := missingIndexFile(addr.FileID)
 					db.poison(err)
 					db.state.Unlock()
 					return nil, operationError("get", "index", err)
 				}
-				loc = storage.At(file, addr)
+				loc = storage.At(segment, addr)
 			}
 			found = ok
 		} else {
@@ -251,7 +251,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		}
 		revision := db.revision
 		if found {
-			loc.File.Pin()
+			loc.Segment.Pin()
 		}
 		db.state.Unlock()
 		if !found {
@@ -259,7 +259,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		}
 		k := string(key)
 		value, err := db.store.Read(loc, k)
-		loc.File.Unpin()
+		loc.Segment.Unpin()
 		if db.cleaner.pinned.Load() {
 			db.notifyCleaner()
 		}
@@ -455,23 +455,23 @@ func (db *DB) copyPutValue(kind uint8, entry *ownedMutation, value []byte) {
 // applyMutation requires the state lock and reports obsolete data in a sealed file.
 func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc, old storage.Location) bool {
 	invalidatedSealed := false
-	if old.File != nil {
-		invalidatedSealed = old.File != loc.File
-		old.File.LiveBytes.Add(-old.RecordBytes)
+	if old.Segment != nil {
+		invalidatedSealed = old.Segment != loc.Segment
+		old.Segment.LiveBytes.Add(-old.RecordBytes)
 		db.stats.LiveRecordBytes -= uint64(old.RecordBytes)
-		db.dropLocation(old.File)
+		db.dropLocation(old.Segment)
 	}
 	if kind == format.Delete {
-		loc.File.DeleteBytes.Add(loc.RecordBytes)
+		loc.Segment.DeleteBytes.Add(loc.RecordBytes)
 		db.stats.TombstoneBytes += uint64(loc.RecordBytes)
 		db.stats.LiveKeys--
 		db.cache.Delete(entry.key)
 	} else {
-		if old.File == nil {
+		if old.Segment == nil {
 			db.stats.LiveKeys++
 		}
-		db.addLocation(loc.File)
-		loc.File.LiveBytes.Add(loc.RecordBytes)
+		db.addLocation(loc.Segment)
+		loc.Segment.LiveBytes.Add(loc.RecordBytes)
 		db.stats.LiveRecordBytes += uint64(loc.RecordBytes)
 		if loc.ValueBytes > db.maxSeenValueBytes {
 			db.maxSeenValueBytes = loc.ValueBytes
@@ -518,17 +518,17 @@ func (db *DB) Close() error {
 	var unavailable []error
 	for _, entry := range db.store.Catalog.Entries {
 		if entry.HasPhysicalFile() {
-			if err := db.store.Files[entry.ID].UnavailableData(); err != nil {
+			if err := db.store.Segments[entry.ID].UnavailableData(); err != nil {
 				unavailable = append(unavailable, err)
 			}
 		}
 	}
-	for _, file := range db.files {
-		file.LiveKeys.Store(0)
+	for _, segment := range db.segments {
+		segment.LiveKeys.Store(0)
 	}
 	db.state.Lock()
 	db.readStatsLocked(&db.stats)
-	db.files, db.cache = nil, nil
+	db.segments, db.cache = nil, nil
 	db.state.Unlock()
 	err := publicCause(errors.Join(checkpointErr, parityErr, errors.Join(unavailable...), db.keys.Close(), db.store.Close()))
 	if f := db.failed.Load(); f != nil {

@@ -14,13 +14,13 @@ const maxContiguousRecords = 32
 // A duplicate result slot or a gap in the byte offsets ends the range.
 func contiguousRecordCount(reads []batchRead) int {
 	first := reads[0].loc
-	if first.File == nil || first.RecordBytes <= 0 || first.RecordBytes >= storage.MaxContiguousReadBytes || first.RecordOffset < 0 {
+	if first.Segment == nil || first.RecordBytes <= 0 || first.RecordBytes >= storage.MaxContiguousReadBytes || first.RecordOffset < 0 {
 		return 1
 	}
 	total := first.RecordBytes
 	for i := 1; i < min(len(reads), maxContiguousRecords); i++ {
 		next := reads[i].loc
-		if next.File != first.File || first.RecordOffset > math.MaxInt64-total || next.RecordOffset != first.RecordOffset+total ||
+		if next.Segment != first.Segment || first.RecordOffset > math.MaxInt64-total || next.RecordOffset != first.RecordOffset+total ||
 			next.RecordBytes <= 0 || next.RecordBytes > storage.MaxContiguousReadBytes-total {
 			return i
 		}
@@ -36,7 +36,7 @@ func (db *DB) readGroupedBatch(keys [][]byte, results []BatchResult, reads []bat
 	// Workers borrow expected keys through private output slots just as they do
 	// for individual reads. The caller's slice of key headers stays on its stack.
 	for _, r := range reads {
-		if r.loc.File != nil {
+		if r.loc.Segment != nil {
 			results[r.slot].Value = keys[r.slot]
 		}
 	}
@@ -51,7 +51,7 @@ func (db *DB) readGroupedBatch(keys [][]byte, results []BatchResult, reads []bat
 	var local [maxContiguousRecords]job
 	jobs := append(local[:0], job{0, uint16(firstWidth)})
 	for i := firstWidth; i < len(reads); {
-		if reads[i].loc.File == nil {
+		if reads[i].loc.Segment == nil {
 			i++
 			continue
 		}

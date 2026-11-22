@@ -76,8 +76,8 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 		}
 		source = s.Catalog.Entries[0]
 		if source.ID == 0 || source.Kind != format.RawLogKind ||
-			s.Files[source.ID].LiveBytes.Load() != opts.MaxRecordBytes ||
-			s.Files[source.ID].DeleteBytes.Load() != int64(format.RecordHeaderBytes+len(keys[1])) {
+			s.Segments[source.ID].LiveBytes.Load() != opts.MaxRecordBytes ||
+			s.Segments[source.ID].DeleteBytes.Load() != int64(format.RecordHeaderBytes+len(keys[1])) {
 			t.Fatal("fixture must contain a sealed log with a surviving Put and a tombstone")
 		}
 	})
@@ -219,18 +219,18 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 	probe.Store(func(s *storage.Store) {
 		result.Sequence = current.LastUserSequence
 		result.Cutoff, result.PrunedThrough = s.Catalog.CheckpointCutoffSequence, s.Catalog.PrunedThroughSequence
-		for _, file := range s.Catalog.Entries {
-			switch file.Kind {
+		for _, entry := range s.Catalog.Entries {
+			switch entry.Kind {
 			case format.CleanedLogKind:
 				result.CleanedIntervals++
-				if file.ID == 0 || file.FirstSequence != f.source.FirstSequence || file.LastSequence != f.source.LastSequence {
+				if entry.ID == 0 || entry.FirstSequence != f.source.FirstSequence || entry.LastSequence != f.source.LastSequence {
 					t.Fatal("incremental replacement lost the retained records or their original interval")
 				}
 			case format.SnapshotKind:
 				result.SnapshotFiles++
 			}
-			if file.ID != 0 {
-				selected[file.ID] = file.Bytes
+			if entry.ID != 0 {
+				selected[entry.ID] = entry.Bytes
 			}
 		}
 	})
@@ -247,16 +247,16 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 			t.Fatalf("unexpected checkpoint layout: %+v", result)
 		}
 	}
-	for _, file := range original {
-		if _, kept := selected[file.ID]; kept {
-			delete(selected, file.ID)
+	for _, entry := range original {
+		if _, kept := selected[entry.ID]; kept {
+			delete(selected, entry.ID)
 			continue
 		}
-		name := filepath.Join(dir, storage.DataName(current.UUID, file.ID))
+		name := filepath.Join(dir, storage.DataName(current.UUID, entry.ID))
 		if _, err := os.Lstat(name); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("retired DATA file %s still present or unreadable: %v", name, err)
 		}
-		result.UnlinkedDataBytes += file.Bytes
+		result.UnlinkedDataBytes += entry.Bytes
 	}
 	for _, length := range selected {
 		result.PublishedDataBytes += length

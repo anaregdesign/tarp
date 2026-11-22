@@ -23,7 +23,7 @@ func (c *DataCheckpoint) CopyRecovered(ctx context.Context, history index.Backen
 	defer r.history.abort()
 	err := c.writeSnapshot(ctx, moves, reserve, func(emit func(string, Location) (io.Writer, error)) error {
 		r.emit = emit
-		for _, src := range c.capture.Files {
+		for _, src := range c.capture.Segments {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -87,10 +87,10 @@ type checkpointRecovery struct {
 	possibleDelete uint64 // latest sequence of an unreadable potential tombstone
 }
 
-func (r *checkpointRecovery) file(src CapturedFile) (result error) {
+func (r *checkpointRecovery) file(src CapturedSegment) (result error) {
 	c := r.c
 	open := func() (*os.File, error) {
-		fd, _, _, err := openSelected(src.File.Path, c.capture.Current.UUID, src.Entry, src.Entry.ID == c.capture.Current.ActiveID)
+		fd, _, _, err := openSelected(src.Segment.Path, c.capture.Current.UUID, src.Entry, src.Entry.ID == c.capture.Current.ActiveID)
 		if err != nil {
 			return nil, err
 		}
@@ -105,9 +105,9 @@ func (r *checkpointRecovery) file(src CapturedFile) (result error) {
 	if err != nil && src.Entry.DataFileDigest != ([32]byte{}) {
 		// Additional damaged files may have been beyond the first failure
 		// of the strict pass. Try complete repair independently for each.
-		err = c.store.RepairRead(r.ctx, src.File, err)
+		err = c.store.RepairRead(r.ctx, src.Segment, err)
 		if IsDataUnavailable(err) && !errors.Is(err, syscall.ENOSPC) && !errors.Is(err, syscall.EDQUOT) {
-			repair := src.File.sealed.Load()
+			repair := src.Segment.sealed.Load()
 			repairGeneration := repair.repairGeneration.Load()
 			stage, stageErr := c.stageBlocks(r.ctx, src)
 			if stage != nil {
@@ -146,7 +146,7 @@ func (r *checkpointRecovery) file(src CapturedFile) (result error) {
 		if err != nil || !ok {
 			return err
 		}
-		if err := r.copyRecord(fd, key, At(src.File, a)); err != nil {
+		if err := r.copyRecord(fd, key, At(src.Segment, a)); err != nil {
 			return err
 		}
 		r.keys++
@@ -157,16 +157,16 @@ func (r *checkpointRecovery) file(src CapturedFile) (result error) {
 
 // observe checks every readable event, including historical Deletes. An
 // independently verified later event must never be replaced by an older Put.
-func (r *checkpointRecovery) observe(src CapturedFile, off int64, rec format.RecordHeader, key string) (index.Address, bool, error) {
+func (r *checkpointRecovery) observe(src CapturedSegment, off int64, rec format.RecordHeader, key string) (index.Address, bool, error) {
 	a, ok, err := r.live.Lookup(key)
 	if err != nil {
 		return a, false, &IndexWorkError{Err: err}
 	}
-	want := Location{File: src.File, RecordOffset: off, RecordBytes: rec.EncodedRecordBytes(), ValueBytes: rec.ValueBytes, Sequence: rec.Sequence}
+	want := Location{Segment: src.Segment, RecordOffset: off, RecordBytes: rec.EncodedRecordBytes(), ValueBytes: rec.ValueBytes, Sequence: rec.Sequence}
 	if ok && (a.Sequence < rec.Sequence || a.Sequence == rec.Sequence && (a != want.Address() || rec.Kind != format.Put)) {
 		return a, false, fmt.Errorf("%w: index superseded by captured DATA", ErrCorrupt)
 	}
-	return a, ok && a == want.Address(), r.history.apply(src.File, off, rec, key)
+	return a, ok && a == want.Address(), r.history.apply(src.Segment, off, rec, key)
 }
 
 func (r *checkpointRecovery) copyRecord(rd io.ReaderAt, key string, loc Location) error {
@@ -181,7 +181,7 @@ func (r *checkpointRecovery) copyRecord(rd io.ReaderAt, key string, loc Location
 	return err
 }
 
-func (r *checkpointRecovery) scanDamaged(src CapturedFile, b *recoveredBlocks) error {
+func (r *checkpointRecovery) scanDamaged(src CapturedSegment, b *recoveredBlocks) error {
 	span := format.NewRecordSequenceValidator(src.Entry, r.c.capture.Catalog.CheckpointCutoffSequence)
 	afterGap := false
 	for off := int64(format.SegmentHeaderBytes); off < b.end; {
@@ -232,7 +232,7 @@ func (r *checkpointRecovery) scanDamaged(src CapturedFile, b *recoveredBlocks) e
 				return err
 			}
 			if current {
-				if err := r.copyRecord(b, key, At(src.File, a)); err != nil {
+				if err := r.copyRecord(b, key, At(src.Segment, a)); err != nil {
 					return err
 				}
 				r.keys++
@@ -290,7 +290,7 @@ func (r *checkpointRecovery) scanDamaged(src CapturedFile, b *recoveredBlocks) e
 	return nil
 }
 
-func (r *checkpointRecovery) copyDamaged(src CapturedFile, b *recoveredBlocks) error {
+func (r *checkpointRecovery) copyDamaged(src CapturedSegment, b *recoveredBlocks) error {
 	var callbackErr error
 	err := r.live.All(func(key string, a index.Address) bool {
 		if callbackErr = r.ctx.Err(); callbackErr != nil {
@@ -311,7 +311,7 @@ func (r *checkpointRecovery) copyDamaged(src CapturedFile, b *recoveredBlocks) e
 		if !marked {
 			return true
 		}
-		callbackErr = r.recoverRecord(b, key, At(src.File, a))
+		callbackErr = r.recoverRecord(b, key, At(src.Segment, a))
 		r.keys++
 		r.bytes += a.RecordBytes
 		return callbackErr == nil

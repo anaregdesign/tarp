@@ -68,7 +68,7 @@ func (r recoveryParityReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (c *DataCheckpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *recoveredBlocks, result error) {
+func (c *DataCheckpoint) stageBlocks(ctx context.Context, src CapturedSegment) (_ *recoveredBlocks, result error) {
 	e := src.Entry
 	unavailable := func(err error) error {
 		if rootErr := c.store.checkRepairRoot(c.capture.Current.UUID); rootErr != nil {
@@ -85,7 +85,7 @@ func (c *DataCheckpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *
 	}
 	defer func() { result = errors.Join(result, side.Close()) }()
 	var original io.ReaderAt = bytes.NewReader(nil)
-	fd, err := OpenRegular(src.File.Path)
+	fd, err := OpenRegular(src.Segment.Path)
 	if err == nil {
 		defer func() { result = errors.Join(result, fd.Close()) }()
 		original = fd

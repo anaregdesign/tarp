@@ -40,7 +40,7 @@ func openedRepairFixture(t *testing.T) (repairFixture, *Store, *DataSegment) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := s.Files[s.Catalog.Entries[0].ID]
+	f := s.Segments[s.Catalog.Entries[0].ID]
 	f.Pin()
 	t.Cleanup(func() {
 		f.Unpin()
@@ -210,7 +210,7 @@ func TestReadRepairRejectsUnpinnedActiveAndNonMediaFailures(t *testing.T) {
 	if got != ErrCorrupt {
 		t.Fatalf("unpinned repair: %v", got)
 	}
-	active := s.Files[s.Current.ActiveID]
+	active := s.Segments[s.Current.ActiveID]
 	active.Pin()
 	got = s.RepairRead(t.Context(), active, ErrCorrupt)
 	active.Unpin()
@@ -475,7 +475,7 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 				}
 				defer cap.Release()
 				work := s.NewDataCheckpoint(cap)
-				if err := work.Copy(t.Context(), history, view, moves, s.ReserveSnapshotFile); err != nil {
+				if err := work.Copy(t.Context(), history, view, moves, s.ReserveSnapshotSegment); err != nil {
 					t.Fatal(err)
 				}
 				if err := work.Protect(t.Context()); err != nil {
@@ -501,8 +501,8 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 				}
 			}
 			entry := s.Catalog.Entries[0]
-			f := s.Files[entry.ID]
-			if entry.ID == old.File.ID || f.Kind == format.RawLogKind {
+			f := s.Segments[entry.ID]
+			if entry.ID == old.Segment.ID || f.Kind == format.RawLogKind {
 				t.Fatalf("expected replacement, got %+v", entry)
 			}
 			f.Pin()

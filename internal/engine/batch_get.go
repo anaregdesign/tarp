@@ -74,7 +74,7 @@ func (db *DB) readBatch(keys [][]byte) ([]BatchResult, error) {
 type batchRead struct {
 	loc    storage.Location
 	slot   uint16
-	source uint16 // Earlier result to clone when loc.File is nil.
+	source uint16 // Earlier result to clone when loc.Segment is nil.
 }
 
 // peekBatch only borrows immutable values. It does not change LRU order or
@@ -251,12 +251,12 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		results[i].Found = true
 		r := batchRead{slot: uint16(i), source: source[i]}
 		if int(source[i]) == i {
-			file := db.files[a.FileID]
-			if file == nil {
+			segment := db.segments[a.FileID]
+			if segment == nil {
 				return nil, db.rejectBatchFile(reads, a.FileID)
 			}
-			file.Pin()
-			r.loc = storage.At(file, a)
+			segment.Pin()
+			r.loc = storage.At(segment, a)
 			misses++
 		}
 		reads = append(reads, r)
@@ -323,16 +323,16 @@ func (db *DB) captureResidentMisses(keys [][]byte, results []BatchResult) ([]bat
 			}
 		}
 		misses++
-		file := db.files[addr.FileID]
-		if file == nil {
+		segment := db.segments[addr.FileID]
+		if segment == nil {
 			return nil, db.rejectBatchFile(reads, addr.FileID)
 		}
-		file.Pin()
+		segment.Pin()
 		results[i] = BatchResult{Found: true}
 		if reads == nil {
 			reads = make([]batchRead, 0, len(keys)-i)
 		}
-		reads = append(reads, batchRead{slot: uint16(i), loc: storage.At(file, addr)})
+		reads = append(reads, batchRead{slot: uint16(i), loc: storage.At(segment, addr)})
 	}
 	db.batchCounts(hits, misses, missing, duplicates)
 	return reads, nil

@@ -57,7 +57,7 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 	mustPut(t, db, "update", "old")
 	mustPut(t, db, "keep", "stable")
 	source := sealForCleaning(t, db)
-	old := db.store.Files[source.ID]
+	old := db.store.Segments[source.ID]
 	if err := db.Delete([]byte("raw")); err != nil {
 		t.Fatal(err)
 	}
@@ -88,8 +88,8 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 	wantValue(t, db, "keep", "stable")
 	wantValue(t, db, "del", "reinserted")
 	wantValue(t, db, "update", "new")
-	if testLoc(t, db, "keep").File.ID != clean.ID || testLoc(t, db, "update").File.ID == clean.ID ||
-		db.store.Files[clean.ID].DeleteBytes.Load() == 0 || old.LiveBytes.Load() != 0 {
+	if testLoc(t, db, "keep").Segment.ID != clean.ID || testLoc(t, db, "update").Segment.ID == clean.ID ||
+		db.store.Segments[clean.ID].DeleteBytes.Load() == 0 || old.LiveBytes.Load() != 0 {
 		t.Fatal("stale remap or missing accounting")
 	}
 	if _, pinned, _, err := db.store.RetireCleaned(); err != nil || pinned != source.Bytes {
@@ -311,7 +311,7 @@ func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testin
 	mustPut(t, db, "target", "obsolete")
 	source := sealForCleaning(t, db)
 	mustPut(t, db, "target", "new")
-	hidden := db.store.Files[unrelated.ID].Path
+	hidden := db.store.Segments[unrelated.ID].Path
 	if err := os.Rename(hidden, hidden+".hold"); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testin
 	mustPut(t, db, "corrupt", "obsolete")
 	corrupt := sealForCleaning(t, db)
 	mustPut(t, db, "corrupt", "replacement")
-	path := db.store.Files[corrupt.ID].Path
+	path := db.store.Segments[corrupt.ID].Path
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -365,7 +365,7 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := db.store.Catalog.Entries[0]
-	if snapshot.Kind != format.SnapshotKind || testLoc(t, db, "stable").File.ID != snapshot.ID {
+	if snapshot.Kind != format.SnapshotKind || testLoc(t, db, "stable").Segment.ID != snapshot.ID {
 		t.Fatal("snapshot was not replaced by a snapshot")
 	}
 	if err := db.cleanSegment(ctx, log); err != nil {
@@ -380,7 +380,7 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 	}
 	sparse = db.store.Catalog.Entries[1]
 	if sparse.FirstSequence != log.FirstSequence || sparse.LastSequence != log.LastSequence || sparse.Kind != format.CleanedLogKind ||
-		sparse.ID == 0 || db.store.Files[sparse.ID].DeleteBytes.Load() != sparse.Bytes-format.SegmentHeaderBytes {
+		sparse.ID == 0 || db.store.Segments[sparse.ID].DeleteBytes.Load() != sparse.Bytes-format.SegmentHeaderBytes {
 		t.Fatalf("second cleaning lost required delete or covered interval %+v", sparse)
 	}
 	mustPut(t, db, "stable", "later")
@@ -567,7 +567,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, ok := testLookup(t, db, "deleted"); ok || testLoc(t, db, "updated").File.ID != tail.ID {
+				if _, ok := testLookup(t, db, "deleted"); ok || testLoc(t, db, "updated").Segment.ID != tail.ID {
 					t.Fatal("repacking overwrote newer index locations")
 				}
 			}
@@ -580,11 +580,11 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer image.Close()
-			files := image.store.Catalog.Entries
-			if len(files) < 3 || files[0] != prefix || files[len(files)-1] != tail || image.store.Current.LastUserSequence != 8 {
-				t.Fatalf("lost prefix or acknowledged tail: %+v, sequence %d", files, image.store.Current.LastUserSequence)
+			entries := image.store.Catalog.Entries
+			if len(entries) < 3 || entries[0] != prefix || entries[len(entries)-1] != tail || image.store.Current.LastUserSequence != 8 {
+				t.Fatalf("lost prefix or acknowledged tail: %+v, sequence %d", entries, image.store.Current.LastUserSequence)
 			}
-			middle := files[1 : len(files)-1]
+			middle := entries[1 : len(entries)-1]
 			if tc.published {
 				if len(middle) != 1 || middle[0].Kind != format.CleanedLogKind || middle[0].FirstSequence != group[0].FirstSequence || middle[0].LastSequence != group[len(group)-1].LastSequence {
 					t.Fatalf("incomplete group replacement: %+v", middle)
@@ -614,14 +614,14 @@ func TestCleanSegmentRepairsGroupAndRestartsTombstoneAccounting(t *testing.T) {
 	first := sealForCleaning(t, db)
 	mustPut(t, db, "next", "second")
 	second := damageProtectedTail(t, db)
-	tombstones := db.store.Files[first.ID].DeleteBytes.Load()
+	tombstones := db.store.Segments[first.ID].DeleteBytes.Load()
 	if err := db.cleanSegment(t.Context(), first, second); err != nil {
 		t.Fatal(err)
 	}
-	files := db.store.Catalog.Entries
-	if len(files) != 1 || files[0].Kind != format.CleanedLogKind || files[0].FirstSequence != first.FirstSequence ||
-		files[0].LastSequence != second.LastSequence || db.store.Files[files[0].ID].DeleteBytes.Load() != tombstones {
-		t.Fatalf("replacement after repair: %+v", files)
+	entries := db.store.Catalog.Entries
+	if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].FirstSequence != first.FirstSequence ||
+		entries[0].LastSequence != second.LastSequence || db.store.Segments[entries[0].ID].DeleteBytes.Load() != tombstones {
+		t.Fatalf("replacement after repair: %+v", entries)
 	}
 	wantValue(t, db, "kept", "first")
 	wantValue(t, db, "next", "second")
@@ -649,10 +649,10 @@ func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 	}
 	a, b := testLoc(t, db, "a"), testLoc(t, db, "b")
 	source := db.store.Catalog.Entries[0]
-	if source.Kind != format.SnapshotKind || a.File.ID != source.ID || b.File != a.File || a.RecordOffset >= b.RecordOffset {
+	if source.Kind != format.SnapshotKind || a.Segment.ID != source.ID || b.Segment != a.Segment || a.RecordOffset >= b.RecordOffset {
 		t.Fatal("expected two ordered records in one snapshot")
 	}
-	fd, err := os.OpenFile(b.File.Path, os.O_WRONLY, 0)
+	fd, err := os.OpenFile(b.Segment.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

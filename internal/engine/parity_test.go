@@ -70,10 +70,10 @@ func TestParityBuildAllowsForegroundRotationAndContextCancellation(t *testing.T)
 		t.Fatal(err)
 	}
 	db.writer.Lock()
-	files := db.store.Catalog.Entries
+	entries := db.store.Catalog.Entries
 	uuid := db.store.Catalog.UUID
 	db.writer.Unlock()
-	for _, entry := range files {
+	for _, entry := range entries {
 		fd, err := os.Open(selectedParity(t, db, entry))
 		if err != nil {
 			t.Fatal(err)
@@ -82,8 +82,8 @@ func TestParityBuildAllowsForegroundRotationAndContextCancellation(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	if db.store.Catalog.Index.ID != 0 || db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes || len(files) != 3 {
-		t.Fatalf("explicit protection sealed the foreground tail: files %v, index %v, active end %v", files, db.store.Catalog.Index, db.store.Current.ActiveCommittedEndOffset)
+	if db.store.Catalog.Index.ID != 0 || db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes || len(entries) != 3 {
+		t.Fatalf("explicit protection sealed the foreground tail: files %v, index %v, active end %v", entries, db.store.Catalog.Index, db.store.Current.ActiveCommittedEndOffset)
 	}
 }
 
@@ -318,7 +318,7 @@ func TestParityWorkerProtectsLaterFilesAfterUnrecoverableSource(t *testing.T) {
 	db := openMaintenanceDamageDB(t, Options{}, fs)
 	mustPut(t, db, "unprotected", "original")
 	bad := sealForCleaning(t, db)
-	f := db.store.Files[bad.ID]
+	f := db.store.Segments[bad.ID]
 	data, err := os.ReadFile(f.Path)
 	if err != nil {
 		t.Fatal(err)

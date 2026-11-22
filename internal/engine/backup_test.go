@@ -340,7 +340,7 @@ func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 	end := db.store.Current.ActiveCommittedEndOffset
 	seq := db.store.Current.LastUserSequence
 	// An uncommitted active-file suffix is outside the permitted read window.
-	file := testLoc(t, db, "last").File.Path
+	file := testLoc(t, db, "last").Segment.Path
 	fd, err := os.OpenFile(file, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -408,8 +408,8 @@ func TestBackupPayloadWriteFailureLeavesSourceHealthy(t *testing.T) {
 func TestBackupRejectsCorruptionInFinalBlock(t *testing.T) {
 	db := newTestDB(t, Options{}, nil)
 	mustPut(t, db, "multi-block", strings.Repeat("v", 80<<10))
-	file := testLoc(t, db, "multi-block").File
-	fd, err := os.OpenFile(file.Path, os.O_WRONLY, 0)
+	segment := testLoc(t, db, "multi-block").Segment
+	fd, err := os.OpenFile(segment.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +577,7 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 	mustPut(t, db, "a", "old")
 	mustPut(t, db, "d", "keep-in-backup")
 	target := filepath.Join(t.TempDir(), "backup")
-	pinnedFile := testLoc(t, db, "a").File
+	pinnedFile := testLoc(t, db, "a").Segment
 	armed.Store(true)
 	done := make(chan error, 1)
 	go func() { done <- db.Backup(context.Background(), target) }()
@@ -865,7 +865,7 @@ func TestBackupRepairsCapturedActivePrefixAfterConcurrentSeal(t *testing.T) {
 	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
 	mustPut(t, db, "first", "original")
 	before := db.store.Current
-	file := db.store.Files[before.ActiveID]
+	segment := db.store.Segments[before.ActiveID]
 	dest := filepath.Join(t.TempDir(), "backup")
 	done := make(chan error, 1)
 	go func() { done <- db.Backup(t.Context(), dest) }()
@@ -880,7 +880,7 @@ func TestBackupRepairsCapturedActivePrefixAfterConcurrentSeal(t *testing.T) {
 	if err := db.ProtectParity(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	fd, err := os.OpenFile(file.Path, os.O_WRONLY, 0)
+	fd, err := os.OpenFile(segment.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
