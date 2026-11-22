@@ -336,9 +336,9 @@ The interference profiles add one separately identified writer key.
   keys form a disclosed 10,240-operation history. Five warm and five guest-cold
   file-only reopens **each** before and after checkpoint record elapsed startup
   and the selected replay layout. Each probe opens a copy of a frozen image
-  with the worker parked; the default-history image may contain already-cleaned
-  intervals. Empty cleaned intervals add no file or header. Retained Delete
-  bytes are tracked separately from obsolete Put bytes.
+  with the cleaner and parity workers parked until Close. The default-history
+  image may contain already-cleaned intervals. Empty cleaned intervals add no
+  file or header. Retained Delete bytes are tracked separately from obsolete Put bytes.
   Each cold Open has independently acknowledged external NBD read intervals;
   cache purge and handshake time are excluded from Open latency.
 - The B+tree profile records charged B+tree pages and scratch-file space before

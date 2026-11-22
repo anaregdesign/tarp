@@ -140,12 +140,11 @@ type TypedEntry[K, V any] struct {
 	Value V
 }
 
-// Scan decodes each entry in a DB.Scan snapshot. A DB or codec error yields
-// one zero TypedEntry and ends iteration. Breaking early releases the snapshot.
+// Scan decodes each entry in a DB.Scan snapshot. The iterator retains the DB
+// and codecs from this call. A DB or codec error yields one zero TypedEntry and
+// ends iteration. Breaking early releases the snapshot.
 func (db *View[K, V]) Scan(ctx context.Context) iter.Seq2[TypedEntry[K, V], error] {
-	return func(yield func(TypedEntry[K, V], error) bool) {
-		db.decodeEntries(db.core.Scan(ctx), yield)
-	}
+	return db.ScanPrefix(ctx, nil)
 }
 
 // ScanPrefix decodes the entries selected by [DB.ScanPrefix]. The prefix is a

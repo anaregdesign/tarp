@@ -25,6 +25,27 @@ func selectedParity(t *testing.T, db *DB, entry format.CatalogEntry) string {
 	return filepath.Join(db.store.Dir, name)
 }
 
+func TestProtectParityWakesCleanerToRepackSmallSegments(t *testing.T) {
+	startCleaner := make(chan struct{})
+	db := newTestDBWithHooks(t, Options{IndexMode: IndexMemory}, nil, &Hooks{CleanerStart: startCleaner})
+	// The idle cleaner has already consumed its startup notification.
+	<-db.cleaner.wake
+	for _, key := range []string{"a", "b", "c", "d"} {
+		mustPut(t, db, key, key)
+		if err := db.ProtectParity(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(db.cleaner.wake) == 0 {
+		t.Fatal("explicit rotations left the cleaner asleep")
+	}
+	close(startCleaner)
+	waitForDataFiles(t, db, 2) // Repacked DATA and the empty active log.
+	for _, key := range []string{"a", "b", "c", "d"} {
+		wantValue(t, db, key, key)
+	}
+}
+
 func TestParityBuildAllowsForegroundRotationAndContextCancellation(t *testing.T) {
 	started, resume := make(chan struct{}), make(chan struct{})
 	var once sync.Once

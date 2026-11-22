@@ -2,7 +2,9 @@ package benchmark
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/anaregdesign/tarp/internal/engine"
@@ -93,12 +95,12 @@ func startupRow(elapsed time.Duration, resources map[string]any) map[string]any 
 	}
 }
 
-// Recovery samples time the normal open path while parking the newly launched
-// worker until Close. Post-open collection and the independent cold-device
-// counters then describe exactly the image that recovery read.
+// Park both maintenance workers until Close so the external cold-device
+// counters and post-open layout cover only recovery.
 func openStartupSample(t *testing.T, dir string, opts engine.Options) (*engine.DB, time.Duration) {
 	t.Helper()
-	engineHooks := &engine.Hooks{CleanerStart: make(chan struct{})}
+	parked := make(chan struct{})
+	engineHooks := &engine.Hooks{CleanerStart: parked, ParityStart: parked}
 	start := time.Now()
 	db, err := engine.OpenWithHooks(dir, opts, nil, engineHooks)
 	elapsed := time.Since(start)
@@ -129,6 +131,31 @@ func measurementCheckpointFixture(t *testing.T, dir string, opts engine.Options)
 	if _, err := db.Compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestStartupSampleDefersParityIOUntilClose(t *testing.T) {
+	dir := testfixture.WriteMixedStore(t, 8)
+	parityFiles := func(t *testing.T) []string {
+		t.Helper()
+		files, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	synctest.Test(t, func(t *testing.T) {
+		db, _ := openStartupSample(t, dir, engine.Options{IndexMode: engine.IndexMemory})
+		synctest.Wait()
+		if files := parityFiles(t); len(files) != 0 {
+			t.Errorf("startup sample created %d parity files", len(files))
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if files := parityFiles(t); len(files) == 0 {
+			t.Error("Close did not protect the sealed files")
+		}
+	})
 }
 
 func TestMeasurementLayoutAccountsForCanonicalRecords(t *testing.T) {

@@ -106,6 +106,48 @@ func TestReplacingTypedViewKeepsOwnerOnOriginalDatabase(t *testing.T) {
 	}
 }
 
+func TestTypedScanKeepsItsDatabaseAndCodecsAfterViewReplacement(t *testing.T) {
+	view, replacement := rebindableIteratorViews(t)
+	seq := view.Scan(t.Context())
+	// Replace the view in the first callback, then iterate again with it
+	// already replaced. Both runs should decode only the original database.
+	for attempt := range 2 {
+		seen := make(map[string]string)
+		for entry, err := range seq {
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen[entry.Key] = entry.Value
+			*view = *replacement
+		}
+		if len(seen) != 2 || seen["invalid1"] != "invalid first" || seen["invalid2"] != "invalid second" {
+			t.Fatalf("Scan run %d returned %v", attempt, seen)
+		}
+	}
+}
+
+func rebindableIteratorViews(t *testing.T) (*tarp.View[string, string], *tarp.View[string, string]) {
+	t.Helper()
+	source := openPublicDB(t, t.TempDir(), tarp.Options{})
+	view, err := tarp.Bind(source, tarp.StringCodec{}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := view.Put("invalid1", "invalid first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.Put("invalid2", "invalid second"); err != nil {
+		t.Fatal(err)
+	}
+	other := openPublicDB(t, t.TempDir(), tarp.Options{})
+	reject := rejectingStringCodec{errors.New("unexpected replacement decoder")}
+	replacement, err := tarp.Bind(other, reject, reject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return view, replacement
+}
+
 // Return partial results on failure to check that TypedDB discards them.
 type rejectingStringCodec struct{ err error }
 

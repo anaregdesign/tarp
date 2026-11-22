@@ -90,38 +90,47 @@ func TestDefinitiveOracleOutcomesDoNotKeepAnUnknownWindow(t *testing.T) {
 	}
 }
 
-func TestRotatingPowerCutSequenceRange(t *testing.T) {
+func TestMutationPowerCutSequenceRange(t *testing.T) {
 	cases, err := CampaignCases("mutate")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range cases {
-		if tc.Mode != "rotate" {
-			continue
+		key := []byte("k")
+		events := []OracleEvent{{Type: "ack", Key: key, Value: []byte("old")}}
+		if tc.Mode == "reinsert" {
+			events = append(events, OracleEvent{Type: "ack_delete", Key: key})
 		}
-		events := []OracleEvent{
-			{Type: "ack", Key: []byte("k"), Value: []byte("old")},
-			{Type: "intent", Key: []byte("k"), Value: []byte("new")},
+		if tc.Mode == "insert" {
+			key = []byte("different")
 		}
-		wantLow, wantHigh := uint64(1), uint64(1)
+		intent := OracleEvent{Type: "intent", Key: key, Value: []byte("new")}
+		ack := OracleEvent{Type: "ack", Key: key, Value: intent.Value}
+		if tc.Mode == "delete" {
+			intent = OracleEvent{Type: "intent_delete", Key: key}
+			ack = OracleEvent{Type: "ack_delete", Key: key}
+		}
+		old := uint64(len(events))
+		events = append(events, intent)
+		wantLow, wantHigh := old, old
 		switch tc.Phase {
 		case "current.rename:after", "current.dirsync:before":
-			wantHigh = 2
+			wantHigh = old + 1
 		case "operation.ack:after":
-			events = append(events, OracleEvent{Type: "ack", Key: []byte("k"), Value: []byte("new")})
+			events = append(events, ack)
 			fallthrough
 		case "current.dirsync:after":
-			wantLow, wantHigh = 2, 2
+			wantLow, wantHigh = old+1, old+1
 		}
 		oracle, err := ReplayOracle(append(events, OracleEvent{Type: "phase", Phase: tc.Phase}), false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if lo, hi := oracle.PowerCutSequenceRange(tc.Mode); lo != wantLow || hi != wantHigh {
-			t.Errorf("%s: got [%d,%d], want [%d,%d]", tc.Phase, lo, hi, wantLow, wantHigh)
+			t.Errorf("%s: got [%d,%d], want [%d,%d]", tc.Name, lo, hi, wantLow, wantHigh)
 		}
 		if tc.Phase == "current.dirsync:after" {
-			if lo, hi := oracle.PowerCutSequenceRange("overlap"); lo != 1 || hi != 2 {
+			if lo, hi := oracle.PowerCutSequenceRange("overlap"); lo != old || hi != old+1 {
 				t.Errorf("unrelated publication constrained pending write to [%d,%d]", lo, hi)
 			}
 		}

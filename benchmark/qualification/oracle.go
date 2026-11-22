@@ -188,13 +188,15 @@ func (o *Oracle) SequenceRange() (uint64, uint64) {
 	return o.acks, upper
 }
 
-// PowerCutSequenceRange uses the witnessed I/O boundary when a rotating Put
-// publishes the record and the new log together through a single CURRENT.
+// PowerCutSequenceRange constrains a pending mutation at its own publication
+// barrier. In other campaign modes a barrier can belong to maintenance.
 func (o *Oracle) PowerCutSequenceRange(mode string) (uint64, uint64) {
 	low, high := o.SequenceRange()
-	if mode == "rotate" {
+	switch mode {
+	case "put", "delete", "insert", "reinsert", "rotate":
 		switch o.Phase {
-		case "segment.write:before", "segment.write:after", "data.write:before", "data.write:after",
+		case "data.write:before", "data.write:after", "data.sync:before", "data.sync:after",
+			"segment.write:before", "segment.write:after",
 			"segment.sync:before", "segment.sync:after", "catalog.write:before", "catalog.write:after",
 			"catalog.sync:before", "catalog.sync:after", "catalog.dirsync:before", "catalog.dirsync:after",
 			"current.write:before", "current.write:after", "current.sync:before", "current.sync:after",
