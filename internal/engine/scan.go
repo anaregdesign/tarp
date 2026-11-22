@@ -85,6 +85,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		return err
 	}
 	var result error
+	var stopped bool
 	err := bounds.Walk(ctx, v, func(k string, a index.Address) bool {
 		if result = check(); result != nil {
 			return false
@@ -118,7 +119,8 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 				return false
 			}
 		}
-		return yield(k, value)
+		stopped = !yield(k, value)
+		return !stopped
 	})
 	if result != nil {
 		return result
@@ -131,6 +133,9 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		}
 		db.poison(err)
 		return operationError(op, "index", err)
+	}
+	if !stopped {
+		return check()
 	}
 	return nil
 }

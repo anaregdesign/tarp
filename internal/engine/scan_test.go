@@ -502,3 +502,25 @@ func TestPrefixReadsOnlyMatchingData(t *testing.T) {
 		})
 	}
 }
+
+func TestScanPrefixObservesCancellationAtUpperBound(t *testing.T) {
+	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
+		db := newTestDB(t, Options{IndexMode: mode}, nil)
+		mustPut(t, db, "a/1", "ok")
+		mustPut(t, db, "b/1", "skip")
+		ctx, cancel := context.WithCancel(t.Context())
+		next, stop := iter.Pull2(db.ScanPrefix(ctx, []byte("a/")))
+		entry, err, ok := next()
+		if err != nil || !ok || string(entry.Value) != "ok" {
+			cancel()
+			stop()
+			t.Fatalf("first entry = %+v, %v, %t", entry, err, ok)
+		}
+		cancel()
+		_, err, ok = next()
+		stop()
+		if !ok || !errors.Is(err, context.Canceled) {
+			t.Fatalf("end of canceled prefix = %v, %t", err, ok)
+		}
+	}
+}
