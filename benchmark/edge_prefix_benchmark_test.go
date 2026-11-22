@@ -19,8 +19,7 @@ func edgeTailPrefix(tail int) []byte {
 	return fmt.Appendf(nil, "edge/vertex-%04x/", tail)
 }
 
-func newEdgePrefixFixture(b *testing.B, mode tarp.IndexMode, interleaved bool) (*tarp.DB, []tarp.Entry) {
-	b.Helper()
+func edgePrefixData(interleaved bool) []tarp.Entry {
 	var edges []tarp.Entry
 	for tail := range 258 {
 		degree := 56
@@ -41,7 +40,12 @@ func newEdgePrefixFixture(b *testing.B, mode tarp.IndexMode, interleaved bool) (
 		rng := rand.New(rand.NewPCG(148, 1))
 		rng.Shuffle(len(edges), func(i, j int) { edges[i], edges[j] = edges[j], edges[i] })
 	}
-	db, err := tarp.Open(b.TempDir(), tarp.Options{IndexMode: mode})
+	return edges
+}
+
+func newEdgePrefixFixture(b testing.TB, opts tarp.Options, edges []tarp.Entry) *tarp.DB {
+	b.Helper()
+	db, err := tarp.Open(b.TempDir(), opts)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -59,7 +63,7 @@ func newEdgePrefixFixture(b *testing.B, mode tarp.IndexMode, interleaved bool) (
 	// before either arm, including when running a single selected benchmark.
 	all := edgePrefixQuery{}
 	all.verify(b, db, edges, true, nil)
-	return db, edges
+	return db
 }
 
 type edgePrefixQuery struct {
@@ -130,7 +134,7 @@ func (q edgePrefixQuery) run(ctx context.Context, db *tarp.DB, values bool, nati
 
 // The oracle comes from the inserted records and is independent of both
 // iterators and their traversal order. The first-match case accepts any match.
-func (q edgePrefixQuery) verify(b *testing.B, db *tarp.DB, edges []tarp.Entry, values bool, native edgePrefixReader) int {
+func (q edgePrefixQuery) verify(b testing.TB, db *tarp.DB, edges []tarp.Entry, values bool, native edgePrefixReader) int {
 	b.Helper()
 	want := make(map[string][]byte)
 	for _, e := range edges {
@@ -155,15 +159,20 @@ func (q edgePrefixQuery) verify(b *testing.B, db *tarp.DB, edges []tarp.Entry, v
 	return n
 }
 
-func (q edgePrefixQuery) measure(b *testing.B, db *tarp.DB, edges []tarp.Entry, values, usePrefix bool) {
-	var native edgePrefixReader
-	if usePrefix {
-		var ok bool
-		native, ok = any(db).(edgePrefixReader)
-		if !ok {
-			b.Fatal("this checkout does not implement KeysPrefix and ScanPrefix")
-		}
+func edgePrefixArm(t testing.TB, db *tarp.DB, native bool) edgePrefixReader {
+	t.Helper()
+	if !native {
+		return nil
 	}
+	reader, ok := any(db).(edgePrefixReader)
+	if !ok {
+		t.Fatal("this checkout does not implement KeysPrefix and ScanPrefix")
+	}
+	return reader
+}
+
+func (q edgePrefixQuery) measure(b *testing.B, db *tarp.DB, edges []tarp.Entry, values, usePrefix bool) {
+	native := edgePrefixArm(b, db, usePrefix)
 	n := q.verify(b, db, edges, values, native)
 	ctx := b.Context()
 	var candidates, valueBytes int64
@@ -199,7 +208,8 @@ func BenchmarkEdgePrefix(b *testing.B) {
 	}{{"BTree", tarp.IndexBTree}, {"Memory", tarp.IndexMemory}} {
 		for _, layout := range []string{"grouped", "interleaved"} {
 			b.Run(index.name+"/"+layout, func(b *testing.B) {
-				db, edges := newEdgePrefixFixture(b, index.mode, layout == "interleaved")
+				edges := edgePrefixData(layout == "interleaved")
+				db := newEdgePrefixFixture(b, tarp.Options{IndexMode: index.mode}, edges)
 				for _, op := range []string{"Keys", "Scan"} {
 					for _, query := range queries {
 						for _, arm := range []string{"filter", "prefix"} {
