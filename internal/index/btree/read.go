@@ -3,6 +3,7 @@ package btree
 import (
 	"os"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -72,60 +73,174 @@ type frame struct {
 }
 type cursor struct{ stack []frame }
 
-// Advance only while admitted. No page buffer or reader workspace is held
-// over user code, including a nested read, mutation, or Close.
-func (c *cursor) next(s *pager) (string, index.Address, bool, error) {
+// leaf returns the next nonempty leaf with the cursor positioned at its next
+// entry. On the initial descent, lower seeks through branch separators to its
+// insertion point. The saved ancestor positions resume at the next sibling.
+func (c *cursor) leaf(s *pager, lower string) (*page, error) {
 	for len(c.stack) > 0 {
 		f := &c.stack[len(c.stack)-1]
 		p, err := s.read(f.id)
 		if err != nil {
-			return "", index.Address{}, false, err
+			return nil, err
+		}
+		if lower != "" {
+			f.pos, _, err = p.search(s, lower)
+			if err != nil {
+				return nil, err
+			}
 		}
 		switch p[4] {
 		case leaf:
 			if f.pos < p.count() {
-				item, _ := p.cell(f.pos)
-				f.pos++
-				key, err := item.key.string(s)
-				return key, item.address, true, err
+				return p, nil
 			}
 		case branch:
 			if f.pos <= p.count() {
+				if len(c.stack) >= maxDepth {
+					return nil, errPage
+				}
 				id := p.child(f.pos)
 				f.pos++
-				if len(c.stack) >= maxDepth {
-					return "", index.Address{}, false, errPage
-				}
 				c.stack = append(c.stack, frame{id: id})
 				continue
 			}
 		default:
-			return "", index.Address{}, false, errPage
+			return nil, errPage
 		}
+		lower = ""
 		c.stack = c.stack[:len(c.stack)-1]
 	}
-	return "", index.Address{}, false, nil
+	return nil, nil
 }
 
 func (v *view) All(yield func(string, index.Address) bool) error {
-	if v.root == 0 {
+	return v.Range("", "", yield)
+}
+
+const rangeGroupSize = 16
+
+type rangeEntry struct {
+	key  string
+	addr index.Address
+}
+
+// readGroup copies entries from one leaf while the caller holds a read permit.
+// Inline keys are at most maxInline bytes. Read an overflow key on its own to
+// bound retained bytes and avoid reading its chain before preceding callbacks.
+func (c *cursor) readGroup(s *pager, lower, upper string, out []rangeEntry) (int, error) {
+	p, err := c.leaf(s, lower)
+	if err != nil || p == nil {
+		return 0, err
+	}
+	f := &c.stack[len(c.stack)-1]
+	n, reachedUpper, err := p.rangeEntries(s, f.pos, upper, out)
+	f.pos += n
+	if reachedUpper {
+		c.stack = nil
+	} else if f.pos == p.count() {
+		c.stack = c.stack[:len(c.stack)-1]
+	}
+	return n, err
+}
+
+// rangeEntries stores an inline group's reconstructed keys in a single owned
+// string. Grow exactly once for matching keys, so retaining a result never
+// pins a page or unused capacity for long neighboring keys.
+func (p *page) rangeEntries(s *pager, start int, upper string, out []rangeEntry) (n int, reachedUpper bool, err error) {
+	end := min(start+len(out), p.count())
+	if upper != "" && end-start > 1 {
+		// A short final candidate below upper proves the whole group fits.
+		// Leave overflow keys and any errors to the sequential walk.
+		last, e := p.raw(end - 1)
+		if e == nil && last.tail == 0 {
+			if cmp, _ := last.compare(s, upper); cmp < 0 {
+				upper = ""
+			}
+		}
+	}
+	var suffixes [rangeGroupSize][]byte
+	prefix := p[header : header+int(p[5])]
+	total := 0
+	for start+n < end {
+		var raw rawCell
+		raw, err = p.raw(start + n)
+		if err != nil || raw.tail != 0 && n != 0 {
+			break
+		}
+		if upper != "" {
+			var cmp int
+			cmp, err = raw.compare(s, upper)
+			if err != nil {
+				break
+			}
+			if cmp >= 0 {
+				reachedUpper = true
+				break
+			}
+		}
+		if len(out) == 1 || raw.tail != 0 {
+			key, err := raw.key().string(s)
+			if err != nil {
+				return 0, false, err
+			}
+			out[0] = rangeEntry{key, raw.address}
+			return 1, false, nil
+		}
+		suffixes[n] = raw.suffix
+		total += len(prefix) + len(raw.suffix)
+		out[n].addr = raw.address
+		n++
+	}
+	var keys strings.Builder
+	keys.Grow(total)
+	for i, suffix := range suffixes[:n] {
+		offset := keys.Len()
+		keys.Write(prefix)
+		keys.Write(suffix)
+		out[i].key = keys.String()[offset:]
+	}
+	return n, reachedUpper, err
+}
+
+// Range visits keys in [lower, upper) at this view's root. An empty upper
+// bound extends through the last key.
+func (v *view) Range(lower, upper string, yield func(string, index.Address) bool) error {
+	if v.root == 0 || upper != "" && lower >= upper {
 		if !v.valid() {
 			return os.ErrClosed
 		}
 		return nil
 	}
 	c := cursor{stack: []frame{{id: v.root}}}
+	var group [rangeGroupSize]rangeEntry
+	// Fetch just the first entry so an early break never decodes a whole group.
+	limit := 1
+	bounded := lower != "" || upper != ""
 	for {
 		if err := v.beginRead(); err != nil {
 			return err
 		}
-		key, a, ok, err := c.next(v.tree.p)
+		n, err := c.readGroup(v.tree.p, lower, upper, group[:limit])
 		v.tree.reads.release()
-		if err != nil || !ok {
+		for i, entry := range group[:n] {
+			// beginRead checked the first entry. Each callback may close the
+			// view or tree, including when further entries are already buffered.
+			if i > 0 && !v.valid() {
+				return os.ErrClosed
+			}
+			if !yield(entry.key, entry.addr) {
+				return nil
+			}
+		}
+		if err != nil || len(c.stack) == 0 {
+			if n != 0 && !v.valid() {
+				return os.ErrClosed
+			}
 			return err
 		}
-		if !yield(key, a) {
-			return nil
+		lower = ""
+		if bounded {
+			limit = len(group)
 		}
 	}
 }

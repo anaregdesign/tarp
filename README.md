@@ -181,6 +181,49 @@ and `Decode([]byte) (T, error)`. Use compatible codecs on reopen and after
 `Restore`. See the runnable [TypedDB example](typed_db_test.go) and
 [composite codec example](composite_codec_test.go).
 
+## Prefix iteration
+
+`KeysPrefix(ctx, prefix)` yields matching keys using the index alone.
+`ScanPrefix(ctx, prefix)` yields matching key/value entries and reads their
+values from DATA. PR #149 added both methods to `DB`, `TypedDB` and `View`
+after v0.12.0. On a raw DB with keys such as `job/42`, use
+`db.ScanPrefix(ctx, []byte("job/"))`.
+
+The prefix is a `[]byte` matching the start of the stored key encoding. Both
+methods copy it before returning. A nil or empty prefix matches all live keys.
+Each iteration captures a fresh snapshot and yields in unspecified order. A
+nonempty prefix lets the B+tree seek to the matching range. The memory hash
+index examines all live keys and copies the matching addresses when capturing
+the snapshot. Typed views decode only the selected keys or entries.
+
+For a composite key encoded with `NewCodec`, encode the leading fields using
+the same field types and order. This includes the byte-length framing and
+distinguishes a complete tail such as `"a"` from `"ab"`. The example reads
+destination keys from a view using `NewCodec[EdgeKey]()` and `Float32Codec{}`.
+
+```go
+type EdgeKey struct{ Tail, Head string }
+
+func printHeads(ctx context.Context, edges *tarp.View[EdgeKey, float32], tail string) error {
+	type tailField struct{ Tail string }
+	codec, err := tarp.NewCodec[tailField]()
+	if err != nil {
+		return err
+	}
+	prefix, err := codec.Encode(tailField{Tail: tail})
+	if err != nil {
+		return err
+	}
+	for key, err := range edges.KeysPrefix(ctx, prefix) {
+		if err != nil {
+			return err
+		}
+		fmt.Println(key.Head)
+	}
+	return nil
+}
+```
+
 ## Batch operations
 
 Use `BatchPut` to commit related values together and `BatchGet` to read a
@@ -254,7 +297,7 @@ See the [runnable batch example](typed_batch_test.go).
 
 ## Contract
 
-`DB` provides `Get`, `Scan`, `Keys`, upserting `Put`, `Delete`, `Close`, online `Backup`,
+`DB` provides `Get`, `Scan`, `ScanPrefix`, `Keys`, `KeysPrefix`, upserting `Put`, `Delete`, `Close`, online `Backup`,
 `BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `AutoCompactionStatus`. Use `Open` to create or
 reopen a database and `Restore` to restore a backup offline.
 
@@ -264,7 +307,7 @@ reopen a database and `Restore` to restore a backup offline.
   arrays until every call using them has returned, including failed writes.
 - `Get` uses an exact global LRU first. Misses read a checked indexed file record
   and cache it; updates/deletes cannot race a stale miss into visibility.
-- If `Get`, `BatchGet` or `Scan` encounters a DATA read error, the error
+- If `Get`, `BatchGet`, `Scan` or `ScanPrefix` encounters a DATA read error, the error
   identifies the segment filename and the record's starting byte offset.
   Use `errors.Is` or `errors.As` to inspect the underlying cause.
 - Successful writes include data, commit-frontier, and directory syncs before
@@ -285,7 +328,8 @@ B+tree mode captures a root and visits index pages on demand.
 `for entry, err := range db.Scan(ctx)` reads a point-in-time snapshot in
 unspecified order. Each iteration protects the DATA files referenced by the
 captured index and reads one value at a time, preserving LRU recency. The
-caller owns each key and value. A paused scan can retain old files on disk.
+caller owns each key and value. `ScanPrefix` also pins the DATA layout while
+iterating. A paused scan can retain old files on disk.
 Break to release the snapshot early. When using `iter.Pull2`, defer `stop()`.
 After an error, prior entries remain valid. Calling `Close` in the loop is
 supported. A subsequent read yields `ErrClosed`.
@@ -511,7 +555,7 @@ ones in the same file, remain readable, and `Put` and `Delete` continue to
 commit. A replacement value supplied by the application can overwrite an
 unreadable key. Retrieve the affected file ID with
 `errors.As(err, &damage)`, where `damage` is a `*tarp.UnavailableDataError`.
-A failed `BatchGet` returns no results. `Scan` reports the error and ends that
+A failed `BatchGet` returns no results. `Scan` and `ScanPrefix` report the error and end that
 iteration. To read individual keys while serving traffic, enumerate them with
 `Keys` and handle each `Get` result separately.
 

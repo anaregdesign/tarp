@@ -80,3 +80,44 @@ func ExampleDB_Keys() {
 	fmt.Println(keys)
 	// Output: [apple pear]
 }
+
+func TestKeysPrefixMatchesBinaryKeysAndOwnsPrefix(t *testing.T) {
+	keys := []string{"\x00", "\x00\xff", "\x00\xff\x00", "\x01", "\xfe", "\xff", "\xff\x00", "\xff\xff", "\xff\xffx"}
+	for name, mode := range map[string]tarp.IndexMode{"btree": tarp.IndexBTree, "memory": tarp.IndexMemory} {
+		t.Run(name, func(t *testing.T) {
+			db := openPublicDB(t, t.TempDir(), tarp.Options{IndexMode: mode})
+			for _, key := range keys {
+				if err := db.Put([]byte(key), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, tc := range []struct {
+				prefix []byte
+				want   []string
+			}{
+				{nil, keys},
+				{[]byte{}, keys},
+				{[]byte{0x00, 0xff}, []string{"\x00\xff", "\x00\xff\x00"}},
+				{[]byte{0x01, 0xff}, nil},
+				{[]byte{0xff}, []string{"\xff", "\xff\x00", "\xff\xff", "\xff\xffx"}},
+				{[]byte{0xff, 0xff}, []string{"\xff\xff", "\xff\xffx"}},
+			} {
+				prefix := slices.Clone(tc.prefix)
+				seq := db.KeysPrefix(t.Context(), prefix)
+				clear(prefix)
+				var got []string
+				for key, err := range seq {
+					if err != nil {
+						t.Fatal(err)
+					}
+					got = append(got, string(key))
+					clear(key)
+				}
+				slices.Sort(got)
+				if !slices.Equal(got, tc.want) {
+					t.Errorf("prefix %x yielded %x, want %x", tc.prefix, got, tc.want)
+				}
+			}
+		})
+	}
+}

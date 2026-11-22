@@ -3,9 +3,12 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"maps"
 	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -125,6 +128,75 @@ func TestKeysStopsOnCancelCloseOrBreak(t *testing.T) {
 			}
 			if _, _, ok := next(); ok || db.active != 0 {
 				t.Fatalf("Keys continued or retained admission after %s", action)
+			}
+		})
+	}
+}
+
+func TestPrefixScansReturnIndependentMutableKeys(t *testing.T) {
+	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			db := newTestDB(t, Options{IndexMode: mode}, nil)
+			want := make(map[string]bool)
+			for i := range 96 {
+				key := fmt.Sprintf("prefix/%03d/%s", i, strings.Repeat("v", i%29))
+				if i == 47 {
+					key += strings.Repeat("L", 2048)
+				}
+				mustPut(t, db, key, key)
+				want[key] = true
+			}
+			mustPut(t, db, "unrelated", "skip")
+			prefix := []byte("prefix/")
+			streams := map[string]iter.Seq2[[]byte, error]{
+				"keys": db.KeysPrefix(t.Context(), prefix),
+				"scan": func(yield func([]byte, error) bool) {
+					for e, err := range db.ScanPrefix(t.Context(), prefix) {
+						if !yield(e.Key, err) {
+							return
+						}
+					}
+				},
+			}
+			for name, stream := range streams {
+				t.Run(name, func(t *testing.T) {
+					retained := make(map[string][]byte)
+					var writers sync.WaitGroup
+					defer writers.Wait()
+					for key, err := range stream {
+						if err != nil {
+							t.Fatal(err)
+						}
+						original := string(key)
+						if !want[original] || retained[original] != nil || len(key) != cap(key) {
+							t.Fatalf("unexpected or repeated key %q (len %d, cap %d)", key, len(key), cap(key))
+						}
+						retained[original] = key
+						writers.Go(func() {
+							// Both direct writes and append are permitted while the
+							// iterator is copying and publishing subsequent keys.
+							extra := append(key, '!')
+							extra[0] ^= 0xff
+							for i := range key {
+								key[i] ^= 0xff
+							}
+						})
+					}
+					writers.Wait()
+					if len(retained) != len(want) {
+						t.Fatalf("stream returned %d of %d keys", len(retained), len(want))
+					}
+					for original, key := range retained {
+						for i, b := range key {
+							if b != ^original[i] {
+								t.Fatalf("key %q changed through a different result at byte %d", original, i)
+							}
+						}
+						if value, err := db.Get([]byte(original)); err != nil || string(value) != original {
+							t.Fatalf("retained key %q damaged the stored record: %v", original, err)
+						}
+					}
+				})
 			}
 		})
 	}

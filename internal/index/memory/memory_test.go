@@ -1,7 +1,9 @@
 package memory_test
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -76,5 +78,44 @@ func TestRelocateChecksFullAddressAndPreservesExistingViews(t *testing.T) {
 	}
 	if addr, ok, err := view.Lookup("k"); err != nil || !ok || addr != old {
 		t.Fatalf("captured lookup returned %+v, %t, %v", addr, ok, err)
+	}
+}
+
+func TestBoundedViewCopiesOnlyMatchingAddresses(t *testing.T) {
+	db := memory.New()
+	defer db.Close()
+	tx := db.Begin()
+	for _, key := range []string{"a", "ab", "abc", "b", "c"} {
+		if err := tx.Put(key, index.Address{Sequence: 1}); err != nil {
+			tx.Abort()
+			t.Fatal(err)
+		}
+	}
+	tx.Commit()
+	v, err := db.(index.BoundedSnapshotter).BoundedView(t.Context(), index.Bounds{Lower: "ab", Upper: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	tx = db.Begin()
+	if err := tx.Delete("ab"); err != nil {
+		tx.Abort()
+		t.Fatal(err)
+	}
+	tx.Commit()
+	got := make(map[string]uint64)
+	err = v.All(func(key string, address index.Address) bool {
+		got[key] += address.Sequence
+		return true
+	})
+	if err != nil || len(got) != 2 || got["ab"] != 1 || got["abc"] != 1 {
+		t.Fatalf("captured addresses = %v, %v", got, err)
+	}
+	err = v.All(func(string, index.Address) bool {
+		v.Close()
+		return true
+	})
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("closing view during iteration returned %v", err)
 	}
 }

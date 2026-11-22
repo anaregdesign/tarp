@@ -322,7 +322,7 @@ retrying. This leaves the commit frontier, record addresses and sequences
 unchanged.
 
 `Get` rechecks concurrent changes to the key through its usual read path.
-`BatchGet` and `Scan` keep their original snapshots. A pinned old segment
+`BatchGet`, `Scan` and `ScanPrefix` keep their original snapshots. A pinned old segment
 can be repaired after compaction while a snapshot still needs its bytes.
 Backup, compaction and index checkpoint creation retry private work against
 their captured input before publication. Recovery reads and staging do not
@@ -347,9 +347,10 @@ The live index still identifies the current key versions. A failed read returns
 an error for that version. Applications can overwrite or delete the key, and
 new writes follow the ordinary commit protocol. A cache hit can return the
 current value already held in memory. `BatchGet` keeps its all-or-error result
-contract and `Scan` ends with a terminal error. `Keys` can still enumerate the
-index. Individual `Get` calls during that enumeration see the version current
-at each call.
+contract. `Scan` and `ScanPrefix` end with a terminal error if a record they
+read is unavailable. `Keys` and `KeysPrefix` can still enumerate the index
+without reading DATA. Individual `Get` calls during that enumeration see the
+version current at each call.
 
 Backup and index checkpoint creation report an error while their captured input
 contains unavailable DATA. A successful recovery checkpoint lets subsequent

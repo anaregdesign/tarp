@@ -2,6 +2,7 @@
 package memory
 
 import (
+	"context"
 	"maps"
 	"os"
 	"sync"
@@ -54,6 +55,76 @@ func (s *store) View() index.View {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return &view{owner: s, entries: maps.Clone(s.entries)}
+}
+
+type capturedEntry struct {
+	key     string
+	address index.Address
+}
+
+// BoundedView copies matching addresses into small slices. The existing
+// slices stay in place as the snapshot grows.
+func (s *store) BoundedView(ctx context.Context, bounds index.Bounds) (index.Snapshot, error) {
+	done := ctx.Done()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var chunks [][]capturedEntry
+	var chunk []capturedEntry
+	for key, addr := range s.entries {
+		select {
+		case <-done:
+			return nil, ctx.Err()
+		default:
+		}
+		if !bounds.Contains(key) {
+			continue
+		}
+		if len(chunk) == cap(chunk) {
+			if len(chunk) > 0 {
+				chunks = append(chunks, chunk)
+			}
+			// Begin with one entry for sparse ranges. Limit slack in the
+			// last allocation to fewer than 128 entries (7 KiB).
+			chunk = make([]capturedEntry, 0, min(128, max(1, 2*len(chunk))))
+		}
+		chunk = append(chunk, capturedEntry{key: key, address: addr})
+	}
+	if len(chunk) > 0 {
+		chunks = append(chunks, chunk)
+	}
+	v := &boundedView{owner: s}
+	v.chunks.Store(&chunks)
+	return v, nil
+}
+
+type boundedView struct {
+	owner  *store
+	chunks atomic.Pointer[[][]capturedEntry]
+}
+
+func (v *boundedView) All(yield func(string, index.Address) bool) error {
+	chunks := v.chunks.Load()
+	if chunks == nil || v.owner.closed.Load() {
+		return os.ErrClosed
+	}
+	for _, chunk := range *chunks {
+		for _, row := range chunk {
+			if !yield(row.key, row.address) {
+				return nil
+			}
+			if v.owner.closed.Load() || v.chunks.Load() == nil {
+				return os.ErrClosed
+			}
+		}
+	}
+	return nil
+}
+
+func (v *boundedView) Close() {
+	v.chunks.Store(nil)
 }
 
 func (s *store) Begin() index.Tx {

@@ -113,6 +113,14 @@ func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 	return (*engine.DB)(db).Scan(ctx)
 }
 
+// ScanPrefix yields entries whose encoded keys start with encodedPrefix.
+// A nil or empty prefix matches every key. ScanPrefix copies the prefix
+// before returning. The iterator has the same snapshot, order, and ownership
+// guarantees as [DB.Scan].
+func (db *DB) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[Entry, error] {
+	return (*engine.DB)(db).ScanPrefix(ctx, encodedPrefix)
+}
+
 // Put durably inserts or replaces a value. An oversized entry returns ErrTooLarge
 // before changing stored data or cache recency.
 func (db *DB) Put(key, value []byte) error {

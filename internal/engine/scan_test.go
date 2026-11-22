@@ -460,3 +460,131 @@ func TestScanCloseFromConsumer(t *testing.T) {
 		t.Fatalf("after Close: yielded %v, reads %d, refs %d", ok, reads.Load(), file.References())
 	}
 }
+
+func TestPrefixReadsOnlyMatchingData(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode IndexMode
+	}{{"btree", IndexBTree}, {"memory", IndexMemory}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reads atomic.Int64
+			db := newTestDBWithHooks(t, Options{IndexMode: tc.mode}, &storage.IO{Hook: func(point string) error {
+				if point == "read:before" {
+					reads.Add(1)
+				}
+				return nil
+			}}, parkedMaintenance())
+			for _, k := range []string{"a/1", "a/2", "b/1", "c/1"} {
+				mustPut(t, db, k, k)
+			}
+			db.cache.Clear()
+			reads.Store(0)
+			var n int
+			for _, err := range db.KeysPrefix(t.Context(), []byte("a/")) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				n++
+			}
+			if n != 2 || reads.Load() != 0 {
+				t.Fatalf("KeysPrefix returned %d keys with %d DATA reads", n, reads.Load())
+			}
+			for _, prefix := range []string{"missing", "a/"} {
+				for e, err := range db.ScanPrefix(t.Context(), []byte(prefix)) {
+					if err != nil || !strings.HasPrefix(string(e.Key), prefix) || string(e.Value) != string(e.Key) {
+						t.Fatalf("ScanPrefix(%q) = %q, %q, %v", prefix, e.Key, e.Value, err)
+					}
+				}
+			}
+			if n := reads.Load(); n != 2 {
+				t.Fatalf("ScanPrefix made %d DATA reads, want 2", n)
+			}
+		})
+	}
+}
+
+func TestScanPrefixObservesCancellationAtUpperBound(t *testing.T) {
+	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
+		db := newTestDB(t, Options{IndexMode: mode}, nil)
+		mustPut(t, db, "a/1", "ok")
+		mustPut(t, db, "b/1", "skip")
+		ctx, cancel := context.WithCancel(t.Context())
+		next, stop := iter.Pull2(db.ScanPrefix(ctx, []byte("a/")))
+		entry, err, ok := next()
+		if err != nil || !ok || string(entry.Value) != "ok" {
+			cancel()
+			stop()
+			t.Fatalf("first entry = %+v, %v, %t", entry, err, ok)
+		}
+		cancel()
+		_, err, ok = next()
+		stop()
+		if !ok || !errors.Is(err, context.Canceled) {
+			t.Fatalf("end of canceled prefix = %v, %t", err, ok)
+		}
+	}
+}
+
+// Cancel after scan admission when the memory index starts capturing a range.
+type cancelOnCapture struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+func (c cancelOnCapture) Done() <-chan struct{} {
+	c.cancel()
+	return c.Context.Done()
+}
+
+func TestCancelDuringBoundedMemoryCaptureReleasesAdmission(t *testing.T) {
+	db := newTestDB(t, Options{IndexMode: IndexMemory}, nil)
+	mustPut(t, db, "a/1", "before")
+	file := testLoc(t, db, "a/1").File
+	references := file.References()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	requireScanError(t, db.ScanPrefix(cancelOnCapture{ctx, cancel}, []byte("a/")), context.Canceled)
+	if db.active != 0 || file.References() != references {
+		t.Fatal("canceled capture retained a file or admission")
+	}
+	mustPut(t, db, "a/1", "after")
+	got := scanContents(t, db.ScanPrefix(t.Context(), []byte("a/")))
+	if !maps.Equal(got, map[string]string{"a/1": "after"}) {
+		t.Fatalf("retry contents = %v", got)
+	}
+}
+
+func TestFullIterationEndsAfterCancelInLastCallback(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode IndexMode
+	}{{"memory", IndexMemory}, {"btree", IndexBTree}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t, Options{IndexMode: tc.mode}, nil)
+			mustPut(t, db, "only", "value")
+			for _, name := range []string{"Keys", "Scan"} {
+				t.Run(name, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					count := 0
+					visit := func(key []byte, err error) bool {
+						if err != nil || string(key) != "only" {
+							t.Fatalf("unexpected item %d: key %q, error %v", count, key, err)
+						}
+						count++
+						cancel()
+						return true
+					}
+					if name == "Keys" {
+						db.Keys(ctx)(visit)
+					} else {
+						db.Scan(ctx)(func(e Entry, err error) bool { return visit(e.Key, err) })
+					}
+					if count != 1 {
+						t.Fatalf("got %d keys, want 1", count)
+					}
+				})
+			}
+		})
+	}
+}
