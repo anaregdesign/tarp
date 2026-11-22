@@ -72,10 +72,18 @@ type localityNativeRecordPos struct {
 	off, size int64
 }
 
-func localityNativeLayout(t *testing.T, db *tarp.DB) (locs []localityNativeRecordPos, sorted bool, snapshotBytes int64) {
+type localityNativeBase struct {
+	Sorted                bool
+	Bytes, DirtyFileBytes int64
+	Files, DirtyFiles     int
+}
+
+func localityNativeLayout(t *testing.T, db *tarp.DB) (locs []localityNativeRecordPos, base localityNativeBase) {
 	t.Helper()
 	locs = make([]localityNativeRecordPos, localityNativeKeys)
-	sorted = true
+	base.Sorted = true
+	original := make([]uint64, localityNativeKeys)
+	sizes := make(map[uint64]int64)
 	prev := -1
 	engine.Observe((*engine.DB)(db)).Store(func(s *storage.Store) {
 		files := slices.Clone(s.Catalog.Files)
@@ -92,7 +100,9 @@ func localityNativeLayout(t *testing.T, db *tarp.DB) (locs []localityNativeRecor
 				t.Fatal(err)
 			}
 			if e.Kind == format.Snapshot {
-				snapshotBytes += e.Bytes
+				base.Bytes += e.Bytes
+				base.Files++
+				sizes[e.ID] = e.Bytes
 			}
 			err = format.Scan(t.Context(), f, e.Bytes, func(off int64, r format.Record, key string) error {
 				if len(key) != 8 || r.Kind != format.Put {
@@ -103,7 +113,8 @@ func localityNativeLayout(t *testing.T, db *tarp.DB) (locs []localityNativeRecor
 					return fmt.Errorf("invalid logical key %d", id)
 				}
 				if e.Kind == format.Snapshot {
-					sorted = sorted && id > prev
+					base.Sorted = base.Sorted && id > prev
+					original[id] = e.ID
 					prev = id
 				}
 				locs[id] = localityNativeRecordPos{e.ID, off, r.Bytes()}
@@ -115,6 +126,18 @@ func localityNativeLayout(t *testing.T, db *tarp.DB) (locs []localityNativeRecor
 			}
 		}
 	})
+	// A selected base file with any displaced record would need replacement
+	// in a complete checkpoint that reuses only entirely unaffected files.
+	for id, file := range original {
+		if file == 0 {
+			t.Fatalf("missing base record %d", id)
+		}
+		if locs[id].file != file && sizes[file] != 0 {
+			base.DirtyFileBytes += sizes[file]
+			base.DirtyFiles++
+			delete(sizes, file)
+		}
+	}
 	return
 }
 
@@ -159,9 +182,9 @@ func localityNativeLog(t *testing.T, row map[string]any) {
 
 func localityNativeColdRead(t *testing.T, db *tarp.DB, dir, arm, trace string, trial int, versions []int) {
 	t.Helper()
-	locs, sorted, _ := localityNativeLayout(t, db)
-	if sorted != (arm == "sorted") {
-		t.Fatalf("snapshot order = %t for %s", sorted, arm)
+	locs, base := localityNativeLayout(t, db)
+	if base.Sorted != (arm == "sorted") {
+		t.Fatalf("snapshot order = %t for %s", base.Sorted, arm)
 	}
 	sum := 0
 	for tail := range localityNativeTails {
@@ -225,7 +248,7 @@ func localityNativeColdRead(t *testing.T, db *tarp.DB, dir, arm, trace string, t
 		if err != nil || read1 < read0 || n != localityNativeHeads {
 			t.Fatalf("returned %d, counter/error %v", n, err)
 		}
-		localityNativeLog(t, map[string]any{"kind": "read", "arm": arm, "trace": trace, "trial": trial, "tail": tail, "matches": n, "file_pages": localityNativePages(locs, tail), "mean_file_pages": float64(sum) / localityNativeTails, "read_bytes": read1 - read0, "ns": elapsed.Nanoseconds(), "full_read_control_bytes": after - before})
+		localityNativeLog(t, map[string]any{"kind": "read", "arm": arm, "trace": trace, "trial": trial, "tail": tail, "matches": n, "snapshot_files": base.Files, "snapshot_bytes": base.Bytes, "dirty_base_files": base.DirtyFiles, "dirty_base_file_bytes": base.DirtyFileBytes, "file_pages": localityNativePages(locs, tail), "mean_file_pages": float64(sum) / localityNativeTails, "read_bytes": read1 - read0, "ns": elapsed.Nanoseconds(), "full_read_control_bytes": after - before})
 	}
 }
 
@@ -256,11 +279,11 @@ func TestLocalityNative(t *testing.T) {
 			if err != nil || result.DroppedKeys != 0 {
 				t.Fatalf("Compact = %+v, %v", result, err)
 			}
-			_, sorted, output := localityNativeLayout(t, db)
-			if sorted != (arm == "sorted") || output == 0 {
-				t.Fatalf("unexpected checkpoint physical order %t or bytes %d", sorted, output)
+			_, base := localityNativeLayout(t, db)
+			if base.Sorted != (arm == "sorted") || base.Bytes == 0 {
+				t.Fatalf("unexpected checkpoint physical order %t or bytes %d", base.Sorted, base.Bytes)
 			}
-			localityNativeLog(t, map[string]any{"kind": "checkpoint", "arm": arm, "trial": trial, "ns": elapsed.Nanoseconds(), "snapshot_bytes": output, "allocated_bytes": m1.TotalAlloc - m0.TotalAlloc, "sequence": engine.Observe((*engine.DB)(db)).Frontier().Sequence})
+			localityNativeLog(t, map[string]any{"kind": "checkpoint", "arm": arm, "trial": trial, "ns": elapsed.Nanoseconds(), "snapshot_bytes": base.Bytes, "allocated_bytes": m1.TotalAlloc - m0.TotalAlloc, "sequence": engine.Observe((*engine.DB)(db)).Frontier().Sequence})
 			backup := filepath.Join(t.TempDir(), "base")
 			if err := db.Backup(t.Context(), backup); err != nil {
 				t.Fatal(err)
