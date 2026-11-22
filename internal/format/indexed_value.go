@@ -8,18 +8,27 @@ import (
 // DecodeIndexedValue checks one complete indexed record from a borrowed read
 // buffer and returns independently owned value bytes.
 func DecodeIndexedValue(record, key []byte, sequence uint64) ([]byte, error) {
+	if _, err := ValidateIndexedRecord(record, key, sequence); err != nil {
+		return nil, err
+	}
+	return bytes.Clone(record[RecordHeaderBytes+len(key):]), nil
+}
+
+// ValidateIndexedRecord verifies a complete indexed Put and returns the
+// checksum of its key and value without making a copy of either.
+func ValidateIndexedRecord(record, key []byte, sequence uint64) (uint32, error) {
 	if len(record) < RecordHeaderBytes {
-		return nil, bad("incomplete committed record header")
+		return 0, bad("incomplete committed record header")
 	}
 	r, err := decodeIndexedHeader(record[:RecordHeaderBytes], int64(len(record)), len(key), sequence)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	payload := record[RecordHeaderBytes:]
 	if !bytes.Equal(payload[:len(key)], key) || crc32.Checksum(payload, table) != r.PayloadCRC {
-		return nil, bad("indexed record payload")
+		return 0, bad("indexed record payload")
 	}
-	return bytes.Clone(payload[len(key):]), nil
+	return r.PayloadCRC, nil
 }
 
 func decodeIndexedHeader(header []byte, size int64, keyBytes int, sequence uint64) (RecordHeader, error) {

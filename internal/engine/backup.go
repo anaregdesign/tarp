@@ -47,20 +47,8 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 	}
 	db.writer.Unlock()
 	defer capture.Release()
-	// Yield briefly between bounded copy batches only while durable mutations
-	// are queued or committing. A continuously busy writer cannot starve Backup.
 	yield := func() error {
-		if db.cleaner.writers.Load() == 0 {
-			return nil
-		}
-		timer := time.NewTimer(2 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			return db.store.IO.Check("backup.paced:after")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return db.yieldToWriter(ctx, "backup.paced:after")
 	}
 	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error {
 		return storage.BackupWithIndex(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex)
@@ -73,6 +61,22 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 		return operationError("backup", "copy", err)
 	}
 	return nil
+}
+
+// Briefly give queued or committing mutations time to use the disk and writer
+// gate. Maintenance advances one batch per pause even under continuous writes.
+func (db *DB) yieldToWriter(ctx context.Context, after string) error {
+	if db.cleaner.writers.Load() == 0 {
+		return nil
+	}
+	timer := time.NewTimer(2 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return db.store.IO.Check(after)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // RestoreRequest describes the backup to verify and the new database to publish.

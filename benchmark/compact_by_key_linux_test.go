@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/anaregdesign/tarp"
 	"github.com/anaregdesign/tarp/internal/engine"
+	"github.com/anaregdesign/tarp/internal/storage"
 )
 
 // TestKeyCheckpointMeasurement is an opt-in paired measurement. Each arm
@@ -81,9 +83,15 @@ func TestKeyCheckpointMeasurement(t *testing.T) {
 					arms := [...]string{"foreground", "source", "ordered"}
 					totals := make(map[string]int)
 					for round := range rounds {
+						trials := make(map[string]checkpointWriterTrial, len(arms))
 						for j := range arms {
 							arm := arms[(j+round)%len(arms)]
-							totals[arm] += measureKeyCheckpointWrites(t, orderedDir, opts, sorted, index.name, pattern, arm, round)
+							trial := measureKeyCheckpointWrites(t, orderedDir, opts, sorted, index.name, pattern, arm, round)
+							totals[arm] += len(trial.overlapSlots)
+							trials[arm] = trial
+						}
+						for _, arm := range arms[1:] {
+							reportPairedCheckpoint(t, index.name, pattern, arm, round, trials["foreground"], trials[arm])
 						}
 					}
 					for _, arm := range arms[1:] {
@@ -183,18 +191,62 @@ type checkpointInterval struct {
 	err        error
 }
 
+// Retain one latency and at most one overlap slot per foreground call until
+// the three paired arms complete. The same slot always represents the same Put.
+type checkpointWriterTrial struct {
+	samples      []int64
+	overlapSlots []int
+	serviceRate  float64
+	totalRate    float64
+}
+
+func reportPairedCheckpoint(t *testing.T, index, pattern, arm string, round int, baseline, trial checkpointWriterTrial) {
+	t.Helper()
+	row := map[string]any{
+		"kind": "paired_foreground", "index": index, "pattern": pattern, "arm": arm, "trial": round + 1,
+		"put_calls_per_second_ratio": trial.serviceRate / baseline.serviceRate,
+		"puts_per_second_ratio":      trial.totalRate / baseline.totalRate, "overlapping_puts": len(trial.overlapSlots),
+	}
+	if len(trial.overlapSlots) != 0 {
+		matched, during := make([]int64, len(trial.overlapSlots)), make([]int64, len(trial.overlapSlots))
+		var baselineNS, overlapNS int64
+		for i, slot := range trial.overlapSlots {
+			matched[i], during[i] = baseline.samples[slot], trial.samples[slot]
+			baselineNS += matched[i]
+			overlapNS += during[i]
+		}
+		base99 := latency(matched, int64(len(matched)), 0).P99NS
+		trial99 := latency(during, int64(len(during)), 0).P99NS
+		row["matched_baseline_put_p99_ns"] = base99
+		row["overlap_put_p99_ratio"] = float64(trial99) / float64(base99)
+		row["overlap_put_calls_per_second_ratio"] = float64(baselineNS) / float64(overlapNS)
+	}
+	keyCheckpointRow(t, row)
+}
+
 // Measure one sorted-base trial. The initial mutations ensure that even the
 // first requested checkpoint has work. All arms receive the same foreground
 // calls. Normal automatic cleaning and parity protection stay enabled.
-func measureKeyCheckpointWrites(t *testing.T, source string, opts tarp.Options, edges []tarp.Entry, index, pattern, arm string, round int) int {
+func measureKeyCheckpointWrites(t *testing.T, source string, opts tarp.Options, edges []tarp.Entry, index, pattern, arm string, round int) checkpointWriterTrial {
 	t.Helper()
 	const seedPuts, epochs, perEpoch = 64, 4, 256
 	dir := filepath.Join(t.TempDir(), "db")
 	measurementCloneClosed(t, source, dir)
-	db, err := tarp.OpenExisting(t.Context(), dir, opts)
+	// The IO seam reports actual encoded bytes accepted. The named points
+	// belong exclusively to the manual DATA checkpoint and its own parity.
+	var dataWrites, parityWrites atomic.Int64
+	core, err := engine.OpenWithIO(dir, engine.Options(opts), &storage.IO{Wrote: func(point string, n int) {
+		switch point {
+		case "compact.segment.write", "compact.write":
+			dataWrites.Add(int64(n))
+		case "compact.parity.write":
+			parityWrites.Add(int64(n))
+		}
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := (*tarp.DB)(core)
 	defer db.Close()
 	// Re-establish the sorted base on every new handle, outside timing, so
 	// measured calls include updates to the certified base on all arms.
@@ -208,7 +260,10 @@ func measureKeyCheckpointWrites(t *testing.T, source string, opts tarp.Options, 
 		}
 	}
 	var samples, overlapping []int64
-	var windowNS int64
+	var overlapSlots []int
+	var checkpointTime, joinTime, writerBusy, overlapBusy, overlappingCallTime time.Duration
+	// Ignore writes from unmeasured base certification and fixture setup.
+	beforeDATA, beforePARITY := dataWrites.Load(), parityWrites.Load()
 	ctx := t.Context()
 	start := time.Now()
 	for epoch := range epochs {
@@ -240,20 +295,45 @@ func measureKeyCheckpointWrites(t *testing.T, source string, opts tarp.Options, 
 			if window.err != nil {
 				t.Fatal(window.err)
 			}
-			windowNS += window.end.Sub(window.start).Nanoseconds()
+			checkpointTime += window.end.Sub(window.start)
+			// The writer cannot begin the next epoch until this checkpoint
+			// finishes. Count only its remaining execution after the final Put.
+			if putErr == nil {
+				joinTime += max(0, window.end.Sub(calls[perEpoch-1].end))
+			}
 		}
 		if putErr != nil {
 			t.Fatal(putErr)
 		}
 		for _, call := range calls {
-			ns := call.end.Sub(call.begin).Nanoseconds()
-			samples = append(samples, ns)
+			duration := call.end.Sub(call.begin)
+			writerBusy += duration
+			samples = append(samples, duration.Nanoseconds())
 			if arm != "foreground" && call.begin.Before(window.end) && call.end.After(window.start) {
-				overlapping = append(overlapping, ns)
+				overlapping = append(overlapping, duration.Nanoseconds())
+				overlapSlots = append(overlapSlots, len(samples)-1)
+				overlappingCallTime += duration
+				// Clip both boundary calls to the checkpoint interval. One
+				// writer issues the Puts serially, so these spans are disjoint.
+				start, end := call.begin, call.end
+				if window.start.After(start) {
+					start = window.start
+				}
+				if window.end.Before(end) {
+					end = window.end
+				}
+				overlapBusy += end.Sub(start)
 			}
 		}
 	}
 	elapsed := time.Since(start)
+	writtenDATA, writtenPARITY := dataWrites.Load()-beforeDATA, parityWrites.Load()-beforePARITY
+	if (arm == "foreground") != (writtenDATA == 0 && writtenPARITY == 0) || (writtenDATA == 0) != (writtenPARITY == 0) {
+		t.Fatalf("arm %s counted %d checkpoint DATA bytes and %d PARITY bytes", arm, writtenDATA, writtenPARITY)
+	}
+	if writerBusy+joinTime > elapsed || overlapBusy > checkpointTime || overlapBusy > overlappingCallTime {
+		t.Fatalf("invalid timing: elapsed %s, busy %s, join %s, checkpoint %s, overlap busy %s, overlapping calls %s", elapsed, writerBusy, joinTime, checkpointTime, overlapBusy, overlappingCallTime)
+	}
 	// Validate from a fresh Full open; the writer's value cache must never
 	// supply the oracle. Untouched records and row count are checked as well.
 	if err := db.Close(); err != nil {
@@ -271,14 +351,20 @@ func measureKeyCheckpointWrites(t *testing.T, source string, opts tarp.Options, 
 	}
 	(edgePrefixQuery{}).verify(t, image, expected, true, image)
 	q := latency(samples, int64(len(samples)), elapsed)
-	during := latency(overlapping, int64(len(overlapping)), time.Duration(windowNS))
+	during := latency(overlapping, int64(len(overlapping)), checkpointTime)
+	trial := checkpointWriterTrial{samples: samples, overlapSlots: overlapSlots,
+		serviceRate: float64(len(samples)) / writerBusy.Seconds(), totalRate: float64(len(samples)) / elapsed.Seconds()}
 	keyCheckpointRow(t, map[string]any{
 		"kind": "foreground", "index": index, "pattern": pattern, "arm": arm, "trial": round + 1,
-		"puts": len(samples), "seed_puts": seedPuts, "elapsed_ns": elapsed.Nanoseconds(), "puts_per_second": float64(len(samples)) / elapsed.Seconds(),
+		"puts": len(samples), "seed_puts": seedPuts, "elapsed_ns": elapsed.Nanoseconds(), "puts_per_second": trial.totalRate,
 		"put_p50_ns": q.P50NS, "put_p99_ns": q.P99NS, "overlapping_puts": len(overlapping), "overlap_put_p99_ns": during.P99NS,
-		"checkpoint_window_ns": windowNS, "epochs": epochs, "verified_live_keys": len(expected),
+		"writer_busy_ns": writerBusy.Nanoseconds(), "put_calls_per_second": trial.serviceRate,
+		"checkpoint_window_ns": checkpointTime.Nanoseconds(), "checkpoint_join_ns": joinTime.Nanoseconds(),
+		"overlap_writer_busy_ns": overlapBusy.Nanoseconds(), "overlapping_put_call_ns": overlappingCallTime.Nanoseconds(),
+		"checkpoint_data_written_bytes": writtenDATA, "checkpoint_parity_written_bytes": writtenPARITY,
+		"epochs": epochs, "verified_live_keys": len(expected),
 	})
-	return len(overlapping)
+	return trial
 }
 
 func runKeyCheckpoint(ctx context.Context, db *tarp.DB, arm string) error {

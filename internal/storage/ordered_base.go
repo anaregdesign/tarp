@@ -68,15 +68,19 @@ const snapshotFenceBudget = 256 << 10
 type fenceCache struct{ keys *cache.Cache }
 
 func (c *fenceCache) put(id uint64, first, last string) {
+	var k [8]byte
+	binary.LittleEndian.PutUint64(k[:], id)
 	if len(first) > snapshotFenceBudget || len(last) > snapshotFenceBudget ||
 		entrysize.CacheCharge(8, int64(len(first)+len(last))) > snapshotFenceBudget {
+		// A cleaner retry may reuse its unpublished output ID.
+		if c.keys != nil {
+			c.keys.Delete(string(k[:]))
+		}
 		return
 	}
 	if c.keys == nil {
 		c.keys = cache.New(snapshotFenceBudget)
 	}
-	var k [8]byte
-	binary.LittleEndian.PutUint64(k[:], id)
 	bounds := make([]byte, len(first)+len(last))
 	copy(bounds, first)
 	copy(bounds[len(first):], last)
@@ -145,17 +149,19 @@ func (c *DataCheckpoint) certifyCapturedBase(ctx context.Context, live index.Vie
 		}
 		fd, _, _, err := openSelected(src.Segment.Path, c.capture.Current.UUID, src.Entry, false)
 		if err != nil {
-			return false, selectedReadFailure(src.Entry.ID, err)
+			return false, orderedSourceError(src.Entry.ID, err)
 		}
 		var bounds snapshotBoundsBuilder
 		var mismatch bool
+		var lookupErr error
 		ordered := true
 		err = c.store.IO.Do("compact.key.certify", func() error {
 			return scanSelectedRecords(ctx, fd, src.Entry, c.capture.Catalog.CheckpointCutoffSequence, func(off int64, record format.RecordHeader, key string) error {
 				if live != nil && c.capture.Catalog.CheckpointCutoffSequence == c.capture.Current.LastUserSequence {
 					addr, found, err := live.Lookup(key)
 					if err != nil {
-						return &IndexWorkError{Err: err}
+						lookupErr = &IndexWorkError{Err: err}
+						return lookupErr
 					}
 					expected := index.Address{FileID: src.Entry.ID, RecordOffset: off, RecordBytes: record.EncodedRecordBytes(), ValueBytes: record.ValueBytes, Sequence: record.Sequence}
 					if !found || addr != expected {
@@ -170,7 +176,10 @@ func (c *DataCheckpoint) certifyCapturedBase(ctx context.Context, live index.Vie
 				return nil
 			})
 		})
-		if err = errors.Join(selectedReadFailure(src.Entry.ID, err), fd.Close()); err != nil {
+		if lookupErr == nil {
+			err = orderedSourceError(src.Entry.ID, err)
+		}
+		if err = errors.Join(err, orderedSourceError(src.Entry.ID, fd.Close())); err != nil {
 			return false, err
 		}
 		if mismatch {
@@ -207,9 +216,9 @@ func (c *DataCheckpoint) snapshotBounds(ctx context.Context, entry format.Catalo
 	}
 	fd, _, _, err := openSelected(src.Segment.Path, c.capture.Current.UUID, entry, false)
 	if err != nil {
-		return "", "", selectedReadFailure(entry.ID, err)
+		return "", "", orderedSourceError(entry.ID, err)
 	}
-	defer func() { err = errors.Join(selectedReadFailure(entry.ID, err), fd.Close()) }()
+	defer func() { err = errors.Join(orderedSourceError(entry.ID, err), orderedSourceError(entry.ID, fd.Close())) }()
 	read := func(off int64, n int, final bool) (string, error) {
 		if err := ctx.Err(); err != nil {
 			return "", err

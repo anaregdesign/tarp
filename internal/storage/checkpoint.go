@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -19,6 +20,8 @@ import (
 // Copy runs outside the writer gate. ReserveSnapshotSegment and Install require it.
 type DataCheckpoint struct {
 	store          *Store
+	orderedYield   func() error
+	bytesToYield   int
 	scratch        *orderedScratchBudget
 	capture        *Capture
 	segments       []*DataSegment
@@ -34,6 +37,46 @@ type DataCheckpoint struct {
 
 func (s *Store) NewDataCheckpoint(capture *Capture) *DataCheckpoint {
 	return &DataCheckpoint{store: s, capture: capture}
+}
+
+// SetOrderedYield gives an active foreground writer a chance to run between
+// chunks of private DATA and parity I/O. The callback runs outside DB locks.
+func (c *DataCheckpoint) SetOrderedYield(yield func() error) {
+	c.orderedYield = yield
+	c.bytesToYield = orderedPaceBytes
+}
+
+const orderedPaceBytes = 256 << 10
+
+func (c *DataCheckpoint) paceOrdered(n int) error {
+	c.bytesToYield -= n
+	if c.bytesToYield > 0 {
+		return nil
+	}
+	c.bytesToYield += orderedPaceBytes
+	return c.orderedYield()
+}
+
+type orderedOutput struct {
+	dst *outputWriter
+	c   *DataCheckpoint
+}
+
+func (w orderedOutput) Write(b []byte) (int, error) {
+	var written int
+	for len(b) != 0 {
+		n := min(len(b), orderedPaceBytes)
+		if err := w.c.paceOrdered(n); err != nil {
+			return written, &destinationError{err}
+		}
+		count, err := w.dst.Write(b[:n])
+		written += count
+		if err != nil {
+			return written, err
+		}
+		b = b[n:]
+	}
+	return written, nil
 }
 
 // ReserveSnapshotSegment assigns a name under the writer gate. Only a successfully
@@ -99,12 +142,18 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 	lastCarriedPos := -1
 	ordered := true
 	var fd *os.File
+	var buffered *bufio.Writer
 	var offset int64
 	digest := sha256.New()
 	fs := c.store.IO
 	finish := func() error {
 		if fd == nil {
 			return nil
+		}
+		if buffered != nil {
+			if err := buffered.Flush(); err != nil {
+				return err
+			}
 		}
 		err := errors.Join(fs.Sync(fd, "compact.sync"), fd.Close())
 		fd = nil
@@ -156,14 +205,31 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 			if err != nil {
 				return nil, fault("output-create", publication.NotApplied, false, err)
 			}
-			fd, err = segment.create(c.capture.Current.UUID, fs, "compact.segment", appendData{})
+			fd, err = os.OpenFile(segment.Path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 			if err != nil {
 				return nil, fault("output-create", publication.NotApplied, false, err)
 			}
 			c.segments = append(c.segments, segment)
+			if err := segment.initializeFile(fd, c.capture.Current.UUID, fs, "compact.segment", appendData{}); err != nil {
+				return nil, fault("output-create", publication.NotApplied, false, err)
+			}
 			offset = format.SegmentHeaderBytes
 			digest.Reset()
 			digest.Write(format.EncodeSegmentHeader(format.SegmentHeader{UUID: c.capture.Current.UUID, ID: segment.ID, Kind: segment.Kind}))
+			if requireOrder {
+				// Ordered rows are emitted consecutively. Amortize small
+				// physical writes while retaining the exact record offsets.
+				disk := &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
+				var out io.Writer = disk
+				if c.orderedYield != nil {
+					out = orderedOutput{disk, c}
+				}
+				if buffered == nil {
+					buffered = bufio.NewWriterSize(out, 32<<10)
+				} else {
+					buffered.Reset(out)
+				}
+			}
 		}
 		if requireOrder {
 			if err := c.scratch.growOutput(previousOutputEnd, offset+old.RecordBytes); err != nil {
@@ -174,7 +240,10 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 			bounds.add(key, offset)
 			previousKey = key
 		}
-		writer := &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
+		var writer io.Writer = buffered
+		if buffered == nil {
+			writer = &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
+		}
 		next := old
 		next.Segment, next.RecordOffset = segment, offset
 		offset += old.RecordBytes
@@ -231,9 +300,13 @@ func (c *DataCheckpoint) Protect(ctx context.Context) error {
 	if len(c.privateEntries) == 0 {
 		return nil
 	}
+	var yield func() error
+	if c.orderedYield != nil {
+		yield = func() error { return c.paceOrdered(format.DataBlocksPerStripe * format.DataBlockBytes) }
+	}
 	for i, entry := range c.privateEntries {
 		src := CapturedSegment{Segment: c.segments[i], Entry: entry}
-		if err := c.store.buildParity(ctx, c.capture.Current.UUID, src, false, nil, "compact.parity"); err != nil {
+		if err := c.store.buildParity(ctx, c.capture.Current.UUID, src, false, yield, "compact.parity"); err != nil {
 			return err
 		}
 	}

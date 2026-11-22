@@ -121,7 +121,11 @@ func (c *DataCheckpoint) writeRecoveredByKey(ctx context.Context, live index.Vie
 		result = errors.Join(result, replayWorkError(errors.Join(stage.Close(), runs.close())))
 	}()
 	w := bufio.NewWriterSize(stage, 32<<10)
+	row := recoveryScratchWriter{writer: w, runs: &runs}
 	err = scan(func(key string, old Location) (io.Writer, error) {
+		if row.left != 0 {
+			return nil, &IndexWorkError{Err: io.ErrUnexpectedEOF}
+		}
 		if old.RecordBytes > math.MaxInt64-total {
 			return nil, &IndexWorkError{Err: errors.New("recovery scratch exceeds file offset limit")}
 		}
@@ -131,13 +135,16 @@ func (c *DataCheckpoint) writeRecoveredByKey(ctx context.Context, live index.Vie
 		a := old.Address()
 		a.RecordOffset = total
 		total += old.RecordBytes
-		if err := runs.add(replayEvent{key: key, addr: a}); err != nil {
-			return nil, replayWorkError(err)
-		}
-		return recoveryScratchWriter{w}, nil
+		row.event = replayEvent{key: key, addr: a}
+		row.left = a.RecordBytes
+		row.headerBytes = 0
+		return &row, nil
 	})
 	if err != nil {
 		return err
+	}
+	if row.left != 0 {
+		return &IndexWorkError{Err: io.ErrUnexpectedEOF}
 	}
 	if err := w.Flush(); err != nil {
 		return &IndexWorkError{Err: err}
@@ -172,8 +179,8 @@ func (c *DataCheckpoint) writeRecoveredByKey(ctx context.Context, live index.Vie
 				}
 				return replayWorkError(err)
 			}
-			if rec.EncodedRecordBytes() != a.RecordBytes || rec.ValueBytes != a.ValueBytes {
-				return &IndexWorkError{Err: errors.New("recovery scratch record length changed")}
+			if rec.EncodedRecordBytes() != a.RecordBytes || rec.ValueBytes != a.ValueBytes || rec.PayloadCRC != e.payloadCRC {
+				return &IndexWorkError{Err: errors.New("recovery scratch record differs from staged Put")}
 			}
 			return nil
 		})
@@ -184,11 +191,43 @@ func (c *DataCheckpoint) writeRecoveredByKey(ctx context.Context, live index.Vie
 	})
 }
 
-type recoveryScratchWriter struct{ io.Writer }
+// Capture the original payload checksum from the staged header, independently
+// of the bytes later returned by the scratch file. Some recovered values are
+// supplied by the immutable cache instead of by CopyRecord.
+type recoveryScratchWriter struct {
+	writer      io.Writer
+	runs        *sortedReplay
+	event       replayEvent
+	header      [format.RecordHeaderBytes]byte
+	headerBytes int
+	left        int64
+}
 
-func (w recoveryScratchWriter) Write(p []byte) (int, error) {
-	n, err := w.Writer.Write(p)
-	return n, replayWorkError(err)
+func (w *recoveryScratchWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if int64(len(p)) > w.left {
+		return 0, &IndexWorkError{Err: errors.New("recovery staging exceeds record length")}
+	}
+	n, err := w.writer.Write(p)
+	if err != nil {
+		return n, replayWorkError(err)
+	}
+	if n != len(p) {
+		return n, &IndexWorkError{Err: io.ErrShortWrite}
+	}
+	w.headerBytes += copy(w.header[w.headerBytes:], p)
+	w.left -= int64(n)
+	if w.left == 0 {
+		r, err := format.DecodeRecordHeader(w.header[:], w.event.addr.RecordBytes)
+		if err != nil {
+			return n, replayWorkError(err)
+		}
+		w.event.payloadCRC = r.PayloadCRC
+		return n, replayWorkError(w.runs.add(w.event))
+	}
+	return n, nil
 }
 
 type checkpointRecovery struct {
@@ -263,7 +302,7 @@ func (r *checkpointRecovery) file(src CapturedSegment) (result error) {
 		if err != nil || !ok {
 			return err
 		}
-		if err := r.copyRecord(fd, key, At(src.Segment, a)); err != nil {
+		if err := r.copyRecord(fd, key, At(src.Segment, a), rec.PayloadCRC); err != nil {
 			return err
 		}
 		r.keys++
@@ -286,14 +325,14 @@ func (r *checkpointRecovery) observe(src CapturedSegment, off int64, rec format.
 	return a, ok && a == want.Address(), r.history.apply(src.Segment, off, rec, key)
 }
 
-func (r *checkpointRecovery) copyRecord(rd io.ReaderAt, key string, loc Location) error {
+func (r *checkpointRecovery) copyRecord(rd io.ReaderAt, key string, loc Location, payloadCRC uint32) error {
 	w, err := r.emit(key, loc)
 	if err != nil {
 		return err
 	}
 	rec, err := format.CopyRecord(r.ctx, rd, w, loc.RecordOffset, loc.RecordBytes, &format.Identity{Key: key, Sequence: loc.Sequence}, r.buf)
-	if err == nil && (rec.EncodedRecordBytes() != loc.RecordBytes || rec.ValueBytes != loc.ValueBytes) {
-		return fmt.Errorf("%w: copied record length changed", ErrCorrupt)
+	if err == nil && (rec.EncodedRecordBytes() != loc.RecordBytes || rec.ValueBytes != loc.ValueBytes || rec.PayloadCRC != payloadCRC) {
+		return fmt.Errorf("%w: copied record changed during recovery", ErrCorrupt)
 	}
 	return err
 }
@@ -349,7 +388,7 @@ func (r *checkpointRecovery) scanDamaged(src CapturedSegment, b *recoveredBlocks
 				return err
 			}
 			if current {
-				if err := r.copyRecord(b, key, At(src.Segment, a)); err != nil {
+				if err := r.copyRecord(b, key, At(src.Segment, a), rec.PayloadCRC); err != nil {
 					return err
 				}
 				r.keys++
@@ -448,7 +487,7 @@ func (r *checkpointRecovery) recoverRecord(b *recoveredBlocks, key string, old L
 		if rec.Kind != format.Put || actual != key || rec.Sequence != old.Sequence || rec.EncodedRecordBytes() != old.RecordBytes || rec.ValueBytes != old.ValueBytes {
 			return fmt.Errorf("%w: recovery address disagrees with intact record", ErrCorrupt)
 		}
-		return r.copyRecord(b, key, old)
+		return r.copyRecord(b, key, old, rec.PayloadCRC)
 	}
 	if !errors.Is(err, ErrCorrupt) {
 		return err

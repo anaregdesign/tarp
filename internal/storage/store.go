@@ -429,8 +429,19 @@ func (f *DataSegment) create(uuid [16]byte, fs *IO, point string, initialRecords
 	if err != nil {
 		return nil, err
 	}
+	if err := f.initializeFile(fd, uuid, fs, point, initialRecords); err != nil {
+		closeErr := fd.Close()
+		removeErr := fs.Do("segment.discard", func() error { return os.Remove(f.Path) })
+		return nil, errors.Join(err, closeErr, removeErr)
+	}
+	return fd, nil
+}
+
+// initializeFile leaves ownership of the exclusively created file with the
+// caller even when the first write fails.
+func (f *DataSegment) initializeFile(fd *os.File, uuid [16]byte, fs *IO, point string, initialRecords appendData) error {
 	b := format.EncodeSegmentHeader(format.SegmentHeader{UUID: uuid, ID: f.ID, Kind: f.Kind})
-	err = fs.Write(fd, b, 0, point+".write")
+	err := fs.Write(fd, b, 0, point+".write")
 	if f.Kind == format.RawLogKind {
 		f.activeDigest = sha256.New()
 		f.activeDigest.Write(b)
@@ -442,13 +453,10 @@ func (f *DataSegment) create(uuid [16]byte, fs *IO, point string, initialRecords
 	if err == nil && f.Kind != format.SnapshotKind {
 		err = fs.Sync(fd, point+".sync")
 	}
-	if err != nil {
-		closeErr := fd.Close()
-		removeErr := fs.Do("segment.discard", func() error { return os.Remove(f.Path) })
-		return nil, errors.Join(err, closeErr, removeErr)
+	if err == nil {
+		f.Size.Store(format.SegmentHeaderBytes + initialRecords.size)
 	}
-	f.Size.Store(format.SegmentHeaderBytes + initialRecords.size)
-	return fd, nil
+	return err
 }
 
 func (s *Store) Rotate() error {

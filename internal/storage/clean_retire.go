@@ -53,8 +53,18 @@ func (s *Store) syncRetirements(point string) error {
 // RetireCleaned removes only known obsolete objects. The caller holds the
 // writer gate and checks health. Pin release itself never performs file I/O.
 func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result error) {
-	const batch = 16
-	remaining := batch
+	return s.retireKnown(16)
+}
+
+// RetireAfterCheckpoint visits the complete set of known retirements once and
+// syncs successful unlinks together, as manual directory cleanup does. Counting
+// pins in each automatic batch would repeatedly traverse the same large set.
+func (s *Store) RetireAfterCheckpoint() (unlinked, pinned int64, err error) {
+	unlinked, pinned, _, err = s.retireKnown(math.MaxInt)
+	return unlinked, pinned, err
+}
+
+func (s *Store) retireKnown(remaining int) (unlinked, pinned int64, pending bool, result error) {
 	remove := func(path string) (removed bool, err error) {
 		st, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -102,10 +112,14 @@ func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result er
 		}
 		// Release recovery information before its source. Keep the registry
 		// entry until both names are gone so a partial retirement can retry.
-		removedParity, err := remove(filepath.Join(s.Dir, parityName(s.Current.UUID, id)))
-		if err != nil || !removedParity || remaining == 0 {
-			result = err
-			continue
+		// A staged output whose header failed may own only its DATA name.
+		// A separately existing sidecar never becomes ours on EEXIST.
+		if f.sealed.Load() != nil || f.parityNeedsSync || f.parityReady {
+			removedParity, err := remove(filepath.Join(s.Dir, parityName(s.Current.UUID, id)))
+			if err != nil || !removedParity || remaining == 0 {
+				result = err
+				continue
+			}
 		}
 		removed, err := remove(f.Path)
 		if removed {

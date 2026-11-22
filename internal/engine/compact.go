@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"math"
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
@@ -154,7 +153,16 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 			capture.Release()
 		}
 	}()
-	checkpoint := db.store.NewDataCheckpoint(capture)
+	newCheckpoint := func() *storage.DataCheckpoint {
+		checkpoint := db.store.NewDataCheckpoint(capture)
+		if ordered {
+			checkpoint.SetOrderedYield(func() error {
+				return db.yieldToWriter(ctx, "compact.paced:after")
+			})
+		}
+		return checkpoint
+	}
+	checkpoint := newCheckpoint()
 	discard := func() error {
 		err := checkpoint.Discard()
 		if err != nil {
@@ -194,7 +202,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 	}()
 	reset := func() error {
 		discardErr := errors.Join(discard(), moves.Close())
-		checkpoint = db.store.NewDataCheckpoint(capture)
+		checkpoint = newCheckpoint()
 		moves = db.store.NewRelocations()
 		return discardErr
 	}
@@ -299,7 +307,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	db.relocate(moves, maxBatch, "compact.remap:after")
+	db.relocate(moves, maxBatch, "compact.remap:after", ordered && db.opts.IndexMode == IndexBTree)
 	capture.Release()
 	released = true
 	db.writer.Lock()
@@ -318,14 +326,7 @@ func (db *DB) cleanupCheckpoint(ordered bool) (int64, int64, error) {
 	if !ordered {
 		return db.store.Cleanup()
 	}
-	var removed int64
-	for {
-		n, pinned, pending, err := db.store.RetireCleaned()
-		removed += min(n, math.MaxInt64-removed)
-		if err != nil || !pending || n == 0 {
-			return removed, pinned, err
-		}
-	}
+	return db.store.RetireAfterCheckpoint()
 }
 
 // cachedSource borrows immutable cache bytes only while the indexed version
@@ -425,8 +426,8 @@ func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations,
 
 // The replacement layout is already committed. A partial remap fail-stops the
 // instance, leaving the authoritative DATA for a fresh indexed Open.
-func (db *DB) relocate(moves *storage.Relocations, maxBatch int, after string) {
-	err := moves.EachBatch(maxBatch, func(batch []storage.Relocation) error {
+func (db *DB) relocate(moves *storage.Relocations, maxBatch int, after string, paceWriterGate bool) {
+	apply := func(batch []storage.Relocation) error {
 		if err := db.relocateBatch(batch); err != nil {
 			return err
 		}
@@ -438,6 +439,25 @@ func (db *DB) relocate(moves *storage.Relocations, maxBatch int, after string) {
 			}
 		}
 		return nil
+	}
+	err := moves.EachBatch(maxBatch, func(batch []storage.Relocation) error {
+		for paceWriterGate && len(batch) > 0 && db.cleaner.writers.Load() > 0 {
+			// BTree stages copies of modified pages while holding the writer
+			// gate. Give durable writers a turn between small transactions.
+			// CURRENT has selected this checkpoint, so finish despite cancellation.
+			if err := db.yieldToWriter(context.Background(), "compact.remap.paced:after"); err != nil {
+				return err
+			}
+			n := min(8, len(batch))
+			if err := apply(batch[:n]); err != nil {
+				return err
+			}
+			batch = batch[n:]
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		return apply(batch)
 	})
 	if err != nil {
 		db.poison(err)

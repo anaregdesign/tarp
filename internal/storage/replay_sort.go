@@ -20,7 +20,8 @@ import (
 type replayEvent struct {
 	key        string
 	addr       index.Address
-	fileKind   uint32
+	payloadCRC uint32
+	fileKind   uint8
 	recordKind uint8
 }
 
@@ -41,7 +42,7 @@ type sortedReplay struct {
 
 func (s *sortedReplay) apply(f *DataSegment, off int64, r format.RecordHeader, key string) error {
 	addr := index.Address{FileID: f.ID, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
-	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: f.Kind, recordKind: r.Kind}))
+	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: uint8(f.Kind), recordKind: r.Kind, payloadCRC: r.PayloadCRC}))
 }
 
 func (s *sortedReplay) add(e replayEvent) error {
@@ -201,28 +202,37 @@ func (s *sortedReplay) each(visit func(replayEvent) error) error {
 // reduce validates the same key transitions as chronological replay. The
 // record sequence is preserved as data; it need not equal traversal order.
 func (s *sortedReplay) reduce(pruned uint64, emit func(string, index.Address) error) error {
-	var key string
-	var addr index.Address
-	present := false
-	flush := func() error {
-		if !present || emit == nil {
+	return s.reduceEvents(pruned, func(e replayEvent) error {
+		if emit == nil {
 			return nil
 		}
-		return emit(key, addr)
+		return emit(e.key, e.addr)
+	})
+}
+
+// reduceEvents preserves the payload checksum validated during the source
+// scan so a subsequent record copy can check it against that same version.
+func (s *sortedReplay) reduceEvents(pruned uint64, emit func(replayEvent) error) error {
+	var last replayEvent
+	present := false
+	flush := func() error {
+		if !present {
+			return nil
+		}
+		return emit(last)
 	}
 	err := s.each(func(e replayEvent) error {
-		if key != e.key {
+		if last.key != e.key {
 			if err := flush(); err != nil {
 				return err
 			}
-			key = e.key
 			present = false
 		}
-		if err := validateKey(e.fileKind, format.RecordHeader{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
-			return &SourceError{Err: fmt.Errorf("DATA %d offset %d: %w", e.addr.FileID, e.addr.RecordOffset, err)}
+		if err := validateKey(uint32(e.fileKind), format.RecordHeader{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
+			return selectedReadFailure(e.addr.FileID, &SourceError{Err: fmt.Errorf("DATA %d offset %d: %w", e.addr.FileID, e.addr.RecordOffset, err)})
 		}
 		present = e.recordKind != format.Delete
-		addr = e.addr
+		last = e
 		return nil
 	})
 	if err != nil {
@@ -273,8 +283,8 @@ func (r *replayRun) write(w *bufio.Writer, e replayEvent) error {
 	put(h[16:], uint64(e.addr.RecordBytes))
 	put(h[24:], uint64(e.addr.ValueBytes))
 	put(h[32:], e.addr.Sequence)
-	binary.LittleEndian.PutUint32(h[40:], e.fileKind)
-	h[44] = e.recordKind
+	binary.LittleEndian.PutUint32(h[40:], e.payloadCRC)
+	h[44] = e.fileKind<<4 | e.recordKind
 	charge := uint64(len(e.key)) + replayHeaderBytes
 	if err := r.budget.grow(charge); err != nil {
 		return err
@@ -312,7 +322,7 @@ func (r *runCursor) next() (replayEvent, error) {
 		return replayEvent{}, err
 	}
 	r.left -= int64(len(key))
-	return replayEvent{key: key, addr: a, fileKind: binary.LittleEndian.Uint32(h[40:]), recordKind: h[44]}, nil
+	return replayEvent{key: key, addr: a, payloadCRC: binary.LittleEndian.Uint32(h[40:]), fileKind: h[44] >> 4, recordKind: h[44] & 15}, nil
 }
 
 func mergeReplay(ctx context.Context, a, b *runCursor, visit func(replayEvent) error) error {
