@@ -1384,6 +1384,87 @@ func TestCompactByKeyConcurrentBatchSurvivesCapturedCutoff(t *testing.T) {
 	checkKeyOrderedSnapshot(t, db, want)
 }
 
+func TestCompactByKeyPacesQueuedWriterAndFinishesPublishedRemap(t *testing.T) {
+	for _, stage := range []string{"copy", "remap"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var copyPauses, remapPauses, moves, batch, maxBatch int
+			fs := &storage.IO{Hook: func(point string) error {
+				switch point {
+				case "compact.paced:after":
+					copyPauses++
+					if stage == "copy" {
+						cancel()
+					}
+				case "compact.remap.paced:after":
+					remapPauses++
+					maxBatch = max(maxBatch, batch)
+					batch = 0
+					if stage == "remap" {
+						cancel()
+					}
+				case "compact.remap:after":
+					moves++
+					batch++
+				}
+				return nil
+			}}
+			queued, release := make(chan struct{}), make(chan struct{})
+			var arm, starved atomic.Bool
+			hooks := parkedMaintenance()
+			hooks.WriterWait = func(acquired bool) {
+				if !acquired && arm.CompareAndSwap(true, false) {
+					close(queued)
+					// Keep pressure present for the entire checkpoint. It must make
+					// progress even if a durable writer is continuously queued.
+					select {
+					case <-release:
+					case <-time.After(5 * time.Second):
+						starved.Store(true)
+					}
+				}
+			}
+			db := newTestDBWithHooks(t, Options{IndexMode: IndexBTree}, fs, hooks)
+			entries := make([]Entry, 64)
+			for i := range entries {
+				entries[i] = Entry{Key: []byte(fmt.Sprintf("k%03d", len(entries)-i)), Value: bytes.Repeat([]byte{byte(i)}, 8192)}
+			}
+			if err := db.BatchPut(entries); err != nil {
+				t.Fatal(err)
+			}
+			arm.Store(true)
+			writerDone := make(chan error, 1)
+			go func() { writerDone <- db.Put(entries[0].Key, []byte("newer")) }()
+			<-queued
+			_, err := db.CompactByKey(ctx)
+			close(release)
+			if writerErr := <-writerDone; writerErr != nil || starved.Load() {
+				t.Fatalf("durable writer returned %v, checkpoint waited for writer to drain: %t", writerErr, starved.Load())
+			}
+			if copyPauses == 0 {
+				t.Fatal("private DATA and parity copy did not yield to the queued writer")
+			}
+			if stage == "copy" {
+				var op *OpError
+				if !errors.Is(err, context.Canceled) || !errors.As(err, &op) || op.Outcome != NotApplied || moves != 0 {
+					t.Fatalf("canceled private copy returned %v and remapped %d keys", err, moves)
+				}
+				before := copyPauses
+				if _, err := db.CompactByKey(t.Context()); err != nil || copyPauses != before || remapPauses != 0 {
+					t.Fatalf("idle retry returned %v and paused %d times during copy, %d during remap", err, copyPauses-before, remapPauses)
+				}
+			} else if err != nil || remapPauses == 0 || moves != len(entries) || max(maxBatch, batch) > 8 {
+				t.Fatalf("published remap returned %v, %d pauses, %d moves, largest batch %d", err, remapPauses, moves, max(maxBatch, batch))
+			}
+			wantValue(t, db, string(entries[0].Key), "newer")
+			for _, entry := range entries[1:] {
+				wantValue(t, db, string(entry.Key), string(entry.Value))
+			}
+		})
+	}
+}
+
 func TestCompactByKeyReusesUncheckedNeighborAndRecoversAfterFailedRead(t *testing.T) {
 	// Each large value occupies a separate snapshot segment. A damaged
 	// neighbor must survive a healthy delta at its original identity, then
