@@ -6,7 +6,7 @@ from pathlib import Path
 
 out, rounds = Path(sys.argv[1]), int(sys.argv[2])
 expected = {
-    "btree": ["seed", "value-cold-get", *(f"churn-{i}" for i in range(1, 5))],
+    "btree": ["seed", "value-cache-miss-get", *(f"churn-{i}" for i in range(1, 5))],
     "verify": [(op, size) for size in (20_000, 40_000, 100_000)
                for op in ("read_only", "with_scratch", "restore")],
     "open": [f"orphans-{n}" for n in (0, 100, 1000)],

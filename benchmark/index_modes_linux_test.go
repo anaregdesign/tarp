@@ -169,10 +169,10 @@ func TestIndexModeCampaign(t *testing.T) {
 		if post.ReadWorkspacePeakBytes > post.ReadWorkspaceLimitBytes || post.CachePeakBytes+post.ReadWorkspacePeakBytes > uint64(opts.BTreeMemoryBudgetBytes) {
 			t.Fatalf("page cache and read workspace peaks exceed admission budget: %+v", post)
 		}
-		if name == "hot_get" && pre.PageReads != post.PageReads {
-			t.Fatal("Value hits loaded index pages")
+		if name == "value_cache_hit_get" && pre.PageReads != post.PageReads {
+			t.Fatal("value-cache hits loaded B+tree pages")
 		}
-		row := map[string]any{"mode": modeName, "index_budget_bytes": opts.BTreeMemoryBudgetBytes, "keys": n, "go": runtime.Version(), "gomaxprocs": runtime.GOMAXPROCS(0),
+		row := map[string]any{"mode": modeName, "btree_memory_budget_bytes": opts.BTreeMemoryBudgetBytes, "keys": n, "go": runtime.Version(), "gomaxprocs": runtime.GOMAXPROCS(0),
 			"workload": name, "latency": latency(durations, int64(reps), elapsed), "process_read_bytes": afterIO - beforeIO,
 			"index_before": pre, "index_after": post, "memory_before": beforeMemory, "memory_after": afterMemory,
 			"heap_objects_sampled_peak_bytes": high}
@@ -199,10 +199,10 @@ func TestIndexModeCampaign(t *testing.T) {
 		}
 	}
 	access(trace[0])
-	run("hot_get", len(trace), false, func(int) { access(trace[0]) })
+	run("value_cache_hit_get", len(trace), false, func(int) { access(trace[0]) })
 	clearValues()
-	run("value_cold_get", len(trace), false, func(i int) { access(trace[i]) })
-	run("missing_get", len(trace), false, func(i int) {
+	run("value_cache_miss_get", len(trace), false, func(i int) { access(trace[i]) })
+	run("missing_key_get", len(trace), false, func(i int) {
 		_, e := db.Get(missing[i])
 		if !errors.Is(e, tarp.ErrNotFound) {
 			t.Fatalf("Get missing: %v", e)

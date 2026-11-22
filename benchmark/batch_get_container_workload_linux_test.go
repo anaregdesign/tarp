@@ -110,10 +110,10 @@ func (f *containerBatchFixture) open(t *testing.T, limit int) *tarp.DB {
 }
 
 type containerBatchStats struct {
-	Hits            uint64 `json:"hits"`
-	Misses          uint64 `json:"misses"`
-	MissingKeys     uint64 `json:"missing_keys"`
-	DuplicateInputs uint64 `json:"duplicate_inputs"`
+	ValueCacheHits    uint64 `json:"value_cache_hits"`
+	ValueCacheMisses  uint64 `json:"value_cache_misses"`
+	MissingKeyLookups uint64 `json:"missing_key_lookups"`
+	DuplicateInputs   uint64 `json:"duplicate_inputs"`
 }
 
 type containerBatchRequest struct {
@@ -132,14 +132,14 @@ func (f *containerBatchFixture) trace(seed int64, mode string) []containerBatchR
 		ids := order[i*containerBatchSlots : (i+1)*containerBatchSlots]
 		switch mode {
 		case "distinct":
-			req.want.Misses = containerBatchSlots
-		case "hit":
-			req.want.Hits = containerBatchSlots
+			req.want.ValueCacheMisses = containerBatchSlots
+		case "value-cache-hit":
+			req.want.ValueCacheHits = containerBatchSlots
 			for j, hot := range rng.Perm(containerBatchSlots) {
 				ids[j] = coldKeys + hot
 			}
 		case "duplicate":
-			req.want.Misses = 1
+			req.want.ValueCacheMisses = 1
 			req.want.DuplicateInputs = containerBatchSlots - 1
 			for j := range ids {
 				ids[j] = ids[0]
@@ -216,8 +216,8 @@ func runContainerBatchRequests(db *tarp.DB, requests []containerBatchRequest, cl
 	run := containerBatchRun{SamplesNS: make([][]int64, clients)}
 	var want containerBatchStats
 	for i := range requests {
-		want.Hits += requests[i].want.Hits
-		want.Misses += requests[i].want.Misses
+		want.ValueCacheHits += requests[i].want.ValueCacheHits
+		want.ValueCacheMisses += requests[i].want.ValueCacheMisses
 		want.DuplicateInputs += requests[i].want.DuplicateInputs
 	}
 	before := db.Stats()
@@ -259,10 +259,10 @@ func runContainerBatchRequests(db *tarp.DB, requests []containerBatchRequest, cl
 	}
 	after := db.Stats()
 	run.StatsDelta = containerBatchStats{
-		Hits:            after.ValueCache.Hits - before.ValueCache.Hits,
-		Misses:          after.ValueCache.Misses - before.ValueCache.Misses,
-		MissingKeys:     after.MissingKeyLookups - before.MissingKeyLookups,
-		DuplicateInputs: after.BatchGetDuplicateInputs - before.BatchGetDuplicateInputs,
+		ValueCacheHits:    after.ValueCache.Hits - before.ValueCache.Hits,
+		ValueCacheMisses:  after.ValueCache.Misses - before.ValueCache.Misses,
+		MissingKeyLookups: after.MissingKeyLookups - before.MissingKeyLookups,
+		DuplicateInputs:   after.BatchGetDuplicateInputs - before.BatchGetDuplicateInputs,
 	}
 	if run.StatsDelta != want {
 		return run, fmt.Errorf("BatchGet Stats delta %+v, want %+v", run.StatsDelta, want)

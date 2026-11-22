@@ -20,7 +20,8 @@ type IO struct {
 	// Wrote observes the bytes accepted by each write, including short writes.
 	Wrote func(point string, bytes int)
 	// OpenRead observes bytes returned by reads of selected DATA and INDEX
-	// during Open. DATA distinguishes covered, tail and replay headers/payloads.
+	// during Open. For the covered catalog prefix, log suffix and full replay,
+	// DATA counts segment header bytes and encoded record bytes separately.
 	OpenRead func(kind string, n int)
 }
 

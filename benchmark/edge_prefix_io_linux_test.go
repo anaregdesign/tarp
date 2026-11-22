@@ -13,8 +13,8 @@ import (
 )
 
 // Set TARP_EDGE_PREFIX_IO=seed to write both immutable backups into the
-// shared TARP_EDGE_PREFIX_FIXTURES directory. Run filter on original main
-// and prefix on the prototype. Both restore the same DATA bytes per layout.
+// shared TARP_EDGE_PREFIX_FIXTURES directory. Run filter on the baseline
+// and prefix on the candidate. Both restore the same DATA bytes per layout.
 func TestEdgePrefixDataIO(t *testing.T) {
 	arm := os.Getenv("TARP_EDGE_PREFIX_IO")
 	switch arm {
@@ -74,7 +74,7 @@ func TestEdgePrefixDataIO(t *testing.T) {
 			})
 			native := edgePrefixArm(t, db, arm == "prefix")
 			// Warm and verify all logical rows once. Evictions below affect
-			// DATA only; index files and the B+tree user cache stay eligible for reuse.
+			// DATA files only. B+tree pages can stay in the pager and OS page cache.
 			all := edgePrefixQuery{}
 			all.verify(t, db, edges, true, nil)
 			storage, err := openContainerBatchIO(dir)

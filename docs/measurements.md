@@ -24,21 +24,34 @@ The runner archives committed HEAD, pins the current stable Go Bookworm image by
 
 | Scenario | What is timed and checked |
 | --- | --- |
-| Default-budget B+tree | Seed 196,608 shuffled 64-byte keys, then measure 1,024 distinct Value-LRU misses and four windows of 256 Get/Delete/new-Put cycles at constant live cardinality. Require B+tree page reads, spill and eviction. Record latency distributions, throughput and logical scratch length. Reopen and check every live entry. |
+| Default-budget B+tree | Seed 196,608 shuffled 64-byte keys, then measure 1,024 distinct value-cache misses and four windows of 256 Get/Delete/new-Put cycles at constant live cardinality. Require B+tree page reads, spill and eviction. Record latency distributions, throughput and logical scratch length. Reopen and check every live entry. |
 | Backup verification and restore | Time the three public APIs on the same warm, immutable backup for each of 20k, 40k and 100k distinct 16-byte keys. Count completed logical DATA replay passes and bytes, including source and stage for Restore. Hash/copy volumes follow manifest lengths. A separate invocation samples process heap and apparent scratch-file length every 2 ms; short peaks can be missed. Both restored images must match the original digest. |
 | First OpenExisting | Every arm starts from a fresh private copy of the same 4,096-key image. Vary only 0, 100 or 1,000 empty, owned, unselected DATA/MANIFEST files. Time the first Open and count storage directory listings; verify removal and the full state digest after stopping the clock. |
 | BatchPut during manual Compact | With the Memory index, compare a 512-entry writer on disjoint tail keys and on captured keys spaced through the checkpoint. Each key set has its own control without Compact. The timed writer runs for three seconds after installing a common tail. Record worker wall time, entries/s, batch p99, Compact duration and actual waits caused by a staged key conflict. Reopen and verify all values and the frontier. |
 | Sustained automatic cleaner | Maintain 256 live keys across 512 batches of 16 overwrites, deleting and reinserting a batch every eight steps. Compare no added delay and a 1 ms pause per step. Record a directory census every 32 steps, write latency, rotations, and time from the last write to the first worker pass at that frontier with no eligible cleaning or pending retirement. Sampled file lengths include staging files visible during the census and retainable tombstones. Verify every recovered value. |
 
+The cleaner's `unlinked_data_bytes` sums the lengths of removed DATA segments.
+`worker_unlinked_bytes` also includes metadata removed by the worker.
+
 The runner builds a measurement-only Go source overlay with counters for directory listings, selected DATA scans, staged-key conflicts and the cleaner's first idle frontier. It fails if the instrumentation anchors change. The regular library and CI build use the original sources. B+tree page reads and logical DATA reads can be served by the guest page cache. These workloads measure this container filesystem and do not exercise power loss.
 
 ## Selectable key indexes
+
+For a new edge-prefix comparison, run
+`benchmark/scripts/container-edge-prefix.sh /path/to/new-results`. The filter
+arm defaults to the v0.12.0 source and the prefix arm to the current commit.
+The runner records both revisions, resolves the latest stable Go at campaign
+start and uses one Bookworm image digest for both arms. See the
+[prefix iteration measurements](benchmarks/prefix-148.md) for the workload.
 
 The [index-mode campaign](benchmarks/index-modes.md) compares Memory and B+tree
 at two live-key cardinalities and measures latency, B+tree page reads, heap, scratch
 and maintenance. The [full Go suite](benchmarks/index-full-suite.md) compares
 the then-default Memory backend with v0.8.0. The [disposable VM profiles](benchmarks/index-vm.md)
-record results for 64 B, 1 KiB and 4 KiB values.
+record results for 64 B, 1 KiB and 4 KiB values. For index checkpoint Open
+measurements, `read_bytes_by_region` separates segment headers
+(`*_segment_header`), full encoded records including their headers
+(`*_encoded_records`), and bytes read from the INDEX file (`index_checkpoint_file`).
 
 At `c495e44`, a hosted Linux/ext4 run on 131,072 keys measured a median
 round p99 of 0.428 ms for cold Get and 2.077 ms for Put during manual Compact,
@@ -104,10 +117,10 @@ has 32 input slots. Each of six rounds uses a seeded shuffle, 256 requests
 per trial, and 64 B or 64 KiB values. Across rounds the driver balances the
 run position of limits 1 and 32 and the public default (zero option,
 effective limit 8). The two main arms request distinct live keys outside the
-tarp cache. The warm arm pre-reads fixture DATA, while the evicted arm syncs
+value cache. The warm arm pre-reads fixture DATA, while the evicted arm syncs
 and advises Linux to evict only the private DATA files before measurement.
 Each distinct key appears once per trial. A separate all-hit control makes
-32 tarp cache hits per call. The duplicate control requests one live
+32 value-cache hits per call. The duplicate control requests one live
 uncached key in all 32 slots and checks for one miss and 31 duplicate inputs.
 
 Each JSONL trial reports the observation status and Linux process-attributed
@@ -132,6 +145,23 @@ include the latency and throughput comparison and sample-level data.
 
 ## Compaction comparison
 
+For a same-host comparison of two revisions, select `compact-compare` in the
+VM qualification workflow, set `value-bytes=64` and enter
+`confirmation=disposable-vm-only`. Both arms open clones of the same closed
+fixture. Use a baseline with a database format that both revisions can open.
+
+| `compact-pair` | Revisions and windows |
+| --- | --- |
+| `candidate` (default) | Compare current-format commit `81242ac` with the selected ref. Alternate six paired rounds with foreground traffic and with workers parked. Run foreground-only and pinned-backup controls, then four diagnostic pairs. |
+| `candidate-fixed` | Compare the same revisions in six pairs of five-second foreground windows. Traffic continues after Compact returns. |
+| `releases` | Reproduce the historical v0.8.0 and v0.9.0 comparison on their shared format. |
+
+The candidate latency windows use ordinary builds. The separate `lock-profile`
+rows use `tarpprofile` binaries and report writer, state and lifecycle lock
+hold times during the foreground window. Each `lock_holds` group includes the
+observation count, total and maximum nanoseconds, and a bounded sample. The
+historical release diagnostics report stage timings specific to those engines.
+
 `BenchmarkCompaction` and the opt-in JSONL drivers compare two operations on private
 copies of the same closed database. The fixture has one eligible sealed log with a
 surviving Put and a retained Delete, plus an active log containing live data.
@@ -146,12 +176,12 @@ plus 32 full Put records for both log rotation and manual full DATA checkpoint o
 Fixture creation, cloning, Open, and verification take place outside the timer.
 For each mode the driver checks the original files that disappeared, counts the
 newly published DATA file lengths (including headers), then reopens the result
-and verifies the same keys, values, and committed sequence. Net DATA bytes freed
+and verifies the same keys, values, and last user sequence. Net DATA bytes freed
 equals unlinked DATA bytes minus published DATA bytes. Manifest sizes and
 filesystem allocation are recorded separately where sampled. The JSONL rows
 `compaction_automatic-incremental` and `compaction_manual-full-data-checkpoint`
-include effective options, checkpoint cutoff, pruning boundary and the state
-digest. The two modes perform different amounts of work.
+report effective options, `last_user_sequence`, `checkpoint_cutoff_sequence`,
+`pruned_through_sequence` and the state digest. The two modes perform different amounts of work.
 
 ## Foreground writes and reads during automatic repacking
 
@@ -174,8 +204,8 @@ Both rows report foreground latency samples and p50/p99, including calls that
 finish after the repack. The concurrent row also reports counts and p50/p99
 for only the Gets and Puts overlapping the repack interval. With fewer than
 100 overlapping calls, the nearest-rank p99 is the largest observation.
-Each arm checks the physical DATA count, active log, committed sequence and
-complete contents after reopen. The expected DATA count is nine
+Each arm checks the DATA segment count, active log segment, last user sequence and
+complete contents after reopen. The expected segment count is nine
 with the worker parked and two after repacking (one combined log and the active log).
 
 This command runs one iteration per arm at 4 KiB.
@@ -196,7 +226,7 @@ entry includes capturing the live index and loading the first record. Total
 traversal time includes the consumer checking every key and value. Reported
 bytes count encoded values returned to the caller.
 
-In `scan_paused_checkpoint`, a consumer reads one of 65 entries and pauses.
+In `scan_paused_full_data_checkpoint`, a consumer reads one of 65 entries and pauses.
 The benchmark overwrites and deletes unread keys, adds a new key and completes
 a manual full DATA checkpoint before resuming the iterator. It verifies both the old
 snapshot and the updated DB, checks which source files are retained, and waits
@@ -253,7 +283,7 @@ The interference profiles add one separately identified writer key.
   release/wait, goroutine completion and runtime overhead remain included.
   The separate sequential AllocsPerRun probe temporarily uses GOMAXPROCS=1;
   timings use 2.
-- Cyclic warm-OS application misses assert 8,192 actual Get file reads. A
+- Cyclic warm-OS value-cache misses assert 8,192 actual Get file reads. A
   reproducible 4,096-operation, four-worker uniform-key workload records both
   combined and separate read/durable-write distributions. Its 3,891 Gets and
   205 durable Puts use the same keys as the historical single-writer
@@ -315,7 +345,7 @@ The interference profiles add one separately identified writer key.
   Close. In Memory mode the profile retains and then releases the rebuilt key
   map and shared file registry after closing the cache and handles. The GC
   delta estimates the heap held by those objects.
-- Thirty-two Gets per repetition clear application cache and purge **only this
+- Thirty-two Gets per repetition clear the value cache and purge **only this
   guarded guest's** clean page cache. A start/end acknowledgment through the
   independent read-only 9p channel brackets the operation against external NBD
   counters. Each declared cold Get must show actual virtual-block reads.
@@ -383,7 +413,7 @@ Each repetition records:
 - Warm 1-worker and 4-worker hit p50/p95/p99 and raw nanosecond samples. A hook
   asserts no Get file reads. Returned-value copying is enabled. Allocations/op
   use `testing.AllocsPerRun`; bytes/op use `TotalAlloc` deltas.
-- Sequential cyclic application misses over a working set larger than cache,
+- Sequential cyclic value-cache misses over a working set larger than cache,
   asserting one file read per call. OS data is expected warm from setup and is
   not deliberately evicted; physical residency is not independently verified.
 - A separately labeled state-lock hit critical-section **probe**, not an
@@ -432,7 +462,7 @@ awk -f benchmark/scripts/mixed-metrics.awk baseline.log candidate.log > mixed.cs
 ```
 
 Fixed operation counts keep rotating-write file creation bounded.
-`BenchmarkGet/.../application-hit-parallel` uses Go's `RunParallel` with
+`BenchmarkGet/.../value-cache-hit-parallel` uses Go's `RunParallel` with
 GOMAXPROCS workers. `BenchmarkDurablePut` records observed rotations per timed
 Put. The `default-target` case can rotate during longer runs. The
 `one-record-target` case changes only the soft rotation target between arms
@@ -459,7 +489,7 @@ are logical file lengths, not allocated blocks or guaranteed free-space deltas.
 The sampler itself adds descriptors, I/O, and short writer-gate acquisition.
 Small datasets do not establish large-index or long-history scaling.
 
-Keep application misses distinct from OS page-cache misses. No shared-host cache
+Keep value-cache misses distinct from OS page-cache misses. No shared-host cache
 dropping, disk exhaustion, or power cutting is allowed. The selected-target
 driver and [baseline](measurement-baseline.md), not these smoke numbers, supply
 the separately executed guest-cold profiles, larger disclosed histories/working

@@ -54,7 +54,7 @@ func BenchmarkStatsSnapshot(b *testing.B) {
 			if snapshot != before {
 				b.Fatalf("snapshot changed during idle collection: %+v -> %+v", before, snapshot)
 			}
-			b.ReportMetric(float64(snapshot.SelectedSegments), "segments")
+			b.ReportMetric(float64(snapshot.SelectedSegments), "selected-DATA-segments")
 		})
 	}
 }

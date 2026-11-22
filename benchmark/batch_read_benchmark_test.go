@@ -52,8 +52,8 @@ func BenchmarkBatchGet(b *testing.B) {
 		{"repeated-hot-32", repeatedHot, false},
 		{"repeated-absent-32", repeatedAbsent, false},
 		{"shuffled-distinct-absent-32", shuffledAbsent, false},
-		{"miss-os-warm-32", unique, true},
-		{"duplicate-missing-os-warm-32", mixed, true},
+		{"value-cache-miss-os-warm-32", unique, true},
+		{"duplicate-and-missing-key-os-warm-32", mixed, true},
 	} {
 		for _, api := range []string{"raw", "typed-string"} {
 			for _, method := range []string{"BatchGet", "Get-loop"} {

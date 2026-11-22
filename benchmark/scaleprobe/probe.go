@@ -12,15 +12,15 @@ const Enabled = false
 
 var (
 	DirectoryReads      atomic.Uint64
-	RetiredDataBytes    atomic.Uint64
+	UnlinkedDataBytes   atomic.Uint64
 	RelocationConflicts atomic.Uint64
 	ReplayPasses        atomic.Uint64
 	ReplayBytes         atomic.Uint64
-	// IdleSequence is the last frontier a cleaner found with neither a
-	// candidate nor pending retirement. The harness runs one DB per arm.
-	IdleSequence atomic.Uint64
-	IdleAtNS     atomic.Int64
-	ClockStart   = time.Now()
+	// IdleLastUserSequence records the last user sequence when the cleaner
+	// found no candidate or pending retirement. Each arm has one DB.
+	IdleLastUserSequence atomic.Uint64
+	IdleAtNS             atomic.Int64
+	ClockStart           = time.Now()
 )
 
 func ReadDir(path string) ([]os.DirEntry, error) {
@@ -29,10 +29,10 @@ func ReadDir(path string) ([]os.DirEntry, error) {
 }
 
 // CleanerIdle records the first quiet observation of a frontier. The campaign
-// uses one active cleaner, and samples its timestamp after seeing the sequence.
-func CleanerIdle(sequence uint64) {
-	if IdleSequence.Load() != sequence {
+// samples its timestamp after observing that last user sequence.
+func CleanerIdle(lastUserSequence uint64) {
+	if IdleLastUserSequence.Load() != lastUserSequence {
 		IdleAtNS.Store(time.Since(ClockStart).Nanoseconds())
-		IdleSequence.Store(sequence)
+		IdleLastUserSequence.Store(lastUserSequence)
 	}
 }

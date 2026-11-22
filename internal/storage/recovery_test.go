@@ -150,17 +150,18 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		coveredPayload := db.Catalog.Entries[0].Bytes - format.SegmentHeaderBytes
-		coveredHeader := int64(2 * format.SegmentHeaderBytes)
+		coveredRecordBytes := db.Catalog.Entries[0].Bytes - format.SegmentHeaderBytes
+		coveredSegmentHeaderBytes := int64(2 * format.SegmentHeaderBytes)
 		if indexed {
-			coveredPayload = 0
-			coveredHeader = format.SegmentHeaderBytes
+			coveredRecordBytes = 0
+			coveredSegmentHeaderBytes = format.SegmentHeaderBytes
 		}
-		tailPayload := db.Catalog.Entries[1].Bytes + db.Current.ActiveCommittedEndOffset - 2*format.SegmentHeaderBytes
-		if reads["covered-payload"] != coveredPayload || reads["tail-payload"] != tailPayload ||
-			reads["covered-header"] != coveredHeader || reads["tail-header"] < 2*format.SegmentHeaderBytes ||
-			reads["replay-header"] != 0 || reads["replay-payload"] != 0 {
-			t.Fatalf("indexed=%t: Open DATA reads %v, want covered %d and tail %d payload bytes", indexed, reads, coveredPayload, tailPayload)
+		logSuffixRecordBytes := db.Catalog.Entries[1].Bytes + db.Current.ActiveCommittedEndOffset - 2*format.SegmentHeaderBytes
+		if reads["covered_encoded_records"] != coveredRecordBytes || reads["log_suffix_encoded_records"] != logSuffixRecordBytes ||
+			reads["covered_segment_header"] != coveredSegmentHeaderBytes || reads["log_suffix_segment_header"] < 2*format.SegmentHeaderBytes ||
+			reads["replay_segment_header"] != 0 || reads["replay_encoded_records"] != 0 || reads["index_checkpoint_file"] != db.Catalog.Index.Bytes {
+			t.Fatalf("indexed=%t: Open read byte counts %v, want %d covered record bytes, %d log suffix record bytes and %d INDEX bytes",
+				indexed, reads, coveredRecordBytes, logSuffixRecordBytes, db.Catalog.Index.Bytes)
 		}
 		if !db.IndexCheckpointValidated || keys.Count() != oracle.Count() || db.LargestLiveValueBytes != want.LargestLiveValueBytes {
 			t.Fatalf("indexed=%t: hit=%t, live=%d, max value=%d", indexed, db.IndexCheckpointValidated, keys.Count(), db.LargestLiveValueBytes)

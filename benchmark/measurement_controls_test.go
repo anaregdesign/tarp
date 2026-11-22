@@ -105,7 +105,7 @@ func TestMeasurementMaintenanceCopyAndOverlap(t *testing.T) {
 				}
 			}
 			if backup && (result["backup_reopen_verified"] != true ||
-				result["backup_capture_sequence"] != result["restored_sequence"] ||
+				result["backup_last_user_sequence"] != result["restored_last_user_sequence"] ||
 				result["restored_live_keys"] != len(keys)+1 || result["restored_state_sha256"] != result["fixture_state_sha256"]) {
 				t.Fatalf("backup capture/full-state validation was incomplete: %#v", result)
 			}

@@ -21,15 +21,24 @@ type compactTrial struct {
 }
 
 // Check the schedule independently of the guest process. Each measured pair
-// uses the same control, and both control order and release order rotate.
-func compactTrials(fixed bool) []compactTrial {
+// uses the same control, and both control order and arm order rotate.
+func compactTrials(pair string) ([]compactTrial, error) {
+	var diagnostic string
+	switch pair {
+	case "candidate", "candidate-fixed":
+		diagnostic = "lock-profile"
+	case "releases":
+		diagnostic = "diagnostic"
+	default:
+		return nil, fmt.Errorf("unknown Compact comparison pair %q", pair)
+	}
 	trials := []compactTrial{{"base", "seed", 0}}
 	for round := 1; round <= 6; round++ {
 		arms, modes := [2]string{"base", "next"}, []string{"overlap", "parked"}
 		if round%2 == 0 {
 			arms, modes = [2]string{"next", "base"}, []string{"parked", "overlap"}
 		}
-		if fixed {
+		if pair == "candidate-fixed" {
 			modes = []string{"fixed"}
 		}
 		for _, mode := range modes {
@@ -38,8 +47,8 @@ func compactTrials(fixed bool) []compactTrial {
 			}
 		}
 	}
-	if fixed {
-		return trials
+	if pair == "candidate-fixed" {
+		return trials, nil
 	}
 	trials = append(trials, compactTrial{"base", "baseline", 0}, compactTrial{"next", "baseline", 0},
 		compactTrial{"next", "pinned", 0}, compactTrial{"base", "pinned", 0})
@@ -49,17 +58,25 @@ func compactTrials(fixed bool) []compactTrial {
 			arms = [2]string{"next", "base"}
 		}
 		for _, arm := range arms {
-			trials = append(trials, compactTrial{arm, "diagnostic", round})
+			trials = append(trials, compactTrial{arm, diagnostic, round})
 		}
 	}
-	return trials
+	return trials, nil
 }
 
 func compactComparison(work, confirm string, output io.Writer) (result error) {
 	if err := hostedGuard(confirm); err != nil {
 		return err
 	}
-	work, err := filepath.Abs(work)
+	pair := os.Getenv("TARP_COMPACT_PAIR")
+	if pair == "" {
+		pair = "candidate"
+	}
+	schedule, err := compactTrials(pair)
+	if err != nil {
+		return err
+	}
+	work, err = filepath.Abs(work)
 	if err != nil {
 		return err
 	}
@@ -77,12 +94,6 @@ func compactComparison(work, confirm string, output io.Writer) (result error) {
 	defer func() { result = errors.Join(result, disk.Close()) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	pair := os.Getenv("TARP_COMPACT_PAIR")
-	if pair == "" {
-		pair = "releases"
-	}
-	fixed := pair == "candidate-fixed"
-	schedule := compactTrials(fixed)
 	rows := 0
 	environment, passed := false, false
 	vm, err := qualification.RunVM(ctx, qualification.VMConfig{
@@ -126,7 +137,7 @@ func compactComparison(work, confirm string, output io.Writer) (result error) {
 		return err
 	}
 	diagnosticRounds := 4
-	if fixed {
+	if pair == "candidate-fixed" {
 		diagnosticRounds = 0
 	}
 	return json.NewEncoder(output).Encode(map[string]any{

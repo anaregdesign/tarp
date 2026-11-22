@@ -180,10 +180,10 @@ func measurementState(t testing.TB, db *engine.DB) (string, int) {
 }
 
 type measurementCapture struct {
-	parent   string
-	uuid     [16]byte
-	sequence uint64
-	reached  bool
+	parent           string
+	uuid             [16]byte
+	lastUserSequence uint64
+	reached          bool
 }
 
 func (c *measurementCapture) observe() error {
@@ -214,6 +214,6 @@ func (c *measurementCapture) observe() error {
 	if current.UUID != c.uuid {
 		return errors.New("measurement captured a different fixture UUID")
 	}
-	c.sequence, c.reached = current.LastUserSequence, true
+	c.lastUserSequence, c.reached = current.LastUserSequence, true
 	return nil
 }

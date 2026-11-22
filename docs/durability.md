@@ -120,7 +120,7 @@ supported layout, recovery locks the directory and validates the selected `CURRE
 SHA-256-bound catalog, each selected segment header and length, and all live
 option minima. Full recovery verifies each sealed DATA digest and each committed
 active record. A validated INDEX can supply the covered key history. Indexed
-recovery skips covered DATA payloads after validating INDEX and replays the
+recovery skips the covered segments’ encoded records after validating INDEX and replays the
 committed DATA log suffix. Both start with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
 preserve coverage even when they have zero records. Deletes through the catalog
 pruning boundary may refer to a Put removed by cleaning. All selected physical
@@ -364,7 +364,7 @@ acknowledged during this period retain their ordinary durability contract.
 The guarantee of continued service applies to an open DB with a trusted index
 and commit frontier. `Full` startup validation still rejects damaged selected
 DATA. `Indexed` recovery can reopen when a validated checkpoint covers the
-damaged payload, covered headers and lengths validate, and the remaining log
+damaged record bytes, covered segment headers and lengths validate, and the remaining log
 can be replayed. An uncertain publication, a failure of the active DATA or an
 untrusted index retains its existing fail-stop behavior.
 

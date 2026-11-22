@@ -27,7 +27,7 @@ instrument('benchmark/scaleprobe/probe.go', [
 instrument('internal/storage/store.go', [('os.ReadDir(', 'scaleprobe.ReadDir(', 3)])
 instrument('internal/storage/clean_retire.go', [
     ('removed, err := remove(f.Path)',
-     'previous := unlinked\n\t\tremoved, err := remove(f.Path)\n\t\tscaleprobe.RetiredDataBytes.Add(uint64(unlinked-previous))', 1),
+     'previous := unlinked\n\t\tremoved, err := remove(f.Path)\n\t\tscaleprobe.UnlinkedDataBytes.Add(uint64(unlinked-previous))', 1),
 ])
 instrument('internal/storage/recovery.go', [
     ('scan(ctx context.Context, visit recordVisitor) error {',
@@ -41,8 +41,8 @@ instrument('internal/engine/index.go', [
 ])
 instrument('internal/engine/cleaner.go', [
     ('entries, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)',
-     'observedSequence := db.store.Current.LastUserSequence\n\tentries, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)', 1),
+     'lastUserSequence := db.store.Current.LastUserSequence\n\tentries, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)', 1),
     ('return pending && removed > 0, pending && removed == 0',
-     'if !pending { scaleprobe.CleanerIdle(observedSequence) }\n\t\treturn pending && removed > 0, pending && removed == 0', 1),
+     'if !pending { scaleprobe.CleanerIdle(lastUserSequence) }\n\t\treturn pending && removed > 0, pending && removed == 0', 1),
 ])
 (output / 'overlay.json').write_text(json.dumps({'Replace': replace}, indent=2))
