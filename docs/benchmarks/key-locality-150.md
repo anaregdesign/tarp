@@ -10,7 +10,7 @@ Today each successful Open starts an incremental cleaner. It reclaims obsolete r
 
 The fixture starts with 16,384 edges in shuffled insertion order, organized as 256 source vertices with 64 edges each. Records are 512 B including key and header. We compared the existing checkpoint writer, a control that stages validated records in source order, and an experimental writer that stages those same records and sorts by encoded key. All use the same B+tree and the same prefix reader from [draft PR #149](https://github.com/anaregdesign/tarp/pull/149). Each arm wrote a real checkpoint and backup. Each trace restored the backup, appended updates in batches of 128, closed, reopened, and verified every live key and value. Background cleaning and the asynchronous parity worker were parked for this comparison. Checkpoint publication and its own parity protection ran normally.
 
-| Updates since checkpoint | Source-order pages/prefix | Key-order pages/prefix | Source-order cold read | Key-order cold read |
+| Updates since checkpoint | Existing writer pages/prefix | Key-order pages/prefix | Existing writer cold read | Key-order cold read |
 | --- | ---: | ---: | ---: | ---: |
 | None | 70.89 | 9.00 | 296 KiB · 2.34 ms | 112 KiB · 0.084 ms |
 | 4,096 to the first key | 70.90 | 9.01 | 296 KiB · 1.61 ms | 112 KiB · 0.134 ms |
