@@ -66,6 +66,7 @@ type localityPolicyMutation struct {
 type localityPolicyEpoch struct {
 	mutations []localityPolicyMutation
 	reads     [localityPolicyTails]int
+	samples   [localityPolicyWrites / 2]int
 }
 
 func localityPolicyTrace(keys []string, name string) []localityPolicyEpoch {
@@ -95,7 +96,7 @@ func localityPolicyTrace(keys []string, name string) []localityPolicyEpoch {
 			k := keys[idx]
 			epoch.mutations = append(epoch.mutations, localityPolicyMutation{k, del, localityPolicyMakeRecord(k, uint64(e*localityPolicyWrites+j+1), del)})
 		}
-		for j := range 64 {
+		for j := range epoch.samples {
 			tail := reads.IntN(localityPolicyTails)
 			if j%4 != 0 && name != "uniform" {
 				switch name {
@@ -109,6 +110,7 @@ func localityPolicyTrace(keys []string, name string) []localityPolicyEpoch {
 					tail = reads.IntN(8)
 				}
 			}
+			epoch.samples[j] = tail
 			epoch.reads[tail]++
 		}
 	}
@@ -382,6 +384,59 @@ func (l *localityPolicyLayout) summary(reads *[localityPolicyTails]int, target i
 	return s
 }
 
+// Sample one actual query from the fixed read trace after each pair of writes.
+// Each foreground interval times only its two updates; modeled prefix lookups,
+// independent oracle work and end-of-epoch maintenance are outside that timer.
+type localityPolicyForeground struct {
+	bytes, pages, files int
+	ns, p50, p99        int64
+}
+
+func (s *localityPolicyStore) applyEpoch(t *testing.T, e *localityPolicyEpoch, want map[string]localityPolicyRecord) localityPolicyForeground {
+	var obs localityPolicyForeground
+	var latencies [localityPolicyWrites]int64
+	for j, tail := range e.samples {
+		pair := time.Now()
+		for i := 2 * j; i < 2*j+2; i++ {
+			start := time.Now()
+			obs.bytes += s.append(t, &e.mutations[i])
+			latencies[i] = time.Since(start).Nanoseconds()
+		}
+		obs.ns += time.Since(pair).Nanoseconds()
+		files := map[int]bool{}
+		pages := map[localityPolicyAddress]bool{}
+		start := tail * localityPolicyHeads
+		for _, key := range s.keys[start : start+localityPolicyHeads] {
+			if a, ok := s.latest[key]; ok {
+				files[a.file] = true
+				pages[localityPolicyAddress{a.file, a.slot * localityPolicyRecordBytes / localityPolicyPageBytes}] = true
+			}
+		}
+		obs.files += len(files)
+		obs.pages += len(pages)
+	}
+	slices.Sort(latencies[:])
+	obs.p50 = latencies[(len(latencies)-1)/2]
+	obs.p99 = latencies[(99*len(latencies)-1)/100]
+	for _, op := range e.mutations {
+		if op.deleted {
+			delete(want, op.key)
+		} else {
+			want[op.key] = op.data
+		}
+	}
+	s.verify(t, want)
+	return obs
+}
+
+func (o localityPolicyForeground) report(row map[string]any, n int) {
+	row["foreground_bytes"], row["foreground_ns"] = o.bytes, o.ns
+	row["foreground_p50_ns"], row["foreground_p99_ns"] = o.p50, o.p99
+	row["stream_queries"] = n
+	row["stream_files_per_query"] = float64(o.files) / float64(n)
+	row["stream_pages_per_query"] = float64(o.pages) / float64(n)
+}
+
 func localityPolicyRun(t *testing.T, name string, p localityPolicy, keys []string, trace []localityPolicyEpoch) {
 	s, want, seedBytes := localityPolicySeed(t, keys)
 	var past [localityPolicyTails]int // First epoch has no prior reads.
@@ -390,30 +445,14 @@ func localityPolicyRun(t *testing.T, name string, p localityPolicy, keys []strin
 		target = localityPolicyTails - 1
 	}
 	for i, e := range trace {
-		var latencies [localityPolicyWrites]int64
-		start := time.Now()
-		fgBytes := 0
-		for m := range e.mutations {
-			begin := time.Now()
-			fgBytes += s.append(t, &e.mutations[m])
-			latencies[m] = time.Since(begin).Nanoseconds()
-		}
-		fgNS := time.Since(start).Nanoseconds()
-		for _, op := range e.mutations {
-			if op.deleted {
-				delete(want, op.key)
-			} else {
-				want[op.key] = op.data
-			}
-		}
-		s.verify(t, want)
+		fg := s.applyEpoch(t, &e, want)
 		before := s.layout()
 		jobs := p.jobs(i+1, &before, &past)
 		maintBytes := 0
 		var maintNS int64
 		after := before
 		if len(jobs) > 0 {
-			start = time.Now()
+			start := time.Now()
 			for _, r := range jobs {
 				maintBytes += s.rebuild(t, r)
 			}
@@ -427,16 +466,15 @@ func localityPolicyRun(t *testing.T, name string, p localityPolicy, keys []strin
 			}
 		}
 		past = e.reads
-		slices.Sort(latencies[:])
 		row := map[string]any{
 			"trace": name, "policy": p.name, "epoch": i + 1, "updates": len(e.mutations), "live_keys": len(want),
 			"record_bytes": localityPolicyRecordBytes, "modeled_page_bytes": localityPolicyPageBytes, "range_count": localityPolicyRangeCount,
 			"range_bytes": localityPolicyRecordBytes * localityPolicyRangeKeys, "threshold_distinct_keys": p.threshold,
-			"maintenance_interval_epochs": p.interval, "seed_bytes": seedBytes, "foreground_bytes": fgBytes,
+			"maintenance_interval_epochs": p.interval, "seed_bytes": seedBytes,
 			"rewritten_ranges": jobs, "rewritten_range_count": len(jobs), "maintenance_bytes": maintBytes,
-			"foreground_ns": fgNS, "foreground_p50_ns": latencies[(len(latencies)-1)/2], "foreground_p99_ns": latencies[(99*len(latencies)-1)/100],
 			"maintenance_copy_ns": maintNS, "before": before.summary(&e.reads, target), "after": after.summary(&e.reads, target),
 		}
+		fg.report(row, len(e.samples))
 		output, err := json.Marshal(row)
 		if err != nil {
 			t.Fatal(err)
