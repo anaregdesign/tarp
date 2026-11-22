@@ -547,8 +547,8 @@ unlinked by this worker since `Open`. Filesystem allocation and staging writes
 also affect free space. Provision room for current data, temporary replacements,
 metadata, backups, pinned sources and concurrent growth.
 
-Call `Compact(ctx)` for a full DATA checkpoint through a captured sequence. It can
-discard tombstones covered by that checkpoint and preserves all concurrent
+Call `Compact(ctx)` for a full DATA checkpoint through the captured checkpoint
+cutoff sequence. It can discard covered tombstones and preserves all concurrent
 tail writes. It serializes with the worker and can overlap one online backup.
 Duplicate manual full DATA checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult.UnlinkedBytes` counts the logical lengths of files removed by
@@ -564,15 +564,16 @@ the lock, before starting checkpoint or backup work.
 
 Call `db.Compact(ctx, tarp.WithKeyOrder())` on a raw or typed DB after an import
 or in a maintenance window to place related values together for `ScanPrefix`.
-It writes retained snapshot records in encoded-key order across DATA segments.
+It writes retained DATA records in encoded-key order across snapshot segments.
 Iterator order remains unspecified, and automatic incremental compaction is
 unchanged. Later writes append to the log. On the same handle, the next ordered
-call sorts the new log suffix and rewrites affected snapshot ranges. A healthy,
-unchanged ordered checkpoint with no pending cleanup returns without reading
-DATA or writing a MANIFEST. After reopen, the first ordered call verifies the
-snapshot order before reusing it. A delta checkpoint can leave latent damage in
-a reused segment for its next checked read. Schedule this work in a quiet
-window when foreground latency matters. In the measured workload, overlapping
+call sorts the new DATA log suffix and rewrites affected snapshot segments or
+writes new ones in gaps. A healthy, unchanged ordered checkpoint with no
+pending cleanup returns without reading DATA or writing a MANIFEST. After
+reopen, the first ordered call verifies the snapshot order before reusing it.
+A delta checkpoint can leave latent damage in a reused segment for its next
+checked read. Schedule this work in a quiet window when foreground latency
+matters. In the measured workload, overlapping
 durable `Put` p99 ranged from 1.12× to 2.30× the foreground-only baseline.
 See the [runnable example](doc_test.go) and
 [key-ordered compaction and measurements](docs/key-ordered-compaction.md).

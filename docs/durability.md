@@ -233,26 +233,27 @@ retains both layouts for validated reopen. After durable publication, remapping
 checks file, offset and sequence so later changes win. Reclamation waits for all
 pins. No incremental publication advances the user sequence.
 
-Manual `Compact(ctx)` durably captures the complete DATA history through checkpoint
-cutoff sequence C, validates segment headers and records, and rebuilds the
-captured state outside root locks. Without options, it groups live
-Put records by source file, reads them in offset order with one source descriptor
-open at a time, and writes snapshot files using the same size target as log appends,
-preserving record sequences. Tombstones can
-be dropped only because all earlier history is replaced. Publication combines the
-checkpoint with **all** current tail files after C. Each relocation checks the exact
-prior address and publishes the new address and its file accounting together.
+Manual `Compact(ctx)` builds a full DATA checkpoint. It durably captures the
+complete DATA history through the checkpoint cutoff sequence `C`, validates
+segment headers and records, and rebuilds the captured state outside root locks.
+Without options, it groups live Put records by source file, reads them in offset
+order with one source descriptor open at a time, and writes snapshot segments
+using the same size target as log segments, preserving record sequences.
+Tombstones can be dropped only because all earlier history is replaced.
+Publication combines the checkpoint with the **entire** committed DATA log
+suffix after `C`. Each relocation checks the exact prior address and publishes
+the new address and its file accounting together.
 For the in-memory index, a batch can move while a foreground write syncs if their
 keys are disjoint. A batch that overlaps a staged key waits for the writer to
 commit or abort, then checks the addresses again. The B+tree takes the writer gate
 for each relocation batch. Later Put/Delete wins.
 
-`db.Compact(ctx, tarp.WithKeyOrder())` shares the full DATA checkpoint cutoff,
-atomic publication, conditional relocation and loss-recovery protocol. It puts
-physical snapshot records in encoded-key order and can carry previously verified
-immutable snapshot segments and their PARITY forward under the same identities.
-It checks the new log suffix and changed base ranges. Values in reused files can
-still have latent damage until checked.
+`db.Compact(ctx, tarp.WithKeyOrder())` uses the same checkpoint cutoff sequence,
+atomic publication, conditional relocation and loss-recovery protocol. It writes
+DATA records in encoded-key order across snapshot segments and can carry forward
+previously verified immutable snapshot segments and their PARITY under the same
+identities. It checks the new DATA log suffix and changed base ranges. Values in
+reused files can still have latent damage until checked.
 Order certification is local to the open handle. Backup and restore use the
 existing DATA and catalog formats.
 
