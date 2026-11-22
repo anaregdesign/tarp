@@ -72,68 +72,99 @@ type frame struct {
 }
 type cursor struct{ stack []frame }
 
-// seek positions the cursor at the first key >= lower. Each ancestor frame
-// resumes at the sibling after the child selected by the search.
-func (c *cursor) seek(s *pager, lower string) error {
-	for {
-		f := &c.stack[len(c.stack)-1]
-		p, err := s.read(f.id)
-		if err != nil {
-			return err
-		}
-		at, _, err := p.search(s, lower)
-		if err != nil {
-			return err
-		}
-		if p[4] == leaf {
-			f.pos = at
-			return nil
-		}
-		if len(c.stack) >= maxDepth {
-			return errPage
-		}
-		f.pos = at + 1
-		c.stack = append(c.stack, frame{id: p.child(at)})
-	}
-}
-
-// Advance only while admitted. No page buffer or reader workspace is held
-// over user code, including a nested read, mutation, or Close.
-func (c *cursor) next(s *pager) (string, index.Address, bool, error) {
+// leaf returns the next nonempty leaf with the cursor positioned at its next
+// entry. On the initial descent, lower seeks through branch separators to its
+// insertion point. The saved ancestor positions resume at the next sibling.
+func (c *cursor) leaf(s *pager, lower string) (*page, error) {
 	for len(c.stack) > 0 {
 		f := &c.stack[len(c.stack)-1]
 		p, err := s.read(f.id)
 		if err != nil {
-			return "", index.Address{}, false, err
+			return nil, err
+		}
+		if lower != "" {
+			f.pos, _, err = p.search(s, lower)
+			if err != nil {
+				return nil, err
+			}
 		}
 		switch p[4] {
 		case leaf:
 			if f.pos < p.count() {
-				item, _ := p.cell(f.pos)
-				f.pos++
-				key, err := item.key.string(s)
-				return key, item.address, true, err
+				return p, nil
 			}
 		case branch:
 			if f.pos <= p.count() {
+				if len(c.stack) >= maxDepth {
+					return nil, errPage
+				}
 				id := p.child(f.pos)
 				f.pos++
-				if len(c.stack) >= maxDepth {
-					return "", index.Address{}, false, errPage
-				}
 				c.stack = append(c.stack, frame{id: id})
 				continue
 			}
 		default:
-			return "", index.Address{}, false, errPage
+			return nil, errPage
 		}
+		lower = ""
 		c.stack = c.stack[:len(c.stack)-1]
 	}
-	return "", index.Address{}, false, nil
+	return nil, nil
 }
 
 func (v *view) All(yield func(string, index.Address) bool) error {
 	return v.Range("", "", yield)
+}
+
+type rangeEntry struct {
+	key  string
+	addr index.Address
+}
+
+// readGroup copies entries from one leaf while the caller holds a read permit.
+// Inline keys are at most maxInline bytes. Read an overflow key on its own to
+// bound retained bytes and avoid reading its chain before preceding callbacks.
+func (c *cursor) readGroup(s *pager, lower, upper string, out []rangeEntry) (int, error) {
+	p, err := c.leaf(s, lower)
+	if err != nil || p == nil {
+		return 0, err
+	}
+	f := &c.stack[len(c.stack)-1]
+	n := 0
+	for n < len(out) && f.pos < p.count() {
+		raw, err := p.raw(f.pos)
+		if err != nil {
+			return n, err
+		}
+		if raw.tail != 0 && n != 0 {
+			break
+		}
+		ref := raw.key()
+		if upper != "" {
+			cmp, err := ref.compare(s, upper)
+			if err != nil {
+				return n, err
+			}
+			if cmp >= 0 {
+				c.stack = nil
+				return n, nil
+			}
+		}
+		key, err := ref.string(s)
+		if err != nil {
+			return n, err
+		}
+		out[n] = rangeEntry{key, raw.address}
+		n++
+		f.pos++
+		if raw.tail != 0 {
+			break
+		}
+	}
+	if f.pos == p.count() {
+		c.stack = c.stack[:len(c.stack)-1]
+	}
+	return n, nil
 }
 
 // Range visits keys in [lower, upper) at this view's root. An empty upper
@@ -146,27 +177,35 @@ func (v *view) Range(lower, upper string, yield func(string, index.Address) bool
 		return nil
 	}
 	c := cursor{stack: []frame{{id: v.root}}}
-	if lower != "" {
-		if err := v.beginRead(); err != nil {
-			return err
-		}
-		err := c.seek(v.tree.p, lower)
-		v.tree.reads.release()
-		if err != nil {
-			return err
-		}
-	}
+	var group [16]rangeEntry
+	// Fetch just the first entry so an early break never decodes a whole group.
+	limit := 1
+	bounded := lower != "" || upper != ""
 	for {
 		if err := v.beginRead(); err != nil {
 			return err
 		}
-		key, a, ok, err := c.next(v.tree.p)
+		n, err := c.readGroup(v.tree.p, lower, upper, group[:limit])
 		v.tree.reads.release()
-		if err != nil || !ok || upper != "" && key >= upper {
+		for i, entry := range group[:n] {
+			// beginRead checked the first entry. Each callback may close the
+			// view or tree, including when further entries are already buffered.
+			if i > 0 && !v.valid() {
+				return os.ErrClosed
+			}
+			if !yield(entry.key, entry.addr) {
+				return nil
+			}
+		}
+		if err != nil || len(c.stack) == 0 {
+			if n != 0 && !v.valid() {
+				return os.ErrClosed
+			}
 			return err
 		}
-		if !yield(key, a) {
-			return nil
+		lower = ""
+		if bounded {
+			limit = len(group)
 		}
 	}
 }

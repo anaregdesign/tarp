@@ -175,3 +175,88 @@ func TestRangeStopsAndReleasesReadWorkspaceAtCallbacks(t *testing.T) {
 		t.Fatalf("closing view from callback: %v", err)
 	}
 }
+
+func TestRangeValidatesOnlyOverflowKeysItReaches(t *testing.T) {
+	tr := openTest(t)
+	long := strings.Repeat("z", 2*pageSize)
+	keys := []string{"a", "b", "c", long}
+	tx := tr.Begin()
+	for i, key := range keys {
+		if err := tx.Put(key, addr(uint64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx.Commit()
+	v := tr.View().(*view)
+	defer v.Close()
+	root, err := tr.p.read(v.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := root.raw(len(keys) - 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Break the last link so reading the inline prefix still succeeds, but
+	// reconstructing the complete overflow key detects the invalid chain.
+	tail, err := tr.p.read(raw.tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tail.link() != 0 {
+		tail, err = tr.p.read(tail.link())
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	order.PutUint16(tail[6:8], uint16(tail.count()-1))
+
+	for _, tc := range []struct {
+		name, upper string
+		stopAfter   int
+		want        []string
+		wantErr     error
+	}{
+		{"exclusive bound", "z", 0, keys[:3], nil},
+		{"caller breaks", "", 2, keys[:2], nil},
+		{"corrupt match", "", 0, keys[:3], errPage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			err := v.Range("a", tc.upper, func(key string, _ index.Address) bool {
+				got = append(got, key)
+				return len(got) != tc.stopAfter
+			})
+			if !errors.Is(err, tc.wantErr) || !slices.Equal(got, tc.want) {
+				t.Fatalf("got %d keys and %v; want %d and %v", len(got), err, len(tc.want), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRangeCloseWhileInlineKeysAreBuffered(t *testing.T) {
+	tr := openTest(t)
+	tx := tr.Begin()
+	for i, key := range []string{"a", "b", "c", "d"} {
+		if err := tx.Put(key, addr(uint64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx.Commit()
+	v := tr.View().(*view)
+	defer v.Close()
+	var keys []string
+	err := v.Range("a", "z", func(key string, _ index.Address) bool {
+		keys = append(keys, key)
+		if key == "b" {
+			if n := tr.Metrics().ReadWorkspaceBytes; n != 0 {
+				t.Fatalf("callback retained %d read workspace bytes", n)
+			}
+			v.Close()
+		}
+		return true
+	})
+	if !errors.Is(err, os.ErrClosed) || !slices.Equal(keys, []string{"a", "b"}) {
+		t.Fatalf("got %v, %v after closing the view", keys, err)
+	}
+}
