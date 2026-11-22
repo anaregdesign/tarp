@@ -111,7 +111,7 @@ func openStartupSample(t *testing.T, dir string, opts engine.Options) (*engine.D
 	return db, elapsed
 }
 
-// Seal the same default-worker history into a full checkpoint before cloning
+// Seal the same default-worker history into a full DATA checkpoint before cloning
 // it for the second recovery comparison. The cleaner cannot alter that input.
 func measurementCheckpointFixture(t *testing.T, dir string, opts engine.Options) {
 	t.Helper()

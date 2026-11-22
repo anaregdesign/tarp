@@ -5,8 +5,9 @@ segments, records, pages, DATA blocks and catalog entries.
 
 All integers are unsigned little-endian unless stated otherwise. Each object has
 one fixed eight-byte ASCII signature. There is no format-version field. All
-reserved bytes are zero. CRC32C uses the Castagnoli polynomial. File digests use SHA-256 over complete file bytes. The catalog also uses
-SHA-256 for the covered layout fingerprint defined below. These checks detect accidental corruption.
+reserved bytes are zero. CRC32C uses the Castagnoli polynomial. File digests use
+SHA-256 over complete file bytes. The catalog also uses SHA-256 for the covered
+layout fingerprint defined below. These checks detect accidental corruption.
 
 An unknown outer signature in `CURRENT` or `BACKUP` returns
 `ErrUnsupportedFormat`. Existing databases stay untouched and restore leaves
@@ -26,7 +27,7 @@ INDEX-<32 lowercase UUID hex>-<16 lowercase nonzero ID hex>
 .tarp-work/
 ```
 
-IDs share one allocation space and do not wrap. Recognized names are inspected
+DATA segment, MANIFEST and INDEX file IDs share one allocation space and do not wrap. Recognized names are inspected
 before assigning IDs on reopen. UUID-bound names allow safe recognition of an
 unselected partially written header; unknown objects are not garbage. `CURRENT`
 alone selects the authoritative catalog. `.tarp-work/` is a reserved directory
@@ -129,7 +130,7 @@ the DATA bytes plus 200 bytes of metadata.
 Batch writes append consecutive ordinary records in one segment. One frontier
 publication selects the byte offset immediately after the final record and its inclusive user sequence.
 
-Existing selected sealed/snapshot lengths must match exactly. Active physical
+Existing selected sealed segment lengths must match exactly. Active physical
 length must be at least its committed end; only a suffix strictly beyond that
 end is discardable after validation and compatible-options checks.
 
@@ -177,8 +178,8 @@ The layout fingerprint is SHA-256 of these concatenated bytes, in order:
 2. Four little-endian u64 values giving C, H, covered sequence, and covered entry count.
 3. The exact wire bytes of each covered entry, in catalog order, including empty intervals.
 
-A covered catalog prefix must contain every snapshot segment. Its final sequence is the last
-covered log interval's endpoint, or C when there are no covered log intervals.
+A covered catalog prefix must contain every snapshot segment. Its covered sequence is the last
+user sequence of the final covered log interval, or C when there are no covered log intervals.
 The index checkpoint may only cover a sequence at or above H. Neither the active ID
 nor later sealed entries contribute to this fingerprint, so an append or rotation
 can preserve a previously published checkpoint. Cleaning or compaction clears
@@ -186,9 +187,9 @@ the descriptor in the same catalog publication that replaces physical files.
 
 | Entry kind | Selected file and coverage |
 | --- | --- |
-| Snapshot | Nonzero unique ID. First and last are zero. Appears before all log intervals. Only allowed for C > 0. |
-| Raw log | Nonzero unique ID. Contains every record from first through last, in order. |
-| Cleaned log | Covers the original [first,last] of one log interval or the combined coverage of adjacent repacked intervals. A physical file contains at least one record, in strictly increasing sequence order within that interval. |
+| Snapshot segment | Nonzero unique ID. First and last are zero. Appears before all log intervals. Only allowed for C > 0. |
+| Raw log segment | Nonzero unique ID. Contains every record from first through last, in order. |
+| Cleaned log segment | Covers the original `[first, last]` of one log interval or the combined coverage of consecutive log sequence intervals. A physical file contains at least one record, in strictly increasing sequence order within that interval. |
 | Empty cleaned interval | Kind=cleaned log, ID=0 and length=0. A catalog entry alone represents the covered interval. |
 
 All nonzero DATA IDs are distinct and exclude the active ID and selected catalog ID. A physical sealed
@@ -214,7 +215,8 @@ Reopen, streamed backup and full DATA checkpoint replay apply the same rules.
 
 ## BACKUP payload
 
-The 56-byte prefix contains UUID[16], sequence u64, cutoff u64, advisory source
+The 56-byte prefix contains UUID[16], last user sequence u64, full DATA
+checkpoint cutoff sequence u64, advisory source
 value-cache budget u64, advisory source maximum record bytes u64, and file count u64. Each variable
 entry is name length u16, ASCII name bytes, exact file length u64, SHA-256[32].
 Names are 1..96 bytes and must be generated CURRENT/DATA/MANIFEST names for the
@@ -222,7 +224,7 @@ same UUID. Reject duplicates, unsafe/missing/extra/nonregular objects, trailing
 bytes, unsupported metadata, and inconsistent cutoff/frontier identities.
 
 The listed files are exactly captured CURRENT, selected catalog, selected
-snapshot/sealed files, and the active committed DATA prefix. Empty logical intervals
+sealed DATA segments, and the active committed DATA prefix. Empty logical intervals
 reside entirely in the captured catalog. Its digest in CURRENT binds H and the
 interval metadata to the backup. BACKUP excludes itself and LOCK. Restore
 independently replays the complete image, derives live minima, checks exact
@@ -245,7 +247,7 @@ separators route equal keys to the right. Long keys keep a prefix inline
 and their remaining bytes in checked overflow pages.
 
 Readers validate offsets, lengths, links, checksums and key ordering before
-using pages loaded from disk. An index snapshot retains its original root while a
+using pages loaded from disk. A B+tree index snapshot retains its original root while a
 writer copies changed paths. The OS releases the unlinked scratch files
 when their descriptors close.
 

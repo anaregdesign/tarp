@@ -2,7 +2,7 @@
 
 [Issue #148](https://github.com/anaregdesign/tarp/issues/148) evaluated the `KeysPrefix` and `ScanPrefix` methods selected for adoption in [PR #149](https://github.com/anaregdesign/tarp/pull/149). The 2026-11-22 comparison uses production source at `59ddf199` for the original API and `678dd2c9` for the measured implementation. Both versions read the same storage and key formats.
 
-For an interleaved graph of 16,385 edges, decoding the 56 outgoing edges for a typical vertex took **95.27 ms** on the original typed B+tree scan and **0.324 ms** on the prototype. The prototype can return just the heads through the key index. Fetching the weights also requires reading DATA. After evicting DATA, a query that returned 2,048 edges scattered throughout the fixture read nearly all its pages.
+For an interleaved graph of 16,385 edges, decoding the 56 outgoing edges for a typical vertex took **95.27 ms** on the original typed B+tree scan and **0.324 ms** on the prototype. The prototype can return just the heads through the key index. Fetching the weights also requires reading DATA. After evicting DATA, a query that returned 2,048 edges scattered throughout the fixture accounted for nearly as many process read bytes as a full DATA read.
 
 ## API and access paths
 
@@ -68,7 +68,7 @@ For early termination, the memory index still captures the full matching subset 
 
 Each measured sample cycles once through all 256 ordinary tails, stepping by 73 and requesting 56 results per tail. The budgets are the configured B+tree memory budgets. The pager counts a page read when the index must fetch a page from its file. The OS can satisfy that read from cache.
 
-| Budget | Iterator | Filter | Prefix | Ratio | Filter page reads/query | Prefix page reads/query |
+| Budget | Iterator | Filter | Prefix | Ratio | Filter B+tree page reads/query | Prefix B+tree page reads/query |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1MiB | Keys | 3.44 ms | 8.10 µs | 424× | 151 | 0.53 |
 | 1MiB | Scan | 9.87 ms | 27.7 µs | 357× | 151 | 0.53 |
@@ -86,7 +86,7 @@ Both arms restore the same immutable backup for each write order. Each restored 
 | interleaved | 56 | 24.5 ms | 1.34 ms | 18.4× | 2,768 | 240 |
 | interleaved | 2,048 | 23.9 ms | 18.8 ms | 1.27× | 2,768 | 2,764 |
 
-The encoded prefix groups the index entries. DATA records follow write order. This explains how the prototype can skip decoding thousands of unrelated rows yet still read across most of the selected DATA for a high-degree Tail written in shuffled order.
+An encoded key prefix groups matching index entries in key order. In this fixture the DATA records follow write order. This explains how the prototype can skip decoding thousands of unrelated rows yet still read across most of the selected DATA for a high-degree Tail written in shuffled order.
 
 ## B+tree tuning history
 

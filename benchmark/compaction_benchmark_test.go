@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	automaticIncremental = "automatic-incremental"
-	manualFullCheckpoint = "manual-full-checkpoint"
+	automaticIncremental     = "automatic-incremental"
+	manualFullDataCheckpoint = "manual-full-data-checkpoint"
 )
 
-var compactionModes = [...]string{automaticIncremental, manualFullCheckpoint}
+var compactionModes = [...]string{automaticIncremental, manualFullDataCheckpoint}
 
 type compactionFixture struct {
 	dir       string
@@ -171,7 +171,7 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 		case <-ctx.Done():
 			err = fmt.Errorf("waiting for cleaner retirement: %w (%+v)", ctx.Err(), db.AutoCompactionStatus())
 		}
-	case manualFullCheckpoint:
+	case manualFullDataCheckpoint:
 		compactResult, err = db.Compact(ctx) // keep automatic processing parked on this clone
 	default:
 		err = fmt.Errorf("unknown compaction mode %q", mode)
@@ -183,7 +183,7 @@ func (f compactionFixture) measure(t testing.TB, mode string) compactionMeasurem
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode == manualFullCheckpoint && compactResult.PinnedRetiredDataBytes > 0 {
+	if mode == manualFullDataCheckpoint && compactResult.PinnedRetiredDataBytes > 0 {
 		// Join any parity publisher that still held a retired DATA pin at
 		// the end of the timed Compact, then repeat cleanup at the same cutoff.
 		before := engine.Observe(db).Frontier()
@@ -242,7 +242,7 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 		if result.CleanedIntervals != 1 || result.SnapshotFiles != 0 || result.Cutoff != 0 || current.ActiveID != f.frontier.ActiveID {
 			t.Fatalf("unexpected incremental layout: %+v", result)
 		}
-	case manualFullCheckpoint:
+	case manualFullDataCheckpoint:
 		if result.SnapshotFiles == 0 || result.CleanedIntervals != 0 || result.Cutoff != f.frontier.LastUserSequence {
 			t.Fatalf("unexpected checkpoint layout: %+v", result)
 		}
@@ -319,7 +319,7 @@ func TestCompactionFixtureDataAccounting(t *testing.T) {
 			record := fixture.opts.MaxRecordBytes
 			wantOutput := int64(format.SegmentHeaderBytes) + record + format.RecordHeaderBytes + 16
 			wantUnlinked := fixture.source.Bytes
-			if mode == manualFullCheckpoint {
+			if mode == manualFullDataCheckpoint {
 				wantOutput = 2*format.SegmentHeaderBytes + 3*record
 				wantUnlinked += fixture.frontier.ActiveCommittedEndOffset
 			}

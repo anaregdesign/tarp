@@ -10,13 +10,13 @@ file offset zero. A single record can cross several block and stripe boundaries.
 
 | Term | Meaning in Tarp |
 | --- | --- |
-| DATA segment | One `DATA-…` file with a 64-byte segment header. Raw log, cleaned log and snapshot are segment kinds. Active and sealed describe the segment's lifecycle. `TargetSegmentBytes` applies to each output segment. |
+| DATA segment | One `DATA-…` file with a 64-byte segment header. The three kinds are raw log segment, cleaned log segment and snapshot segment. Active and sealed describe the segment's lifecycle. `TargetSegmentBytes` applies to each output segment. |
 | DATA record | One Put or Delete stored wholly in one segment. The record header occupies 48 bytes and the record payload contains the encoded key followed by the encoded value. A batch can publish multiple records together. |
 | Catalog entry | A descriptor in the selected MANIFEST. An empty cleaned interval covers user sequences with zero physical segments. The active segment's descriptor is derived separately from the catalog and CURRENT. |
 | Index entry | A mapping from one live encoded key to its DATA record address, in either index backend. The address also carries the record length, value length and user sequence for checked reads. |
 | B+tree page | An 8 KiB unit with a one-based page ID in a private B+tree or the packed tree inside an INDEX file. A branch page routes by separator and child page ID. A leaf page stores keys and DATA record addresses. An overflow page holds the remaining bytes of a long key. |
 | Node, cell, slot | A node represents a leaf or branch in the tree. A cell holds one leaf mapping or one branch separator and child. A slot gives the cell's byte offset within its page. |
-| DATA block | Up to 4 KiB of a segment covered by one parity block checksum. The last block can be short. Its record anchor gives the offset, relative to the block, of the first record header starting there, if any. |
+| DATA block | Up to 4 KiB of a segment covered by one CRC32C in its parity stripe. The last block can be short. Its record anchor gives the offset, relative to the block, of the first record header starting there, if any. |
 | Parity stripe | Up to 16 consecutive DATA blocks in one segment. PARITY stores 112 bytes of stripe metadata and an XOR payload of up to 4 KiB. A valid stripe can reconstruct one unavailable DATA block. |
 | I/O chunk, buffer, sort run | A chunk is the portion processed in one step. A buffer holds bytes in memory, such as the replay read-ahead buffer or a key-copy buffer. A replay sort run is an ordered stream of temporary records and can span multiple in-memory chunks. |
 
@@ -53,8 +53,12 @@ payload** is 4 bytes, the **encoded record** is 52 bytes and its **value-cache
 charge** is 132 bytes (128 bytes of logical metadata plus key and value).
 A write batch charges the sum of its encoded record lengths against the
 effective segment target minus the segment header. A BatchGet of that key
-twice charges 6 **result value bytes**. A cache miss counts a live key absent
-from the value LRU. A missing-key lookup counts an absent key.
+twice charges 6 **result value bytes**. A value-cache miss counts a live key absent
+from the value LRU. A missing-key lookup counts an absent key. In backup metadata, the source
+value-cache budget and maximum record size describe the original configuration.
+Verification measures the largest live cache charge and encoded record length
+needed by the restore target. Zero measured bytes describe an empty image,
+while zero in input limits requests the defaults.
 
 **Selected DATA bytes** include segment headers, live Put records, obsolete Put
 records and retained Delete records (tombstones). **Live record bytes** count
@@ -75,7 +79,7 @@ by the operating system. Use **filesystem block**, **OS page cache** and
 | --- | --- |
 | Commit frontier and catalog | CURRENT records the durable commit frontier and selects a MANIFEST by ID and file digest. The catalog in that MANIFEST describes the DATA layout and optional index checkpoint. Foreground writes publish their in-memory index changes after durable frontier publication. |
 | File digest and covered layout fingerprint | A file digest covers the complete file bytes. The covered layout fingerprint binds an index checkpoint to specific catalog entries and sequence boundaries. Appends after that prefix can preserve the fingerprint. A process-local layout revision tracks replacements for a worker. |
-| Full DATA checkpoint | `Compact` replaces all history through its captured cutoff with snapshot segments containing the retained live records. An index snapshot is a reader's captured view. |
+| Full DATA checkpoint | `Compact` replaces all history through its captured cutoff with snapshot segments containing the retained live records. An index snapshot captures an index state for a reader. A typed view returned by `Bind` lends typed access to the running DB. |
 | Index checkpoint | `CheckpointIndex` publishes a derived immutable INDEX for a covered catalog prefix. `IndexMode` chooses the runtime backend. `OpenValidation` chooses how to verify DATA at Open. Both backends can import the packed index. |
 | Cleaning and repacking | Single-segment cleaning and grouped log cleaning reclaim obsolete records. Small-segment repacking combines small segments, even when every record is live. A retired segment has left the selected layout. Unlink removes its file name once its references permit cleanup. |
 | Segment pin, live index reference and read-handle lease | A reader, backup or worker can pin a segment. Live index entries also retain their referenced segment until remapped. Either delays unlink. A read-handle lease keeps an opened descriptor available to an in-flight read, including during replacement of the named file. |

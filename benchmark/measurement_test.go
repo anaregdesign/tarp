@@ -341,7 +341,7 @@ type measurementHooks struct {
 }
 
 // The worker is held from Open through the timed window for controlled interference
-// comparisons. All foreground calls and the manual checkpoint use the normal engine.
+// comparisons. All foreground calls and the manual full DATA checkpoint use the normal engine.
 func (h *measurementHooks) interferenceHooks() (*storage.IO, *engine.Hooks) {
 	h.cleanerStart = make(chan struct{})
 	return &storage.IO{Hook: h.hook, Wrote: h.wrote}, &engine.Hooks{CleanerStart: h.cleanerStart}
@@ -613,7 +613,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 		"compact_copy_source_opens":           hooks.manualSourceOpens.Load() - opensBefore,
 		"compact_records_copied":              hooks.manualRecords.Load() - recordsBefore,
 		"observed_maintenance_api_overlap_ns": overlapNS,
-		"copy_measurement_scope":              "bytes accepted by backup DATA writes and manual checkpoint DATA writes, including segment headers; metadata and foreground writes are excluded; elapsed and overlap cover complete API calls",
+		"copy_measurement_scope":              "bytes accepted by backup DATA writes and full DATA checkpoint writes, including segment headers. Metadata and foreground writes are excluded. Elapsed time and overlap cover complete API calls",
 		"overlap_coordination":                "backup-compact releases the first backup DATA write at the first checkpoint record write; pinned-backup-compact holds it through checkpoint return and retired source observation; API elapsed times include the hold",
 		"get_file_reads":                      hooks.reads.Load() - readStart,
 		"writer_callers":                      1, "caller_value_bytes": len(value), "sample_reservoir_limit_per_worker": 2048,

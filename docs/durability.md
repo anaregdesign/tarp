@@ -415,7 +415,7 @@ Successful completion includes validation of the committed database. Keep a
 backup on independent storage for loss of the volume or the commit metadata.
 
 For an unrepairable sealed file with a valid sidecar, `SalvageData` exports
-checked historical records in physical order. It reconstructs singly damaged
+checked historical records in ascending segment offset order. It reconstructs singly damaged
 stripes, drops records touching unreadable blocks, then resumes at a verified
 record start. Reported byte ranges identify the remaining gaps. A missing region
 can hold a newer Put, Delete or another member of a batch. The callback can also
