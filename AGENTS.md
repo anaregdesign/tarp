@@ -4,7 +4,7 @@
 
 Keep the public `tarp` API, its package documentation, and its public API tests at the module root. Place the unit tests for each `<filename>.go` in `<filename>_test.go` in the same directory. Root public API tests use `package tarp_test` and import `github.com/anaregdesign/tarp`. Put database operations and compaction in `internal/engine/`. Under `internal/`, `format` defines on-disk encodings, `storage` handles file I/O and recovery, `cache` implements the LRU, and `platform` isolates OS-specific operations.
 
-Keep runnable Go examples with their public API tests. Place measurement drivers in `benchmark/`, qualification commands in `benchmark/cmd/`, and guest scripts in `benchmark/scripts/`. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
+Keep runnable Go examples with their public API tests. Place measurement drivers in `benchmark/`, qualification commands in `benchmark/cmd/`, and guest scripts in `benchmark/scripts/`. Use [the storage terminology](docs/terminology.md) in identifiers, comments, documentation and measurement labels. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
 
 During v0, implement the current public API and formats without backward-compatibility shims, legacy readers, or dual writes. Update callers, tests and specifications together. Preserve safe rejection of unsupported input.
 

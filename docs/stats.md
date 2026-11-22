@@ -8,6 +8,8 @@ The snapshot is coherent across the fields, including concurrent batch and
 catalog publications. Taking it uses a short state lock and constant work,
 performs no file I/O, and preserves LRU membership, recency and counters.
 
+The [storage terminology](terminology.md) defines byte accounting, segment pins and read-handle leases.
+
 ## Gauges
 
 | Field | Suggested Prometheus metric | Measures |
@@ -15,7 +17,7 @@ performs no file I/O, and preserves LRU membership, recency and counters.
 | `LiveKeys` | `tarp_live_keys` | Keys in the live index |
 | `LiveRecordBytes` | `tarp_live_record_bytes` | Encoded length of the current Put for every live key, including its record header |
 | `SelectedSegments` | `tarp_selected_segments` | Physical DATA files in the selected catalog and its active log |
-| `SelectedDataBytes` | `tarp_selected_data_bytes` | Sum of selected DATA lengths, using the committed end of the active log |
+| `SelectedDataBytes` | `tarp_selected_data_bytes` | Sum of selected DATA segment lengths, using the active committed end offset |
 | `ObsoletePutBytes` | `tarp_obsolete_put_bytes` | Superseded or deleted Put records still present in selected DATA |
 | `TombstoneBytes` | `tarp_tombstone_bytes` | Encoded Delete records retained in selected DATA |
 | `ValueCache.UsedBytes` | `tarp_cache_used_bytes` | Logical charges of cached keys, values and entry metadata |
@@ -27,7 +29,7 @@ created DB has one empty segment and 64 selected bytes. Physical disk use also
 includes filesystem allocation, metadata, temporary files and retired files.
 Obsolete records can reside in the active log or in segments below the
 automatic cleaner's threshold. For its most recent observation of retired
-bytes held by pins, use `AutoCompactionStatus().PinnedRetiredDataBytes`.
+bytes retained by segment pins or live index references, use `AutoCompactionStatus().PinnedRetiredDataBytes`.
 
 ## Counters
 

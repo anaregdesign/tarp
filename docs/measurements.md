@@ -35,7 +35,7 @@ The runner builds a measurement-only Go source overlay with counters for directo
 ## Selectable key indexes
 
 The [index-mode campaign](benchmarks/index-modes.md) compares Memory and B+tree
-at two live-key cardinalities and measures latency, page reads, heap, scratch
+at two live-key cardinalities and measures latency, B+tree page reads, heap, scratch
 and maintenance. The [full Go suite](benchmarks/index-full-suite.md) compares
 the then-default Memory backend with v0.8.0. The [disposable VM profiles](benchmarks/index-vm.md)
 record results for 64 B, 1 KiB and 4 KiB values.
@@ -136,7 +136,7 @@ include the latency and throughput comparison and sample-level data.
 copies of the same closed database. The fixture has one eligible sealed log with a
 surviving Put and a retained Delete, plus an active log containing live data.
 Each value size (64 B, 1 KiB, 4 KiB) uses a segment target of one file header
-plus 32 full Put records for both log rotation and manual checkpoint output.
+plus 32 full Put records for both log rotation and manual full DATA checkpoint output.
 
 | Mode | Timed interval |
 | --- | --- |
@@ -198,7 +198,7 @@ bytes count value payloads.
 
 In `scan_paused_checkpoint`, a consumer reads one of 65 entries and pauses.
 The benchmark overwrites and deletes unread keys, adds a new key and completes
-a manual checkpoint before resuming the iterator. It verifies both the old
+a manual full DATA checkpoint before resuming the iterator. It verifies both the old
 snapshot and the updated DB, checks which source files are retained, and waits
 for the worker to unlink retired files. The three mutation times describe
 progress while the snapshot is held. The workload reports checkpoint time
@@ -266,7 +266,7 @@ The interference profiles add one separately identified writer key.
   active IDs must match their declared rotating/nonrotating mode. Each
   rotating Delete follows a fully synced full-segment Put outside its timer,
   and the driver verifies all 64 Delete rotations.
-- Each of baseline, backup, manual checkpoint, their overlap and pinned-backup overlap
+- Each of baseline, backup, manual full DATA checkpoint, their overlap and pinned-backup overlap
   starts from a fresh private copy of the **same closed fixture** and runs for
   at least 500 ms and until maintenance completes. The worker is parked during
   fixture preparation and throughout all five timed windows. The plain fixture has 4,096
@@ -280,7 +280,7 @@ The interference profiles add one separately identified writer key.
   are reported; the sampler's own I/O/writer-lock acquisitions perturb all modes.
   Backup and compaction each retain actual copied DATA-file bytes (including
   headers, excluding metadata) and their complete API elapsed time, separately
-  from the combined window. For manual checkpoints, `compact_copy_source_opens`
+  from the combined window. For manual full DATA checkpoints, `compact_copy_source_opens`
   and `compact_records_copied` count source opens and successfully copied live
   records during the copy phase. The preceding validation scan is excluded.
   The driver records the overlap between the two API calls.
@@ -395,7 +395,7 @@ Each repetition records:
 - Two full update passes and deletion of one quarter of keys, followed by reopen
   timings before and after checkpointing. These are bounded histories, not a
   production-scale startup qualification.
-- Read plus synced-writer interference on identical private fixtures during baseline, backup, manual checkpoint,
+- Read plus synced-writer interference on identical private fixtures during baseline, backup, manual full DATA checkpoint,
   backup+compaction, and a backup held through checkpoint completion. Each lasts at least
   30 ms and through maintenance completion. The automatic worker stays parked during timing.
   The pinned-backup workload releases it after restore to verify retirement. Per-worker Algorithm R reservoirs retain at most 2,048 durations.
