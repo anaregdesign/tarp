@@ -208,6 +208,10 @@ To sample both scenarios locally at 4 KiB, run
 `go test ./benchmark -run '^$' -bench '^BenchmarkScan/4096/' -benchtime=1x`.
 The local warm traversal uses 128 keys.
 
+The [prefix scan measurements](benchmarks/prefix-148.md) compare filtering a
+full iterator with `KeysPrefix` and `ScanPrefix` on both index modes. They
+include typed Edge queries, early exit and DATA reads after cache eviction.
+
 ## Selected-target bounded driver
 
 All six 64 B/1 KiB/4 KiB and Go 1.26.11/1.27.4 profiles completed on the
