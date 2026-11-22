@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/anaregdesign/tarp"
+	"github.com/anaregdesign/tarp/internal/engine"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
@@ -1272,7 +1273,21 @@ func TestCompactSalvagesLiveRecordsAndDropsOnlyLostKeys(t *testing.T) {
 func TestScanPrefixTakesFreshSnapshotsAndReleasesOnBreak(t *testing.T) {
 	for name, mode := range map[string]tarp.IndexMode{"btree": tarp.IndexBTree, "memory": tarp.IndexMemory} {
 		t.Run(name, func(t *testing.T) {
-			db := openPublicDB(t, t.TempDir(), tarp.Options{IndexMode: mode})
+			// The PARITY worker can also pin the sealed log, and the cleaner
+			// can reclaim it before the second explicit Compact.
+			parked := make(chan struct{})
+			core, err := engine.OpenWithHooks(t.TempDir(), engine.Options{IndexMode: mode}, nil, &engine.Hooks{
+				CleanerStart: parked, ParityStart: parked,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			db := (*tarp.DB)(core)
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Error(err)
+				}
+			})
 			prefix := []byte("a/")
 			seq := db.ScanPrefix(t.Context(), prefix)
 			clear(prefix)
@@ -1314,14 +1329,23 @@ func TestScanPrefixTakesFreshSnapshotsAndReleasesOnBreak(t *testing.T) {
 			if !maps.Equal(got, map[string]string{"a/1": "new", "a/2": "new", "a/3": "new"}) {
 				t.Fatalf("fresh snapshot = %v", got)
 			}
+			var pinned int64
 			for _, err := range seq {
 				if err != nil {
 					t.Fatal(err)
 				}
+				result, err := db.Compact(t.Context())
+				if err != nil || result.PinnedRetiredDataBytes == 0 {
+					t.Fatalf("compact during scan = %+v, %v", result, err)
+				}
+				pinned = result.PinnedRetiredDataBytes
 				break
 			}
-			if result, err := db.Compact(t.Context()); err != nil || result.PinnedRetiredDataBytes != 0 {
-				t.Fatalf("compact after early break = %+v, %v", result, err)
+			if pinned == 0 {
+				t.Fatal("scan yielded no entries before early break")
+			}
+			if result, err := db.Compact(t.Context()); err != nil || result.PinnedRetiredDataBytes != 0 || result.UnlinkedBytes < pinned {
+				t.Fatalf("compact after early break = %+v, %v; want to reclaim %d bytes of formerly pinned DATA", result, err, pinned)
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()

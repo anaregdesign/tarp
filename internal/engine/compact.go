@@ -155,8 +155,8 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 	}()
 	newCheckpoint := func() *storage.DataCheckpoint {
 		checkpoint := db.store.NewDataCheckpoint(capture)
-		if ordered {
-			checkpoint.SetOrderedYield(func() error {
+		if mode != sourceRecovery {
+			checkpoint.SetYield(func() error {
 				return db.yieldToWriter(ctx, "compact.paced:after")
 			})
 		}

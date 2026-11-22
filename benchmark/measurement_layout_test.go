@@ -194,14 +194,30 @@ func TestMeasurementLayoutAccountsForCanonicalRecords(t *testing.T) {
 		}
 	})
 	defer capture.Release()
+	carried := capture.Catalog.Entries[0]
+	var wantedPinned int64
+	for _, src := range capture.Segments {
+		if src.Entry.ID != carried.ID {
+			wantedPinned += src.Entry.Bytes
+		}
+	}
 	result, err := db.Compact(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	engine.Observe(db).Store(func(s *storage.Store) {
+		if len(s.Catalog.Entries) != 2 || s.Catalog.Entries[0] != carried {
+			t.Fatalf("checkpoint did not retain the original snapshot: %+v", s.Catalog.Entries)
+		}
+	})
 	checkpoint := observedLayout(db)
-	if checkpoint.SelectedDataSegments != 2 || checkpoint.SnapshotSegments != 1 || checkpoint.EmptyCleanedIntervals != 0 ||
+	wantedLive += bytesOf("tail", "newer") - bytesOf("tail", "new")
+	if checkpoint.LastUserSequence != 10 || checkpoint.CheckpointCutoffSequence != 10 || checkpoint.PrunedThroughSequence != 10 ||
+		checkpoint.SelectedDataSegments != 3 || checkpoint.SnapshotSegments != 2 || checkpoint.EmptyCleanedIntervals != 0 ||
 		checkpoint.RetainedDeleteBytes != 0 || checkpoint.ObsoletePutBytes != 0 ||
-		checkpoint.UnselectedPinnedDataBytes == 0 || checkpoint.UnselectedPinnedDataBytes != result.PinnedRetiredDataBytes ||
+		checkpoint.SelectedRecordBytes != wantedLive || checkpoint.LiveRecordBytes != wantedLive ||
+		checkpoint.SelectedDataBytes != 3*format.SegmentHeaderBytes+wantedLive ||
+		checkpoint.UnselectedPinnedDataBytes != wantedPinned || result.PinnedRetiredDataBytes != wantedPinned ||
 		checkpoint.RegisteredDataBytes != checkpoint.SelectedDataBytes+checkpoint.UnselectedPinnedDataBytes {
 		t.Fatalf("incorrect post-checkpoint inventory: %+v (Compact %+v)", checkpoint, result)
 	}

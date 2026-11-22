@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index/memory"
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
@@ -468,6 +470,275 @@ func TestCheckpointCopiesInSourceOrderAndReusesReaders(t *testing.T) {
 			t.Fatalf("key %q copied out of source order", key)
 		}
 		previous = loc
+	}
+}
+
+func TestCompactKeepsWholeSnapshotsInSourceOrder(t *testing.T) {
+	for _, mode := range []IndexMode{IndexBTree, IndexMemory} {
+		for _, pattern := range []string{"append", "sparse", "spread"} {
+			t.Run(fmt.Sprintf("%d/%s", mode, pattern), func(t *testing.T) {
+				const recordsPerFile = 2
+				opts := Options{IndexMode: mode, MaxRecordBytes: 52, TargetSegmentBytes: format.SegmentHeaderBytes + recordsPerFile*50}
+				keys := []string{"z", "y", "a", "b", "e", "d", "m", "n"}
+				var scans, writes, moves int
+				fs := &storage.IO{Hook: func(point string) error {
+					switch point {
+					case "compact.scan:after":
+						scans++
+					case "compact.segment.write:after":
+						writes++
+					case "compact.remap:after":
+						moves++
+					}
+					return nil
+				}}
+				db := newTestDBWithHooks(t, opts, fs, parkedMaintenance())
+				for _, key := range keys {
+					mustPut(t, db, key, "v")
+				}
+				if _, err := db.Compact(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				base := db.store.Catalog.Entries
+				if len(base) != len(keys)/recordsPerFile {
+					t.Fatalf("unexpected base layout: %v", base)
+				}
+				old := make(map[string]storage.Location, len(keys))
+				parity := make(map[uint64]os.FileInfo, len(base))
+				for _, key := range keys {
+					old[key] = testLoc(t, db, key)
+				}
+				for _, entry := range base {
+					var err error
+					parity[entry.ID], err = os.Stat(selectedParity(t, db, entry))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				var want []string
+				var kept []format.CatalogEntry
+				var wantScans, wantWrites, wantMoves int
+				switch pattern {
+				case "append":
+					mustPut(t, db, "q", "v")
+					want = append(keys, "q")
+					kept = base
+					wantScans, wantWrites, wantMoves = 6, 1, 1
+				case "sparse":
+					mustPut(t, db, "a", "v") // Equal payload, but a newer sequence and address.
+					if err := db.Delete([]byte("d")); err != nil {
+						t.Fatal(err)
+					}
+					mustPut(t, db, "d", "v")
+					want = []string{"z", "y", "b", "e", "m", "n", "a", "d"}
+					kept = []format.CatalogEntry{base[0], base[3]}
+					wantScans, wantWrites, wantMoves = 7, 2, 4
+				case "spread":
+					for i := 0; i < len(keys); i += recordsPerFile {
+						mustPut(t, db, keys[i], "w")
+					}
+					want = []string{"y", "b", "d", "n", "z", "a", "e", "m"}
+					wantScans, wantWrites, wantMoves = 7, 4, 8
+				}
+				cutoff := db.store.Current.LastUserSequence
+				scans, writes, moves = 0, 0, 0
+				if _, err := db.Compact(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				if db.store.Catalog.CheckpointCutoffSequence != cutoff || db.store.HasOrderedBase() {
+					t.Fatalf("wrong cutoff or falsely certified order: %+v", db.store.Catalog)
+				}
+				if scans != wantScans || writes != wantWrites || moves != wantMoves {
+					t.Fatalf("scanned/written/relocated = %d/%d/%d, want %d/%d/%d", scans, writes, moves, wantScans, wantWrites, wantMoves)
+				}
+				var got []string
+				keptIDs := make(map[uint64]bool)
+				for _, entry := range kept {
+					keptIDs[entry.ID] = true
+					st, err := os.Stat(selectedParity(t, db, entry))
+					if err != nil || !os.SameFile(st, parity[entry.ID]) {
+						t.Fatalf("PARITY for unchanged DATA %d was replaced: %v", entry.ID, err)
+					}
+				}
+				for _, entry := range db.store.Catalog.Entries {
+					f, err := os.Open(db.store.Segments[entry.ID].Path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = format.Scan(t.Context(), f, entry.Bytes, func(off int64, r format.RecordHeader, key string) error {
+						got = append(got, key)
+						loc := testLoc(t, db, key)
+						before := old[key]
+						kept := before.Segment != nil && keptIDs[before.Segment.ID]
+						if loc.Segment.ID != entry.ID || loc.RecordOffset != off || loc.Sequence != r.Sequence ||
+							(loc == before) != kept {
+							return fmt.Errorf("wrong address for %q: %+v", key, loc)
+						}
+						return nil
+					})
+					if err := errors.Join(err, f.Close()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !slices.Equal(got, want) {
+					t.Fatalf("source order = %v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCompactVerifiesWouldBeReusedSnapshot(t *testing.T) {
+	for _, mode := range []IndexMode{IndexBTree, IndexMemory} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			var repairs int
+			fs := &storage.IO{Hook: func(point string) error {
+				if point == "data-repair.verify:before" {
+					repairs++
+				}
+				return nil
+			}}
+			opts := testOptions()
+			opts.IndexMode = mode
+			db := newTestDBWithHooks(t, opts, fs, parkedMaintenance())
+			mustPut(t, db, "carry", "value")
+			if _, err := db.Compact(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			loc := testLoc(t, db, "carry")
+			before, err := os.ReadFile(loc.Segment.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			damaged := bytes.Clone(before)
+			damaged[len(damaged)-1] ^= 1
+			if err := os.WriteFile(loc.Segment.Path, damaged, 0600); err != nil {
+				t.Fatal(err)
+			}
+			mustPut(t, db, "tail", "new")
+			if _, err := db.Compact(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(loc.Segment.Path)
+			if err != nil || !bytes.Equal(after, before) || repairs != 1 || testLoc(t, db, "carry") != loc {
+				t.Fatalf("expected one verified repair at the original DATA address, got %d repairs, read error %v", repairs, err)
+			}
+		})
+	}
+}
+
+func TestCompactReuseRejectsStaleIndexAndLiveByteHint(t *testing.T) {
+	db := newTestDBWithHooks(t, testOptions(), nil, parkedMaintenance())
+	mustPut(t, db, "key", "same value")
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	old := testLoc(t, db, "key")
+	stale := db.indexView()
+	defer stale.Close()
+	mustPut(t, db, "key", "same value")
+	// Supply plausible-looking byte accounting and a stale derived view.
+	// Only replay can establish that the newer Put at another address wins.
+	old.Segment.LiveBytes.Store(old.RecordBytes)
+	capture, err := db.store.Capture()
+	old.Segment.LiveBytes.Store(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Release()
+	history := memory.New()
+	defer history.Close()
+	checkpoint := db.store.NewDataCheckpoint(capture)
+	defer checkpoint.Discard()
+	moves := db.store.NewRelocations()
+	defer moves.Close()
+	if err := checkpoint.Copy(t.Context(), history, stale, moves, db.store.ReserveSnapshotSegment); !errors.Is(err, storage.ErrCorrupt) {
+		t.Fatalf("accepted an unchecked snapshot winner: %v", err)
+	}
+}
+
+func TestCompactReusePreservesConcurrentDeletesThroughBackupAndReopen(t *testing.T) {
+	for _, mode := range []IndexMode{IndexBTree, IndexMemory} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			ctx := t.Context()
+			opts := Options{IndexMode: mode, MaxRecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 60}
+			scanning, resume := make(chan struct{}), make(chan struct{})
+			var armed atomic.Bool
+			fs := &storage.IO{Hook: func(point string) error {
+				if point == "compact.scan:before" && armed.CompareAndSwap(true, false) {
+					close(scanning)
+					select {
+					case <-resume:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return nil
+			}}
+			db := newTestDBWithHooks(t, opts, fs, parkedMaintenance())
+			for _, k := range []string{"keep", "drop", "edit"} {
+				mustPut(t, db, k, "old")
+			}
+			if _, err := db.Compact(ctx); err != nil {
+				t.Fatal(err)
+			}
+			kept, dropped := testLoc(t, db, "keep"), testLoc(t, db, "drop")
+			mustPut(t, db, "edit", "cutoff")
+			cutoff := db.store.Current.LastUserSequence
+			armed.Store(true)
+			done := make(chan error, 1)
+			go func() {
+				_, err := db.Compact(ctx)
+				done <- err
+			}()
+			select {
+			case <-scanning:
+			case err := <-done:
+				t.Fatalf("checkpoint returned before scanning: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("checkpoint did not start scanning")
+			}
+			func() {
+				defer close(resume)
+				if err := db.Delete([]byte("drop")); err != nil {
+					t.Fatal(err)
+				}
+				mustPut(t, db, "edit", "tail")
+			}()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			entries := db.store.Catalog.Entries
+			if db.store.Catalog.CheckpointCutoffSequence != cutoff || len(entries) < 2 ||
+				entries[0].ID != kept.Segment.ID || entries[1].ID != dropped.Segment.ID || testLoc(t, db, "keep") != kept {
+				t.Fatalf("concurrent suffix changed the captured snapshot: %+v", db.store.Catalog)
+			}
+			backup, restored := filepath.Join(t.TempDir(), "backup"), filepath.Join(t.TempDir(), "restored")
+			if err := db.Backup(ctx, backup); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := Restore(ctx, RestoreRequest{Source: backup, Destination: restored, Limits: opts.RestoreLimits()}); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range []string{db.store.Dir, restored} {
+				reopened, err := OpenWithHooks(dir, opts, nil, parkedMaintenance())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				wantValue(t, reopened, "keep", "old")
+				wantValue(t, reopened, "edit", "tail")
+				if _, err := reopened.Get([]byte("drop")); !errors.Is(err, ErrNotFound) {
+					t.Fatalf("replayed deleted key: %v", err)
+				}
+				if testLoc(t, reopened, "keep").Address() != kept.Address() {
+					t.Fatal("reopen or restore changed a reused DATA address")
+				}
+			}
+		})
 	}
 }
 
@@ -1384,9 +1655,16 @@ func TestCompactByKeyConcurrentBatchSurvivesCapturedCutoff(t *testing.T) {
 	checkKeyOrderedSnapshot(t, db, want)
 }
 
-func TestCompactByKeyPacesQueuedWriterAndFinishesPublishedRemap(t *testing.T) {
-	for _, stage := range []string{"copy", "remap"} {
-		t.Run(stage, func(t *testing.T) {
+func TestCompactPacesQueuedWriterAndFinishesPublishedRemap(t *testing.T) {
+	for _, tc := range []struct {
+		name, stage string
+		ordered     bool
+	}{
+		{"source-copy", "copy", false},
+		{"key-copy", "copy", true},
+		{"key-remap", "remap", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var copyPauses, remapPauses, moves, batch, maxBatch int
@@ -1394,14 +1672,14 @@ func TestCompactByKeyPacesQueuedWriterAndFinishesPublishedRemap(t *testing.T) {
 				switch point {
 				case "compact.paced:after":
 					copyPauses++
-					if stage == "copy" {
+					if tc.stage == "copy" {
 						cancel()
 					}
 				case "compact.remap.paced:after":
 					remapPauses++
 					maxBatch = max(maxBatch, batch)
 					batch = 0
-					if stage == "remap" {
+					if tc.stage == "remap" {
 						cancel()
 					}
 				case "compact.remap:after":
@@ -1437,7 +1715,11 @@ func TestCompactByKeyPacesQueuedWriterAndFinishesPublishedRemap(t *testing.T) {
 			writerDone := make(chan error, 1)
 			go func() { writerDone <- db.Put(entries[0].Key, []byte("newer")) }()
 			<-queued
-			_, err := db.CompactByKey(ctx)
+			compact := db.Compact
+			if tc.ordered {
+				compact = db.CompactByKey
+			}
+			_, err := compact(ctx)
 			close(release)
 			if writerErr := <-writerDone; writerErr != nil || starved.Load() {
 				t.Fatalf("durable writer returned %v, checkpoint waited for writer to drain: %t", writerErr, starved.Load())
@@ -1445,13 +1727,13 @@ func TestCompactByKeyPacesQueuedWriterAndFinishesPublishedRemap(t *testing.T) {
 			if copyPauses == 0 {
 				t.Fatal("private DATA and parity copy did not yield to the queued writer")
 			}
-			if stage == "copy" {
+			if tc.stage == "copy" {
 				var op *OpError
 				if !errors.Is(err, context.Canceled) || !errors.As(err, &op) || op.Outcome != NotApplied || moves != 0 {
 					t.Fatalf("canceled private copy returned %v and remapped %d keys", err, moves)
 				}
 				before := copyPauses
-				if _, err := db.CompactByKey(t.Context()); err != nil || copyPauses != before || remapPauses != 0 {
+				if _, err := compact(t.Context()); err != nil || copyPauses != before || remapPauses != 0 {
 					t.Fatalf("idle retry returned %v and paused %d times during copy, %d during remap", err, copyPauses-before, remapPauses)
 				}
 			} else if err != nil || remapPauses == 0 || moves != len(entries) || max(maxBatch, batch) > 8 {
@@ -1510,7 +1792,12 @@ func TestCompactByKeyReusesUncheckedNeighborAndRecoversAfterFailedRead(t *testin
 	wantValue(t, db, "z", "updated")
 }
 
-func TestCompactByKeyKeepsReusedFilesAcrossFailedPublicationAndRetry(t *testing.T) {
+func TestCompactKeepsReusedFilesAcrossFailedPublicationAndRetry(t *testing.T) {
+	t.Run("source", func(t *testing.T) { testCompactReuseAfterFailure(t, false) })
+	t.Run("ordered", func(t *testing.T) { testCompactReuseAfterFailure(t, true) })
+}
+
+func testCompactReuseAfterFailure(t *testing.T, ordered bool) {
 	for _, point := range []string{"compact.sync:before", "current.rename:before", "current.rename:after"} {
 		t.Run(point, func(t *testing.T) {
 			var armed atomic.Bool
@@ -1522,6 +1809,12 @@ func TestCompactByKeyKeepsReusedFilesAcrossFailedPublicationAndRetry(t *testing.
 			}}
 			opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64}
 			db := newTestDBWithHooks(t, opts, fs, parkedMaintenance())
+			compact := func() (CompactResult, error) {
+				if ordered {
+					return db.CompactByKey(t.Context())
+				}
+				return db.Compact(t.Context())
+			}
 			mustPut(t, db, "z", "original")
 			mustPut(t, db, "a", "stable")
 			if _, err := db.CompactByKey(t.Context()); err != nil {
@@ -1534,7 +1827,7 @@ func TestCompactByKeyKeepsReusedFilesAcrossFailedPublicationAndRetry(t *testing.
 				t.Fatal(err)
 			}
 			armed.Store(true)
-			_, err := db.CompactByKey(t.Context())
+			_, err := compact()
 			var op *OpError
 			wantOutcome := Unknown
 			if point == "compact.sync:before" {
@@ -1558,7 +1851,7 @@ func TestCompactByKeyKeepsReusedFilesAcrossFailedPublicationAndRetry(t *testing.
 				t.Fatal("failed publication changed the address of an untouched key")
 			}
 			wantValue(t, db, "z", "updated")
-			if _, err := db.CompactByKey(t.Context()); err != nil {
+			if _, err := compact(); err != nil {
 				t.Fatalf("retry = %v", err)
 			}
 			checkKeyOrderedSnapshot(t, db, map[string]uint64{"a": 2, "z": 3})
@@ -1622,4 +1915,103 @@ func TestCompactByKeyReordersOrdinaryCheckpointAtSameCutoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkKeyOrderedSnapshot(t, db, map[string]uint64{"a": 3, "m": 2, "z": 1})
+}
+
+func TestFullOpenDerivesOrderOnlyFromReplayedSnapshotRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		mode                    IndexMode
+		validation              OpenValidation
+		packed, unordered, tail bool
+	}{
+		{name: "memory replay with tail", mode: IndexMemory, tail: true},
+		{name: "btree replay", mode: IndexBTree},
+		{name: "unordered prefix", mode: IndexMemory, unordered: true},
+		{name: "full covered digest", mode: IndexBTree, packed: true},
+		{name: "indexed covered prefix", mode: IndexMemory, validation: Indexed, packed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := Options{IndexMode: tc.mode, MaxRecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 60, OpenValidation: tc.validation}
+			db := newTestDBWithHooks(t, opts, nil, parkedMaintenance())
+			mustPut(t, db, "z", "one")
+			mustPut(t, db, "b", "two")
+			compact := db.CompactByKey
+			if tc.unordered {
+				compact = db.Compact
+			}
+			if _, err := compact(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			kept := testLoc(t, db, "z").Address()
+			if tc.tail {
+				// A key smaller than the snapshot belongs to the log suffix,
+				// not the order proof for the selected checkpoint cutoff.
+				mustPut(t, db, "a", "tail")
+			}
+			if tc.packed {
+				if err := db.CheckpointIndex(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			dir := db.store.Dir
+			if !tc.packed && db.store.Catalog.Index.ID != 0 {
+				// A missing optional INDEX forces the ordinary full replay
+				// even when BTree published an INDEX on close.
+				path := filepath.Join(dir, storage.IndexName(db.store.Current.UUID, db.store.Catalog.Index.ID))
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var certification, checkpointScans, dataBytes int
+			fs := &storage.IO{
+				Hook: func(pt string) error {
+					switch pt {
+					case "compact.key.certify:before":
+						certification++
+					case "compact.scan:before":
+						checkpointScans++
+					}
+					return nil
+				},
+				OpenRead: func(kind string, n int) {
+					if strings.HasSuffix(kind, "_encoded_records") {
+						dataBytes += n
+					}
+				},
+			}
+			reopened, err := OpenWithHooks(dir, opts, fs, parkedMaintenance())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			var wantBytes int
+			if tc.validation != Indexed {
+				for _, entry := range reopened.store.Catalog.Entries {
+					wantBytes += int(entry.Bytes - format.SegmentHeaderBytes)
+				}
+				wantBytes += int(reopened.store.Current.ActiveCommittedEndOffset - format.SegmentHeaderBytes)
+			}
+			proved := !tc.packed && !tc.unordered
+			if dataBytes != wantBytes || reopened.store.HasOrderedBase() != proved {
+				t.Fatalf("Open read %d encoded DATA bytes (want %d), proved order %t (want %t)", dataBytes, wantBytes, reopened.store.HasOrderedBase(), proved)
+			}
+			if _, err := reopened.CompactByKey(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if proved && (certification != 0 || !tc.tail && checkpointScans != 0) || !proved && certification == 0 {
+				t.Fatalf("after reopen: %d base certification scans, %d checkpoint scans", certification, checkpointScans)
+			}
+			if !tc.unordered && testLoc(t, reopened, "z").Address() != kept {
+				t.Fatal("ordered checkpoint moved an unchanged range after reopen")
+			}
+			want := map[string]uint64{"z": 1, "b": 2}
+			if tc.tail {
+				want["a"] = 3
+			}
+			checkKeyOrderedSnapshot(t, reopened, want)
+		})
+	}
 }

@@ -307,7 +307,7 @@ func TestCopyByKeySeparatesInputPermissionFailuresFromPrivateWorkspace(t *testin
 // Exercise the first-pass digest, contiguous range read, and streamed-record
 // paths separately, so a yield during output cannot mask an unpaced input.
 func TestOrderedCheckpointInputPacesEachPassAndSeparatesSchedulingFailures(t *testing.T) {
-	const valueBytes = 3 * orderedPaceBytes
+	const valueBytes = 3 * checkpointPaceBytes
 	target := int64(valueBytes + 1024)
 	s, err := openTestStore(t, t.TempDir(), Config{MaxRecordBytes: target - 64, ValueCacheBudgetBytes: target, TargetSegmentBytes: target, Handles: 1}, nil)
 	if err != nil {
@@ -338,7 +338,7 @@ func TestOrderedCheckpointInputPacesEachPassAndSeparatesSchedulingFailures(t *te
 			for _, stop := range []error{nil, context.Canceled, syscall.EIO, &IndexWorkError{Err: syscall.EPERM}} {
 				cp := s.NewDataCheckpoint(cap)
 				yields := 0
-				cp.SetOrderedYield(func() error {
+				cp.SetYield(func() error {
 					yields++
 					if yields == 2 {
 						return stop

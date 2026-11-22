@@ -52,6 +52,40 @@ func TestCleanerRanksNetSavings(t *testing.T) {
 	}
 }
 
+func TestCleanerRanksParityWorkAndLongLivedPins(t *testing.T) {
+	small, large := &storage.DataSegment{}, &storage.DataSegment{}
+	small.LiveBytes.Store(512)
+	large.LiveBytes.Store(27 << 10)
+	large.LiveKeys.Store(3) // These references leave the source at remap.
+	s := &storage.Store{
+		Manifest: make([]byte, 64),
+		Segments: map[uint64]*storage.DataSegment{2: small, 3: large},
+		Catalog: format.Catalog{Entries: []format.CatalogEntry{
+			{ID: 2, Kind: format.RawLogKind, Bytes: 2 << 10, FirstSequence: 1, LastSequence: 4},
+			{ID: 3, Kind: format.RawLogKind, Bytes: 64 << 10, FirstSequence: 5, LastSequence: 40},
+		}},
+	}
+	want := func(id uint64) {
+		t.Helper()
+		got, _, _ := selectCleaningInputs(s, 4<<20)
+		if len(got) != 1 || got[0].ID != id {
+			t.Fatalf("selected %+v, want DATA %d", got, id)
+		}
+	}
+	// DATA/metadata alone favored the small file (768/2048 vs 27904/65536).
+	// The small replacement's near-full-length PARITY changes that ranking.
+	want(3)
+	large.Pin() // Transient PARITY/read pins still block unlink, not selection.
+	defer large.Unpin()
+	want(3)
+	large.PinRetained()
+	defer large.UnpinRetained()
+	want(2)
+	small.PinRetained()
+	defer small.UnpinRetained()
+	want(2) // No immediate reclaim: retain the legacy progress fallback.
+}
+
 func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 	type segment struct {
 		kind                uint32

@@ -91,12 +91,12 @@ type recordVisitor func(*DataSegment, int64, format.RecordHeader, string) error
 
 // scan validates each selected record through the committed end in replay order.
 func (image *Image) scan(ctx context.Context, visit recordVisitor) error {
-	return image.scanFrom(ctx, 0, "replay", visit)
+	return image.scanFrom(ctx, 0, "replay", visit, nil)
 }
 
 // start is a catalog entry boundary. The active segment always follows the
 // sealed entries, even when the committed prefix ends at its header.
-func (image *Image) scanFrom(ctx context.Context, start int, area string, visit recordVisitor) error {
+func (image *Image) scanFrom(ctx context.Context, start int, area string, visit recordVisitor, order *snapshotOrderCheck) error {
 	active, err := image.Catalog.ActiveEntry(image.Current)
 	if err != nil {
 		return err
@@ -124,9 +124,14 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 		}
 		var deletions int64
 		var visitErr error
+		var bounds scannedSnapshot
+		checkOrder := order != nil && !order.unordered && entry.Kind == format.SnapshotKind
 		err = scanSelectedRecords(ctx, observeDATA(fd, image.openRead, area), entry, image.Catalog.CheckpointCutoffSequence, func(off int64, r format.RecordHeader, key string) error {
 			if r.Kind == format.Delete {
 				deletions += r.EncodedRecordBytes()
+			}
+			if checkOrder {
+				bounds.add(key, off)
 			}
 			visitErr = visit(segment, off, r, key)
 			return visitErr
@@ -138,6 +143,9 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 			return fmt.Errorf("%s: %w", filepath.Base(segment.Path), err)
 		}
 		segment.DeleteBytes.Store(deletions)
+		if checkOrder {
+			order.accept(segment, &bounds)
+		}
 	}
 	return ctx.Err()
 }
@@ -193,9 +201,13 @@ func (image *Image) measure(key string, recordBytes, valueBytes int64) error {
 }
 
 func (image *Image) rebuildIndexFromData(ctx context.Context, backend index.Backend) error {
+	return image.rebuildIndex(ctx, backend, nil)
+}
+
+func (image *Image) rebuildIndex(ctx context.Context, backend index.Backend, order *snapshotOrderCheck) error {
 	builder := newReplayBuilder(ctx, backend, image.Catalog.PrunedThroughSequence)
 	defer builder.abort()
-	if err := image.scan(ctx, builder.apply); err != nil {
+	if err := image.scanFrom(ctx, 0, "replay", builder.apply, order); err != nil {
 		return err
 	}
 	return builder.finishWith(image.measureLive(ctx))
@@ -359,7 +371,7 @@ func (image *Image) replayAfterIndexCheckpoint(ctx context.Context, keys index.B
 	// to bounded private transactions on top of the imported checkpoint.
 	builder := replayBuilder{backend: keys, pruned: image.Catalog.PrunedThroughSequence}
 	defer builder.abort()
-	if err := image.scanFrom(ctx, int(cp.CoveredCatalogEntries), "log_suffix", builder.apply); err != nil {
+	if err := image.scanFrom(ctx, int(cp.CoveredCatalogEntries), "log_suffix", builder.apply, nil); err != nil {
 		return err
 	}
 	if cp.CoveredSequence == image.Current.LastUserSequence {
