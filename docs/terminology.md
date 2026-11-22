@@ -4,7 +4,10 @@ A lookup in the B+tree visits branch pages and a leaf page to find an encoded
 key's DATA record address. The address gives the DATA segment ID and the byte
 offset of the record header. A read uses the record length to fetch the value.
 Parity interprets that same segment as a sequence of DATA blocks starting at
-file offset zero. A single record can cross several block and stripe boundaries.
+file offset zero. For example, a 52-byte record starting at offset 4,090
+occupies bytes `[4090, 4142)`. Its header crosses the 4 KiB boundary. Its
+record address points to 4,090, and its record start belongs to DATA block 0.
+Larger records can also cross stripe boundaries.
 
 ## Stored units
 
