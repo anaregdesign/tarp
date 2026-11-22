@@ -23,9 +23,10 @@ type compactTrial struct {
 // Check the schedule independently of the guest process. Each measured pair
 // uses the same control, and both control order and arm order rotate.
 func compactTrials(pair string) ([]compactTrial, error) {
-	diagnostic := "lock-profile"
+	var diagnostic string
 	switch pair {
 	case "candidate", "candidate-fixed":
+		diagnostic = "lock-profile"
 	case "releases":
 		diagnostic = "diagnostic"
 	default:
