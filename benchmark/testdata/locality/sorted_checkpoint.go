@@ -14,7 +14,7 @@ import (
 	"github.com/anaregdesign/tarp/internal/index"
 )
 
-func (c *Checkpoint) localityReplaySorted(ctx context.Context, history index.Backend, live index.View, emit func(string, Location) (io.Writer, error)) error {
+func (c *Checkpoint) localityReplayStaged(ctx context.Context, history index.Backend, live index.View, emit func(string, Location) (io.Writer, error), sortKeys bool) error {
 	type row struct {
 		key    string
 		old    Location
@@ -34,7 +34,9 @@ func (c *Checkpoint) localityReplaySorted(ctx context.Context, history index.Bac
 	if err != nil {
 		return err
 	}
-	slices.SortFunc(rows, func(a, b row) int { return strings.Compare(a.key, b.key) })
+	if sortKeys {
+		slices.SortFunc(rows, func(a, b row) int { return strings.Compare(a.key, b.key) })
+	}
 	for _, r := range rows {
 		if err := ctx.Err(); err != nil {
 			return err

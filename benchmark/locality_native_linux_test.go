@@ -236,7 +236,7 @@ func TestLocalityNative(t *testing.T) {
 	if arm == "" {
 		t.Skip("set TARP_LOCALITY_NATIVE via container-key-locality.sh")
 	}
-	if arm != "physical" && arm != "sorted" {
+	if arm != "physical" && arm != "staged" && arm != "sorted" {
 		t.Fatal("invalid native arm")
 	}
 	opts := tarp.Options{IndexMode: tarp.IndexBTree, TargetSegmentBytes: 1 << 20, MaxRecordBytes: 64 << 10}
