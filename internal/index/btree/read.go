@@ -3,6 +3,7 @@ package btree
 import (
 	"os"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -116,6 +117,8 @@ func (v *view) All(yield func(string, index.Address) bool) error {
 	return v.Range("", "", yield)
 }
 
+const rangeGroupSize = 16
+
 type rangeEntry struct {
 	key  string
 	addr index.Address
@@ -130,41 +133,73 @@ func (c *cursor) readGroup(s *pager, lower, upper string, out []rangeEntry) (int
 		return 0, err
 	}
 	f := &c.stack[len(c.stack)-1]
-	n := 0
-	for n < len(out) && f.pos < p.count() {
-		raw, err := p.raw(f.pos)
-		if err != nil {
-			return n, err
-		}
-		if raw.tail != 0 && n != 0 {
-			break
-		}
-		ref := raw.key()
-		if upper != "" {
-			cmp, err := ref.compare(s, upper)
-			if err != nil {
-				return n, err
-			}
-			if cmp >= 0 {
-				c.stack = nil
-				return n, nil
-			}
-		}
-		key, err := ref.string(s)
-		if err != nil {
-			return n, err
-		}
-		out[n] = rangeEntry{key, raw.address}
-		n++
-		f.pos++
-		if raw.tail != 0 {
-			break
-		}
-	}
-	if f.pos == p.count() {
+	n, reachedUpper, err := p.rangeEntries(s, f.pos, upper, out)
+	f.pos += n
+	if reachedUpper {
+		c.stack = nil
+	} else if f.pos == p.count() {
 		c.stack = c.stack[:len(c.stack)-1]
 	}
-	return n, nil
+	return n, err
+}
+
+// rangeEntries stores an inline group's reconstructed keys in a single owned
+// string. Grow exactly once for matching keys, so retaining a result never
+// pins a page or unused capacity for long neighboring keys.
+func (p *page) rangeEntries(s *pager, start int, upper string, out []rangeEntry) (n int, reachedUpper bool, err error) {
+	end := min(start+len(out), p.count())
+	if upper != "" && end-start > 1 {
+		// A short final candidate below upper proves the whole group fits.
+		// Leave overflow keys and any errors to the sequential walk.
+		last, e := p.raw(end - 1)
+		if e == nil && last.tail == 0 {
+			if cmp, _ := last.compare(s, upper); cmp < 0 {
+				upper = ""
+			}
+		}
+	}
+	var suffixes [rangeGroupSize][]byte
+	prefix := p[header : header+int(p[5])]
+	total := 0
+	for start+n < end {
+		var raw rawCell
+		raw, err = p.raw(start + n)
+		if err != nil || raw.tail != 0 && n != 0 {
+			break
+		}
+		if upper != "" {
+			var cmp int
+			cmp, err = raw.compare(s, upper)
+			if err != nil {
+				break
+			}
+			if cmp >= 0 {
+				reachedUpper = true
+				break
+			}
+		}
+		if len(out) == 1 || raw.tail != 0 {
+			key, err := raw.key().string(s)
+			if err != nil {
+				return 0, false, err
+			}
+			out[0] = rangeEntry{key, raw.address}
+			return 1, false, nil
+		}
+		suffixes[n] = raw.suffix
+		total += len(prefix) + len(raw.suffix)
+		out[n].addr = raw.address
+		n++
+	}
+	var keys strings.Builder
+	keys.Grow(total)
+	for i, suffix := range suffixes[:n] {
+		offset := keys.Len()
+		keys.Write(prefix)
+		keys.Write(suffix)
+		out[i].key = keys.String()[offset:]
+	}
+	return n, reachedUpper, err
 }
 
 // Range visits keys in [lower, upper) at this view's root. An empty upper
@@ -177,7 +212,7 @@ func (v *view) Range(lower, upper string, yield func(string, index.Address) bool
 		return nil
 	}
 	c := cursor{stack: []frame{{id: v.root}}}
-	var group [16]rangeEntry
+	var group [rangeGroupSize]rangeEntry
 	// Fetch just the first entry so an early break never decodes a whole group.
 	limit := 1
 	bounded := lower != "" || upper != ""

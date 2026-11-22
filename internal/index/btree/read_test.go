@@ -260,3 +260,52 @@ func TestRangeCloseWhileInlineKeysAreBuffered(t *testing.T) {
 		t.Fatalf("got %v, %v after closing the view", keys, err)
 	}
 }
+
+func TestRangeKeysSurviveLaterGroupsAndViewClose(t *testing.T) {
+	tr := openTest(t)
+	var keys []string
+	tx := tr.Begin()
+	for i := range rangeGroupSize*4 + 3 {
+		key := fmt.Sprintf("v\x00%03d%s", i, strings.Repeat("x", i%17))
+		if i == rangeGroupSize+3 {
+			key += strings.Repeat("z", maxInline)
+		}
+		keys = append(keys, key)
+		if err := tx.Put(key, addr(uint64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx.Commit()
+	v := tr.View().(*view)
+	var got []string
+	upper := len(keys) - 2
+	err := v.Range(keys[0], keys[upper], func(k string, a index.Address) bool {
+		if a != addr(uint64(len(got))) {
+			t.Fatalf("address %v at position %d", a, len(got))
+		}
+		got = append(got, k)
+		return true
+	})
+	v.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise different group boundaries on a new view after a deletion.
+	tx = tr.Begin()
+	if err := tx.Delete(keys[3]); err != nil {
+		t.Fatal(err)
+	}
+	tx.Commit()
+	next := tr.View().(*view)
+	err = next.Range(keys[5], "", func(string, index.Address) bool { return true })
+	next.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, keys[:upper]) {
+		t.Fatalf("retained keys changed: got %d, want %d matching entries", len(got), upper)
+	}
+}
