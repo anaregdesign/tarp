@@ -30,7 +30,7 @@ const (
 	// Full verifies all committed DATA during Open. This is the default.
 	Full = engine.Full
 	// Indexed validates an available index checkpoint and replays the DATA log
-	// suffix it does not cover. Covered DATA payloads are checked on read.
+	// suffix it does not cover. It checks covered DATA records on read.
 	Indexed = engine.Indexed
 )
 
