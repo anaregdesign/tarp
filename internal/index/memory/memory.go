@@ -2,6 +2,7 @@
 package memory
 
 import (
+	"context"
 	"maps"
 	"os"
 	"sync"
@@ -54,6 +55,29 @@ func (s *store) View() index.View {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return &view{owner: s, entries: maps.Clone(s.entries)}
+}
+
+// BoundedView captures matching addresses under the same lock as View.
+// Iteration over the copy permits user code to mutate or close the store.
+func (s *store) BoundedView(ctx context.Context, bounds index.Bounds) (index.View, error) {
+	done := ctx.Done()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries := make(map[string]index.Address)
+	for key, addr := range s.entries {
+		select {
+		case <-done:
+			return nil, ctx.Err()
+		default:
+		}
+		if bounds.Contains(key) {
+			entries[key] = addr
+		}
+	}
+	return &view{owner: s, entries: entries}, nil
 }
 
 func (s *store) Begin() index.Tx {

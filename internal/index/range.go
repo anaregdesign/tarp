@@ -22,6 +22,36 @@ func PrefixBounds(prefix []byte) Bounds {
 	return Bounds{Lower: lower}
 }
 
+// Contains reports whether key is within the half-open bounds.
+func (b Bounds) Contains(key string) bool {
+	return key >= b.Lower && (b.Upper == "" || key < b.Upper)
+}
+
+// BoundedSnapshotter can capture just the matching portion of an index.
+// BoundedView returns ctx.Err() on cancellation and otherwise succeeds.
+// A canceled capture retains no snapshot.
+type BoundedSnapshotter interface {
+	BoundedView(ctx context.Context, bounds Bounds) (View, error)
+}
+
+// ScanView pairs a snapshot with any bounds still to apply during iteration.
+type ScanView struct {
+	view   View
+	bounds Bounds
+}
+
+func (b Bounds) Capture(ctx context.Context, backend Backend) (ScanView, error) {
+	if b != (Bounds{}) {
+		if snapshot, ok := backend.(BoundedSnapshotter); ok {
+			v, err := snapshot.BoundedView(ctx, b)
+			return ScanView{view: v}, err
+		}
+	}
+	return ScanView{view: backend.View(), bounds: b}, nil
+}
+
+func (s ScanView) Close() { s.view.Close() }
+
 // RangeView can seek directly to the first entry at or above lower.
 type RangeView interface {
 	Range(lower, upper string, yield func(string, Address) bool) error
@@ -29,7 +59,8 @@ type RangeView interface {
 
 // Walk visits only matching addresses. An unordered view filters its snapshot
 // before the caller reads DATA, so it needs no secondary ordered index.
-func (b Bounds) Walk(ctx context.Context, v View, yield func(string, Address) bool) error {
+func (s ScanView) Walk(ctx context.Context, yield func(string, Address) bool) error {
+	b, v := s.bounds, s.view
 	if b == (Bounds{}) {
 		return v.All(yield)
 	}
@@ -41,7 +72,7 @@ func (b Bounds) Walk(ctx context.Context, v View, yield func(string, Address) bo
 		if canceled = ctx.Err(); canceled != nil {
 			return false
 		}
-		if k < b.Lower || (b.Upper != "" && k >= b.Upper) {
+		if !b.Contains(k) {
 			return true
 		}
 		return yield(k, a)

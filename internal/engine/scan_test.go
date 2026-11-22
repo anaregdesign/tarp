@@ -524,3 +524,32 @@ func TestScanPrefixObservesCancellationAtUpperBound(t *testing.T) {
 		}
 	}
 }
+
+// Cancel after scan admission when the memory index starts capturing a range.
+type cancelOnCapture struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+func (c cancelOnCapture) Done() <-chan struct{} {
+	c.cancel()
+	return c.Context.Done()
+}
+
+func TestCancelDuringBoundedMemoryCaptureReleasesAdmission(t *testing.T) {
+	db := newTestDB(t, Options{IndexMode: IndexMemory}, nil)
+	mustPut(t, db, "a/1", "before")
+	file := testLoc(t, db, "a/1").File
+	references := file.References()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	requireScanError(t, db.ScanPrefix(cancelOnCapture{ctx, cancel}, []byte("a/")), context.Canceled)
+	if db.active != 0 || file.References() != references {
+		t.Fatal("canceled capture retained a file or admission")
+	}
+	mustPut(t, db, "a/1", "after")
+	got := scanContents(t, db.ScanPrefix(t.Context(), []byte("a/")))
+	if !maps.Equal(got, map[string]string{"a/1": "after"}) {
+		t.Fatalf("retry contents = %v", got)
+	}
+}

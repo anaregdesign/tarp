@@ -10,7 +10,7 @@ func TestPrefixBoundsMatchBytes(t *testing.T) {
 	for _, prefix := range samples {
 		b := PrefixBounds([]byte(prefix))
 		for _, key := range samples {
-			within := key >= b.Lower && (b.Upper == "" || key < b.Upper)
+			within := b.Contains(key)
 			if within != strings.HasPrefix(key, prefix) {
 				t.Fatalf("range [%x, %x) for prefix %x, key %x: got %v", b.Lower, b.Upper, prefix, key, within)
 			}

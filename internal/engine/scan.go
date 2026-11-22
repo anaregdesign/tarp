@@ -51,7 +51,12 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		return operationError(op, "context", err)
 	}
 	db.indexGate.RLock()
-	v := db.keys.View()
+	v, err := bounds.Capture(ctx, db.keys)
+	if err != nil {
+		db.indexGate.RUnlock()
+		db.done()
+		return operationError(op, "context", err)
+	}
 	var layout map[uint64]*storage.File
 	if values {
 		layout = make(map[uint64]*storage.File, len(db.files))
@@ -86,7 +91,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	}
 	var result error
 	var stopped bool
-	err := bounds.Walk(ctx, v, func(k string, a index.Address) bool {
+	err = v.Walk(ctx, func(k string, a index.Address) bool {
 		if result = check(); result != nil {
 			return false
 		}
