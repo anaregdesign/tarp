@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -48,6 +49,16 @@ func TestEdgePrefixDataIO(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Both comparison arms read the last user sequence from the same
+			// verified, immutable backup in the 128-byte CURRENT format.
+			current, err := os.ReadFile(filepath.Join(source, "CURRENT"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(current) != 128 {
+				t.Fatalf("CURRENT size %d, want 128", len(current))
+			}
+			lastUserSequence := binary.LittleEndian.Uint64(current[96:104])
 			dir := filepath.Join(t.TempDir(), "restored")
 			if err := tarp.Restore(t.Context(), tarp.RestoreRequest{Source: source, Destination: dir, Limits: opts.RestoreLimits()}); err != nil {
 				t.Fatal(err)
@@ -113,7 +124,7 @@ func TestEdgePrefixDataIO(t *testing.T) {
 							}
 							row := map[string]any{
 								"arm": arm, "layout": layout, "operation": op, "query": query.name, "trial": trial,
-								"database_id": fmt.Sprintf("%x", info.DatabaseID), "sequence": info.Sequence,
+								"database_id": fmt.Sprintf("%x", info.DatabaseID), "last_user_sequence": lastUserSequence,
 								"data_files": len(storage.files), "filesystem": storage.Filesystem, "device": storage.Device,
 								"matches": n, "yielded": counts.candidates, "yielded_value_bytes": counts.valueBytes,
 								"elapsed_ns": ns, "process_read_bytes": charged, "full_read_control_bytes": control,

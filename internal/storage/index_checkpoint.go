@@ -18,9 +18,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
-// ErrIndexMiss means that authoritative replay can replace this optional file.
-var ErrIndexMiss = errors.New("storage: unusable index checkpoint")
-var ErrIndexLayoutChanged = errors.New("storage: checkpoint prefix was replaced")
+// ErrIndexCheckpointUnusable indicates that the runtime index must be rebuilt from DATA.
+var ErrIndexCheckpointUnusable = errors.New("storage: unusable index checkpoint")
+var ErrCoveredCatalogPrefixChanged = errors.New("storage: the catalog prefix covered by the index checkpoint was replaced")
 
 const indexSignature = "TARPIDX1"
 const indexHeaderBytes = 48
@@ -35,7 +35,7 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	cp := c.Index
 	fd, err := OpenRegular(filepath.Join(s.Dir, IndexName(c.UUID, cp.ID)))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil, ErrIndexMiss
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
 	if err != nil {
 		return nil, nil, err
@@ -51,8 +51,8 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	if err != nil {
 		return nil, nil, err
 	}
-	if st.Size() != cp.Bytes || cp.Bytes < indexHeaderBytes || cp.Entries > uint64(len(c.Files)) || cp.Entries > uint64((cp.Bytes-indexHeaderBytes)/8) {
-		return nil, nil, ErrIndexMiss
+	if st.Size() != cp.Bytes || cp.Bytes < indexHeaderBytes || cp.CoveredCatalogEntries > uint64(len(c.Entries)) || cp.CoveredCatalogEntries > uint64((cp.Bytes-indexHeaderBytes)/8) {
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
 	h := sha256.New()
 	var source io.Reader = fd
@@ -64,10 +64,10 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	if _, err := io.ReadFull(rd, header[:]); err != nil {
 		return nil, nil, indexReadError(err)
 	}
-	if string(header[:8]) != indexSignature || [32]byte(header[8:40]) != cp.Layout || binary.LittleEndian.Uint64(header[40:]) != cp.Entries {
-		return nil, nil, ErrIndexMiss
+	if string(header[:8]) != indexSignature || [32]byte(header[8:40]) != cp.CoveredLayoutFingerprint || binary.LittleEndian.Uint64(header[40:]) != cp.CoveredCatalogEntries {
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
-	deletes := make([]int64, int(cp.Entries))
+	deletes := make([]int64, int(cp.CoveredCatalogEntries))
 	var raw [8]byte
 	for i := range deletes {
 		if err := ctx.Err(); err != nil {
@@ -83,8 +83,8 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	if err != nil {
 		return nil, nil, indexReadError(err)
 	}
-	if [32]byte(h.Sum(nil)) != cp.Digest {
-		return nil, nil, ErrIndexMiss
+	if [32]byte(h.Sum(nil)) != cp.IndexFileDigest {
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
 	return keys, deletes, nil
 }
@@ -102,23 +102,22 @@ func (r checkpointReadMeter) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// IsIndexMiss reports whether every cause describes an unusable optional
-// index. An additional read, close or cancellation failure must reach the
+// IsIndexCheckpointUnusable reports whether every cause invalidates the index checkpoint. An additional read, close or cancellation failure must reach the
 // caller even when a decoder also found an invalid page.
-func IsIndexMiss(err error, equivalent ...error) bool {
-	return onlyCauses(err, ErrIndexMiss, equivalent...)
+func IsIndexCheckpointUnusable(err error, equivalent ...error) bool {
+	return onlyCauses(err, ErrIndexCheckpointUnusable, equivalent...)
 }
 
 func indexReadError(err error) error {
-	if IsIndexMiss(err, io.EOF, io.ErrUnexpectedEOF) {
-		return ErrIndexMiss
+	if IsIndexCheckpointUnusable(err, io.EOF, io.ErrUnexpectedEOF) {
+		return ErrIndexCheckpointUnusable
 	}
 	return err
 }
 
-// IndexBuild owns a pinned DATA selection and a private, named staging file.
-// Only BeginIndex and Install require the writer gate.
-type IndexBuild struct {
+// IndexCheckpointBuild owns a pinned DATA selection and a private, named staging file.
+// Only BeginIndexCheckpoint and Install require the writer gate.
+type IndexCheckpointBuild struct {
 	store         *Store
 	capture       *Capture
 	descriptor    format.IndexCheckpoint
@@ -127,14 +126,14 @@ type IndexBuild struct {
 	filePublished bool
 }
 
-func (b *IndexBuild) Sources() []CapturedFile { return b.capture.Files }
+func (b *IndexCheckpointBuild) Sources() []CapturedSegment { return b.capture.Segments }
 
-func (s *Store) BeginIndex() (*IndexBuild, error) {
-	if s.Current.ActiveEnd != format.SegmentHeaderBytes {
+func (s *Store) BeginIndexCheckpoint() (*IndexCheckpointBuild, error) {
+	if s.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		return nil, errors.New("storage: index checkpoint requires a sealed boundary")
 	}
-	n, seq := uint64(len(s.Catalog.Files)), s.Current.Sequence
-	layout, err := s.Catalog.IndexLayout(n, seq)
+	n, seq := uint64(len(s.Catalog.Entries)), s.Current.LastUserSequence
+	fingerprint, err := s.Catalog.CoveredLayoutFingerprint(n, seq)
 	if err != nil {
 		return nil, err
 	}
@@ -147,10 +146,10 @@ func (s *Store) BeginIndex() (*IndexBuild, error) {
 		return nil, err
 	}
 	s.buildingIndex.Store(id)
-	return &IndexBuild{store: s, capture: c, descriptor: format.IndexCheckpoint{ID: id, Entries: n, Sequence: seq, Layout: layout}}, nil
+	return &IndexCheckpointBuild{store: s, capture: c, descriptor: format.IndexCheckpoint{ID: id, CoveredCatalogEntries: n, CoveredSequence: seq, CoveredLayoutFingerprint: fingerprint}}, nil
 }
 
-func (b *IndexBuild) Release() error {
+func (b *IndexCheckpointBuild) Release() error {
 	b.capture.Release()
 	defer b.store.buildingIndex.CompareAndSwap(b.descriptor.ID, 0)
 	path := b.stage
@@ -170,21 +169,21 @@ func (b *IndexBuild) Release() error {
 	return nil
 }
 
-func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(context.Context, index.Backend, io.Writer) error) (result error) {
+func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, export func(context.Context, index.Backend, io.Writer) error) (result error) {
 	// Isolate recovery counters from live accounting. The capture pins the
 	// original files even if rotations occur during the scan.
 	c := b.capture
 	image := Image{
 		Current: c.Current, Catalog: c.Catalog,
-		Files: make(map[uint64]*File, len(c.Files)), liveCapture: true,
+		Segments: make(map[uint64]*DataSegment, len(c.Segments)), liveCapture: true,
 	}
-	for _, f := range c.Files {
-		image.Files[f.File.ID] = &File{ID: f.File.ID, Kind: f.File.Kind, Path: f.File.Path}
+	for _, f := range c.Segments {
+		image.Segments[f.Segment.ID] = &DataSegment{ID: f.Segment.ID, Kind: f.Segment.Kind, Path: f.Segment.Path}
 	}
 	if err := b.store.IO.Check("index.scan:before"); err != nil {
 		return err
 	}
-	if err := image.replayIndexed(ctx, tree); err != nil {
+	if err := image.rebuildIndexFromData(ctx, tree); err != nil {
 		var work *IndexWorkError
 		if errors.As(err, &work) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -206,16 +205,16 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 	out := bufio.NewWriterSize(writer, 32<<10)
 	var header [indexHeaderBytes]byte
 	copy(header[:8], indexSignature)
-	copy(header[8:40], b.descriptor.Layout[:])
-	binary.LittleEndian.PutUint64(header[40:], b.descriptor.Entries)
+	copy(header[8:40], b.descriptor.CoveredLayoutFingerprint[:])
+	binary.LittleEndian.PutUint64(header[40:], b.descriptor.CoveredCatalogEntries)
 	if _, err := out.Write(header[:]); err != nil {
 		return err
 	}
 	var raw [8]byte
-	for _, entry := range c.Catalog.Files {
+	for _, entry := range c.Catalog.Entries {
 		var count int64
 		if entry.HasPhysicalFile() {
-			count = image.Files[entry.ID].DeleteBytes.Load()
+			count = image.Segments[entry.ID].DeleteBytes.Load()
 		}
 		binary.LittleEndian.PutUint64(raw[:], uint64(count))
 		if _, err := out.Write(raw[:]); err != nil {
@@ -232,13 +231,13 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 		return err
 	}
 	b.descriptor.Bytes = writer.offset
-	b.descriptor.Digest = [32]byte(h.Sum(nil))
+	b.descriptor.IndexFileDigest = [32]byte(h.Sum(nil))
 	return nil
 }
 
 // PublishFile durably names the candidate outside the writer gate. Its
 // reserved ID protects it from cleanup until selector publication or discard.
-func (b *IndexBuild) PublishFile() error {
+func (b *IndexCheckpointBuild) PublishFile() error {
 	s := b.store
 	path := filepath.Join(s.Dir, IndexName(b.capture.Current.UUID, b.descriptor.ID))
 	if err := s.IO.Do("index.rename", func() error {
@@ -255,22 +254,22 @@ func (b *IndexBuild) PublishFile() error {
 	return err
 }
 
-func (b *IndexBuild) Install() error {
+func (b *IndexCheckpointBuild) Install() error {
 	if !b.filePublished || b.final == "" {
 		return errors.New("storage: checkpoint file has not been published")
 	}
 	s := b.store
 	cp := b.descriptor
-	layout, err := s.Catalog.IndexLayout(cp.Entries, cp.Sequence)
-	if err != nil || layout != cp.Layout {
-		return ErrIndexLayoutChanged
+	fingerprint, err := s.Catalog.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	if err != nil || fingerprint != cp.CoveredLayoutFingerprint {
+		return ErrCoveredCatalogPrefixChanged
 	}
-	if s.Current.Generation == math.MaxUint64 {
+	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return errors.New("storage: publication generation exhausted")
 	}
 	catalog, frontier := s.Catalog, s.Current
 	catalog.Index = cp
-	frontier.Generation++
+	frontier.PublicationGeneration++
 	if err := s.publishCatalogFor(catalog, frontier, "index.", nil); err != nil {
 		var f *Fault
 		if errors.As(err, &f) && f.Outcome == publication.Unknown {
@@ -279,7 +278,7 @@ func (b *IndexBuild) Install() error {
 		return err
 	}
 	b.final = "" // The catalog now owns the file.
-	s.IndexCheckpointHit = true
+	s.IndexCheckpointValidated = true
 	// A cleanup failure represents an already published checkpoint.
 	if _, _, _, err := s.RetireCleaned(); err != nil {
 		return fault("index.cleanup", publication.Committed, false, err)

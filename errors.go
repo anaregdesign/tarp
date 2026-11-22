@@ -62,20 +62,21 @@ type SizeError = engine.SizeError
 // via errors.Is.
 type BatchKeyError = engine.BatchKeyError
 
-// BatchLimitKind identifies a batch input-count, entry-size, payload or result-byte limit.
+// BatchLimitKind identifies which batch limit was exceeded. The limits count input
+// items, individual entry sizes, total encoded record bytes, or result value bytes.
 type BatchLimitKind = engine.BatchLimitKind
 
 const (
 	BatchInputCountLimit    = engine.BatchInputCountLimit
 	BatchEntrySizeLimit     = engine.BatchEntrySizeLimit
-	BatchPayloadLimit       = engine.BatchPayloadLimit
+	BatchRecordBytesLimit   = engine.BatchRecordBytesLimit
 	BatchGetValueBytesLimit = engine.BatchGetValueBytesLimit
 )
 
 // BatchLimitError matches ErrTooLarge. Index is the original zero-based input
 // position, or -1 for a request-wide count failure. Actual and Limit are
-// counts for BatchInputCountLimit or encoded bytes through Index for
-// BatchPayloadLimit. For BatchGetValueBytesLimit they describe encoded value
+// counts for BatchInputCountLimit or total encoded record bytes through Index for
+// BatchRecordBytesLimit. For BatchGetValueBytesLimit they describe encoded value
 // bytes, counting each requested occurrence of a found key. For
 // BatchEntrySizeLimit both are zero and errors.As can
 // also retrieve the underlying *SizeError with its record and cache charges.

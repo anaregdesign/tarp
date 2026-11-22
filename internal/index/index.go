@@ -2,12 +2,12 @@
 // engine, verified DATA replay and maintenance.
 package index
 
-// Address identifies one checked DATA record independently of process-local
-// file handles. A compaction may change its physical address at the same sequence.
+// Address identifies one DATA record by file ID, segment-relative byte offset
+// and encoded record length. Compaction can move it at the same user sequence.
 type Address struct {
-	FileID                    uint64
-	Offset, Bytes, ValueBytes int64
-	Sequence                  uint64
+	FileID                                uint64
+	RecordOffset, RecordBytes, ValueBytes int64
+	Sequence                              uint64
 }
 
 // Snapshot enumerates one captured index state in unspecified order.
@@ -92,7 +92,7 @@ type Backend interface {
 	Close() error
 }
 
-// Meter exposes the physical activity of a paged backend.
+// Meter reports B+tree pager activity. A file read may hit the OS page cache.
 type Meter interface{ Metrics() Metrics }
 
 type Metrics struct {
@@ -100,8 +100,8 @@ type Metrics struct {
 	// CacheBytes charges page buffers and their cache entries. ScratchBytes
 	// sums logical file sizes, including sparse regions and allocator journals.
 	CacheBytes, CachePeakBytes, ScratchBytes, ScratchPeakBytes uint64
-	// Retired pages await the next writer or the oldest pinned generation.
-	ActiveViews, PinnedGenerations, RetiredPages uint64
+	// Retired pages await the next writer or the oldest pinned root generation.
+	ActiveViews, PinnedRootGenerations, RetiredPages uint64
 	// SpillNanoseconds measures elapsed synchronous dirty-page write calls.
 	Evictions, SpillWrites, SpillNanoseconds uint64
 	// Each active read reserves room for page validation, overflow comparison

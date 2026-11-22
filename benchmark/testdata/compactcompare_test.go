@@ -3,6 +3,7 @@
 package benchmark
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +23,12 @@ import (
 // The diagnostic-only binary supplies timings for individual Compact stages.
 var compactDiagnostic = func() map[string]int64 { return nil }
 var compactGateSamples = func() map[string][]int64 { return nil }
+
+// Both comparison arms measure these fields in the same committed CURRENT format.
+func captureMeasuredFrontier(frontier format.Frontier) (lastUserSequence uint64, manifestDigest [32]byte) {
+	encoded := format.EncodeFrontier(frontier)
+	return binary.LittleEndian.Uint64(encoded[96:104]), [32]byte(encoded[48:80])
+}
 
 // TestCompactCompare is compiled into each arm's benchmark package. A single
 // seed invocation prepares the closed disk image used by both binaries.
@@ -82,9 +89,10 @@ func TestCompactCompare(t *testing.T) {
 	probe := engine.Observe(db)
 	dir := probe.Dir()
 	initial := probe.Frontier()
+	initialSequence, sourceManifestDigest := captureMeasuredFrontier(initial)
 	// 4,096 initial Puts, 1,024 overwrites and 256 delete/reinsert pairs.
-	if initial.Sequence != 5632 {
-		t.Fatalf("fixture sequence %d", initial.Sequence)
+	if initialSequence != 5632 {
+		t.Fatalf("fixture sequence %d", initialSequence)
 	}
 	row := map[string]any{}
 	var puts int64
@@ -99,7 +107,7 @@ func TestCompactCompare(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		row["fixture_sequence_before_workers"] = probe.Frontier().Sequence
+		row["fixture_sequence_before_workers"], _ = captureMeasuredFrontier(probe.Frontier())
 		// All foreground workers and the inventory sampler are parked.
 		start := time.Now()
 		_, err := db.Compact(t.Context())
@@ -201,22 +209,23 @@ func TestCompactCompare(t *testing.T) {
 	}
 	digest, live := measurementState(t, reopened)
 	frontier := engine.Observe(reopened).Frontier()
+	reopenedSequence, _ := captureMeasuredFrontier(frontier)
 	layout := observedLayout(reopened)
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wantSequence := initial.Sequence + 1 + uint64(puts)
+	wantSequence := initialSequence + 1 + uint64(puts)
 	if int64(live) != count || live != row["fixture_live_keys"].(int) || digest != row["fixture_state_sha256"].(string) ||
-		initial.UUID != frontier.UUID || frontier.Sequence != wantSequence || row["fixture_sequence_before_workers"].(uint64) != initial.Sequence+1 {
-		t.Fatalf("reopened state: digest %s, %d keys, sequence %d (want %d)", digest, live, frontier.Sequence, wantSequence)
+		initial.UUID != frontier.UUID || reopenedSequence != wantSequence || row["fixture_sequence_before_workers"].(uint64) != initialSequence+1 {
+		t.Fatalf("reopened state: digest %s, %d keys, sequence %d (want %d)", digest, live, reopenedSequence, wantSequence)
 	}
-	if mode != "baseline" && (layout.CheckpointCutoff < initial.Sequence+1 || layout.CheckpointCutoff > frontier.Sequence ||
+	if mode != "baseline" && (layout.CheckpointCutoff < initialSequence+1 || layout.CheckpointCutoff > reopenedSequence ||
 		layout.SnapshotFiles == 0 || layout.UnselectedPinnedBytes != 0) {
 		t.Fatalf("unexpected reopened checkpoint layout: %+v", layout)
 	}
 	row["arm"], row["round"], row["mode"] = arm, round, mode
-	row["source_manifest_sha256"] = fmt.Sprintf("%x", initial.ManifestHash)
-	row["successful_puts"], row["reopened_sequence"], row["reopened_live_keys"] = puts, frontier.Sequence, live
+	row["source_manifest_sha256"] = fmt.Sprintf("%x", sourceManifestDigest)
+	row["successful_puts"], row["reopened_sequence"], row["reopened_live_keys"] = puts, reopenedSequence, live
 	row["reopened_state_sha256"], row["reopened_checkpoint_cutoff"] = digest, layout.CheckpointCutoff
 	encoded, err := json.Marshal(row)
 	if err != nil {

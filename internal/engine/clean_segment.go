@@ -11,7 +11,7 @@ import (
 
 // Clean one immutable file or repack a contiguous group. Foreground mutations
 // may continue during the scan and during conditional index relocation.
-func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result error) {
+func (db *DB) cleanSegment(ctx context.Context, entries ...format.CatalogEntry) (result error) {
 	db.writer.Lock()
 	if err := db.health(); err != nil {
 		db.writer.Unlock()
@@ -53,7 +53,7 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	}()
 	err = db.store.RetryMaintenance(ctx, work.Sources(), func() (result error) {
 		var history index.Backend
-		if entries[0].Kind == format.Snapshot {
+		if entries[0].Kind == format.SnapshotKind {
 			var err error
 			history, err = db.newIndex()
 			if err != nil {
@@ -126,11 +126,11 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.File) (result 
 	var oldData, newData dataTotals
 	for _, source := range entries {
 		if source.HasPhysicalFile() {
-			oldData.addFile(source.Bytes, 0)
+			oldData.addSegment(source.Bytes, 0)
 		}
 	}
 	if n := work.OutputBytes(); n > 0 {
-		newData.addFile(n, 0)
+		newData.addSegment(n, 0)
 	}
 	db.replaceDataStats(oldData, newData)
 	db.writer.Unlock()

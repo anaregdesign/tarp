@@ -16,9 +16,7 @@ import (
 	"github.com/anaregdesign/tarp/internal/platform"
 )
 
-// sortedReplay groups records by exact key and preserves their original order
-// within a key. Only a bounded chunk and two merge cursors are resident. The
-// copied address contains no DATA value and no pointer into the active store.
+// A replay event carries the record address and kinds used to rebuild the index.
 type replayEvent struct {
 	key        string
 	addr       index.Address
@@ -26,20 +24,22 @@ type replayEvent struct {
 	recordKind uint8
 }
 
+// sortedReplay groups events by encoded key and preserves their input order
+// within each key. It keeps one replay chunk and two merge cursors in memory.
 type sortedReplay struct {
 	ctx         context.Context
 	dir         string
 	limit, used int64
 	chunk       []replayEvent
-	// Consecutive, already ordered chunks can share a single run. Disordered
-	// runs are merged in pairs. Each level holds at most one older run.
+	// Consecutive ordered replay chunks can share a single on-disk sort run.
+	// Sort runs merge in pairs. Each level holds at most one older run.
 	pending *replayRun
 	last    string
 	levels  [64]*replayRun
 }
 
-func (s *sortedReplay) apply(f *File, off int64, r format.Record, key string) error {
-	addr := index.Address{FileID: f.ID, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+func (s *sortedReplay) apply(f *DataSegment, off int64, r format.RecordHeader, key string) error {
+	addr := index.Address{FileID: f.ID, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: f.Kind, recordKind: r.Kind}))
 }
 
@@ -217,8 +217,8 @@ func (s *sortedReplay) reduce(pruned uint64, emit func(string, index.Address) er
 			key = e.key
 			present = false
 		}
-		if err := validateKey(e.fileKind, format.Record{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
-			return &SourceError{Err: fmt.Errorf("DATA %d offset %d: %w", e.addr.FileID, e.addr.Offset, err)}
+		if err := validateKey(e.fileKind, format.RecordHeader{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
+			return &SourceError{Err: fmt.Errorf("DATA %d offset %d: %w", e.addr.FileID, e.addr.RecordOffset, err)}
 		}
 		present = e.recordKind != format.Delete
 		addr = e.addr
@@ -230,6 +230,7 @@ func (s *sortedReplay) reduce(pruned uint64, emit func(string, index.Address) er
 	return flush()
 }
 
+// A replayRun is a sorted stream of replay events in a scratch file.
 type replayRun struct {
 	fd     *os.File
 	bytes  int64
@@ -252,8 +253,8 @@ func (r *replayRun) write(w *bufio.Writer, e replayEvent) error {
 	var h [replayHeaderBytes]byte
 	put := binary.LittleEndian.PutUint64
 	put(h[0:], e.addr.FileID)
-	put(h[8:], uint64(e.addr.Offset))
-	put(h[16:], uint64(e.addr.Bytes))
+	put(h[8:], uint64(e.addr.RecordOffset))
+	put(h[16:], uint64(e.addr.RecordBytes))
 	put(h[24:], uint64(e.addr.ValueBytes))
 	put(h[32:], e.addr.Sequence)
 	binary.LittleEndian.PutUint32(h[40:], e.fileKind)
@@ -283,9 +284,9 @@ func (r *runCursor) next() (replayEvent, error) {
 		return replayEvent{}, err
 	}
 	get := binary.LittleEndian.Uint64
-	a := index.Address{FileID: get(h[0:]), Offset: int64(get(h[8:])), Bytes: int64(get(h[16:])), ValueBytes: int64(get(h[24:])), Sequence: get(h[32:])}
+	a := index.Address{FileID: get(h[0:]), RecordOffset: int64(get(h[8:])), RecordBytes: int64(get(h[16:])), ValueBytes: int64(get(h[24:])), Sequence: get(h[32:])}
 	r.left -= replayHeaderBytes
-	key, err := readScratchKey(r.r, h[:], a.Bytes, a.ValueBytes, r.left, r.maxKey)
+	key, err := readScratchKey(r.r, h[:], a.RecordBytes, a.ValueBytes, r.left, r.maxKey)
 	if err != nil {
 		return replayEvent{}, err
 	}

@@ -49,7 +49,7 @@ func failedDataRead(err error) *dataReadError {
 // RetryMaintenance reruns private work against the same pinned input.
 // A clean pass performs no additional DATA reads. Repair is attempted at most
 // once per damaged DATA file, and only before the operation has published.
-func (s *Store) RetryMaintenance(ctx context.Context, sources []CapturedFile, run func() error, reset func() error) error {
+func (s *Store) RetryMaintenance(ctx context.Context, sources []CapturedSegment, run func() error, reset func() error) error {
 	var attempted map[uint64]bool
 	for {
 		err := run()
@@ -60,17 +60,17 @@ func (s *Store) RetryMaintenance(ctx context.Context, sources []CapturedFile, ru
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		var file *File
+		var segment *DataSegment
 		for _, src := range sources {
 			if src.Entry.ID == read.id {
-				file = src.File
+				segment = src.Segment
 				break
 			}
 		}
-		if file == nil {
+		if segment == nil {
 			return err
 		}
-		if err := s.RepairRead(ctx, file, err); err != nil {
+		if err := s.RepairRead(ctx, segment, err); err != nil {
 			return err
 		}
 		if reset != nil {

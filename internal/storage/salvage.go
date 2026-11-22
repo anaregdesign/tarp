@@ -22,13 +22,13 @@ type SalvagedRecord struct {
 	Key, Value []byte
 }
 
-// DataRange is a half-open range of DATA byte offsets.
-type DataRange struct{ Start, End int64 }
+// DataByteRange is a half-open range of DATA byte offsets.
+type DataByteRange struct{ Start, End int64 }
 
 // SalvageReport counts delivered records and identifies unreadable DATA bytes.
 type SalvageReport struct {
-	Records       uint64
-	Unrecoverable []DataRange
+	Records                 uint64
+	UnrecoverableByteRanges []DataByteRange
 }
 
 type salvageReader struct {
@@ -37,7 +37,7 @@ type salvageReader struct {
 	pending           bytes.Buffer
 	synced            bool
 	afterGap          bool
-	span              format.RecordRange
+	span              format.RecordSequenceValidator
 	visit             func(SalvagedRecord) error
 	report            SalvageReport
 }
@@ -46,12 +46,12 @@ var salvageCRC = crc32.MakeTable(crc32.Castagnoli)
 
 func (r *salvageReader) block(off int64, first uint16, b []byte) error {
 	if b == nil {
-		end := off + min(int64(format.ParityBlockBytes), r.end-off)
-		gaps := r.report.Unrecoverable
+		end := off + min(int64(format.DataBlockBytes), r.end-off)
+		gaps := r.report.UnrecoverableByteRanges
 		if n := len(gaps); n != 0 && gaps[n-1].End == off {
 			gaps[n-1].End = end
 		} else {
-			r.report.Unrecoverable = append(gaps, DataRange{off, end})
+			r.report.UnrecoverableByteRanges = append(gaps, DataByteRange{off, end})
 		}
 		r.pending.Reset()
 		r.synced = false
@@ -59,7 +59,7 @@ func (r *salvageReader) block(off int64, first uint16, b []byte) error {
 		return nil
 	}
 	if !r.synced {
-		if first == format.ParityNoAnchor {
+		if first == format.NoRecordAnchor {
 			return nil
 		}
 		r.start = off + int64(first)
@@ -72,17 +72,17 @@ func (r *salvageReader) block(off int64, first uint16, b []byte) error {
 			return err
 		}
 		wire := r.pending.Bytes()
-		rec, err := format.DecodeRecord(wire[:format.RecordHeaderBytes], r.end-r.start)
+		rec, err := format.DecodeRecordHeader(wire[:format.RecordHeaderBytes], r.end-r.start)
 		if err != nil {
 			return fmt.Errorf("salvage record at %d: %w", r.start, err)
 		}
-		if rec.Bytes() > r.limit {
-			return &CompatibilityError{RequiredLimits{RecordBytes: rec.Bytes()}}
+		if rec.EncodedRecordBytes() > r.limit {
+			return &CompatibilityError{RequiredMaxRecordBytes: rec.EncodedRecordBytes()}
 		}
-		if rec.Bytes() > int64(len(wire)) {
+		if rec.EncodedRecordBytes() > int64(len(wire)) {
 			break
 		}
-		payload := wire[format.RecordHeaderBytes:rec.Bytes()]
+		payload := wire[format.RecordHeaderBytes:rec.EncodedRecordBytes()]
 		if crc32.Checksum(payload, salvageCRC) != rec.PayloadCRC {
 			return fmt.Errorf("%w: salvage record checksum at %d", ErrCorrupt, r.start)
 		}
@@ -104,8 +104,8 @@ func (r *salvageReader) block(off int64, first uint16, b []byte) error {
 			return err
 		}
 		r.report.Records++
-		r.pending.Next(int(rec.Bytes()))
-		r.start += rec.Bytes()
+		r.pending.Next(int(rec.EncodedRecordBytes()))
+		r.start += rec.EncodedRecordBytes()
 	}
 	return nil
 }
@@ -119,8 +119,8 @@ func SalvageData(ctx context.Context, dir string, id uint64, limit int64, visit 
 		return report, err
 	}
 	defer func() { result = errors.Join(result, s.Close()) }()
-	var entry format.File
-	for _, f := range image.Catalog.Files {
+	var entry format.CatalogEntry
+	for _, f := range image.Catalog.Entries {
 		if f.ID == id && f.HasPhysicalFile() {
 			entry = f
 			break
@@ -135,8 +135,8 @@ func SalvageData(ctx context.Context, dir string, id uint64, limit int64, visit 
 	}
 	defer func() { result = errors.Join(result, side.Close()) }()
 	// Validate the entire anchor directory before any externally visible output.
-	metadata := bufio.NewReaderSize(side, parityBufferSize(entry.Bytes))
-	if err := format.ValidateParity(ctx, metadata, image.Current.UUID, entry); err != nil {
+	metadata := bufio.NewReaderSize(side, parityIOBufferBytes(entry.Bytes))
+	if err := format.ValidateParitySidecar(ctx, metadata, image.Current.UUID, entry); err != nil {
 		return report, err
 	}
 	if _, err := side.Seek(0, io.SeekStart); err != nil {
@@ -144,7 +144,7 @@ func SalvageData(ctx context.Context, dir string, id uint64, limit int64, visit 
 	}
 	metadata.Reset(side)
 	var source io.ReaderAt = bytes.NewReader(nil)
-	fd, err := OpenRegular(image.Files[id].Path)
+	fd, err := OpenRegular(image.Segments[id].Path)
 	if err == nil {
 		defer func() { result = errors.Join(result, fd.Close()) }()
 		source = fd
@@ -152,8 +152,8 @@ func SalvageData(ctx context.Context, dir string, id uint64, limit int64, visit 
 		return report, err
 	}
 	reader := salvageReader{ctx: ctx, end: entry.Bytes, limit: limit, visit: visit,
-		span: format.NewRecordRange(entry, image.Catalog.Cutoff)}
-	err = format.WalkParityBlocks(ctx, source, metadata, image.Current.UUID, entry, reader.block)
+		span: format.NewRecordSequenceValidator(entry, image.Catalog.CheckpointCutoffSequence)}
+	err = format.WalkDataBlocksFromParity(ctx, source, metadata, image.Current.UUID, entry, reader.block)
 	if err == nil && reader.pending.Len() != 0 {
 		err = fmt.Errorf("%w: incomplete final salvage record", ErrCorrupt)
 	}

@@ -19,7 +19,7 @@ const (
 	IndexDefault = engine.IndexDefault
 	// IndexMemory keeps all key locations in memory.
 	IndexMemory = engine.IndexMemory
-	// IndexBTree keeps key locations in a paged disk index and checkpoints on clean Close.
+	// IndexBTree keeps DATA record addresses in B+tree pages. A clean Close persists or reuses an index checkpoint.
 	IndexBTree = engine.IndexBTree
 )
 
@@ -29,8 +29,8 @@ type OpenValidation = engine.OpenValidation
 const (
 	// Full verifies all committed DATA during Open. This is the default.
 	Full = engine.Full
-	// Indexed verifies the index and replays its tail. Covered payloads
-	// receive their record checks when read. Open with Full to check all bytes.
+	// Indexed validates an available index checkpoint and replays the DATA log
+	// suffix it does not cover. Covered DATA payloads are checked on read.
 	Indexed = engine.Indexed
 )
 
@@ -52,8 +52,8 @@ type Options struct {
 	ValueCacheBudgetBytes int64
 	// MaxRecordBytes limits the encoded header, key and value of one record. Zero selects 1 MiB.
 	MaxRecordBytes int64
-	// TargetSegmentBytes sizes new logs and checkpoints. It caps the total
-	// input to a small-file repack and the output of grouped log cleaning.
+	// TargetSegmentBytes sets the target for each new log or snapshot segment.
+	// It caps small-segment repacking input and grouped log cleaning output.
 	// The default is 4 MiB. The target grows to fit one maximum record and a segment header.
 	TargetSegmentBytes int64
 	// ReadFileHandles bounds the pool of reusable DATA handles. Zero selects 64.
@@ -140,7 +140,8 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 }
 
 // ProtectParity seals a nonempty active DATA segment, then verifies or builds
-// recovery files for the sealed selection. Writes after the seal can continue.
+// PARITY sidecars for the selected sealed DATA segments. Writers can continue
+// appending to the new active segment.
 func (db *DB) ProtectParity(ctx context.Context) error {
 	return (*engine.DB)(db).ProtectParity(ctx)
 }
@@ -176,23 +177,28 @@ func Restore(ctx context.Context, req RestoreRequest) error {
 	})
 }
 
-// BackupInfo describes a verified backup at its committed sequence.
+// BackupInfo describes a verified file backup at its last committed user sequence.
+// An empty backup has zero live keys and zero size measurements.
 type BackupInfo struct {
-	DatabaseID [16]byte // Database UUID, shared by its backups and restored copies.
-	Sequence   uint64   // Last committed user sequence in the backup.
-	LiveKeys   uint64   // Number of keys present at Sequence.
-	// RequiredLimits gives the largest live value-cache charge and encoded record size.
-	// Both are zero for an empty image. Zero option fields select defaults.
-	RequiredLimits RestoreLimits
+	DatabaseID       [16]byte // Database UUID, shared by its backups and restored copies.
+	LastUserSequence uint64   // Last committed user sequence in the backup.
+	LiveKeys         uint64   // Number of keys present at LastUserSequence.
+	// LargestLiveCacheChargeBytes is the largest logical value-cache charge for one live entry.
+	LargestLiveCacheChargeBytes int64
+	// LargestLiveRecordBytes is the largest encoded live record, including its header.
+	LargestLiveRecordBytes int64
 }
 
 // CheckLimits checks whether a target configuration can restore this backup,
-// using the measured RequiredLimits without reading the backup again. Zero fields
+// using the measured live record sizes without reading the backup again. Zero fields
 // select the same defaults as Open. Invalid limits match ErrInvalidOptions.
 // Insufficient limits match ErrIncompatibleOptions and expose *CompatibilityError
 // through errors.As.
 func (info BackupInfo) CheckLimits(limits RestoreLimits) error {
-	return engine.RestoreLimits(limits).Check(engine.RestoreLimits(info.RequiredLimits))
+	return engine.RestoreLimits(limits).Check(storage.LiveRecordSizes{
+		LargestLiveCacheChargeBytes: info.LargestLiveCacheChargeBytes,
+		LargestLiveRecordBytes:      info.LargestLiveRecordBytes,
+	})
 }
 
 // VerifyBackup checks an immutable backup's file set, checksums and committed
@@ -213,26 +219,25 @@ func publicBackupInfo(info storage.BackupInfo, err error) (BackupInfo, error) {
 		return BackupInfo{}, err
 	}
 	return BackupInfo{
-		DatabaseID: info.DatabaseID,
-		Sequence:   info.Sequence,
-		LiveKeys:   info.LiveKeys,
-		RequiredLimits: RestoreLimits{
-			ValueCacheBudgetBytes: info.Required.ValueCacheBudgetBytes,
-			MaxRecordBytes:        info.Required.RecordBytes,
-		},
+		DatabaseID:                  info.DatabaseID,
+		LastUserSequence:            info.LastUserSequence,
+		LiveKeys:                    info.LiveKeys,
+		LargestLiveCacheChargeBytes: info.LargestLiveCacheChargeBytes,
+		LargestLiveRecordBytes:      info.LargestLiveRecordBytes,
 	}, nil
 }
 
-// CheckpointIndex persists the key index for a committed prefix while normal writes continue.
+// CheckpointIndex persists an index checkpoint covering the captured catalog prefix
+// while normal writes continue.
 func (db *DB) CheckpointIndex(ctx context.Context) error {
 	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
 
 // CompactResult reports discarded live keys, unlinked bytes and retired DATA bytes
-// still held by leases at cleanup.
+// still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult
 
-// Compact replaces the complete committed prefix with an online checkpoint.
+// Compact builds a full DATA checkpoint through the captured user sequence.
 // It uses PARITY to recover damaged sealed DATA. A live key whose record is
 // proved irrecoverable is removed when the checkpoint commits. The operation
 // requires temporary disk space for recovery and protected snapshot files.

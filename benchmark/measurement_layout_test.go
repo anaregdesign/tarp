@@ -44,37 +44,37 @@ func observedLayout(db *engine.DB) measurementLayout {
 
 func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 	layout := measurementLayout{
-		Sequence: s.Current.Sequence, CheckpointCutoff: s.Catalog.Cutoff, PrunedThrough: s.Catalog.PrunedThrough,
-		SelectedDataFiles: 1, SelectedDataBytes: s.Current.ActiveEnd,
+		Sequence: s.Current.LastUserSequence, CheckpointCutoff: s.Catalog.CheckpointCutoffSequence, PrunedThrough: s.Catalog.PrunedThroughSequence,
+		SelectedDataFiles: 1, SelectedDataBytes: s.Current.ActiveCommittedEndOffset,
 		SelectedMetadataBytes: int64(len(s.Manifest)) + format.FrontierBytes,
-		RetainedDeleteBytes:   s.Files[s.Current.ActiveID].DeleteBytes.Load(),
+		RetainedDeleteBytes:   s.Segments[s.Current.ActiveID].DeleteBytes.Load(),
 	}
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, e := range s.Catalog.Files {
+	for _, e := range s.Catalog.Entries {
 		if e.ID == 0 {
 			layout.EmptyCleanedIntervals++
 			continue
 		}
 		switch e.Kind {
-		case format.Log:
+		case format.RawLogKind:
 			layout.RawSealedFiles++
-		case format.Snapshot:
+		case format.SnapshotKind:
 			layout.SnapshotFiles++
-		case format.Cleaned:
+		case format.CleanedLogKind:
 			layout.CleanedFiles++
 		}
 		selected[e.ID] = true
 		layout.SelectedDataFiles++
 		layout.SelectedDataBytes += e.Bytes
-		layout.RetainedDeleteBytes += s.Files[e.ID].DeleteBytes.Load()
+		layout.RetainedDeleteBytes += s.Segments[e.ID].DeleteBytes.Load()
 	}
 	layout.SelectedRecordBytes = layout.SelectedDataBytes - int64(layout.SelectedDataFiles)*format.SegmentHeaderBytes
 	layout.LivePutBytes = liveBytes
 	layout.ObsoletePutBytes = layout.SelectedRecordBytes - layout.LivePutBytes - layout.RetainedDeleteBytes
-	for id, file := range s.Files {
-		size := file.Size.Load()
+	for id, segment := range s.Segments {
+		size := segment.Size.Load()
 		layout.RegisteredDataBytes += size
-		if !selected[id] && file.References() > 0 {
+		if !selected[id] && segment.References() > 0 {
 			layout.UnselectedPinnedBytes += size
 		}
 	}
@@ -111,7 +111,7 @@ func openStartupSample(t *testing.T, dir string, opts engine.Options) (*engine.D
 	return db, elapsed
 }
 
-// Seal the same default-worker history into a full checkpoint before cloning
+// Seal the same default-worker history into a full DATA checkpoint before cloning
 // it for the second recovery comparison. The cleaner cannot alter that input.
 func measurementCheckpointFixture(t *testing.T, dir string, opts engine.Options) {
 	t.Helper()

@@ -23,7 +23,7 @@ type repairFixture struct {
 func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := openTestStore(t, dir, Config{Handles: 1, RecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
+	db, err := openTestStore(t, dir, Config{Handles: 1, MaxRecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,8 +40,8 @@ func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 		if err := db.Rotate(); err != nil {
 			t.Fatal(err)
 		}
-		entry := db.Catalog.Files[i]
-		path := db.Files[entry.ID].Path
+		entry := db.Catalog.Entries[i]
+		path := db.Segments[entry.ID].Path
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -50,7 +50,7 @@ func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = format.WriteParity(t.Context(), bytes.NewReader(data), sidecar, db.Current.UUID, entry)
+		err = format.WriteParitySidecar(t.Context(), bytes.NewReader(data), sidecar, db.Current.UUID, entry)
 		if err := errors.Join(err, sidecar.Close()); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +60,7 @@ func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 	return fixture
 }
 
-func TestRepairParityRecoversIndependentFilesAndPreservesFailures(t *testing.T) {
+func TestRepairDataFromParityRecoversIndependentFilesAndPreservesFailures(t *testing.T) {
 	f := newRepairFixture(t, 10000, 6000, 30)
 	bad := bytes.Clone(f.originals[0])
 	bad[format.SegmentHeaderBytes+120] ^= 0x90
@@ -75,7 +75,7 @@ func TestRepairParityRecoversIndependentFilesAndPreservesFailures(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	err := RepairParity(t.Context(), f.dir, nil)
+	err := RepairDataFromParity(t.Context(), f.dir, nil)
 	var failure *Fault
 	if !errors.Is(err, ErrCorrupt) || !errors.As(err, &failure) || failure.Outcome != publication.Committed {
 		t.Fatalf("partial recovery: %v", err)
@@ -89,13 +89,13 @@ func TestRepairParityRecoversIndependentFilesAndPreservesFailures(t *testing.T) 
 	if err := os.WriteFile(f.paths[0], f.originals[0], 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RepairParity(t.Context(), f.dir, nil); err != nil {
+	if err := RepairDataFromParity(t.Context(), f.dir, nil); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestRepairParityPublicationFaultsAndDurableRetry(t *testing.T) {
-	for _, phase := range []string{"repair.write:after", "repair.sync:after", "repair.rename:before", "repair.rename:after", "repair.dirsync:before"} {
+func TestRepairDataFromParityPublicationFaultsAndDurableRetry(t *testing.T) {
+	for _, phase := range []string{"data-repair.write:after", "data-repair.sync:after", "data-repair.rename:before", "data-repair.rename:after", "data-repair.dirsync:before"} {
 		t.Run(phase, func(t *testing.T) {
 			f := newRepairFixture(t, 5000)
 			bad := bytes.Clone(f.originals[0])
@@ -109,13 +109,13 @@ func TestRepairParityPublicationFaultsAndDurableRetry(t *testing.T) {
 				}
 				return nil
 			}}
-			err := RepairParity(t.Context(), f.dir, fs)
+			err := RepairDataFromParity(t.Context(), f.dir, fs)
 			if !errors.Is(err, syscall.EIO) {
 				t.Fatalf("missing original error: %v", err)
 			}
 			got, readErr := os.ReadFile(f.paths[0])
 			var failure *Fault
-			renamed := phase == "repair.rename:after" || phase == "repair.dirsync:before"
+			renamed := phase == "data-repair.rename:after" || phase == "data-repair.dirsync:before"
 			if readErr != nil || renamed != errors.As(err, &failure) || renamed && (failure.Outcome != publication.Unknown || !bytes.Equal(got, f.originals[0])) || !renamed && !bytes.Equal(got, bad) {
 				t.Fatalf("wrong state after %s: %v (read %v)", phase, err, readErr)
 			}
@@ -129,11 +129,11 @@ func TestRepairParityPublicationFaultsAndDurableRetry(t *testing.T) {
 					}
 					return nil
 				}}
-				if err := RepairParity(t.Context(), f.dir, blockSync); !errors.Is(err, syscall.EIO) {
+				if err := RepairDataFromParity(t.Context(), f.dir, blockSync); !errors.Is(err, syscall.EIO) {
 					t.Fatalf("retry skipped directory durability: %v", err)
 				}
 			}
-			if err := RepairParity(t.Context(), f.dir, nil); err != nil {
+			if err := RepairDataFromParity(t.Context(), f.dir, nil); err != nil {
 				t.Fatal(err)
 			}
 			if got, err := os.ReadFile(f.paths[0]); err != nil || !bytes.Equal(got, f.originals[0]) {
@@ -143,7 +143,7 @@ func TestRepairParityPublicationFaultsAndDurableRetry(t *testing.T) {
 	}
 }
 
-func TestRepairParityVerifiesActualStagedBytesBeforeRename(t *testing.T) {
+func TestRepairDataFromParityVerifiesActualStagedBytesBeforeRename(t *testing.T) {
 	f := newRepairFixture(t, 5000)
 	bad := bytes.Clone(f.originals[0])
 	bad[110] ^= 1
@@ -155,7 +155,7 @@ func TestRepairParityVerifiesActualStagedBytesBeforeRename(t *testing.T) {
 		changed[0] ^= 4
 		return fd.WriteAt(changed, off)
 	}}
-	if err := RepairParity(t.Context(), f.dir, fs); !errors.Is(err, ErrCorrupt) {
+	if err := RepairDataFromParity(t.Context(), f.dir, fs); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("accepted unverified staged bytes: %v", err)
 	}
 	if got, err := os.ReadFile(f.paths[0]); err != nil || !bytes.Equal(got, bad) {
@@ -163,7 +163,7 @@ func TestRepairParityVerifiesActualStagedBytesBeforeRename(t *testing.T) {
 	}
 }
 
-func TestRepairParityRequiresTrustedSelectionAndSafePaths(t *testing.T) {
+func TestRepairDataFromParityRequiresTrustedSelectionAndSafePaths(t *testing.T) {
 	for _, object := range []string{"CURRENT", "MANIFEST", "DATA symlink", "PARITY symlink", "PARITY contents", "BACKUP"} {
 		t.Run(object, func(t *testing.T) {
 			f := newRepairFixture(t, 4999)
@@ -196,9 +196,9 @@ func TestRepairParityRequiresTrustedSelectionAndSafePaths(t *testing.T) {
 			case "DATA symlink":
 				path = f.paths[0]
 			case "PARITY symlink":
-				path = filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Files[0].ID))
+				path = filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Entries[0].ID))
 			case "PARITY contents":
-				path := filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Files[0].ID))
+				path := filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Entries[0].ID))
 				if err := os.Truncate(path, 15); err != nil {
 					t.Fatal(err)
 				}
@@ -218,7 +218,7 @@ func TestRepairParityRequiresTrustedSelectionAndSafePaths(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := RepairParity(t.Context(), f.dir, nil); !errors.Is(err, want) {
+			if err := RepairDataFromParity(t.Context(), f.dir, nil); !errors.Is(err, want) {
 				t.Fatalf("unsafe repair: %v, want %v", err, want)
 			}
 			if got, err := os.ReadFile(f.paths[0]); err != nil || !bytes.Equal(got, bad) {
@@ -233,7 +233,7 @@ func TestRepairParityRequiresTrustedSelectionAndSafePaths(t *testing.T) {
 	}
 }
 
-func TestRepairParityCancellationPreservesSourceAndAllowsRetry(t *testing.T) {
+func TestRepairDataFromParityCancellationPreservesSourceAndAllowsRetry(t *testing.T) {
 	f := newRepairFixture(t, 5000)
 	bad := bytes.Clone(f.originals[0])
 	bad[len(bad)-1] ^= 1
@@ -243,18 +243,18 @@ func TestRepairParityCancellationPreservesSourceAndAllowsRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	fs := &IO{Hook: func(point string) error {
-		if point == "repair.sync:after" {
+		if point == "data-repair.sync:after" {
 			cancel()
 		}
 		return nil
 	}}
-	if err := RepairParity(ctx, f.dir, fs); !errors.Is(err, context.Canceled) {
+	if err := RepairDataFromParity(ctx, f.dir, fs); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled repair: %v", err)
 	}
 	if got, err := os.ReadFile(f.paths[0]); err != nil || !bytes.Equal(got, bad) {
 		t.Fatalf("changed original: %v", err)
 	}
-	if err := RepairParity(t.Context(), f.dir, nil); err != nil {
+	if err := RepairDataFromParity(t.Context(), f.dir, nil); err != nil {
 		t.Fatal(err)
 	}
 }

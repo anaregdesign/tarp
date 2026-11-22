@@ -38,7 +38,7 @@ func (o Observer) LiveKeys() int {
 	return int(o.db.stats.LiveKeys)
 }
 
-// Store observes a consistent catalog, frontier and file registry, excluding
+// Store observes a consistent catalog, frontier and DATA segment registry, excluding
 // foreground writes and checkpoint remaps. The callback may sample Stats.
 // It must not otherwise reenter the DB, mutate storage or retain live references.
 func (o Observer) Store(inspect func(*storage.Store)) {
@@ -102,16 +102,16 @@ func (o Observer) ClearCache() {
 	o.db.cache.Clear()
 }
 
-// CloseAndRetainMemoryIndex transfers the memory index and file registry to
+// CloseAndRetainMemoryIndex transfers the memory index and DATA segment registry to
 // the heap experiment. The measurement coordinates Close with all other users.
-func (o Observer) CloseAndRetainMemoryIndex() (map[string]index.Address, map[uint64]*storage.File, error) {
+func (o Observer) CloseAndRetainMemoryIndex() (map[string]index.Address, map[uint64]*storage.DataSegment, error) {
 	o.db.writer.Lock()
 	entries := o.memoryEntries()
 	o.db.writer.Unlock()
 	if err := o.db.Close(); err != nil {
 		return nil, nil, err
 	}
-	files := o.db.store.Files
-	o.db.store.Files = nil
-	return entries, files, nil
+	segments := o.db.store.Segments
+	o.db.store.Segments = nil
+	return entries, segments, nil
 }

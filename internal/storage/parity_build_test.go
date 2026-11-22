@@ -11,7 +11,7 @@ import (
 )
 
 func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
-	for _, valueBytes := range []int{5, 32 * format.ParityBlockBytes * format.ParityDataBlocks} {
+	for _, valueBytes := range []int{5, 32 * format.DataBlockBytes * format.DataBlocksPerStripe} {
 		name := "tiny"
 		if valueBytes > 5 {
 			name = "multiple stripes"
@@ -23,7 +23,7 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 					writes++
 				}
 			}}
-			cfg := Config{ValueCacheBudgetBytes: 4 << 20, RecordBytes: 3 << 20, TargetSegmentBytes: 4 << 20, Handles: 1}
+			cfg := Config{ValueCacheBudgetBytes: 4 << 20, MaxRecordBytes: 3 << 20, TargetSegmentBytes: 4 << 20, Handles: 1}
 			s, err := openTestStore(t, t.TempDir(), cfg, io)
 			if err != nil {
 				t.Fatal(err)
@@ -37,11 +37,11 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 			if err := s.Rotate(); err != nil {
 				t.Fatal(err)
 			}
-			entry := s.Catalog.Files[0]
-			source := CapturedFile{File: s.Files[entry.ID], Entry: entry}
-			source.File.Pin()
-			defer source.File.Unpin()
-			ensure := func() error { return s.EnsureParity(t.Context(), s.Current.UUID, source, true, nil) }
+			entry := s.Catalog.Entries[0]
+			source := CapturedSegment{Segment: s.Segments[entry.ID], Entry: entry}
+			source.Segment.Pin()
+			defer source.Segment.Unpin()
+			ensure := func() error { return s.EnsureParitySidecar(t.Context(), s.Current.UUID, source, true, nil) }
 			if err := ensure(); err != nil {
 				t.Fatal(err)
 			}
@@ -65,8 +65,8 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 				t.Fatal(err)
 			}
 			var sourceErr *SourceError
-			if err := ensure(); !errors.Is(err, ErrCorrupt) || errors.As(err, &sourceErr) || source.File.parityReady {
-				t.Fatalf("unsafe sidecar misclassified: %v, ready %t", err, source.File.parityReady)
+			if err := ensure(); !errors.Is(err, ErrCorrupt) || errors.As(err, &sourceErr) || source.Segment.parityReady {
+				t.Fatalf("unsafe sidecar misclassified: %v, ready %t", err, source.Segment.parityReady)
 			}
 			if target, err := os.Readlink(path); err != nil || target != unrelated {
 				t.Fatalf("changed symlink: %q, %v", target, err)

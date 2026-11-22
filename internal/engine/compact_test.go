@@ -171,8 +171,8 @@ func TestCompactReportsCheckpointPublicationOutcome(t *testing.T) {
 			if tc.checkpointSelected {
 				wantCutoff = 1
 			}
-			if reopened.store.Catalog.Cutoff != wantCutoff || reopened.store.Current.Sequence != 1 {
-				t.Fatalf("recovered cutoff %d, sequence %d; want %d, 1", reopened.store.Catalog.Cutoff, reopened.store.Current.Sequence, wantCutoff)
+			if reopened.store.Catalog.CheckpointCutoffSequence != wantCutoff || reopened.store.Current.LastUserSequence != 1 {
+				t.Fatalf("recovered cutoff %d, sequence %d; want %d, 1", reopened.store.Catalog.CheckpointCutoffSequence, reopened.store.Current.LastUserSequence, wantCutoff)
 			}
 		})
 	}
@@ -328,8 +328,8 @@ func TestCheckpointSyncsEveryCompletedSnapshotBeforePublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			if (reopened.store.Catalog.Cutoff == 4) != published {
-				t.Fatalf("cutoff after reopen %d, published %t", reopened.store.Catalog.Cutoff, published)
+			if (reopened.store.Catalog.CheckpointCutoffSequence == 4) != published {
+				t.Fatalf("cutoff after reopen %d, published %t", reopened.store.Catalog.CheckpointCutoffSequence, published)
 			}
 			for _, key := range []string{"a", "b", "c", "d"} {
 				wantValue(t, reopened, key, "v")
@@ -348,11 +348,11 @@ func TestCheckpointSplitsAtSegmentTarget(t *testing.T) {
 	if _, err := db.Compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(db.store.Catalog.Files) != 2 {
-		t.Fatalf("expected two snapshot files, got %v", db.store.Catalog.Files)
+	if len(db.store.Catalog.Entries) != 2 {
+		t.Fatalf("expected two snapshot files, got %v", db.store.Catalog.Entries)
 	}
-	for _, f := range db.store.Catalog.Files {
-		if f.Kind != format.Snapshot || f.Bytes != opts.TargetSegmentBytes {
+	for _, f := range db.store.Catalog.Entries {
+		if f.Kind != format.SnapshotKind || f.Bytes != opts.TargetSegmentBytes {
 			t.Fatalf("unexpected snapshot size or kind: %+v", f)
 		}
 	}
@@ -366,8 +366,8 @@ func TestRepeatedCompactionDoesNotRetainOldFileRegistry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(db.store.Files) != len(db.store.Catalog.Files)+1 {
-		t.Fatalf("obsolete file metadata retained: %d", len(db.store.Files))
+	if len(db.store.Segments) != len(db.store.Catalog.Entries)+1 {
+		t.Fatalf("obsolete file metadata retained: %d", len(db.store.Segments))
 	}
 }
 
@@ -376,21 +376,21 @@ func TestCompactionValidatesCapturedSegmentHeaders(t *testing.T) {
 		t.Run(damage, func(t *testing.T) {
 			db := openMaintenanceDamageDB(t, testOptions(), nil)
 			mustPut(t, db, "k", "acknowledged")
-			file := db.store.Files[db.store.Current.ActiveID]
-			header := format.Segment{UUID: db.store.Current.UUID, ID: file.ID, Kind: format.Log}
+			segment := db.store.Segments[db.store.Current.ActiveID]
+			header := format.SegmentHeader{UUID: db.store.Current.UUID, ID: segment.ID, Kind: format.RawLogKind}
 			switch damage {
 			case "uuid":
 				header.UUID[0] ^= 1
 			case "id":
 				header.ID++
 			case "kind":
-				header.Kind = format.Snapshot
+				header.Kind = format.SnapshotKind
 			}
-			b := format.EncodeSegment(header)
+			b := format.EncodeSegmentHeader(header)
 			if damage == "checksum" {
 				b[60] ^= 1
 			}
-			fd, err := os.OpenFile(file.Path, os.O_WRONLY, 0)
+			fd, err := os.OpenFile(segment.Path, os.O_WRONLY, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -403,7 +403,7 @@ func TestCompactionValidatesCapturedSegmentHeaders(t *testing.T) {
 			}
 			wantValue(t, db, "k", "acknowledged") // Previously committed value from cache.
 			mustPut(t, db, "unrelated", "healthy")
-			if _, err := os.Stat(file.Path); err != nil {
+			if _, err := os.Stat(segment.Path); err != nil {
 				t.Fatalf("corrupt selected evidence removed: %v", err)
 			}
 		})
@@ -425,14 +425,14 @@ func TestCleanupAfterFaultDoesNotRetainUnlinkedMetadata(t *testing.T) {
 	if _, err := db.Compact(context.Background()); !errors.Is(err, syscall.EIO) {
 		t.Fatal(err)
 	}
-	if _, retained := db.store.Files[old]; retained {
+	if _, retained := db.store.Segments[old]; retained {
 		t.Fatal("successfully unlinked file retained after an after-hook fault")
 	}
 	wantValue(t, db, "k", "new")
 	if _, err := db.Compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(db.store.Files) != len(db.store.Catalog.Files)+1 {
+	if len(db.store.Segments) != len(db.store.Catalog.Entries)+1 {
 		t.Fatal("deferred cleanup retained file metadata")
 	}
 }
@@ -462,8 +462,8 @@ func TestCheckpointCopiesInSourceOrderAndReusesReaders(t *testing.T) {
 	var previous storage.Location
 	for _, key := range []string{"c", "d", "e", "f", "a", "b"} {
 		loc := testLoc(t, db, key)
-		if previous.File != nil && (loc.File.ID < previous.File.ID ||
-			loc.File.ID == previous.File.ID && loc.Offset <= previous.Offset) {
+		if previous.Segment != nil && (loc.Segment.ID < previous.Segment.ID ||
+			loc.Segment.ID == previous.Segment.ID && loc.RecordOffset <= previous.RecordOffset) {
 			t.Fatalf("key %q copied out of source order", key)
 		}
 		previous = loc
@@ -480,9 +480,9 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 	if err := db.Delete([]byte("k0")); err != nil {
 		t.Fatal(err)
 	}
-	cutoff := db.store.Current.Sequence
+	cutoff := db.store.Current.LastUserSequence
 	result, err := db.Compact(context.Background())
-	if err != nil || result.UnlinkedBytes == 0 || db.store.Catalog.Cutoff != cutoff {
+	if err != nil || result.UnlinkedBytes == 0 || db.store.Catalog.CheckpointCutoffSequence != cutoff {
 		t.Fatalf("compact: %+v %v", result, err)
 	}
 	for i := 1; i < 4; i++ {
@@ -497,8 +497,8 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 	if _, err := db.Compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	emptySequence := db.store.Current.Sequence
-	if len(db.store.Catalog.Files) != 0 || emptySequence == 0 {
+	emptySequence := db.store.Current.LastUserSequence
+	if len(db.store.Catalog.Entries) != 0 || emptySequence == 0 {
 		t.Fatalf("empty checkpoint: %+v", db.store.Catalog)
 	}
 	if err := db.Close(); err != nil {
@@ -509,7 +509,7 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustPut(t, reopened, "next", "value")
-	if reopened.store.Current.Sequence != emptySequence+1 {
+	if reopened.store.Current.LastUserSequence != emptySequence+1 {
 		t.Fatal("sequence lost with last deleted key")
 	}
 	if err := reopened.Close(); err != nil {
@@ -531,7 +531,7 @@ func TestMemoryCheckpointHonorsMutationsBetweenRelocationBatches(t *testing.T) {
 		entries[i] = Entry{Key: []byte(fmt.Sprintf("key-%012d", i)), Value: []byte("old")}
 	}
 	opts := Options{IndexMode: IndexMemory}
-	var source *storage.File
+	var source *storage.DataSegment
 	var db *DB
 	overwrite, remove := entries[len(entries)-2].Key, entries[len(entries)-1].Key
 	firstBatch := int64(0)
@@ -544,7 +544,7 @@ func TestMemoryCheckpointHonorsMutationsBetweenRelocationBatches(t *testing.T) {
 			return fmt.Errorf("unexpected first memory relocation batch of %d", firstBatch)
 		}
 		for _, key := range [][]byte{overwrite, remove} {
-			if loc, ok := testLookup(t, db, string(key)); !ok || loc.File != source {
+			if loc, ok := testLookup(t, db, string(key)); !ok || loc.Segment != source {
 				return fmt.Errorf("key %q was already relocated", key)
 			}
 		}
@@ -558,7 +558,7 @@ func TestMemoryCheckpointHonorsMutationsBetweenRelocationBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	loc, _ := testLookup(t, db, string(overwrite))
-	source = loc.File
+	source = loc.Segment
 	if _, err := db.Compact(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +629,7 @@ func testCompactionConcurrentTail(t *testing.T, opts Options) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if loc, ok := testLookup(t, db, "a"); !ok || loc.File.Kind != format.Log {
+	if loc, ok := testLookup(t, db, "a"); !ok || loc.Segment.Kind != format.RawLogKind {
 		t.Fatalf("concurrent update relocated into checkpoint: %+v", loc)
 	}
 	if _, exists := testLookup(t, db, "b"); exists {
@@ -703,7 +703,7 @@ func TestMaintenanceIsolatesOnlySealedSourceCorruption(t *testing.T) {
 		t.Run(fmt.Sprint(compact), func(t *testing.T) {
 			db := openMaintenanceDamageDB(t, testOptions(), nil)
 			mustPut(t, db, "a", "cached")
-			path := testLoc(t, db, "a").File.Path
+			path := testLoc(t, db, "a").Segment.Path
 			f, err := os.OpenFile(path, os.O_RDWR, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -777,7 +777,7 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 			fs := &storage.IO{Hook: func(point string) error {
 				switch point {
 				case "data.sync:before", "index.prepare:before":
-					if original.File == nil {
+					if original.Segment == nil {
 						return nil // The fixture is being written.
 					}
 					if point == "index.prepare:before" {
@@ -802,7 +802,7 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 				case "compact.remap:after":
 					if !started {
 						started = true
-						firstRemaining = original.File.LiveKeys.Load()
+						firstRemaining = original.Segment.LiveKeys.Load()
 						go func() {
 							if mode == "delete" {
 								done <- db.Delete(key)
@@ -816,16 +816,16 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 							return errors.New("writer did not stage")
 						}
 					}
-					if !progressed && original.File.LiveKeys.Load() < firstRemaining {
+					if !progressed && original.Segment.LiveKeys.Load() < firstRemaining {
 						// The writer is still paused. A disjoint batch moved, but
 						// its pending key must take the writer-lock fallback.
 						// This fixture is copied in source order into a single file.
 						head, ok := testLookup(t, db, string(entries[0].Key))
-						if !ok || head.File.Kind != format.Snapshot {
+						if !ok || head.Segment.Kind != format.SnapshotKind {
 							return errors.New("first key did not reach the snapshot")
 						}
 						next := original
-						next.File = head.File
+						next.Segment = head.Segment
 						move := storage.Relocation{Key: string(key), Old: original, Next: next}
 						if ok, err := db.relocateUnstaged([]storage.Relocation{move}); ok || err != nil {
 							return fmt.Errorf("staged key remapped: %t %v", ok, err)
@@ -849,10 +849,10 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 			if _, err := db.Compact(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			if !progressed || original.File.LiveBytes.Load() != 0 || original.File.LiveKeys.Load() != 0 {
-				t.Fatalf("progress=%v, original file retains %d keys", progressed, original.File.LiveKeys.Load())
+			if !progressed || original.Segment.LiveBytes.Load() != 0 || original.Segment.LiveKeys.Load() != 0 {
+				t.Fatalf("progress=%v, original file retains %d keys", progressed, original.Segment.LiveKeys.Load())
 			}
-			if _, err := os.Stat(original.File.Path); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(original.Segment.Path); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("source retained: %v", err)
 			}
 			check := func(db *DB) {
@@ -883,13 +883,13 @@ func TestMemoryCheckpointProgressesPastStagedMutations(t *testing.T) {
 
 // Damage the last payload byte, after a complete sidecar is durable. Streaming
 // maintenance may already have written private output before noticing this CRC.
-func damageProtectedTail(t *testing.T, db *DB) format.File {
+func damageProtectedTail(t *testing.T, db *DB) format.CatalogEntry {
 	t.Helper()
 	if err := db.ProtectParity(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	e := db.store.Catalog.Files[len(db.store.Catalog.Files)-1]
-	fd, err := os.OpenFile(db.store.Files[e.ID].Path, os.O_RDWR, 0)
+	e := db.store.Catalog.Entries[len(db.store.Catalog.Entries)-1]
+	fd, err := os.OpenFile(db.store.Segments[e.ID].Path, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -914,7 +914,7 @@ func TestCompactRepairsProtectedSourceAndRestartsPrivateOutputs(t *testing.T) {
 	if _, err := db.Compact(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if db.store.Catalog.Cutoff != cut.Last || len(db.store.Catalog.Files) != 1 || db.store.Catalog.Files[0].Kind != format.Snapshot {
+	if db.store.Catalog.CheckpointCutoffSequence != cut.LastSequence || len(db.store.Catalog.Entries) != 1 || db.store.Catalog.Entries[0].Kind != format.SnapshotKind {
 		t.Fatalf("checkpoint after repair: %+v", db.store.Catalog)
 	}
 	wantValue(t, db, "original", "one")
@@ -948,13 +948,13 @@ func TestMaintenanceKeepsDamagedDataAndLeavesWritersAvailable(t *testing.T) {
 			mustPut(t, db, "intact", "healthy")
 			mustPut(t, db, "unavailable", strings.Repeat("v", 10000))
 			entry := damageProtectedTail(t, db)
-			file := db.store.Files[entry.ID]
-			raw, err := os.ReadFile(file.Path)
+			segment := db.store.Segments[entry.ID]
+			raw, err := os.ReadFile(segment.Path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			raw[300] ^= 1 // A second bad block in the same stripe.
-			if err := os.WriteFile(file.Path, raw, 0600); err != nil {
+			if err := os.WriteFile(segment.Path, raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 			before := db.store.Current
@@ -977,7 +977,7 @@ func TestMaintenanceKeepsDamagedDataAndLeavesWritersAvailable(t *testing.T) {
 			if db.store.Current != before {
 				t.Fatal("incomplete maintenance published a frontier")
 			}
-			if data, err := os.ReadFile(file.Path); err != nil || !bytes.Equal(data, raw) {
+			if data, err := os.ReadFile(segment.Path); err != nil || !bytes.Equal(data, raw) {
 				t.Fatalf("damaged source lost: %v", err)
 			}
 			mustPut(t, db, "new", "acknowledged")
@@ -994,12 +994,12 @@ func corruptUncachedCheckpointValue(t *testing.T, db *DB) {
 	mustPut(t, db, "keep", "healthy")
 	mustPut(t, db, "lost", strings.Repeat("v", 10000))
 	entry := damageProtectedTail(t, db)
-	raw, err := os.ReadFile(db.store.Files[entry.ID].Path)
+	raw, err := os.ReadFile(db.store.Segments[entry.ID].Path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw[300] ^= 1 // Together with the tail, two DATA blocks in one stripe.
-	if err := os.WriteFile(db.store.Files[entry.ID].Path, raw, 0600); err != nil {
+	if err := os.WriteFile(db.store.Segments[entry.ID].Path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	Observe(db).ClearCache()
@@ -1138,7 +1138,7 @@ func TestCompactKeepsVersionRepairedAfterRecoveryCopy(t *testing.T) {
 	opts := Options{IndexMode: IndexBTree}
 	db := openMaintenanceDamageDB(t, opts, fs)
 	corruptUncachedCheckpointValue(t, db)
-	source := testLoc(t, db, "lost").File
+	source := testLoc(t, db, "lost").Segment
 	armed.Store(true)
 	done := make(chan error, 1)
 	go func() {

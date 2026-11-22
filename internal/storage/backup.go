@@ -103,7 +103,7 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 }
 
 func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error, newIndex func() (index.Backend, error)) (returned error) {
-	target, err := destinationPath(filepath.Dir(capture.Files[0].File.Path), destination)
+	target, err := destinationPath(filepath.Dir(capture.Segments[0].Segment.Path), destination)
 	if err != nil {
 		return err
 	}
@@ -117,13 +117,13 @@ func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, 
 			returned = errors.Join(returned, cleanStage(fs, stage, "backup"))
 		}
 	}()
-	meta := format.Backup{UUID: capture.Current.UUID, Sequence: capture.Current.Sequence, Cutoff: capture.Catalog.Cutoff,
-		SourceCacheBytes: cfg.ValueCacheBudgetBytes, SourceRecordBytes: cfg.RecordBytes}
+	meta := format.Backup{UUID: capture.Current.UUID, LastUserSequence: capture.Current.LastUserSequence, CheckpointCutoffSequence: capture.Catalog.CheckpointCutoffSequence,
+		SourceValueCacheBudgetBytes: cfg.ValueCacheBudgetBytes, SourceMaxRecordBytes: cfg.MaxRecordBytes}
 	addBytes := func(name string, b []byte) error {
 		if err := fs.NewFile(filepath.Join(stage, name), b, "backup.metadata"); err != nil {
 			return err
 		}
-		meta.Files = append(meta.Files, format.BackupFile{Name: name, Bytes: int64(len(b)), Hash: sha256.Sum256(b)})
+		meta.Files = append(meta.Files, format.BackupFile{Name: name, Bytes: int64(len(b)), Digest: sha256.Sum256(b)})
 		return nil
 	}
 	if err := addBytes("CURRENT", format.EncodeFrontier(capture.Current)); err != nil {
@@ -144,7 +144,7 @@ func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, 
 		if err != nil {
 			return &IndexWorkError{Err: err}
 		}
-		builder = newReplayBuilder(ctx, backend, capture.Catalog.PrunedThrough)
+		builder = newReplayBuilder(ctx, backend, capture.Catalog.PrunedThroughSequence)
 		defer func() {
 			if backend != nil {
 				builder.abort()
@@ -154,14 +154,14 @@ func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, 
 		visit = builder.apply
 	} else {
 		window = newKeyWindow("", verifyWindowBytes)
-		visit = func(f *File, _ int64, r format.Record, key string) error {
-			if err := window.apply(f.Kind, capture.Catalog.PrunedThrough, r, key); err != nil {
+		visit = func(f *DataSegment, _ int64, r format.RecordHeader, key string) error {
+			if err := window.apply(f.Kind, capture.Catalog.PrunedThroughSequence, r, key); err != nil {
 				return &SourceError{Err: err}
 			}
 			return nil
 		}
 	}
-	for _, captured := range capture.Files {
+	for _, captured := range capture.Segments {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -231,13 +231,13 @@ type backupStream struct {
 	source backupReaderAt
 }
 
-func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, visit recordVisitor, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
-	src, header, _, err := openSelected(captured.File.Path, capture.Current.UUID, captured.Entry, captured.File.ID == capture.Current.ActiveID)
+func copySegment(ctx context.Context, capture *Capture, captured CapturedSegment, visit recordVisitor, stage string, fs *IO, stream *backupStream, buffer []byte) (entry format.BackupFile, returned error) {
+	src, header, _, err := openSelected(captured.Segment.Path, capture.Current.UUID, captured.Entry, captured.Segment.ID == capture.Current.ActiveID)
 	if err != nil {
 		return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: err})
 	}
 	defer func() { returned = errors.Join(returned, src.Close()) }()
-	name := DataName(capture.Current.UUID, captured.File.ID)
+	name := DataName(capture.Current.UUID, captured.Segment.ID)
 	dst, err := os.OpenFile(filepath.Join(stage, name), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return entry, err
@@ -255,7 +255,7 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 	stream.source.ReaderAt = src
 	source := io.NewSectionReader(&stream.source, start, captured.Entry.Bytes-start)
 	stream.reader.Reset(io.TeeReader(source, writer))
-	span := format.NewRecordRange(captured.Entry, capture.Catalog.Cutoff)
+	span := format.NewRecordSequenceValidator(captured.Entry, capture.Catalog.CheckpointCutoffSequence)
 	for offset := start; offset < captured.Entry.Bytes; {
 		if err := ctx.Err(); err != nil {
 			return entry, err
@@ -271,15 +271,15 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 		if err := span.Accept(r); err != nil {
 			return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)})
 		}
-		if err := visit(captured.File, offset, r, key); err != nil {
+		if err := visit(captured.Segment, offset, r, key); err != nil {
 			return entry, fmt.Errorf("%s: record at offset %d: %w", name, offset, err)
 		}
-		offset += r.Bytes()
+		offset += r.EncodedRecordBytes()
 	}
 	if err := span.Finish(); err != nil {
 		return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: fmt.Errorf("%s: %w", name, err)})
 	}
-	if captured.File.ID != capture.Current.ActiveID {
+	if captured.Segment.ID != capture.Current.ActiveID {
 		if err := checkSealedDigest(h, captured.Entry); err != nil {
 			return entry, selectedReadFailure(captured.Entry.ID, err)
 		}
@@ -288,7 +288,7 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedFile, v
 		return entry, err
 	}
 	entry = format.BackupFile{Name: name, Bytes: captured.Entry.Bytes}
-	copy(entry.Hash[:], h.Sum(nil))
+	copy(entry.Digest[:], h.Sum(nil))
 	return entry, nil
 }
 
@@ -319,7 +319,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err != nil {
 		return err
 	}
-	if err := cfg.CheckLimits(backup.info.Required); err != nil {
+	if err := cfg.CheckLimits(backup.info.LiveRecordSizes); err != nil {
 		return err
 	}
 	stage, err := os.MkdirTemp(filepath.Dir(target), ".tarp-restore-")
@@ -341,7 +341,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err != nil {
 		return err
 	}
-	if err := cfg.CheckLimits(image.Required); err != nil {
+	if err := cfg.CheckLimits(image.LiveRecordSizes); err != nil {
 		return err
 	}
 	err = publishDirectory(ctx, fs, stage, target, "restore")
@@ -351,9 +351,9 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 
 // BackupInfo describes a fully verified backup. Size minima come from live records.
 type BackupInfo struct {
-	DatabaseID         [16]byte
-	Sequence, LiveKeys uint64
-	Required           RequiredLimits
+	DatabaseID                 [16]byte
+	LastUserSequence, LiveKeys uint64
+	LiveRecordSizes
 }
 
 type verifiedBackup struct {
@@ -446,8 +446,8 @@ func verifySorted(ctx context.Context, dir, scratch string, limit int64) (verifi
 	if err := image.scan(ctx, history.apply); err != nil {
 		return nil, err
 	}
-	err = history.reduce(image.Catalog.PrunedThrough, func(key string, addr index.Address) error {
-		return image.measure(key, addr.Bytes, addr.ValueBytes)
+	err = history.reduce(image.Catalog.PrunedThroughSequence, func(key string, addr index.Address) error {
+		return image.measure(key, addr.RecordBytes, addr.ValueBytes)
 	})
 	if err != nil {
 		return nil, replayWorkError(err)
@@ -497,13 +497,13 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 	if err != nil {
 		return verifiedBackup{}, err
 	}
-	if image.Current.UUID != meta.UUID || image.Current.Sequence != meta.Sequence || image.Catalog.Cutoff != meta.Cutoff {
+	if image.Current.UUID != meta.UUID || image.Current.LastUserSequence != meta.LastUserSequence || image.Catalog.CheckpointCutoffSequence != meta.CheckpointCutoffSequence {
 		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: identity, sequence or cutoff differs from the selected image", ErrCorrupt)
 	}
-	if image.Files[image.Current.ActiveID].Size.Load() != image.Current.ActiveEnd {
+	if image.Segments[image.Current.ActiveID].Size.Load() != image.Current.ActiveCommittedEndOffset {
 		return verifiedBackup{}, fmt.Errorf("%s: %w: length differs from committed end", DataName(meta.UUID, image.Current.ActiveID), ErrCorrupt)
 	}
-	if len(files) != len(image.Files)+2 {
+	if len(files) != len(image.Segments)+2 {
 		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: number of files differs from selected image", ErrCorrupt)
 	}
 	if _, ok := files["CURRENT"]; !ok {
@@ -513,7 +513,7 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 	if _, ok := files[name]; !ok {
 		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %s entry", ErrCorrupt, name)
 	}
-	for id := range image.Files {
+	for id := range image.Segments {
 		name := DataName(meta.UUID, id)
 		if _, ok := files[name]; !ok {
 			return verifiedBackup{}, fmt.Errorf("BACKUP: %w: missing %s entry", ErrCorrupt, name)
@@ -522,8 +522,8 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 	return verifiedBackup{
 		files: meta.Files,
 		info: BackupInfo{
-			DatabaseID: image.Current.UUID, Sequence: image.Current.Sequence, LiveKeys: image.LiveKeys,
-			Required: image.Required,
+			DatabaseID: image.Current.UUID, LastUserSequence: image.Current.LastUserSequence, LiveKeys: image.LiveKeys,
+			LiveRecordSizes: image.LiveRecordSizes,
 		},
 	}, nil
 }
@@ -572,7 +572,7 @@ func verifyBackupFile(ctx context.Context, dir string, entry format.BackupFile, 
 		}
 		offset += n
 	}
-	if actual := h.Sum(nil); string(actual) != string(entry.Hash[:]) {
+	if actual := h.Sum(nil); string(actual) != string(entry.Digest[:]) {
 		return fmt.Errorf("%w: backup digest", ErrCorrupt)
 	}
 	return nil
@@ -605,7 +605,7 @@ func copyBackupFile(ctx context.Context, source, stage string, entry format.Back
 		}
 		offset += n
 	}
-	if string(h.Sum(nil)) != string(entry.Hash[:]) {
+	if string(h.Sum(nil)) != string(entry.Digest[:]) {
 		return fmt.Errorf("%w: backup changed while restoring", ErrCorrupt)
 	}
 	return fs.Sync(dst, "restore.file.sync")

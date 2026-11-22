@@ -32,8 +32,8 @@ func TestKeysSnapshotUsesNoDataReadsOrFilePins(t *testing.T) {
 	}
 	db.cache.Clear()
 	before := db.Stats()
-	pins := make(map[*storage.File]int64)
-	for _, f := range db.files {
+	pins := make(map[*storage.DataSegment]int64)
+	for _, f := range db.segments {
 		pins[f] = f.References()
 	}
 
@@ -45,9 +45,9 @@ func TestKeysSnapshotUsesNoDataReadsOrFilePins(t *testing.T) {
 		seen[string(key)] = true
 		key[0] ^= 0xff
 		if len(seen) == 1 {
-			for file, count := range pins {
-				if got := file.References(); got != count {
-					t.Fatalf("file %d references = %d, want %d", file.ID, got, count)
+			for segment, count := range pins {
+				if got := segment.References(); got != count {
+					t.Fatalf("file %d references = %d, want %d", segment.ID, got, count)
 				}
 			}
 			if db.active != 0 || db.Stats() != before {

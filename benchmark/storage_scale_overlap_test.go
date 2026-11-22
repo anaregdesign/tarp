@@ -185,7 +185,7 @@ func verifyOverlapDatabase(t *testing.T, dir string, opts engine.Options, overla
 	}
 	defer db.Close()
 	wantSequence := uint64(overlapCapturedKeys + (1+batches)*overlapBatchSize)
-	if seq := engine.Observe(db).Frontier().Sequence; seq != wantSequence {
+	if seq := engine.Observe(db).Frontier().LastUserSequence; seq != wantSequence {
 		t.Fatalf("recovered sequence %d, expected %d", seq, wantSequence)
 	}
 	seen := make([]bool, overlapCapturedKeys+overlapBatchSize)

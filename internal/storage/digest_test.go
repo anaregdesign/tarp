@@ -14,7 +14,7 @@ import (
 // The substitute is a valid record of the same length, sequence and key.
 // Its key and payload CRCs pass every decoder, including on a dead record.
 func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 4096, RecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 4096, MaxRecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
 	store, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -38,11 +38,11 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 		t.Fatal(err)
 	}
 	before := store.Current
-	source := store.Catalog.Files[0]
-	path := store.Files[source.ID].Path
+	source := store.Catalog.Entries[0]
+	path := store.Segments[source.ID].Path
 	b, err := os.ReadFile(path)
-	if err != nil || sha256.Sum256(b) != source.Digest {
-		t.Fatalf("sealed bytes %x: %v", source.Digest, err)
+	if err != nil || sha256.Sum256(b) != source.DataFileDigest {
+		t.Fatalf("sealed bytes %x: %v", source.DataFileDigest, err)
 	}
 	copy(b[format.SegmentHeaderBytes:], format.EncodeRecord(format.Put, 1, []byte("key"), []byte("tampered")))
 	if err := os.WriteFile(path, b, 0600); err != nil {
@@ -62,14 +62,14 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 	defer moves.Close()
 	work := memory.New()
 	defer work.Close()
-	compact := store.NewCheckpoint(capture)
-	if err := compact.Copy(t.Context(), work, view, moves, store.ReserveSnapshotFile); !errors.Is(err, ErrCorrupt) {
+	compact := store.NewDataCheckpoint(capture)
+	if err := compact.Copy(t.Context(), work, view, moves, store.ReserveSnapshotSegment); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("compaction: %v", err)
 	}
 	if err := compact.Discard(); err != nil {
 		t.Fatal(err)
 	}
-	clean, err := store.BeginClean([]format.File{source})
+	clean, err := store.BeginClean([]format.CatalogEntry{source})
 	if err != nil {
 		t.Fatal(err)
 	}

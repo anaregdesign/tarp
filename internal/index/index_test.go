@@ -29,10 +29,10 @@ func TestBackendTransactionsExposeWholeSnapshots(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			a := index.Address{FileID: 4, Offset: 64, Bytes: 56, Sequence: 1}
+			a := index.Address{FileID: 4, RecordOffset: 64, RecordBytes: 56, Sequence: 1}
 			b := a
 			b.Sequence = 2
-			b.Offset += a.Bytes
+			b.RecordOffset += a.RecordBytes
 			key := "\x00k\xff"
 			tx := db.Begin()
 			if err := tx.Put(key, a); err != nil {
@@ -157,7 +157,7 @@ func TestBackendsAgainstSameRandomizedSnapshotModel(t *testing.T) {
 					if m.Delete {
 						delete(model, key)
 					} else {
-						m.Address = index.Address{FileID: uint64(1 + epoch%4), Offset: int64(step) * 4096, Bytes: 64, ValueBytes: 1, Sequence: uint64(1 + epoch*17 + step)}
+						m.Address = index.Address{FileID: uint64(1 + epoch%4), RecordOffset: int64(step) * 4096, RecordBytes: 64, ValueBytes: 1, Sequence: uint64(1 + epoch*17 + step)}
 						model[key] = m.Address
 					}
 					if old, found, err := tx.Apply(m); err != nil || found != live || old != want {

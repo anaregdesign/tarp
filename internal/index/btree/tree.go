@@ -11,21 +11,21 @@ import (
 )
 
 type tree struct {
-	p                *pager
-	writer           sync.Mutex
-	mu               sync.Mutex
-	root, generation uint64
-	count            int
-	views            map[uint64]int
-	activeViews      uint64
-	retiredPages     atomic.Uint64
-	closed           bool
-	stopped          chan struct{}
-	reads            readWorkspace
-	pending          *transaction
-	packed           packedHeader // dense bulk-built image, protected by writer
-	retired          retireQueue
-	allocErr         error
+	p                    *pager
+	writer               sync.Mutex
+	mu                   sync.Mutex
+	root, rootGeneration uint64
+	count                int
+	views                map[uint64]int
+	activeViews          uint64
+	retiredPages         atomic.Uint64
+	closed               bool
+	stopped              chan struct{}
+	reads                readWorkspace
+	pending              *transaction
+	packed               packedHeader // dense bulk-built image, protected by writer
+	retired              retireQueue
+	allocErr             error
 }
 
 // NewIn puts all disk workspace for the derived index on the chosen filesystem.
@@ -34,13 +34,13 @@ func NewIn(dir string, budget int64) (index.Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tree{p: p, generation: 1, views: make(map[uint64]int), stopped: make(chan struct{}), reads: newReadWorkspace(p.budget)}, nil
+	return &tree{p: p, rootGeneration: 1, views: make(map[uint64]int), stopped: make(chan struct{}), reads: newReadWorkspace(p.budget)}, nil
 }
 func (t *tree) Metrics() index.Metrics {
 	m := t.p.metrics()
 	t.mu.Lock()
 	m.ActiveViews = t.activeViews
-	m.PinnedGenerations = uint64(len(t.views))
+	m.PinnedRootGenerations = uint64(len(t.views))
 	t.mu.Unlock()
 	m.RetiredPages = t.retiredPages.Load()
 	t.reads.metrics(&m)
@@ -50,11 +50,11 @@ func (t *tree) Count() int { t.mu.Lock(); defer t.mu.Unlock(); return t.count }
 func (t *tree) View() index.View {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	v := &view{tree: t, root: t.root, gen: t.generation}
+	v := &view{tree: t, root: t.root, rootGeneration: t.rootGeneration}
 	if t.closed {
-		v.gen = 0
+		v.rootGeneration = 0
 	} else {
-		t.views[v.gen]++
+		t.views[v.rootGeneration]++
 		t.activeViews++
 	}
 	return v
@@ -67,36 +67,36 @@ func (t *tree) Lookup(key string) (index.Address, bool, error) {
 func (t *tree) Begin() index.Tx {
 	t.writer.Lock()
 	t.mu.Lock()
-	root, count, gen := t.root, t.count, t.generation
-	minGen := gen
+	root, count, rootGeneration := t.root, t.count, t.rootGeneration
+	oldestRootGeneration := rootGeneration
 	for g := range t.views {
-		minGen = min(minGen, g)
+		oldestRootGeneration = min(oldestRootGeneration, g)
 	}
 	closed := t.closed
 	t.mu.Unlock()
 	var err error
 	if closed {
 		err = os.ErrClosed
-	} else if gen == math.MaxUint64 {
-		err = errors.New("btree: snapshot generation exhausted")
+	} else if rootGeneration == math.MaxUint64 {
+		err = errors.New("btree: root generation exhausted")
 	} else if t.allocErr != nil {
 		err = t.allocErr
 	} else {
-		err = t.reclaim(minGen)
+		err = t.reclaim(oldestRootGeneration)
 		if err != nil {
 			t.allocErr = err
 		}
 	}
-	return &transaction{tree: t, root: root, count: count, gen: gen, err: err}
+	return &transaction{tree: t, root: root, count: count, rootGeneration: rootGeneration, err: err}
 }
-func (t *tree) reclaim(minGen uint64) error {
-	err := t.retired.collect(t.p, minGen)
+func (t *tree) reclaim(oldestRootGeneration uint64) error {
+	err := t.retired.collect(t.p, oldestRootGeneration)
 	if prev := t.pending; prev != nil {
 		if err == nil {
-			if prev.gen < minGen {
+			if prev.rootGeneration < oldestRootGeneration {
 				err = prev.old.each(t.p.release)
 			} else {
-				err = t.retired.append(t.p, prev.gen, &prev.old)
+				err = t.retired.append(t.p, prev.rootGeneration, &prev.old)
 			}
 		}
 		err = errors.Join(err, prev.old.close(), prev.allocated.close())
@@ -128,17 +128,17 @@ func (t *tree) Close() error {
 }
 
 type view struct {
-	tree      *tree
-	root, gen uint64
+	tree                 *tree
+	root, rootGeneration uint64
 }
 
 func (v *view) Close() {
 	t := v.tree
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if v.gen != 0 {
-		g := v.gen
-		v.gen = 0
+	if v.rootGeneration != 0 {
+		g := v.rootGeneration
+		v.rootGeneration = 0
 		t.activeViews--
 		if n := t.views[g]; n <= 1 {
 			delete(t.views, g)
@@ -150,7 +150,7 @@ func (v *view) Close() {
 func (v *view) valid() bool {
 	v.tree.mu.Lock()
 	defer v.tree.mu.Unlock()
-	return v.gen != 0 && !v.tree.closed
+	return v.rootGeneration != 0 && !v.tree.closed
 }
 func (v *view) Lookup(key string) (index.Address, bool, error) {
 	if err := v.beginRead(); err != nil {

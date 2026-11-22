@@ -32,16 +32,16 @@ instrument('internal/storage/clean_retire.go', [
 instrument('internal/storage/recovery.go', [
     ('scan(ctx context.Context, visit recordVisitor) error {',
      'scan(ctx context.Context, visit recordVisitor) error {\n\tscaleprobe.ReplayPasses.Add(1)', 1),
-    ('file := image.Files[entry.ID]',
-     'scaleprobe.ReplayBytes.Add(uint64(entry.Bytes))\n\t\tfile := image.Files[entry.ID]', 1),
+    ('segment := image.Segments[entry.ID]\n\t\tfd, _, physical, err := openSelectedForRead(segment.Path, image.Current.UUID, entry, entry.ID == image.Current.ActiveID,',
+     'scaleprobe.ReplayBytes.Add(uint64(entry.Bytes))\n\t\tsegment := image.Segments[entry.ID]\n\t\tfd, _, physical, err := openSelectedForRead(segment.Path, image.Current.UUID, entry, entry.ID == image.Current.ActiveID,', 1),
 ])
 instrument('internal/engine/index.go', [
     ('if _, busy := db.memoryRemap.staged[move.Key]; busy {',
      'if _, busy := db.memoryRemap.staged[move.Key]; busy {\n\t\t\tscaleprobe.RelocationConflicts.Add(1)', 1),
 ])
 instrument('internal/engine/cleaner.go', [
-    ('files, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)',
-     'observedSequence := db.store.Current.Sequence\n\tfiles, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)', 1),
+    ('entries, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)',
+     'observedSequence := db.store.Current.LastUserSequence\n\tentries, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)', 1),
     ('return pending && removed > 0, pending && removed == 0',
      'if !pending { scaleprobe.CleanerIdle(observedSequence) }\n\t\treturn pending && removed > 0, pending && removed == 0', 1),
 ])

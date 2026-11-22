@@ -43,11 +43,11 @@ func damageProtectedReadFixture(t *testing.T, db *DB) {
 		t.Fatal(err)
 	}
 	loc := testLoc(t, db, "target")
-	f, err := os.OpenFile(loc.File.Path, os.O_WRONLY, 0)
+	f, err := os.OpenFile(loc.Segment.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.WriteAt([]byte{0xff}, loc.Offset+loc.Bytes-1)
+	_, err = f.WriteAt([]byte{0xff}, loc.RecordOffset+loc.RecordBytes-1)
 	if err = errors.Join(err, f.Close()); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestForegroundRepairPreservesReadConsistencyDuringWrites(t *testing.T) {
 					case reads <- struct{}{}:
 					default:
 					}
-				case "repair.rename:before":
+				case "data-repair.rename:before":
 					if replacements.Add(1) == 1 {
 						close(paused)
 						<-resume
@@ -169,14 +169,14 @@ func TestScanCanceledDuringRepairReleasesTheSnapshotAndAllowsRetry(t *testing.T)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	fs := &storage.IO{Hook: func(point string) error {
-		if point == "repair.sync:after" {
+		if point == "data-repair.sync:after" {
 			cancel()
 		}
 		return nil
 	}}
 	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
 	damageProtectedReadFixture(t, db)
-	f := testLoc(t, db, "target").File
+	f := testLoc(t, db, "target").Segment
 	refs := f.References()
 	requireScanError(t, db.Scan(ctx), context.Canceled)
 	if got := f.References(); got != refs {
@@ -189,7 +189,7 @@ func TestScanCancellationPreservesUncertainRepairOutcome(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	fs := &storage.IO{Hook: func(point string) error {
-		if point == "repair.dirsync:before" {
+		if point == "data-repair.dirsync:before" {
 			cancel()
 			return ctx.Err()
 		}
@@ -230,11 +230,11 @@ func TestScanKeepsUnreadValuesAcrossCompact(t *testing.T) {
 	start := make(chan struct{})
 	db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: start})
 	want := make(map[string]string)
-	old := make(map[string]*storage.File)
+	old := make(map[string]*storage.DataSegment)
 	for _, k := range []string{"a", "b", "c", "d"} {
 		want[k] = strings.Repeat(k, 64)
 		mustPut(t, db, k, want[k])
-		old[k] = testLoc(t, db, k).File // Each pair of these records exceeds the target.
+		old[k] = testLoc(t, db, k).Segment // Each pair of these records exceeds the target.
 	}
 	next, stop := iter.Pull2(db.Scan(t.Context()))
 	defer stop()
@@ -292,12 +292,12 @@ func TestScanStopsWithoutExtraReadsOrLeases(t *testing.T) {
 	}})
 	mustPut(t, db, "one", "1")
 	mustPut(t, db, "two", "2")
-	file := testLoc(t, db, "one").File
-	baseline := file.References()
+	segment := testLoc(t, db, "one").Segment
+	baseline := segment.References()
 	check := func(wantReads int64) {
 		t.Helper()
-		if reads.Load() != wantReads || file.References() != baseline || db.active != 0 {
-			t.Fatalf("reads %d, refs %d, active %d", reads.Load(), file.References(), db.active)
+		if reads.Load() != wantReads || segment.References() != baseline || db.active != 0 {
+			t.Fatalf("reads %d, refs %d, active %d", reads.Load(), segment.References(), db.active)
 		}
 	}
 	seq := db.Scan(t.Context())
@@ -343,13 +343,13 @@ func requireScanError(t *testing.T, seq iter.Seq2[Entry, error], want error) {
 // Cancel as soon as capture pins the first file, without relying on timing.
 type cancelOnScanPin struct {
 	context.Context
-	file        *storage.File
+	segment     *storage.DataSegment
 	initialRefs int64
 	cancel      context.CancelFunc
 }
 
 func (c cancelOnScanPin) Err() error {
-	if c.file.References() > c.initialRefs {
+	if c.segment.References() > c.initialRefs {
 		c.cancel()
 	}
 	return c.Context.Err()
@@ -359,12 +359,12 @@ func TestScanReleasesPartialCapture(t *testing.T) {
 	db := newTestDB(t, Options{}, nil)
 	mustPut(t, db, "a", "1")
 	mustPut(t, db, "b", "2")
-	file := testLoc(t, db, "a").File
-	baseline := file.References()
+	segment := testLoc(t, db, "a").Segment
+	baseline := segment.References()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	requireScanError(t, db.Scan(cancelOnScanPin{ctx, file, baseline, cancel}), context.Canceled)
-	if file.References() != baseline || db.active != 0 {
+	requireScanError(t, db.Scan(cancelOnScanPin{ctx, segment, baseline, cancel}), context.Canceled)
+	if segment.References() != baseline || db.active != 0 {
 		t.Fatal("partial capture retained resources")
 	}
 }
@@ -393,7 +393,7 @@ func TestScanPreservesHotCache(t *testing.T) {
 	}
 	wantValue(t, db, "b", "B")
 	if reads.Load() != 3 {
-		t.Fatal("expected a cache miss for b")
+		t.Fatal("expected a value-cache miss for b")
 	}
 }
 
@@ -412,18 +412,18 @@ func TestScanCancellationAndReadFailure(t *testing.T) {
 	}})
 	mustPut(t, db, "a", "A")
 	mustPut(t, db, "b", "B")
-	file := testLoc(t, db, "a").File
-	baseline := file.References()
+	segment := testLoc(t, db, "a").Segment
+	baseline := segment.References()
 	requireScanError(t, db.Scan(nil), nil)
 	requireScanError(t, db.Scan(ctx), context.Canceled) // Canceled after OS read.
 	requireScanError(t, db.Scan(ctx), context.Canceled) // Already canceled.
-	if file.References() != baseline || db.active != 0 {
+	if segment.References() != baseline || db.active != 0 {
 		t.Fatal("canceled scan retained resources")
 	}
 	inject.Store(true)
 	requireScanError(t, db.Scan(t.Context()), ErrCorrupt)
 	requireScanError(t, db.Scan(t.Context()), ErrUnhealthy)
-	if file.References() != baseline || db.active != 0 {
+	if segment.References() != baseline || db.active != 0 {
 		t.Fatal("failed scan retained resources")
 	}
 }
@@ -438,7 +438,7 @@ func TestScanCloseFromConsumer(t *testing.T) {
 	}})
 	mustPut(t, db, "one", "1")
 	mustPut(t, db, "two", "2")
-	file := testLoc(t, db, "one").File
+	segment := testLoc(t, db, "one").Segment
 	next, stop := iter.Pull2(db.Scan(t.Context()))
 	defer stop()
 	if _, err, ok := next(); !ok || err != nil {
@@ -456,8 +456,8 @@ func TestScanCloseFromConsumer(t *testing.T) {
 	if e, err, ok := next(); !ok || !errors.Is(err, ErrClosed) || e.Key != nil || e.Value != nil {
 		t.Fatalf("closed scan: %+v, %v, %v", e, err, ok)
 	}
-	if _, _, ok := next(); ok || reads.Load() != 1 || file.References() != 0 {
-		t.Fatalf("after Close: yielded %v, reads %d, refs %d", ok, reads.Load(), file.References())
+	if _, _, ok := next(); ok || reads.Load() != 1 || segment.References() != 0 {
+		t.Fatalf("after Close: yielded %v, reads %d, refs %d", ok, reads.Load(), segment.References())
 	}
 }
 
@@ -539,12 +539,12 @@ func (c cancelOnCapture) Done() <-chan struct{} {
 func TestCancelDuringBoundedMemoryCaptureReleasesAdmission(t *testing.T) {
 	db := newTestDB(t, Options{IndexMode: IndexMemory}, nil)
 	mustPut(t, db, "a/1", "before")
-	file := testLoc(t, db, "a/1").File
-	references := file.References()
+	segment := testLoc(t, db, "a/1").Segment
+	references := segment.References()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	requireScanError(t, db.ScanPrefix(cancelOnCapture{ctx, cancel}, []byte("a/")), context.Canceled)
-	if db.active != 0 || file.References() != references {
+	if db.active != 0 || segment.References() != references {
 		t.Fatal("canceled capture retained a file or admission")
 	}
 	mustPut(t, db, "a/1", "after")

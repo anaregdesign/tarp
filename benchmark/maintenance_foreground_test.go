@@ -91,8 +91,8 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 	}
 	digest, count := measurementState(t, db)
 	initial := engine.Observe(db).Frontier()
-	if initial.Sequence != 5633 || count != 4097 {
-		t.Fatalf("unexpected foreground fixture: sequence=%d keys=%d", initial.Sequence, count)
+	if initial.LastUserSequence != 5633 || count != 4097 {
+		t.Fatalf("unexpected foreground fixture: sequence=%d keys=%d", initial.LastUserSequence, count)
 	}
 	hot := keys[:8]
 	for _, k := range hot {
@@ -229,15 +229,15 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 			t.Fatalf("invalid Put timing %+v", p)
 		}
 	}
-	if end := engine.Observe(db).Frontier().Sequence; end != initial.Sequence+uint64(len(window.Puts)) {
+	if end := engine.Observe(db).Frontier().LastUserSequence; end != initial.LastUserSequence+uint64(len(window.Puts)) {
 		t.Fatalf("unexpected tail %d", end)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	checkDir, seq := dir, initial.Sequence+uint64(len(window.Puts))
+	checkDir, seq := dir, initial.LastUserSequence+uint64(len(window.Puts))
 	if mode == "backup" {
-		checkDir, seq = filepath.Join(root, "restored"), initial.Sequence
+		checkDir, seq = filepath.Join(root, "restored"), initial.LastUserSequence
 		if err := engine.Restore(context.Background(), engine.RestoreRequest{
 			Source:      target,
 			Destination: checkDir,
@@ -253,15 +253,15 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 	defer verified.Close()
 	actual, live := measurementState(t, verified)
 	frontier, observed := engine.Observe(verified).Frontier(), observedLayout(verified)
-	if actual != digest || live != count || frontier.Sequence != seq || frontier.UUID != initial.UUID {
+	if actual != digest || live != count || frontier.LastUserSequence != seq || frontier.UUID != initial.UUID {
 		t.Fatal("foreground digest or sequence mismatch")
 	}
 	if mode == "backup" {
-		window.CaptureSequence = frontier.Sequence
+		window.CaptureSequence = frontier.LastUserSequence
 	}
 	if strings.HasPrefix(mode, "compact") {
 		window.CaptureSequence = observed.CheckpointCutoff
-		if observed.CheckpointCutoff != initial.Sequence || window.Records != count {
+		if observed.CheckpointCutoff != initial.LastUserSequence || window.Records != count {
 			t.Fatal("incorrect checkpoint prefix")
 		}
 	}

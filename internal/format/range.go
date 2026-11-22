@@ -1,93 +1,95 @@
 package format
 
-// SealedEnd returns the sequence covered by the checkpoint and all sealed intervals.
-func (c Catalog) SealedEnd() uint64 {
-	if n := len(c.Files); n > 0 && c.Files[n-1].Kind != Snapshot {
-		return c.Files[n-1].Last
+// SealedThroughSequence returns the last user sequence covered by the full DATA
+// checkpoint and all sealed log intervals, inclusive.
+func (c Catalog) SealedThroughSequence() uint64 {
+	if n := len(c.Entries); n > 0 && c.Entries[n-1].Kind != SnapshotKind {
+		return c.Entries[n-1].LastSequence
 	}
-	return c.Cutoff
+	return c.CheckpointCutoffSequence
 }
 
-// ActiveFile derives the final dense interval from a validated catalog and frontier.
-func (c Catalog) ActiveFile(current Frontier) (File, error) {
-	if c.UUID != current.UUID || c.ActiveID != current.ActiveID || c.PrunedThrough > current.Sequence {
-		return File{}, bad("catalog/frontier identity or pruning boundary")
+// ActiveEntry derives the active log descriptor from a validated catalog and
+// CURRENT. The MANIFEST stores sealed entries separately from the active log.
+func (c Catalog) ActiveEntry(current Frontier) (CatalogEntry, error) {
+	if c.UUID != current.UUID || c.ActiveID != current.ActiveID || c.PrunedThroughSequence > current.LastUserSequence {
+		return CatalogEntry{}, bad("catalog/frontier identity or pruning boundary")
 	}
 	if c.Index.ID != 0 && c.Index.ID == current.ManifestID {
-		return File{}, bad("catalog and index share an ID")
+		return CatalogEntry{}, bad("catalog and index share an ID")
 	}
-	for _, file := range c.Files {
-		if file.HasPhysicalFile() && file.ID == current.ManifestID {
-			return File{}, bad("catalog and data file share an ID")
+	for _, entry := range c.Entries {
+		if entry.HasPhysicalFile() && entry.ID == current.ManifestID {
+			return CatalogEntry{}, bad("catalog and data file share an ID")
 		}
 	}
-	end := c.SealedEnd()
-	if end > current.Sequence || current.ActiveEnd < SegmentHeaderBytes {
-		return File{}, bad("active log coverage")
+	sealedThrough := c.SealedThroughSequence()
+	if sealedThrough > current.LastUserSequence || current.ActiveCommittedEndOffset < SegmentHeaderBytes {
+		return CatalogEntry{}, bad("active log coverage")
 	}
-	file := File{ID: current.ActiveID, Bytes: current.ActiveEnd, Kind: Log}
-	if end == current.Sequence {
-		if current.ActiveEnd != SegmentHeaderBytes {
-			return File{}, bad("unexpected active log records")
+	entry := CatalogEntry{ID: current.ActiveID, Bytes: current.ActiveCommittedEndOffset, Kind: RawLogKind}
+	if sealedThrough == current.LastUserSequence {
+		if current.ActiveCommittedEndOffset != SegmentHeaderBytes {
+			return CatalogEntry{}, bad("unexpected active log records")
 		}
-		return file, nil
+		return entry, nil
 	}
-	if current.Sequence-end > uint64((current.ActiveEnd-SegmentHeaderBytes)/(RecordHeaderBytes+1)) {
-		return File{}, bad("active interval cannot fit committed prefix")
+	if current.LastUserSequence-sealedThrough > uint64((current.ActiveCommittedEndOffset-SegmentHeaderBytes)/(RecordHeaderBytes+1)) {
+		return CatalogEntry{}, bad("active interval cannot fit committed prefix")
 	}
-	file.First, file.Last = end+1, current.Sequence
-	return file, nil
+	entry.FirstSequence, entry.LastSequence = sealedThrough+1, current.LastUserSequence
+	return entry, nil
 }
 
-// RecordRange validates record order and membership for one selected file.
-type RecordRange struct {
-	file   File
+// RecordSequenceValidator checks record sequences against one catalog entry.
+type RecordSequenceValidator struct {
+	entry  CatalogEntry
 	cutoff uint64
 	last   uint64
 }
 
-func NewRecordRange(file File, cutoff uint64) RecordRange {
-	r := RecordRange{file: file, cutoff: cutoff}
-	if file.First != 0 {
-		r.last = file.First - 1
+func NewRecordSequenceValidator(entry CatalogEntry, cutoff uint64) RecordSequenceValidator {
+	r := RecordSequenceValidator{entry: entry, cutoff: cutoff}
+	if entry.FirstSequence != 0 {
+		r.last = entry.FirstSequence - 1
 	}
 	return r
 }
 
-func (r *RecordRange) Accept(record Record) error {
+func (r *RecordSequenceValidator) Accept(record RecordHeader) error {
 	return r.accept(record, false)
 }
 
 // AcceptAfterGap checks the first surviving record after an unreadable region.
 // A raw log may skip sequences across that region, but still increases within
 // the selected interval. Call Accept for subsequent contiguous records.
-func (r *RecordRange) AcceptAfterGap(record Record) error {
+func (r *RecordSequenceValidator) AcceptAfterGap(record RecordHeader) error {
 	return r.accept(record, true)
 }
 
-func (r *RecordRange) accept(record Record, afterGap bool) error {
-	if r.file.Kind == Snapshot {
+func (r *RecordSequenceValidator) accept(record RecordHeader, afterGap bool) error {
+	if r.entry.Kind == SnapshotKind {
 		if record.Kind != Put || record.Sequence == 0 || record.Sequence > r.cutoff {
 			return bad("snapshot record outside checkpoint")
 		}
 		return nil
 	}
-	if !r.file.HasPhysicalFile() || record.Sequence <= r.last || record.Sequence > r.file.Last {
+	if !r.entry.HasPhysicalFile() || record.Sequence <= r.last || record.Sequence > r.entry.LastSequence {
 		return bad("record outside selected interval")
 	}
-	if r.file.Kind == Log && !afterGap && record.Sequence != r.last+1 {
+	if r.entry.Kind == RawLogKind && !afterGap && record.Sequence != r.last+1 {
 		return bad("noncontiguous raw log")
 	}
 	r.last = record.Sequence
 	return nil
 }
 
-func (r *RecordRange) Finish() error {
-	if r.file.Kind == Log && r.last != r.file.Last {
+func (r *RecordSequenceValidator) Finish() error {
+	if r.entry.Kind == RawLogKind && r.last != r.entry.LastSequence {
 		return bad("incomplete raw log")
 	}
-	if r.file.Kind == Cleaned && r.file.HasPhysicalFile() && r.last < r.file.First {
-		return bad("empty physical cleaned file")
+	if r.entry.Kind == CleanedLogKind && r.entry.HasPhysicalFile() && r.last < r.entry.FirstSequence {
+		return bad("empty physical cleaned segment")
 	}
 	return nil
 }

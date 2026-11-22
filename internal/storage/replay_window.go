@@ -48,7 +48,7 @@ func newKeyWindow(after string, limit int64) *keyWindow {
 // The high key can only decrease once an eviction occurs. Therefore a key
 // that survives the pass has been tracked since its first record, even when
 // the physical replay order bears no relation to key order.
-func (w *keyWindow) apply(kind uint32, pruned uint64, r format.Record, key string) error {
+func (w *keyWindow) apply(kind uint32, pruned uint64, r format.RecordHeader, key string) error {
 	if key <= w.after || (w.more && key > w.keys[0]) {
 		return nil
 	}
@@ -73,7 +73,7 @@ func (w *keyWindow) apply(kind uint32, pruned uint64, r format.Record, key strin
 	if r.Kind == format.Delete {
 		w.live[key] = recordSize{}
 	} else {
-		w.live[key] = recordSize{record: r.Bytes(), value: r.ValueBytes}
+		w.live[key] = recordSize{record: r.EncodedRecordBytes(), value: r.ValueBytes}
 	}
 	return nil
 }
@@ -90,8 +90,8 @@ func validateWindows(ctx context.Context, dir string, limit int64, spill imageVe
 	after := ""
 	for {
 		w := newKeyWindow(after, limit)
-		if err := image.scan(ctx, func(f *File, _ int64, r format.Record, key string) error {
-			return w.apply(f.Kind, image.Catalog.PrunedThrough, r, key)
+		if err := image.scan(ctx, func(f *DataSegment, _ int64, r format.RecordHeader, key string) error {
+			return w.apply(f.Kind, image.Catalog.PrunedThroughSequence, r, key)
 		}); err != nil {
 			return nil, err
 		}
@@ -157,7 +157,7 @@ func replayWorkError(err error) error {
 	return &IndexWorkError{Err: err}
 }
 
-func (b *replayBuilder) apply(f *File, off int64, r format.Record, key string) error {
+func (b *replayBuilder) apply(f *DataSegment, off int64, r format.RecordHeader, key string) error {
 	if b.sort != nil {
 		return b.sort.apply(f, off, r, key)
 	}

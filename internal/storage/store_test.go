@@ -36,10 +36,10 @@ func TestReadMissingSegmentPreservesPathErrorAndRecordOffset(t *testing.T) {
 	filename := DataName([16]byte{}, 1)
 	path := filepath.Join(t.TempDir(), filename)
 	s := &Store{readers: newHandles(1)}
-	loc := Location{File: &File{Path: path}, Offset: format.SegmentHeaderBytes}
+	loc := Location{Segment: &DataSegment{Path: path}, RecordOffset: format.SegmentHeaderBytes}
 	_, err := s.Read(loc, "k")
 	var pathErr *os.PathError
-	want := fmt.Sprintf("%s: record at offset %d:", filename, loc.Offset)
+	want := fmt.Sprintf("%s: record at offset %d:", filename, loc.RecordOffset)
 	if !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathErr) || pathErr.Path != path || !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected missing segment and location %q, got %v", want, err)
 	}
@@ -106,7 +106,7 @@ func TestOpenPreservesUnrecognizedFilesBeforeCleanup(t *testing.T) {
 
 func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 256, TargetSegmentBytes: 1024, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 256, TargetSegmentBytes: 1024, Handles: 1}
 	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -115,8 +115,8 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 		s.Close()
 		t.Fatal(err)
 	}
-	data := s.Files[s.Current.ActiveID].Path
-	end := s.Current.ActiveEnd
+	data := s.Segments[s.Current.ActiveID].Path
+	end := s.Current.ActiveCommittedEndOffset
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	}
 
 	tooSmall := cfg
-	tooSmall.RecordBytes = 1
+	tooSmall.MaxRecordBytes = 1
 	rejected, keys, err := OpenIndexed(t.Context(), dir, tooSmall, true, nil, newBTree, nil)
 	var limits *CompatibilityError
 	if rejected != nil || keys != nil || !errors.As(err, &limits) {
@@ -183,7 +183,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("committed key after retry: found=%t, err=%v", ok, err)
 	}
-	if got, err := reopened.Read(At(reopened.Files[addr.FileID], addr), "k"); err != nil || string(got) != "saved" {
+	if got, err := reopened.Read(At(reopened.Segments[addr.FileID], addr), "k"); err != nil || string(got) != "saved" {
 		t.Fatalf("retry read: %q, %v", got, err)
 	}
 	if _, err := os.Lstat(owned); !errors.Is(err, os.ErrNotExist) {
@@ -196,7 +196,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 
 func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 1024, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 128, TargetSegmentBytes: 1024, Handles: 1}
 	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +276,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("rotate=%v/%s", rotate, tc.point), func(t *testing.T) {
 				dir := t.TempDir()
-				cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 128 << 10, TargetSegmentBytes: 1 << 20, Handles: 1}
+				cfg := Config{ValueCacheBudgetBytes: 1 << 20, MaxRecordBytes: 128 << 10, TargetSegmentBytes: 1 << 20, Handles: 1}
 				if rotate {
 					cfg.TargetSegmentBytes = format.SegmentHeaderBytes + batchBytes
 				}
@@ -302,7 +302,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 					return nil
 				}}
 				if tc.point == "partial-data" {
-					start := before.ActiveEnd
+					start := before.ActiveCommittedEndOffset
 					if rotate {
 						start = format.SegmentHeaderBytes
 					}
@@ -343,7 +343,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 				defer keys.Close()
 				after := reopened.Current
 				if tc.committed {
-					if after.Sequence != before.Sequence+2 || after.Generation != before.Generation+1 || (after.ActiveID != before.ActiveID) != rotate {
+					if after.LastUserSequence != before.LastUserSequence+2 || after.PublicationGeneration != before.PublicationGeneration+1 || (after.ActiveID != before.ActiveID) != rotate {
 						t.Fatalf("frontier after batch: %+v -> %+v", before, after)
 					}
 					for _, e := range entries {
@@ -351,7 +351,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 						if err != nil || !ok {
 							t.Fatalf("lookup %q after reopen: found=%t, err=%v", e.Key, ok, err)
 						}
-						v, err := reopened.Read(At(reopened.Files[addr.FileID], addr), string(e.Key))
+						v, err := reopened.Read(At(reopened.Segments[addr.FileID], addr), string(e.Key))
 						if err != nil || !bytes.Equal(v, e.Value) {
 							t.Fatalf("reopened %q: %q, %v", e.Key, v, err)
 						}
@@ -365,7 +365,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 }
 
 func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
-	s := &Store{Current: format.Frontier{Sequence: math.MaxUint64 - 1}}
+	s := &Store{Current: format.Frontier{LastUserSequence: math.MaxUint64 - 1}}
 	_, err := s.AppendBatch(format.Put, []Entry{{Key: []byte("a")}, {Key: []byte("b")}}, nil)
 	var f *Fault
 	if !errors.As(err, &f) || f.Unsafe || f.Outcome != publication.NotApplied {
@@ -374,7 +374,7 @@ func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
 }
 
 func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 4096, RecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 4096, MaxRecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
 	s, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -385,18 +385,18 @@ func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
 	if _, err := s.Append(format.Put, []byte("before"), value, healthy); err != nil {
 		t.Fatal(err)
 	}
-	before, lastID, files := s.Current, s.nextID, len(s.Files)
+	before, lastID, files := s.Current, s.nextID, len(s.Segments)
 	rejected := errors.New("reject staged index")
 	var candidate uint64
 	_, err = s.AppendPrepared(format.Put, []byte("after"), value, healthy, func(loc Location) error {
-		candidate = loc.File.ID
+		candidate = loc.Segment.ID
 		return rejected
 	})
-	if !errors.Is(err, rejected) || s.Current != before || s.nextID != lastID || len(s.Files) != files {
-		t.Fatalf("rejected rotation: error %v, frontier %+v, last ID %d (was %d), files %d (was %d)", err, s.Current, s.nextID, lastID, len(s.Files), files)
+	if !errors.Is(err, rejected) || s.Current != before || s.nextID != lastID || len(s.Segments) != files {
+		t.Fatalf("rejected rotation: error %v, frontier %+v, last ID %d (was %d), files %d (was %d)", err, s.Current, s.nextID, lastID, len(s.Segments), files)
 	}
 	loc, err := s.Append(format.Put, []byte("after"), value, healthy)
-	if err != nil || candidate == before.ActiveID || loc.File.ID != candidate || loc.Sequence != before.Sequence+1 {
+	if err != nil || candidate == before.ActiveID || loc.Segment.ID != candidate || loc.Sequence != before.LastUserSequence+1 {
 		t.Fatalf("retry used location %+v, wanted file %d, error %v", loc, candidate, err)
 	}
 }

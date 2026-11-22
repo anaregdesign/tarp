@@ -94,12 +94,10 @@ edit('internal/storage/io.go', [(old_sync, '''func (i *IO) Sync(f *os.File, poin
 
 if layout == 'v08':
     replay = 'func (c *Capture) Replay(ctx context.Context, fs *IO) ([]Relocation, error)'
-    checkpoint_args = 'moves []Relocation'
     copy_record = 'func (r *snapshotReader) copyRecord(ctx context.Context, fs *IO, old Location, key string, dst *os.File, offset int64, buffer []byte) error'
     callback_changes = []
 else:
     replay = 'func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend, live index.View, visit func(*os.File, string, Location) error) error'
-    checkpoint_args = 'history index.Backend, live index.View, moves *Relocations'
     copy_record = 'func copyCheckpointRecord(ctx context.Context, fs *IO, src *os.File, old Location, key string, dst *os.File, offset int64, buffer []byte) error'
     callback_changes = [timed('func(src *os.File, key string, old Location) error', 'Emit')]
     edit('internal/engine/index.go', [
@@ -109,9 +107,11 @@ else:
     index_file = root / 'internal/engine/index.go'
     index_file.write_text(probe_relocation_index_gate(index_file.read_text()))
 edit('internal/storage/snapshot.go', [timed(replay, 'Replay')])
+checkpoint = (root / 'internal/storage/checkpoint.go').read_text()
+copy, = (line.removesuffix(' {') for line in checkpoint.splitlines()
+         if line.startswith('func (') and ') Copy(' in line and line.endswith(' {'))
 edit('internal/storage/checkpoint.go', [
-    timed('func (c *Checkpoint) Copy(ctx context.Context, ' + checkpoint_args +
-          ', reserve func() (*File, error)) (result error)', 'Copy'),
+    timed(copy, 'Copy'),
     timed(copy_record, 'RecordCopy'),
     *callback_changes,
 ])

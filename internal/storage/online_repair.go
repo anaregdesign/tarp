@@ -20,14 +20,14 @@ import (
 // Bind its trusted extent once; a repair never consults mutable catalog state.
 type sealedRepair struct {
 	uuid  [16]byte
-	entry format.File
+	entry format.CatalogEntry
 
-	mu          sync.Mutex
-	running     *readRepair
-	uncertain   error
-	generation  atomic.Uint64 // successful full-file verifications or repairs
-	unavailable atomic.Pointer[UnavailableDataError]
-	retryAfter  time.Time
+	mu               sync.Mutex
+	running          *readRepair
+	uncertain        error
+	repairGeneration atomic.Uint64 // successful full-file verifications or repairs
+	unavailable      atomic.Pointer[UnavailableDataError]
+	retryAfter       time.Time
 }
 
 type readRepair struct {
@@ -76,7 +76,7 @@ func IsDataUnavailable(err error) bool {
 
 // UnavailableData returns the last confirmed physical failure. Values whose
 // record checks pass can still be read from the same file.
-func (f *File) UnavailableData() *UnavailableDataError {
+func (f *DataSegment) UnavailableData() *UnavailableDataError {
 	r := f.sealed.Load()
 	if r == nil {
 		return nil
@@ -96,18 +96,18 @@ type UncertainReadRepair struct{ Err error }
 func (e *UncertainReadRepair) Error() string { return e.Err.Error() }
 func (e *UncertainReadRepair) Unwrap() error { return e.Err }
 
-func (f *File) markSealed(uuid [16]byte, entry format.File) {
+func (f *DataSegment) markSealed(uuid [16]byte, entry format.CatalogEntry) {
 	f.sealed.CompareAndSwap(nil, &sealedRepair{uuid: uuid, entry: entry})
 }
 
 // RepairRead checks one eligible physical read failure against the pinned
 // file's immutable extent. A nil result authorizes exactly one checked retry;
 // it never certifies the failed record, a caller's index or any cached value.
-func (s *Store) RepairRead(ctx context.Context, f *File, cause error) error {
+func (s *Store) RepairRead(ctx context.Context, f *DataSegment, cause error) error {
 	if cause == nil {
 		return errors.New("storage: read repair requires a source failure")
 	}
-	if f == nil || f.refs.Load() <= 0 || !repairableRead(cause) {
+	if f == nil || f.pins.Load() <= 0 || !repairableRead(cause) {
 		return cause
 	}
 	r := f.sealed.Load()
@@ -115,10 +115,10 @@ func (s *Store) RepairRead(ctx context.Context, f *File, cause error) error {
 		return cause
 	}
 	err := r.run(ctx, s.DamageChanged, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
-		if err := s.IO.Check("repair.verify:before"); err != nil {
+		if err := s.IO.Check("data-repair.verify:before"); err != nil {
 			return err
 		}
-		if _, err := s.repairSealed(ctx, r.uuid, r.entry, true); err != nil {
+		if _, err := s.repairSealedData(ctx, r.uuid, r.entry, true); err != nil {
 			return err
 		}
 		// Another completed publication may already have replaced the path.
@@ -207,7 +207,7 @@ func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot,
 			r.uncertain = call.err
 		}
 		if call.err == nil {
-			r.generation.Add(1)
+			r.repairGeneration.Add(1)
 		}
 		prior := r.unavailable.Load()
 		if local, ok := call.err.(*UnavailableDataError); ok {
@@ -220,8 +220,8 @@ func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot,
 		// A cached read failure cannot schedule the same expensive checkpoint
 		// again. Reconsider the work when loss is first observed or a formerly
 		// blocked file can be fully read again.
-		newGap := next != nil && errors.Is(next.Err, format.ErrParityGap) &&
-			(prior == nil || !errors.Is(prior.Err, format.ErrParityGap))
+		newGap := next != nil && errors.Is(next.Err, format.ErrUnrecoverableDataBlocks) &&
+			(prior == nil || !errors.Is(prior.Err, format.ErrUnrecoverableDataBlocks))
 		if damageChanged != nil && (newGap || prior != nil && next == nil) {
 			damageChanged()
 		}

@@ -77,6 +77,8 @@ confirmed local loss in sealed DATA fails the affected request and permits
 other reads and writes to continue. Cache hits read memory and never
 start an on-disk scrub.
 
+For units, identifiers and lifetimes, see the [storage terminology](terminology.md).
+
 ## Commit and recovery
 
 The segmented full-value log supplies the WAL/recovery role; there is no second
@@ -99,7 +101,7 @@ When an append would take a nonempty log past its target (4 MiB by default),
 tarp writes the new segment header and first record, then syncs them together.
 It writes and syncs the new catalog and syncs the directory before replacing
 `CURRENT`. This one frontier publication selects both the new active log and
-the committed record. Explicit full-checkpoint sealing instead selects an empty
+the committed record. Sealing for a full DATA checkpoint instead selects an empty
 active log at the existing sequence. Sequences, generations and file IDs never wrap.
 No record spans files or overwrites previously committed bytes.
 
@@ -119,7 +121,7 @@ SHA-256-bound catalog, each selected segment header and length, and all live
 option minima. Full recovery verifies each sealed DATA digest and each committed
 active record. A validated INDEX can supply the covered key history. Indexed
 recovery skips covered DATA payloads after validating INDEX and replays the
-committed suffix. Both start with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
+committed DATA log suffix. Both start with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
 preserve coverage even when they have zero records. Deletes through the catalog
 pruning boundary may refer to a Put removed by cleaning. All selected physical
 DATA files must exist. See the [replay rules](format.md#catalog-payload).
@@ -129,9 +131,10 @@ cause for `errors.Is` and `errors.As`.
 Only after that validation may recovery truncate/sync the active suffix
 strictly beyond the committed frontier or delete recognized unselected objects.
 
-Full replay, `Restore`, and the validation pass of a manual checkpoint read each
-selected file sequentially in blocks of up to 32 KiB. The committed end bounds
-read-ahead, including when the active log has a longer physical tail. The
+Full replay, `Restore`, and the validation pass of a manual full DATA checkpoint
+read each selected segment sequentially in read-ahead chunks of up to 32 KiB.
+In the active segment the committed end offset bounds read-ahead, even when
+the physical file has a longer tail. The
 decoder verifies each record's checksum before applying it to the rebuilt index.
 
 An incomplete or checksum-invalid final **committed** record is corruption, not
@@ -187,22 +190,22 @@ uncertainty or supply the first durability barrier.
 
 ## Maintenance, capacity, and backup
 
-On fresh Open and reopen one worker considers the selected immutable segments.
+On fresh Open and reopen, the worker first considers single-segment cleaning of selected sealed DATA segments.
 Per-file live Put and required Delete byte counts estimate replacement size.
 For a candidate with source bytes S and estimated bytes to write W (including
 metadata), the initial eligibility rule is `W <= S/2`. This gives estimated
 net savings of at least one third of read-plus-write bytes. The worker ranks
 eligible files by highest savings per I/O byte, with stable tie breaks.
 
-When no single file qualifies, the worker can clean adjacent sealed logs
-with one catalog publication. It considers up to eight catalog entries,
+When no single segment qualifies, grouped log cleaning processes consecutive
+sealed logs in catalog order with one catalog publication. It considers up to eight catalog entries,
 including empty intervals. Each physical input must fit within one segment
 target and retain at most half its bytes. The combined replacement DATA must
 also fit within one target. The same savings threshold applies to the whole
 group, charging metadata once and retaining all tombstones.
 
-If neither a single file nor such a group qualifies, the worker looks for 4–8
-adjacent physical files of the same family (snapshots or sealed logs). Each
+When neither cleaning policy qualifies, small-segment repacking looks for four to
+eight small segments of the same family (snapshots or sealed logs) in catalog order. Each
 may occupy up to one quarter of the effective segment target. Their combined
 size including headers must fit within one target, and the largest must be
 no larger than all the others combined. This avoids repeatedly rewriting a
@@ -221,7 +224,7 @@ catalog under the writer gate. It releases the gate while writing and syncing
 the unselected manifest. Under the gate again, it publishes against the latest
 committed frontier. If a foreground rotation selected a different manifest,
 the worker discards its staging manifest and rebuilds it once under the gate.
-A repacked log covers its inputs' full sequence interval and retains their
+A repacked log segment covers its inputs' full sequence interval and retains their
 Delete records. Each replacement DATA file and its matching PARITY are verified
 and synced before catalog publication. The catalog reaches stable storage before the
 temporary CURRENT is synced, renamed and directory-synced.
@@ -230,8 +233,9 @@ retains both layouts for validated reopen. After durable publication, remapping
 checks file, offset and sequence so later changes win. Reclamation waits for all
 pins. No incremental publication advances the user sequence.
 
-Manual `Compact(ctx)` durably captures a complete prefix at cutoff C, validates its segment
-headers and records, and rebuilds cutoff state outside root locks. It groups live
+Manual `Compact(ctx)` durably captures the complete DATA history through checkpoint
+cutoff sequence C, validates segment headers and records, and rebuilds the
+captured state outside root locks. It groups live
 Put records by source file, reads them in offset order with one source descriptor
 open at a time, and writes snapshot files using the same size target as log appends,
 preserving record sequences. Tombstones can
@@ -248,12 +252,12 @@ no reader/backup/compaction pins. The compaction releases its own capture pins
 before cleanup; successful unlinks also remove retired registry objects.
 After an unlink, a failed directory sync stays pending. The next manual cleanup
 or worker retirement pass retries it, even if there are no more files to remove.
-Leased read descriptors close after their final release. Pin release performs
-no disk I/O. The worker revisits its pending retirements, and full checkpoint
+Retired read descriptors close after their final read-handle lease is released. Pin release performs
+no disk I/O. The worker revisits its pending retirements, and a full DATA checkpoint
 and validated reopen can also clean eligible files. `DB.AutoCompactionStatus`
 reports the worker's deferral reason and most recent error. Its
-`PinnedRetiredDataBytes` records the retired DATA bytes held by leases at the
-latest retirement check. Its `UnlinkedBytes` counts the logical file bytes
+`PinnedRetiredDataBytes` records the logical bytes of retired DATA segments
+retained by segment pins or live index references at the latest retirement check. Its `UnlinkedBytes` counts the logical file bytes
 unlinked by the worker during this DB lifetime.
 
 Provision space for current data, copied live records and tombstones, headers,
@@ -298,8 +302,7 @@ PARITY or wait for its sync. The worker briefly yields between stripe reads
 during foreground writes or a backup. Background work still consumes CPU and
 disk bandwidth. Restored databases build
 missing sidecars on Open. Replaced DATA and its sidecar are retired together.
-Compaction protects its private output before it becomes selected. Logical
-backups contain the original DATA and catalog hashes.
+Compaction protects its private output before it becomes selected. File backups contain committed DATA bytes and the selected catalog with its sealed DATA digests.
 
 Protection starts when the complete sidecar reaches disk. Active DATA and newly
 sealed DATA waiting for the worker remain exposed to local media damage. Calling
@@ -313,10 +316,10 @@ successful commits retain their original durability contract.
 ### Automatic repair while serving reads
 
 When a live read finds localized damage in a sealed DATA file, Tarp uses that
-file's pinned catalog identity and recovery file. Concurrent reports for the
+file's pinned catalog identity and PARITY sidecar. Concurrent reports for the
 same file share a repair. Reconstruction uses a private file in the DB
 workspace. Before replacement Tarp verifies the actual staged bytes against
-the catalog SHA-256 and syncs the file. It publishes the replacement with a
+the catalog-selected DATA digest and syncs the file. It publishes the replacement with a
 rename and directory sync, and refreshes the pooled read descriptor before
 retrying. This leaves the commit frontier, record addresses and sequences
 unchanged.
@@ -369,7 +372,7 @@ untrusted index retains its existing fail-stop behavior.
 
 Manual and automatic compaction first attempt ordinary repair of the original
 file. When a valid sidecar confirms multiple lost blocks in a stripe, the
-automatic worker can run a full checkpoint even if the damaged file would
+automatic worker can run a full DATA checkpoint even if the damaged file would
 normally be too small or too live to clean. Replacing all history through
 the cutoff lets Tarp discard a lost current value without exposing an older Put.
 If the current sequence is already checkpointed and there is no known DATA damage,
@@ -400,7 +403,7 @@ including scans or backups that began before recovery.
 
 ### Offline repair and salvage
 
-`RepairParity(ctx, dir)` takes the database lock without opening the DB for
+`RepairDataFromParity(ctx, dir)` takes the database lock without opening the DB for
 queries. Each selected sealed DATA is checked against its catalog length and hash.
 For a damaged file it checks the recovery material, reconstructs one bad block per
 stripe, verifies the private candidate against the original SHA-256, syncs it,
@@ -412,7 +415,7 @@ Successful completion includes validation of the committed database. Keep a
 backup on independent storage for loss of the volume or the commit metadata.
 
 For an unrepairable sealed file with a valid sidecar, `SalvageData` exports
-checked historical records in physical order. It reconstructs singly damaged
+checked historical records in ascending segment offset order. It reconstructs singly damaged
 stripes, drops records touching unreadable blocks, then resumes at a verified
 record start. Reported byte ranges identify the remaining gaps. A missing region
 can hold a newer Put, Delete or another member of a batch. The callback can also
@@ -426,7 +429,7 @@ the final result is known. The report uses one range per disjoint damaged area.
 the captured DATA. It shares the maintenance slot with compaction. Foreground
 writes and rotation can proceed while a private B+tree is bulk-built from the
 validated record stream. After syncing the staging file, the publisher renames the INDEX and syncs
-the database directory. Under the gate, it checks the prefix against the latest
+the database directory. Under the gate, it checks the covered catalog prefix against the latest
 catalog. A new MANIFEST and CURRENT then select it
 together with the latest committed tail. Cleaning and compaction invalidate
 the descriptor when replacing its physical layout. Sealed DATA digests also

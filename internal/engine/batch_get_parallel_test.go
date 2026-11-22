@@ -185,8 +185,8 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 			mustPut(t, db, "~", "") // Distinct workers must be able to block and fail independently.
 		}
 		mustPut(t, db, "z", "z") // Keep the health probe cached.
-		file := testLoc(t, db, "a").File
-		refs := file.References()
+		segment := testLoc(t, db, "a").Segment
+		refs := segment.References()
 		done := startBatchGet(db, [][]byte{[]byte("a"), []byte("b"), []byte("a"), []byte("c"), []byte("?")})
 		synctest.Wait()
 		if _, err := db.Get([]byte("z")); !errors.Is(err, ErrUnhealthy) {
@@ -197,7 +197,7 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 			t.Fatalf("BatchGet returned with a DATA read in flight: %+v", outcome)
 		default:
 		}
-		if got := file.References(); got != refs+3 {
+		if got := segment.References(); got != refs+3 {
 			t.Fatalf("pins while draining = %d, want %d", got, refs+3)
 		}
 		s := db.Stats()
@@ -209,7 +209,7 @@ func TestBatchGetDrainsInFlightReadBeforeReleasingPinsOnError(t *testing.T) {
 		if outcome.results != nil || !errors.Is(outcome.err, ErrCorrupt) {
 			t.Fatalf("BatchGet after drain = %+v, %v", outcome.results, outcome.err)
 		}
-		if got := file.References(); got != refs || started.Load() != 2 {
+		if got := segment.References(); got != refs || started.Load() != 2 {
 			t.Fatalf("after drain: pins = %d, want %d; reads = %d, want 2", got, refs, started.Load())
 		}
 	})

@@ -44,7 +44,7 @@ func missingIndexFile(id uint64) error {
 
 func (db *DB) locationLocked(key string) (storage.Location, bool, error) {
 	a, ok, err := db.keys.Lookup(key)
-	if err == nil && ok && db.files[a.FileID] == nil {
+	if err == nil && ok && db.segments[a.FileID] == nil {
 		err = missingIndexFile(a.FileID)
 	}
 	if err != nil {
@@ -54,7 +54,7 @@ func (db *DB) locationLocked(key string) (storage.Location, bool, error) {
 	if !ok {
 		return storage.Location{}, false, nil
 	}
-	return storage.At(db.files[a.FileID], a), true, nil
+	return storage.At(db.segments[a.FileID], a), true, nil
 }
 
 func (db *DB) lookupLocation(key string) (storage.Location, bool, error) {
@@ -89,16 +89,16 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 	}
 	var old storage.Location
 	if found {
-		file := next.File
-		if file == nil || a.FileID != file.ID {
-			file = db.files[a.FileID]
+		segment := next.Segment
+		if segment == nil || a.FileID != segment.ID {
+			segment = db.segments[a.FileID]
 		}
-		if file == nil {
+		if segment == nil {
 			err := missingIndexFile(a.FileID)
 			db.poison(err)
 			return old, err
 		}
-		old = storage.At(file, a)
+		old = storage.At(segment, a)
 	}
 	if err == nil && mutation.Delete && !found {
 		return old, ErrNotFound
@@ -106,15 +106,15 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 	return old, err
 }
 
-func (db *DB) dropLocation(file *storage.File) {
-	if file.LiveKeys.Add(-1) == 0 {
-		delete(db.files, file.ID)
+func (db *DB) dropLocation(segment *storage.DataSegment) {
+	if segment.LiveKeys.Add(-1) == 0 {
+		delete(db.segments, segment.ID)
 	}
 }
 
-func (db *DB) addLocation(file *storage.File) {
-	if file.LiveKeys.Add(1) == 1 {
-		db.files[file.ID] = file
+func (db *DB) addLocation(segment *storage.DataSegment) {
+	if segment.LiveKeys.Add(1) == 1 {
+		db.segments[segment.ID] = segment
 	}
 }
 
@@ -164,10 +164,10 @@ func (db *DB) relocateBatch(batch []storage.Relocation) error {
 }
 
 func (db *DB) accountRelocation(move storage.Relocation) {
-	db.dropLocation(move.Old.File)
-	db.addLocation(move.Next.File)
-	move.Old.File.LiveBytes.Add(-move.Old.Bytes)
-	move.Next.File.LiveBytes.Add(move.Next.Bytes)
+	db.dropLocation(move.Old.Segment)
+	db.addLocation(move.Next.Segment)
+	move.Old.Segment.LiveBytes.Add(-move.Old.RecordBytes)
+	move.Next.Segment.LiveBytes.Add(move.Next.RecordBytes)
 }
 
 // A durable writer has already captured file addresses for its staged keys.

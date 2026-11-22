@@ -40,7 +40,7 @@ func TestMemoryConcurrentReadersAndPublishedMultiKeyTransactions(t *testing.T) {
 	for seq := uint64(1); seq <= 100; seq++ {
 		tx := db.Begin()
 		for n := range width {
-			if err := tx.Put(fmt.Sprint(n), index.Address{FileID: 1, Offset: int64(n) * 64, Bytes: 64, Sequence: seq}); err != nil {
+			if err := tx.Put(fmt.Sprint(n), index.Address{FileID: 1, RecordOffset: int64(n) * 64, RecordBytes: 64, Sequence: seq}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -52,7 +52,7 @@ func TestMemoryConcurrentReadersAndPublishedMultiKeyTransactions(t *testing.T) {
 func TestRelocateChecksFullAddressAndPreservesExistingViews(t *testing.T) {
 	db := memory.New()
 	defer db.Close()
-	old := index.Address{FileID: 1, Offset: 64, Bytes: 80, ValueBytes: 16, Sequence: 5}
+	old := index.Address{FileID: 1, RecordOffset: 64, RecordBytes: 80, ValueBytes: 16, Sequence: 5}
 	next := old
 	next.FileID = 7
 	tx := db.Begin()

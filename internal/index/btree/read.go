@@ -159,7 +159,7 @@ func (p *page) rangeEntries(s *pager, start int, upper string, out []rangeEntry)
 		}
 	}
 	var suffixes [rangeGroupSize][]byte
-	prefix := p[header : header+int(p[5])]
+	sharedKeyPrefix := p[header : header+int(p[5])]
 	total := 0
 	for start+n < end {
 		var raw rawCell
@@ -187,7 +187,7 @@ func (p *page) rangeEntries(s *pager, start int, upper string, out []rangeEntry)
 			return 1, false, nil
 		}
 		suffixes[n] = raw.suffix
-		total += len(prefix) + len(raw.suffix)
+		total += len(sharedKeyPrefix) + len(raw.suffix)
 		out[n].addr = raw.address
 		n++
 	}
@@ -195,7 +195,7 @@ func (p *page) rangeEntries(s *pager, start int, upper string, out []rangeEntry)
 	keys.Grow(total)
 	for i, suffix := range suffixes[:n] {
 		offset := keys.Len()
-		keys.Write(prefix)
+		keys.Write(sharedKeyPrefix)
 		keys.Write(suffix)
 		out[i].key = keys.String()[offset:]
 	}

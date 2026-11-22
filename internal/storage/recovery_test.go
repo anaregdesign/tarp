@@ -41,16 +41,16 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = image.replayIndexed(t.Context(), m)
+	err = image.rebuildIndexFromData(t.Context(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, err := validateReadOnly(t.Context(), dir, verifyWindowBytes)
-	if err != nil || image.Required != raw.Required || image.LiveKeys != uint64(len(puts)) || m.Count() != len(puts) {
-		t.Fatalf("replayed %d, limits %+v, err=%v", image.LiveKeys, image.Required, err)
+	if err != nil || image.LiveRecordSizes != raw.LiveRecordSizes || image.LiveKeys != uint64(len(puts)) || m.Count() != len(puts) {
+		t.Fatalf("replayed %d, limits %+v, err=%v", image.LiveKeys, image.LiveRecordSizes, err)
 	}
 	var live int64
-	for _, f := range image.Files {
+	for _, f := range image.Segments {
 		live += f.LiveKeys.Load()
 	}
 	if live != int64(len(puts)) {
@@ -67,7 +67,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = image.replayIndexed(t.Context(), failing)
+		err = image.rebuildIndexFromData(t.Context(), failing)
 		var source *SourceError
 		if !errors.As(err, &source) || !errors.Is(err, ErrCorrupt) || failing.Count() != 0 {
 			t.Fatalf("failed replay: count=%d, err=%v", failing.Count(), err)
@@ -80,7 +80,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 // recoverable by treating the suffix as an independent initial bulk build.
 func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	dir, scratch := t.TempDir(), t.TempDir()
-	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 2048, RecordBytes: 1024, TargetSegmentBytes: 4096}
+	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 2048, MaxRecordBytes: 1024, TargetSegmentBytes: 4096}
 	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	if err := s.Rotate(); err != nil {
 		t.Fatal(err)
 	}
-	build, err := s.BeginIndex()
+	build, err := s.BeginIndexCheckpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	indexPath := filepath.Join(dir, IndexName(s.Current.UUID, s.Catalog.Index.ID))
-	coveredPath := s.Files[s.Catalog.Files[0].ID].Path
+	coveredPath := s.Segments[s.Catalog.Entries[0].ID].Path
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -134,10 +134,10 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	}
 	oracle := memory.New()
 	defer oracle.Close()
-	if err := want.replayIndexed(t.Context(), oracle); err != nil {
+	if err := want.rebuildIndexFromData(t.Context(), oracle); err != nil {
 		t.Fatal(err)
 	}
-	cfg.RecordBytes, cfg.ValueCacheBudgetBytes = want.Required.RecordBytes, want.Required.ValueCacheBudgetBytes
+	cfg.MaxRecordBytes, cfg.ValueCacheBudgetBytes = want.LargestLiveRecordBytes, want.LargestLiveCacheChargeBytes
 	fresh := func(*Store) (index.Backend, error) { return memory.New(), nil }
 	load := func(ctx context.Context, _ *Store, r io.Reader, n int64, visit func(string, index.Address) error) (index.Backend, error) {
 		return btree.ImportPacked(ctx, r, n, scratch, btree.MinBudget, visit)
@@ -150,20 +150,20 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		coveredPayload := db.Catalog.Files[0].Bytes - format.SegmentHeaderBytes
+		coveredPayload := db.Catalog.Entries[0].Bytes - format.SegmentHeaderBytes
 		coveredHeader := int64(2 * format.SegmentHeaderBytes)
 		if indexed {
 			coveredPayload = 0
 			coveredHeader = format.SegmentHeaderBytes
 		}
-		tailPayload := db.Catalog.Files[1].Bytes + db.Current.ActiveEnd - 2*format.SegmentHeaderBytes
+		tailPayload := db.Catalog.Entries[1].Bytes + db.Current.ActiveCommittedEndOffset - 2*format.SegmentHeaderBytes
 		if reads["covered-payload"] != coveredPayload || reads["tail-payload"] != tailPayload ||
 			reads["covered-header"] != coveredHeader || reads["tail-header"] < 2*format.SegmentHeaderBytes ||
 			reads["replay-header"] != 0 || reads["replay-payload"] != 0 {
 			t.Fatalf("indexed=%t: Open DATA reads %v, want covered %d and tail %d payload bytes", indexed, reads, coveredPayload, tailPayload)
 		}
-		if !db.IndexCheckpointHit || keys.Count() != oracle.Count() || db.MaxValueBytes != want.MaxValueBytes {
-			t.Fatalf("indexed=%t: hit=%t, live=%d, max value=%d", indexed, db.IndexCheckpointHit, keys.Count(), db.MaxValueBytes)
+		if !db.IndexCheckpointValidated || keys.Count() != oracle.Count() || db.LargestLiveValueBytes != want.LargestLiveValueBytes {
+			t.Fatalf("indexed=%t: hit=%t, live=%d, max value=%d", indexed, db.IndexCheckpointValidated, keys.Count(), db.LargestLiveValueBytes)
 		}
 		for _, key := range []string{"largest", "survives", "gone", "new"} {
 			got, found, err := keys.Lookup(key)
@@ -172,8 +172,8 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 				t.Fatalf("%s: checkpoint (%+v, %t, %v), oracle (%+v, %t, %v)", key, got, found, err, addr, live, oracleErr)
 			}
 		}
-		for id, f := range db.Files {
-			expect := want.Files[id]
+		for id, f := range db.Segments {
+			expect := want.Segments[id]
 			if f.LiveBytes.Load() != expect.LiveBytes.Load() || f.LiveKeys.Load() != expect.LiveKeys.Load() || f.DeleteBytes.Load() != expect.DeleteBytes.Load() {
 				t.Fatalf("file %d: checkpoint live keys/bytes/deletes %d/%d/%d, full replay %d/%d/%d", id, f.LiveKeys.Load(), f.LiveBytes.Load(), f.DeleteBytes.Load(), expect.LiveKeys.Load(), expect.LiveBytes.Load(), expect.DeleteBytes.Load())
 			}
@@ -203,7 +203,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !db.IndexCheckpointHit {
+	if !db.IndexCheckpointValidated {
 		t.Fatal("Indexed open did not reuse the checkpoint")
 	}
 	// A subsequent checkpoint must validate the previously attested DATA
@@ -212,7 +212,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := db.Current
-	refresh, err := db.BeginIndex()
+	refresh, err := db.BeginIndexCheckpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 }
 
 func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
-	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 1024, RecordBytes: 200, TargetSegmentBytes: 1024, IndexedOpen: true}
+	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 1024, MaxRecordBytes: 200, TargetSegmentBytes: 1024, IndexedOpen: true}
 	dir, clone, scratch := t.TempDir(), t.TempDir(), t.TempDir()
 	db, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
@@ -264,7 +264,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 		if err := db.Rotate(); err != nil {
 			t.Fatal(err)
 		}
-		build, err := db.BeginIndex()
+		build, err := db.BeginIndexCheckpoint()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -285,8 +285,8 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 	}
 	a, target := makeCheckpoint(dir, "ours")
 	b, other := makeCheckpoint(clone, "peer")
-	if a.UUID != b.UUID || a.Sequence != b.Sequence || a.Generation != b.Generation || a.ActiveID != b.ActiveID ||
-		a.ActiveEnd != b.ActiveEnd || a.ManifestID != b.ManifestID || filepath.Base(target) != filepath.Base(other) || a.ManifestHash == b.ManifestHash {
+	if a.UUID != b.UUID || a.LastUserSequence != b.LastUserSequence || a.PublicationGeneration != b.PublicationGeneration || a.ActiveID != b.ActiveID ||
+		a.ActiveCommittedEndOffset != b.ActiveCommittedEndOffset || a.ManifestID != b.ManifestID || filepath.Base(target) != filepath.Base(other) || a.ManifestDigest == b.ManifestDigest {
 		t.Fatal("copies should differ only in authenticated history at the same physical cut")
 	}
 	own, err := os.ReadFile(target)
@@ -308,8 +308,8 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, found, err := keys.Lookup("ours")
-		if db.IndexCheckpointHit || !found || err != nil || keys.Count() != 1 || db.Files[got.FileID].LiveKeys.Load() != 1 {
-			t.Fatalf("retry recovered checkpoint=%t, key=%+v, live=%d, err=%v", db.IndexCheckpointHit, got, keys.Count(), err)
+		if db.IndexCheckpointValidated || !found || err != nil || keys.Count() != 1 || db.Segments[got.FileID].LiveKeys.Load() != 1 {
+			t.Fatalf("retry recovered checkpoint=%t, key=%+v, live=%d, err=%v", db.IndexCheckpointValidated, got, keys.Count(), err)
 		}
 		if err := errors.Join(keys.Close(), db.Close()); err != nil {
 			t.Fatal(err)
@@ -338,7 +338,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 		// A short read and failed cleanup can arrive together. Preserve the
 		// operational cause even if the failed import also qualifies as a miss.
 		checkIO := func(context.Context, *Store, io.Reader, int64, func(string, index.Address) error) (index.Backend, error) {
-			return nil, fmt.Errorf("read/close: %w", errors.Join(ErrIndexMiss, io.ErrUnexpectedEOF, operational))
+			return nil, fmt.Errorf("read/close: %w", errors.Join(ErrIndexCheckpointUnusable, io.ErrUnexpectedEOF, operational))
 		}
 		if db, keys, err := OpenIndexed(t.Context(), dir, cfg, true, nil, fresh, checkIO); db != nil || keys != nil || !errors.Is(err, operational) {
 			t.Fatalf("joined index and operational failures should preserve %v: %v", operational, err)
@@ -348,8 +348,8 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []uint64{image.Current.ActiveID, image.Catalog.Files[0].ID} {
-		path := image.Files[id].Path
+	for _, id := range []uint64{image.Current.ActiveID, image.Catalog.Entries[0].ID} {
+		path := image.Segments[id].Path
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

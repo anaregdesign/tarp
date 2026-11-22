@@ -11,7 +11,7 @@ import (
 )
 
 type handle struct {
-	file    *File
+	segment *DataSegment
 	fd      *os.File
 	used    int
 	retired atomic.Bool
@@ -20,10 +20,10 @@ type handle struct {
 
 // Once sealed DATA is known to be damaged, a valid record checksum alone
 // cannot identify a foreign inode with the same key and sequence. Check the
-// header on the descriptor that supplied the bytes. A lease can outlive both
+// header on the descriptor that supplied the bytes. A read-handle lease can outlive both
 // replacement of the path and clearing the unavailable marker.
 func (h *handle) verifyReadIdentity() error {
-	r := h.file.sealed.Load()
+	r := h.segment.sealed.Load()
 	if r == nil || r.unavailable.Load() == nil && !h.retired.Load() {
 		return nil
 	}
@@ -38,18 +38,18 @@ type handles struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
 	limit    int
-	items    map[*File]*handle
+	items    map[*DataSegment]*handle
 	lru      list.List
 	closeErr error // deferred errors from returning invalidated descriptors
 }
 
 func newHandles(limit int) *handles {
-	h := &handles{limit: limit, items: make(map[*File]*handle)}
+	h := &handles{limit: limit, items: make(map[*DataSegment]*handle)}
 	h.cond = sync.NewCond(&h.mu)
 	return h
 }
 
-func (h *handles) acquire(f *File) (*handle, error) {
+func (h *handles) acquire(f *DataSegment) (*handle, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for {
@@ -63,7 +63,7 @@ func (h *handles) acquire(f *File) (*handle, error) {
 			if err != nil {
 				return nil, err
 			}
-			got := &handle{file: f, fd: fd, used: 1}
+			got := &handle{segment: f, fd: fd, used: 1}
 			got.node = h.lru.PushFront(got)
 			h.items[f] = got
 			return got, nil
@@ -76,7 +76,7 @@ func (h *handles) acquire(f *File) (*handle, error) {
 			}
 		}
 		if idle != nil {
-			delete(h.items, idle.file)
+			delete(h.items, idle.segment)
 			h.lru.Remove(idle.node)
 			if err := idle.fd.Close(); err != nil {
 				return nil, err
@@ -103,7 +103,7 @@ func (h *handles) release(got *handle) {
 // invalidate detaches a descriptor from the lookup table immediately. Existing
 // positional reads retain their lease on that inode. It still counts toward the
 // descriptor limit until the last lease closes it.
-func (h *handles) invalidate(f *File) error {
+func (h *handles) invalidate(f *DataSegment) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	got := h.items[f]
@@ -120,7 +120,7 @@ func (h *handles) invalidate(f *File) error {
 	return got.fd.Close()
 }
 
-func (h *handles) forget(f *File) error {
+func (h *handles) forget(f *DataSegment) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	got := h.items[f]
@@ -128,7 +128,7 @@ func (h *handles) forget(f *File) error {
 		return nil
 	}
 	if got.used != 0 {
-		return errors.New("storage: attempted to close a leased file")
+		return errors.New("storage: attempted to close a leased DATA read handle")
 	}
 	delete(h.items, f)
 	h.lru.Remove(got.node)
@@ -142,7 +142,7 @@ func (h *handles) close() error {
 	for n := h.lru.Front(); n != nil; n = n.Next() {
 		got := n.Value.(*handle)
 		if got.used != 0 {
-			err = errors.Join(err, errors.New("storage: active lease at close"))
+			err = errors.Join(err, errors.New("storage: active read-handle lease at close"))
 		}
 		err = errors.Join(err, got.fd.Close())
 	}

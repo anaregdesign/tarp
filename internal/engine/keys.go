@@ -13,8 +13,8 @@ func (db *DB) Keys(ctx context.Context) iter.Seq2[[]byte, error] {
 }
 
 // KeysPrefix streams matching encoded keys without reading DATA.
-func (db *DB) KeysPrefix(ctx context.Context, prefix []byte) iter.Seq2[[]byte, error] {
-	bounds := index.PrefixBounds(prefix)
+func (db *DB) KeysPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[[]byte, error] {
+	bounds := index.PrefixBounds(encodedPrefix)
 	return func(yield func([]byte, error) bool) {
 		err := db.walkSnapshot(ctx, false, bounds, func(k, _ []byte) bool { return yield(k, nil) })
 		if err != nil {
@@ -31,14 +31,14 @@ type prefixKeyCopies struct {
 }
 
 func (c *prefixKeyCopies) copyKey(key string) []byte {
-	const blockSize = 512
+	const keyCopyBufferBytes = 512
 	n := len(key)
-	if n <= blockSize/4 {
+	if n <= keyCopyBufferBytes/4 {
 		if c.small >= 4 {
 			if len(c.tail) < n {
 				// Earlier results may be changing on another goroutine. Never
-				// grow a previous block by copying its published contents.
-				c.tail = make([]byte, blockSize)
+				// grow a previous key copy buffer by copying its published contents.
+				c.tail = make([]byte, keyCopyBufferBytes)
 			}
 			result := c.tail[:n:n]
 			copy(result, key)

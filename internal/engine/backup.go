@@ -62,7 +62,7 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 			return ctx.Err()
 		}
 	}
-	err = db.store.RetryMaintenance(ctx, capture.Files, func() error {
+	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error {
 		return storage.BackupWithIndex(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex)
 	}, nil)
 	if err != nil {
@@ -115,18 +115,16 @@ func VerifyBackupWithScratch(ctx context.Context, source, scratch string) (stora
 
 func (l RestoreLimits) backupConfig() (storage.Config, error) {
 	limits, err := l.normalized()
-	return storage.Config{ValueCacheBudgetBytes: limits.ValueCacheBudgetBytes, RecordBytes: limits.MaxRecordBytes}, err
+	return storage.Config{ValueCacheBudgetBytes: limits.ValueCacheBudgetBytes, MaxRecordBytes: limits.MaxRecordBytes}, err
 }
 
 // Check reports whether these destination limits can hold the measured live records.
-func (l RestoreLimits) Check(required RestoreLimits) error {
+func (l RestoreLimits) Check(sizes storage.LiveRecordSizes) error {
 	cfg, err := l.backupConfig()
 	if err != nil {
 		return err
 	}
-	return publicCause(cfg.CheckLimits(storage.RequiredLimits{
-		ValueCacheBudgetBytes: required.ValueCacheBudgetBytes, RecordBytes: required.MaxRecordBytes,
-	}))
+	return publicCause(cfg.CheckLimits(sizes))
 }
 
 func restoreWithIO(ctx context.Context, req RestoreRequest, fs *storage.IO) error {

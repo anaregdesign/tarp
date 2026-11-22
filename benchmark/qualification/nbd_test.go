@@ -89,7 +89,7 @@ func TestNBDFlushFUAAndDisconnectControls(t *testing.T) {
 	for _, mode := range []string{"volatile", "flush", "fua"} {
 		t.Run(mode, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "disk.raw")
-			disk, err := CreateDisk(path, pageBytes)
+			disk, err := CreateDisk(path, overlayPageBytes)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -118,7 +118,7 @@ func TestNBDFlushFUAAndDisconnectControls(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			expected := make([]byte, pageBytes)
+			expected := make([]byte, overlayPageBytes)
 			if mode != "volatile" {
 				copy(expected, payload)
 			}

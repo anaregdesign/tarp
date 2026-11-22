@@ -2,7 +2,7 @@
 
 [Issue #148](https://github.com/anaregdesign/tarp/issues/148) evaluated the `KeysPrefix` and `ScanPrefix` methods selected for adoption in [PR #149](https://github.com/anaregdesign/tarp/pull/149). The 2026-11-22 comparison uses production source at `59ddf199` for the original API and `678dd2c9` for the measured implementation. Both versions read the same storage and key formats.
 
-For an interleaved graph of 16,385 edges, decoding the 56 outgoing edges for a typical vertex took **95.27 ms** on the original typed B+tree scan and **0.324 ms** on the prototype. The prototype can return just the heads through the key index. Fetching the weights also requires reading DATA. After evicting DATA, a query that returned 2,048 edges scattered throughout the fixture read nearly all its pages.
+For an interleaved graph of 16,385 edges, decoding the 56 outgoing edges for a typical vertex took **95.27 ms** on the original typed B+tree scan and **0.324 ms** on the prototype. The prototype can return just the heads through the key index. Fetching the weights also requires reading DATA. After evicting DATA, a query that returned 2,048 edges scattered throughout the fixture accounted for nearly as many process read bytes as a full DATA read.
 
 ## API and access paths
 
@@ -68,7 +68,7 @@ For early termination, the memory index still captures the full matching subset 
 
 Each measured sample cycles once through all 256 ordinary tails, stepping by 73 and requesting 56 results per tail. The budgets are the configured B+tree memory budgets. The pager counts a page read when the index must fetch a page from its file. The OS can satisfy that read from cache.
 
-| Budget | Iterator | Filter | Prefix | Ratio | Filter page reads/query | Prefix page reads/query |
+| Budget | Iterator | Filter | Prefix | Ratio | Filter B+tree page reads/query | Prefix B+tree page reads/query |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1MiB | Keys | 3.44 ms | 8.10 µs | 424× | 151 | 0.53 |
 | 1MiB | Scan | 9.87 ms | 27.7 µs | 357× | 151 | 0.53 |
@@ -86,7 +86,7 @@ Both arms restore the same immutable backup for each write order. Each restored 
 | interleaved | 56 | 24.5 ms | 1.34 ms | 18.4× | 2,768 | 240 |
 | interleaved | 2,048 | 23.9 ms | 18.8 ms | 1.27× | 2,768 | 2,764 |
 
-The encoded prefix groups the index entries. DATA records follow write order. This explains how the prototype can skip decoding thousands of unrelated rows yet still touch most DATA pages for a high-degree Tail written in shuffled order.
+An encoded key prefix groups matching index entries in key order. In this fixture the DATA records follow write order. This explains how the prototype can skip decoding thousands of unrelated rows yet still read across most of the selected DATA for a high-degree Tail written in shuffled order.
 
 ## B+tree tuning history
 
@@ -102,7 +102,7 @@ Each row below is a separately built and measured revision. These are earlier tu
 - **V1** (`bea50277`) added seek and streamed one item per reader permit. In a 2 s profile for 2,048 keys, the original per-entry cursor accounted for roughly half of sampled CPU time including descendants.
 - **V2** (`07fac71a`) combined seek and the first result, then copied up to 16 short entries from one leaf per permit. Each callback runs with the permit released. Overflow keys are processed individually. The 2,048-key profile attributed 24% cumulative CPU time to short string concatenation.
 - **V3** (`b9a835b2`) reconstructed short keys into one owned string per group. It used the last candidate to skip individual upper-bound comparisons when possible. The first match and overflow keys still take the single-item path.
-- **V4** (`678dd2c9`) gave short caller-owned keys disjoint slices in a 512-byte block after four small results. Each returned slice has capacity equal to length. A retained short key can keep its block alive. This optimization is shared by the two index modes and both iterators.
+- **V4** (`678dd2c9`) gave short caller-owned keys disjoint slices in a 512-byte key-copy buffer after four small results. Each returned slice has capacity equal to length. A retained short key can keep its key-copy buffer alive. This optimization is shared by the two index modes and both iterators.
 
 | Tuning variant | First key | 56 keys | 2,048 keys | 2,048 values |
 | --- | --- | --- | --- | --- |
@@ -114,7 +114,7 @@ Each row below is a separately built and measured revision. These are earlier tu
 | s512 | 0.99 µs | 5.33 µs | 149 µs | 912 µs |
 | s1024 | 1.00 µs | 5.85 µs | 154 µs | 924 µs |
 
-The w8/w32/w64 rows change only V3's leaf group width from 16 to 8/32/64. The s256/s512/s1024 rows compare 256/512/1,024-byte output blocks on V4. The width sweep traded first-result latency and buffer size for modest changes to larger scans. In the final block sweep, 512 produced the lowest median for the 56-key, 2,048-key and 2,048-value queries among those three sizes. The prototype retains width 16 and a 512-byte block. The remaining cost for shuffled, DATA-evicted high-degree reads is the set of DATA pages touched. Reorganizing DATA for graph locality would require evaluating a different write/compaction policy.
+The w8/w32/w64 rows change only V3's leaf group width from 16 to 8/32/64. The s256/s512/s1024 rows compare 256/512/1,024-byte key-copy buffers on V4. The width sweep traded first-result latency and buffer size for modest changes to larger scans. In the final key-copy buffer sweep, 512 produced the lowest median for the 56-key, 2,048-key and 2,048-value queries among those three sizes. The prototype retains width 16 and a 512-byte key-copy buffer. The remaining cost for shuffled, DATA-evicted high-degree reads is the spread of matching records across DATA file offsets. Reorganizing DATA for graph locality would require evaluating a different write/compaction policy.
 
 ### Memory snapshot tuning
 

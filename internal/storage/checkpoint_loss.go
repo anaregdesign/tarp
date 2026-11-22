@@ -9,14 +9,14 @@ import (
 var ErrLossSourceRepaired = errors.New("a checkpoint loss source was repaired")
 
 type lossSource struct {
-	repair     *sealedRepair
-	generation uint64
+	repair           *sealedRepair
+	repairGeneration uint64
 }
 
 // GuardLosses waits outside the writer gate for attempts that could restore
 // discarded records. Hold the affected files' repair locks in catalog order
 // through the CURRENT switch so a successful repair cannot race publication.
-func (c *Checkpoint) GuardLosses(ctx context.Context) (func(), error) {
+func (c *DataCheckpoint) GuardLosses(ctx context.Context) (func(), error) {
 	if len(c.lossSources) == 0 {
 		return func() {}, nil
 	}
@@ -37,7 +37,7 @@ func (c *Checkpoint) GuardLosses(ctx context.Context) (func(), error) {
 				err := &UncertainReadRepair{Err: r.uncertain}
 				release()
 				return nil, err
-			case r.generation.Load() != src.generation || r.unavailable.Load() == nil:
+			case r.repairGeneration.Load() != src.repairGeneration || r.unavailable.Load() == nil:
 				release()
 				return nil, ErrLossSourceRepaired
 			case r.running != nil:

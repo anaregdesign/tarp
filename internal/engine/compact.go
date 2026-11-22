@@ -14,10 +14,10 @@ import (
 type CompactResult struct {
 	DroppedKeys            uint64 // Unrecoverable live key versions omitted from the published checkpoint.
 	UnlinkedBytes          int64  // Logical lengths of files unlinked during cleanup.
-	PinnedRetiredDataBytes int64  // Logical lengths of retired DATA files still held by leases during cleanup.
+	PinnedRetiredDataBytes int64  // Retired DATA bytes retained by segment pins or live index references during cleanup.
 }
 
-// Compact replaces the complete committed prefix with an online checkpoint.
+// Compact builds a full DATA checkpoint through the captured user sequence.
 // It requires temporary space and does not impose a total disk quota.
 func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	var result CompactResult
@@ -31,13 +31,13 @@ func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	if err := ctx.Err(); err != nil {
 		return result, operationError("compact", "context", err)
 	}
-	if !db.compact.CompareAndSwap(false, true) {
+	if !db.manualCheckpoint.CompareAndSwap(false, true) {
 		return result, ErrBusy
 	}
 	db.cancelAutoRecovery()
 	db.resumeCleaner()
 	defer func() {
-		db.compact.Store(false)
+		db.manualCheckpoint.Store(false)
 		db.notifyCleaner()
 	}()
 	select {
@@ -73,12 +73,12 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		db.writer.Unlock()
 		return result, err
 	}
-	if !force && db.store.Current.Sequence == db.store.Catalog.Cutoff && !db.hasUnavailableSource() {
+	if !force && db.store.Current.LastUserSequence == db.store.Catalog.CheckpointCutoffSequence && !db.hasUnavailableSource() {
 		n, pinned, err := db.store.Cleanup()
 		db.writer.Unlock()
 		return CompactResult{UnlinkedBytes: n, PinnedRetiredDataBytes: pinned}, compactCleanupError(err)
 	}
-	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
+	if db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		if err := db.sealActive(); err != nil {
 			db.storageFailure(err)
 			db.writer.Unlock()
@@ -103,7 +103,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 			capture.Release()
 		}
 	}()
-	checkpoint := db.store.NewCheckpoint(capture)
+	checkpoint := db.store.NewDataCheckpoint(capture)
 	defer func() {
 		if returned != nil && db.health() == nil {
 			if err := checkpoint.Discard(); err != nil {
@@ -111,7 +111,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 			}
 		}
 	}()
-	reserve := func() (*storage.File, error) {
+	reserve := func() (*storage.DataSegment, error) {
 		db.writer.Lock()
 		defer db.writer.Unlock()
 		if err := ctx.Err(); err != nil {
@@ -120,7 +120,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		if err := db.health(); err != nil {
 			return nil, err
 		}
-		return db.store.ReserveSnapshotFile()
+		return db.store.ReserveSnapshotSegment()
 	}
 	moves, lost := db.store.NewRelocations(), db.store.NewRelocations()
 	defer func() {
@@ -134,7 +134,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 	}()
 	reset := func() error {
 		discardErr := errors.Join(checkpoint.Discard(), moves.Close())
-		checkpoint = db.store.NewCheckpoint(capture)
+		checkpoint = db.store.NewDataCheckpoint(capture)
 		moves = db.store.NewRelocations()
 		return discardErr
 	}
@@ -153,7 +153,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		}
 		return checkpoint.Copy(ctx, history, live, moves, reserve)
 	}
-	err = db.store.RetryMaintenance(ctx, capture.Files, func() error { return copyData(false) }, reset)
+	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error { return copyData(false) }, reset)
 	if storage.IsDataUnavailable(err) && !errors.Is(err, syscall.ENOSPC) && !errors.Is(err, syscall.EDQUOT) {
 		if err = reset(); err == nil {
 			err = copyData(true)
@@ -187,7 +187,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 	}
 	losses, err := db.prepareLosses(ctx, lost)
 	if err != nil {
-		if err == errCheckpointChanged && db.store.Current.Sequence == capture.Current.Sequence {
+		if err == errCheckpointChanged && db.store.Current.LastUserSequence == capture.Current.LastUserSequence {
 			// No foreground commit could have changed the captured address.
 			err = errors.Join(format.ErrCorrupt, errors.New("checkpoint lost address disagrees with live index"))
 			db.poison(err)
@@ -254,7 +254,7 @@ type lostFileTotals struct {
 
 type checkpointLosses struct {
 	tx    index.Tx
-	files map[*storage.File]lostFileTotals
+	files map[*storage.DataSegment]lostFileTotals
 }
 
 // Stage all deletions against the current index under the writer gate. No key
@@ -267,7 +267,7 @@ func (db *DB) prepareLosses(ctx context.Context, lost *storage.Relocations) (*ch
 			return err
 		}
 		if losses == nil {
-			losses = &checkpointLosses{db.keys.Begin(), make(map[*storage.File]lostFileTotals)}
+			losses = &checkpointLosses{db.keys.Begin(), make(map[*storage.DataSegment]lostFileTotals)}
 		}
 		addr, found, err := losses.tx.Apply(index.Mutation{Key: key, Delete: true})
 		if err != nil {
@@ -280,10 +280,10 @@ func (db *DB) prepareLosses(ctx context.Context, lost *storage.Relocations) (*ch
 		if !found || addr != old.Address() {
 			return errCheckpointChanged
 		}
-		total := losses.files[old.File]
+		total := losses.files[old.Segment]
 		total.keys++
-		total.bytes += old.Bytes
-		losses.files[old.File] = total
+		total.bytes += old.RecordBytes
+		losses.files[old.Segment] = total
 		return nil
 	})
 	if err != nil && losses != nil {
@@ -315,11 +315,11 @@ func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations,
 	}
 	db.revision++
 	var dropped uint64
-	for file, total := range losses.files {
-		if file.LiveKeys.Add(-total.keys) == 0 {
-			delete(db.files, file.ID)
+	for segment, total := range losses.files {
+		if segment.LiveKeys.Add(-total.keys) == 0 {
+			delete(db.segments, segment.ID)
 		}
-		file.LiveBytes.Add(-total.bytes)
+		segment.LiveBytes.Add(-total.bytes)
 		dropped += uint64(total.keys)
 		db.stats.LiveRecordBytes -= uint64(total.bytes)
 	}
@@ -330,8 +330,8 @@ func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations,
 
 // Only the selected catalog matters: a retired file may still be pinned.
 func (db *DB) hasUnavailableSource() bool {
-	for _, entry := range db.store.Catalog.Files {
-		if entry.HasPhysicalFile() && db.store.Files[entry.ID].UnavailableData() != nil {
+	for _, entry := range db.store.Catalog.Entries {
+		if entry.HasPhysicalFile() && db.store.Segments[entry.ID].UnavailableData() != nil {
 			return true
 		}
 	}

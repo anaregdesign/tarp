@@ -18,7 +18,7 @@ type repackFixture struct {
 	readKey   []byte
 	writeKey  []byte
 	value     []byte
-	inputs    []format.File
+	inputs    []format.CatalogEntry
 	frontier  format.Frontier
 	stateHash string
 }
@@ -60,18 +60,18 @@ func prepareRepackFixture(t testing.TB, size int) repackFixture {
 	probe := engine.Observe(db)
 	fixture := repackFixture{dir: dir, opts: opts, readKey: keys[0], writeKey: writerKey, value: value, frontier: probe.Frontier()}
 	probe.Store(func(s *storage.Store) {
-		fixture.inputs = slices.Clone(s.Catalog.Files)
+		fixture.inputs = slices.Clone(s.Catalog.Entries)
 		if len(fixture.inputs) != logs {
 			t.Fatalf("fixture has %d sealed logs, want %d", len(fixture.inputs), logs)
 		}
-		for _, file := range fixture.inputs {
-			if file.Kind != format.Log || file.Bytes != opts.TargetSegmentBytes ||
-				s.Files[file.ID].LiveBytes.Load() != file.Bytes-format.SegmentHeaderBytes {
-				t.Fatalf("fixture log %d is not full of live records", file.ID)
+		for _, entry := range fixture.inputs {
+			if entry.Kind != format.RawLogKind || entry.Bytes != opts.TargetSegmentBytes ||
+				s.Segments[entry.ID].LiveBytes.Load() != entry.Bytes-format.SegmentHeaderBytes {
+				t.Fatalf("fixture log %d is not full of live records", entry.ID)
 			}
 		}
 	})
-	if fixture.frontier.Sequence != uint64(len(keys)) || fixture.frontier.ActiveEnd != format.SegmentHeaderBytes+opts.MaxRecordBytes {
+	if fixture.frontier.LastUserSequence != uint64(len(keys)) || fixture.frontier.ActiveCommittedEndOffset != format.SegmentHeaderBytes+opts.MaxRecordBytes {
 		t.Fatalf("unexpected seed frontier: %+v", fixture.frontier)
 	}
 	fixture.stateHash, _ = measurementState(t, db)
@@ -145,20 +145,20 @@ func (f repackFixture) verify(t testing.TB, db *engine.DB, repacked bool, puts i
 		t.Fatalf("repacked=%t: found %d physical DATA files; want %d", repacked, fileCount, wantFiles)
 	}
 	frontier := probe.Frontier()
-	if frontier.ActiveID != f.frontier.ActiveID || frontier.Sequence != f.frontier.Sequence+uint64(puts) ||
-		frontier.ActiveEnd != f.frontier.ActiveEnd+int64(puts)*f.opts.MaxRecordBytes {
+	if frontier.ActiveID != f.frontier.ActiveID || frontier.LastUserSequence != f.frontier.LastUserSequence+uint64(puts) ||
+		frontier.ActiveCommittedEndOffset != f.frontier.ActiveCommittedEndOffset+int64(puts)*f.opts.MaxRecordBytes {
 		t.Fatalf("foreground writes changed the expected frontier: %+v after %d Puts", frontier, puts)
 	}
 	probe.Store(func(s *storage.Store) {
-		entries := s.Catalog.Files
+		entries := s.Catalog.Entries
 		if !repacked {
 			if !slices.Equal(entries, f.inputs) {
 				t.Fatalf("parked worker changed selected logs: %+v", entries)
 			}
 			return
 		}
-		if len(entries) != 1 || entries[0].Kind != format.Cleaned || entries[0].ID == 0 ||
-			entries[0].First != f.inputs[0].First || entries[0].Last != f.inputs[len(f.inputs)-1].Last || s.Catalog.Cutoff != 0 {
+		if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].ID == 0 ||
+			entries[0].FirstSequence != f.inputs[0].FirstSequence || entries[0].LastSequence != f.inputs[len(f.inputs)-1].LastSequence || s.Catalog.CheckpointCutoffSequence != 0 {
 			t.Fatalf("unexpected repacked catalog: %+v", s.Catalog)
 		}
 	})
@@ -174,11 +174,11 @@ func (f repackFixture) verify(t testing.TB, db *engine.DB, repacked bool, puts i
 			t.Error(err)
 		}
 	}()
-	if got := engine.Observe(reopened).Frontier(); got.Sequence != frontier.Sequence || got.UUID != frontier.UUID {
+	if got := engine.Observe(reopened).Frontier(); got.LastUserSequence != frontier.LastUserSequence || got.UUID != frontier.UUID {
 		t.Fatalf("reopened clone has unexpected identity or sequence: %+v", got)
 	}
 	hash, count := measurementState(t, reopened)
-	if hash != f.stateHash || uint64(count) != f.frontier.Sequence {
+	if hash != f.stateHash || uint64(count) != f.frontier.LastUserSequence {
 		t.Fatalf("state after reopen: %d keys, digest %s", count, hash)
 	}
 	return fileCount, hash

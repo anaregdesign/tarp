@@ -121,8 +121,8 @@ func TestCheckpointIndexConcurrentRotationPreservesTail(t *testing.T) {
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
-			if db.store.Catalog.Index.Sequence != 1 || db.store.Current.Sequence != 3 {
-				t.Fatalf("frontiers %d %d", db.store.Catalog.Index.Sequence, db.store.Current.Sequence)
+			if db.store.Catalog.Index.CoveredSequence != 1 || db.store.Current.LastUserSequence != 3 {
+				t.Fatalf("frontiers %d %d", db.store.Catalog.Index.CoveredSequence, db.store.Current.LastUserSequence)
 			}
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
@@ -132,7 +132,7 @@ func TestCheckpointIndexConcurrentRotationPreservesTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			if !db.store.IndexCheckpointHit {
+			if !db.store.IndexCheckpointValidated {
 				t.Fatal("miss on rotated suffix")
 			}
 			wantValue(t, db, "a", "tail")
@@ -181,7 +181,7 @@ func TestCheckpointIndexRepairsSealedDataBeforePacking(t *testing.T) {
 	if err := db.CheckpointIndex(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if cp := db.store.Catalog.Index; cp.ID == 0 || cp.Sequence != cut.Last {
+	if cp := db.store.Catalog.Index; cp.ID == 0 || cp.CoveredSequence != cut.LastSequence {
 		t.Fatalf("index checkpoint after repair: %+v", cp)
 	}
 	if err := db.Close(); err != nil {
@@ -192,7 +192,7 @@ func TestCheckpointIndexRepairsSealedDataBeforePacking(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if !reopened.store.IndexCheckpointHit {
+	if !reopened.store.IndexCheckpointValidated {
 		t.Fatal("failed to load packed index")
 	}
 	wantValue(t, reopened, "b", "second")

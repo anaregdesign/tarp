@@ -61,6 +61,9 @@ go run .
 
 ## Storage and compatibility
 
+The [storage terminology guide](docs/terminology.md) defines DATA segments,
+B+tree pages, parity stripes and the units used by APIs and metrics.
+
 During v0, each revision supports its current Go API, database format and
 backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
@@ -68,7 +71,7 @@ them, import them into a fresh database, and verify the result before switching.
 
 v0.12.0 can open v0.11.0 databases and restore v0.11.0 backups directly.
 `Options{}` now selects the disk-backed B+tree. Allow space on the database
-volume for index pages and checkpoints, or set `IndexMode: tarp.IndexMemory`
+volume for B+tree pages and index checkpoints, or set `IndexMode: tarp.IndexMemory`
 to keep using the previous in-memory default. See [Choosing the key index](#choosing-the-key-index).
 
 v0.11.0 changes the BACKUP header. You can open a v0.10.0 database directly
@@ -283,9 +286,9 @@ All put entries count, including repeated keys. For deletes, only distinct
 keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
 before publication. Each nonempty write batch has one commit outcome.
 Use `errors.As` with `*tarp.BatchLimitError` to distinguish input count,
-per-entry size, total encoded write payload and total encoded value bytes returned
+per-entry size, total encoded record bytes written and total encoded value bytes returned
 by `BatchGet`. Its `Index` is the original input position, or -1 for a
-request-wide count error. For count, payload and result limits,
+request-wide count error. For input-count, encoded-record-byte and result-value-byte limits,
 `Actual` and `Limit` report inputs or bytes respectively. A per-entry error
 also exposes the underlying `*tarp.SizeError` with its record and cache charges.
 Use `errors.As` with `*tarp.BatchCodecError` to get the zero-based input
@@ -351,29 +354,29 @@ db, err := tarp.Open(dir, tarp.Options{
 })
 ```
 
-`IndexBTree` stores encoded keys and DATA addresses in private 8 KiB pages.
+`IndexBTree` stores encoded keys and DATA addresses in private 8 KiB B+tree pages.
 Tarp creates the backing files in `.tarp-work/` inside the database directory
 passed to `Open` or `OpenExisting`. Size the database volume for DATA, index
-pages, the persistent checkpoint, and temporary work during replay, compaction and online backup. Tarp
+pages, the index checkpoint, and temporary work during replay, compaction and online backup. Tarp
 unlinks private pager files immediately after opening them. The OS releases its
 space when its final descriptor closes.
 
-The root and frequently used routing pages get priority in the cache. Value
-LRU hits bypass the index. On a Value miss, cold routing, leaf and overflow
+The root and frequently used branch pages get priority in the cache. Value
+LRU hits bypass the index. On a value-cache miss, cold branch, leaf and overflow
 pages can add reads before loading DATA.
 
 The configured budget is split between the foreground index (one half),
-compaction and backup (one quarter each). It limits page-cache and index work
+compaction and backup (one quarter each). It limits B+tree page-cache and index work
 capacity. Decoded keys, request/iterator buffers, the file registry, Go's
 allocator and the OS page cache also consume memory. `ValueCacheBudgetBytes`
 limits entries kept in the value LRU. `MaxBatchGetValueBytes` limits encoded
 value bytes returned by one batch read. Long-running readers can
-hold previous page generations and DATA files on disk.
+hold previous B+tree root generations and retired DATA segments on disk.
 
 Both index modes can reuse the same immutable `INDEX` file. A healthy B+tree handle
-refreshes a missing or outdated checkpoint at `Close`. To checkpoint a
+refreshes a missing or outdated index checkpoint at `Close`. To checkpoint a
 long-running DB or an in-memory index, call `db.CheckpointIndex(ctx)`. It seals
-the active log and verifies and packs the committed prefix. Writes can continue
+a nonempty active log and packs the index for the captured DATA history. Writes can continue
 during the build. Size the volume for both the build workspace and the new INDEX,
 and allow for the extra Close time. Checkpoint creation leaves the normal
 per-write sync protocol intact.
@@ -400,18 +403,19 @@ the commit sync protocol.
 
 | Option | Default | What the limit applies to |
 | --- | ---: | --- |
-| `OpenValidation` | `Full` | Choose eager DATA verification or `Indexed` checkpoint recovery. |
+| `OpenValidation` | `Full` | Select how Open verifies DATA covered by an index checkpoint. Both runtime backends support both validation modes. |
 | `IndexMode` | `IndexBTree` | Selects a built-in key index for this Open. |
 | `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
 | `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
-| `TargetSegmentBytes` | 4 MiB | Target size for new logs and checkpoint snapshots. Bounds the total input to a small-file repack and the output of grouped log cleaning. |
+| `TargetSegmentBytes` | 4 MiB | Target size for each new log or snapshot segment. Bounds the total input to small-segment repacking and the output of grouped log cleaning. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
 | `BatchGetReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 | `MaxBatchGetValueBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
 
-For a key of `K` bytes and a value of `V` bytes, a Put costs `48 + K + V` record
-bytes and `128 + K + V` cache bytes. An entry that exceeds either limit returns
+For an encoded key of `K` bytes and an encoded value of `V` bytes, a Put has
+`K + V` record payload bytes, `48 + K + V` encoded record bytes, and a logical
+value-cache charge of `128 + K + V` bytes. An entry that exceeds either limit returns
 `ErrTooLarge`. For example, the default record limit permits a 1,048,512-byte
 value with a 16-byte key. When several individually admissible entries fill the
 cache, the least recently used entries are evicted. The selected index, Go
@@ -456,7 +460,7 @@ info, err := tarp.VerifyBackup(ctx, backupDir)
 if err != nil {
     return err
 }
-fmt.Printf("database %x, sequence %d, live keys %d\n", info.DatabaseID, info.Sequence, info.LiveKeys)
+fmt.Printf("database %x, sequence %d, live keys %d\n", info.DatabaseID, info.LastUserSequence, info.LiveKeys)
 if err := info.CheckLimits(opts.RestoreLimits()); err != nil {
     return err
 }
@@ -466,8 +470,9 @@ if err := info.CheckLimits(opts.RestoreLimits()); err != nil {
 records. It writes no files and can make multiple passes over large backups.
 For a single DATA replay using temporary disk space, call
 `VerifyBackupWithScratch(ctx, backupDir, scratchDir)` with an existing
-directory outside the backup. `info.RequiredLimits` reports the largest logical cache charge and
-encoded record among the live entries. Both
+directory outside the backup. `info.LargestLiveCacheChargeBytes` and
+`info.LargestLiveRecordBytes` measure the largest value-cache charge and
+encoded record length across live entries. Both
 are zero for an empty backup. A verification error returns a zero report.
 `info.CheckLimits` compares these sizes with a target configuration in memory.
 `Restore` enforces the target limits and independently verifies the copied
@@ -497,16 +502,21 @@ limits, then publishes a new closed database. Existing destinations, even empty
 directories, are never replaced. Parents must be caller-controlled; destinations
 must be outside the source. Backups must be immutable during restore.
 
-The worker first reclaims obsolete records from individual files when the
-estimated replacement, including metadata, fits in half the source size.
-When no file meets that threshold, the worker looks for 4–8 adjacent small
-files to combine. At the default target each input may be at most 1 MiB and
-their total at most 4 MiB. The other inputs together must be at least as large
-as the largest. For example, four adjacent 40 KiB sealed logs qualify even if
-every record is live. Snapshots are grouped with snapshots and logs with logs.
+The background worker selects the first eligible maintenance policy in this order.
 
-Both operations run in the background, yield for foreground writers and backup,
-and defer when temporary space is scarce. A replaced file can remain on disk
+1. **Single-segment cleaning** reclaims obsolete records when the estimated
+   replacement, including metadata, fits in half the source bytes.
+2. **Grouped log cleaning** shares one publication across consecutive sealed
+   logs in catalog order. It examines up to eight catalog entries, retains
+   required tombstones and fits the combined DATA output in one segment target.
+3. **Small-segment repacking** combines four to eight small segments of the
+   same family in catalog order. Each input fits in one quarter of the target,
+   their total fits in one target, and the other inputs together are at least
+   as large as the largest. Four consecutive 40 KiB log segments can qualify
+   at the default target even when every record is live.
+
+The worker yields for foreground writers and backup, and defers when temporary
+space is scarce. A replaced file can remain on disk
 while a reader or backup uses it.
 
 `db.AutoCompactionStatus()` reports the worker's deferral reason, most recent
@@ -515,13 +525,13 @@ unlinked by this worker since `Open`. Filesystem allocation and staging writes
 also affect free space. Provision room for current data, temporary replacements,
 metadata, backups, pinned sources and concurrent growth.
 
-Call `Compact(ctx)` for a full checkpoint through a captured sequence. It can
+Call `Compact(ctx)` for a full DATA checkpoint through a captured sequence. It can
 discard tombstones covered by that checkpoint and preserves all concurrent
 tail writes. It serializes with the worker and can overlap one online backup.
-Duplicate manual checkpoints or duplicate backups return `ErrBusy`. Its
+Duplicate manual full DATA checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult.UnlinkedBytes` counts the logical lengths of files removed by
 that call. `PinnedRetiredDataBytes` reports the retired DATA file bytes still
-held by leases at cleanup. `DroppedKeys` counts live keys discarded by this
+retained by segment pins or live index references at cleanup. `DroppedKeys` counts live keys discarded by this
 checkpoint after recovery. The worker reports its own cumulative `DroppedKeys`
 in `AutoCompactionStatus`.
 If the context is canceled while `Compact` or `Backup` waits for the initial
@@ -530,7 +540,7 @@ the lock, before starting checkpoint or backup work.
 
 ### Recovering damaged DATA
 
-Every open DB generates recovery files for sealed DATA in the background.
+Every open DB generates PARITY sidecars for sealed DATA in the background.
 Healthy reads and ordinary commits do no parity I/O. To protect the current
 tail at a chosen point, call `db.ProtectParity(ctx)`. This seals a nonempty active DATA segment
 and completes protection without building an index checkpoint.
@@ -544,9 +554,9 @@ the read handle. Reads of other files and ordinary writes can continue during
 reconstruction. Cached values are served from memory. Detection happens when
 an operation reads the damaged bytes.
 
-Each 64 KiB stripe can recover one missing or corrupt 4 KiB block. A full
+Each full parity stripe covers 64 KiB of DATA and can recover one missing or corrupt 4 KiB DATA block. A full
 stripe adds about 6.42% including checksums and record offsets. If corruption
-prevents `Open`, run `tarp.RepairParity(ctx, dir)` while the DB is closed.
+prevents `Open`, run `tarp.RepairDataFromParity(ctx, dir)` while the DB is closed.
 An independent backup covers whole-device failure.
 
 If a sealed DATA file exceeds the correction budget, the read returns an error
@@ -560,7 +570,7 @@ iteration. To read individual keys while serving traffic, enumerate them with
 `Keys` and handle each `Get` result separately.
 
 Compaction first tries to restore the complete DATA file. If two or more
-damaged blocks in a stripe exceed its parity budget, a full checkpoint can
+damaged blocks in a stripe exceed its parity budget, a full DATA checkpoint can
 still keep independently verified records, including neighbors in those same
 blocks. It can also recover a value from the live cache when its version and
 record checksum match. A live key is dropped only when its current record
@@ -568,7 +578,7 @@ cannot be recovered. An older value or a deleted key cannot reappear.
 After publication, `Get` returns `ErrNotFound` for a dropped key and a new
 `Put` for that key works normally.
 
-The automatic worker uses this full checkpoint when it learns of damage
+The automatic worker uses this full DATA checkpoint when it learns of damage
 beyond parity's correction budget. `Compact(ctx)` can also perform the
 recovery explicitly. A missing or invalid sidecar, an I/O error without
 verified loss, or insufficient staging space cannot authorize dropping keys.
@@ -577,8 +587,8 @@ to the new files. Readers with pins keep their original files until release.
 
 For offline recovery of historical records, run
 `tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` after closing the
-DB. It requires a valid parity file. The callback receives historical Put and Delete
-records. Check the returned error and the report's `Unrecoverable` byte ranges.
+DB. It requires a valid PARITY sidecar. The callback receives historical Put and Delete
+records. Check the returned error and the report's `UnrecoverableByteRanges`.
 The source stays in place and the caller chooses where to export the records.
 [Recovery guarantees](docs/durability.md#sealed-data-protection-and-offline-recovery)
 

@@ -179,8 +179,8 @@ func TestBatchGetLimitsSnapshotValueBytesBeforeReading(t *testing.T) {
 	mustPut(t, db, "e", "")
 	mustPut(t, db, "h", "45") // Only h fits in the cache now.
 	c, e, h, missing := []byte("c"), []byte("e"), []byte("h"), []byte("absent")
-	file := testLoc(t, db, "c").File
-	refs, stats := file.References(), db.Stats()
+	segment := testLoc(t, db, "c").Segment
+	refs, stats := segment.References(), db.Stats()
 	for _, tc := range []struct {
 		keys   [][]byte
 		index  int
@@ -197,8 +197,8 @@ func TestBatchGetLimitsSnapshotValueBytesBeforeReading(t *testing.T) {
 			t.Fatalf("keys %q: got %+v, err %+v", tc.keys, got, err)
 		}
 	}
-	if file.References() != refs || db.Stats() != stats || reads.Load() != 0 {
-		t.Fatalf("rejected batches changed refs, stats or reads: %d, %+v, %d", file.References(), db.Stats(), reads.Load())
+	if segment.References() != refs || db.Stats() != stats || reads.Load() != 0 {
+		t.Fatalf("rejected batches changed refs, stats or reads: %d, %+v, %d", segment.References(), db.Stats(), reads.Load())
 	}
 	got, err := db.BatchGet([][]byte{c, e, missing, h, h})
 	if err != nil || len(got) != 5 || string(got[0].Value) != "123" || !got[1].Found || len(got[1].Value) != 0 ||
@@ -212,7 +212,7 @@ func TestBatchGetSizeBoundCannotWrap(t *testing.T) {
 	// result already exceeds the limit. No payload allocation is necessary.
 	const size = 1<<62 + 1
 	var limit *BatchLimitError
-	err := checkBatchBytes(4, math.MaxInt64, size, func(int) int64 { return size })
+	err := checkBatchGetValueBytes(4, math.MaxInt64, size, func(int) int64 { return size })
 	if !errors.As(err, &limit) || limit.Index != 1 || limit.Actual != 2*uint64(size) || limit.Limit != math.MaxInt64 {
 		t.Fatalf("large result: %+v", err)
 	}
@@ -325,7 +325,7 @@ func TestBatchGetReadsPinnedPointInTimeAcrossCompact(t *testing.T) {
 		mustPut(t, db, "b", "B")
 		mustPut(t, db, "z", "Z")
 		mustPut(t, db, "w", "W") // a and b are cold while z stays cached.
-		oldA, oldB := testLoc(t, db, "a").File, testLoc(t, db, "b").File
+		oldA, oldB := testLoc(t, db, "a").Segment, testLoc(t, db, "b").Segment
 		keys := [][]byte{[]byte("b"), []byte("a"), []byte("z"), []byte("b"), []byte("c"), []byte("a"), []byte("c")}
 		done := startBatchGet(db, keys)
 		synctest.Wait()
@@ -367,14 +367,14 @@ func TestBatchGetReadFailureDiscardsResultsAndPins(t *testing.T) {
 	mustPut(t, db, "b", "B")
 	mustPut(t, db, "c", "C")
 	mustPut(t, db, "d", "D")
-	file := testLoc(t, db, "a").File
-	refs := file.References()
+	segment := testLoc(t, db, "a").Segment
+	refs := segment.References()
 	keys := [][]byte{[]byte("d"), []byte("a"), []byte("b"), []byte("c"), []byte("a"), []byte("x"), []byte("x")}
 	if got, err := db.BatchGet(keys); got != nil || !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("corrupt read: %+v, %v", got, err)
 	}
-	if file.References() != refs {
-		t.Fatalf("retained pins: %d, want %d", file.References(), refs)
+	if segment.References() != refs {
+		t.Fatalf("retained pins: %d, want %d", segment.References(), refs)
 	}
 	if _, err := db.BatchGet(keys); !errors.Is(err, ErrUnhealthy) {
 		t.Fatalf("next read: %v", err)

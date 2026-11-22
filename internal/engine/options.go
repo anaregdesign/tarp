@@ -35,7 +35,8 @@ type Options struct {
 	BTreeMemoryBudgetBytes int64
 	ValueCacheBudgetBytes  int64
 	MaxRecordBytes         int64
-	// TargetSegmentBytes sizes new logs and checkpoints and caps repack input bytes.
+	// TargetSegmentBytes sets the target for each new log or snapshot segment.
+	// It also caps the input to small-segment repacking.
 	// Zero selects 4 MiB. The target grows to fit a header and one maximum record.
 	TargetSegmentBytes int64
 	ReadFileHandles    int

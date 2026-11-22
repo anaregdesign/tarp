@@ -83,8 +83,8 @@ func TestRestoreVerifierCarriesOnlySourceSpillDecisionToStage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if image.LiveKeys != want.LiveKeys || image.Required != want.Required || image.MaxValueBytes != want.MaxValueBytes {
-				t.Fatalf("source: live=%d, limits=%+v maxValue=%d", image.LiveKeys, image.Required, image.MaxValueBytes)
+			if image.LiveKeys != want.LiveKeys || image.LiveRecordSizes != want.LiveRecordSizes || image.LargestLiveValueBytes != want.LargestLiveValueBytes {
+				t.Fatalf("source: live=%d, limits=%+v maxValue=%d", image.LiveKeys, image.LiveRecordSizes, image.LargestLiveValueBytes)
 			}
 			if _, err := verify(t.Context(), stage); !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("invalid staged history: %v", err)
@@ -106,7 +106,7 @@ func TestRestoreVerifierCarriesOnlySourceSpillDecisionToStage(t *testing.T) {
 }
 
 func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 256, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 128, TargetSegmentBytes: 256, Handles: 1}
 	store, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := DataName(c.Current.UUID, c.Catalog.Files[0].ID)
+	name := DataName(c.Current.UUID, c.Catalog.Entries[0].ID)
 	path := filepath.Join(dir, name)
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -148,7 +148,7 @@ func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) 
 	}
 	for i, f := range meta.Files {
 		if f.Name == name {
-			meta.Files[i].Hash = sha256.Sum256(b)
+			meta.Files[i].Digest = sha256.Sum256(b)
 		}
 	}
 	if err := os.WriteFile(listPath, format.EncodeBackup(meta), 0600); err != nil {

@@ -30,13 +30,13 @@ func CheckBatchKey(operation string, i int, key []byte) error {
 	return nil
 }
 
-func (db *DB) addBatchBytes(index int, used, recordBytes uint64) (uint64, error) {
+func (db *DB) addBatchRecordBytes(index int, used, recordBytes uint64) (uint64, error) {
 	limit := uint64(min(db.opts.TargetSegmentBytes-format.SegmentHeaderBytes, int64(math.MaxInt)))
 	// Used fits a segment minus its header; recordBytes is either a validated
 	// Put or the record header plus one native-length delete key.
 	actual := used + recordBytes
 	if actual > limit {
-		return used, &BatchLimitError{Kind: BatchPayloadLimit, Index: index, Actual: actual, Limit: limit}
+		return used, &BatchLimitError{Kind: BatchRecordBytesLimit, Index: index, Actual: actual, Limit: limit}
 	}
 	return actual, nil
 }
@@ -52,7 +52,7 @@ type PreparedBatch struct {
 	deleteInputs []uint16
 }
 
-// PreparePuts checks entry and payload limits as entryAt supplies each put.
+// PreparePuts checks entry and total encoded record byte limits as entryAt supplies each put.
 // The caller must check each key with CheckBatchKey before supplying its value.
 // No database lock is held while calling entryAt.
 func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (PreparedBatch, error) {
@@ -70,7 +70,7 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		if size := db.opts.checkEntryLimits(keyBytes, valueBytes); size != nil {
 			return PreparedBatch{}, &BatchLimitError{Kind: BatchEntrySizeLimit, Index: i, Entry: size}
 		}
-		used, err = db.addBatchBytes(i, used, entrysize.RecordBytes(keyBytes, valueBytes))
+		used, err = db.addBatchRecordBytes(i, used, entrysize.RecordBytes(keyBytes, valueBytes))
 		if err != nil {
 			return PreparedBatch{}, err
 		}
@@ -103,7 +103,7 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 		if slots[slot] != 0 {
 			continue
 		}
-		used, err = db.addBatchBytes(i, used, entrysize.RecordBytes(uint64(len(key)), 0))
+		used, err = db.addBatchRecordBytes(i, used, entrysize.RecordBytes(uint64(len(key)), 0))
 		if err != nil {
 			return PreparedBatch{}, err
 		}

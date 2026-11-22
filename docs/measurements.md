@@ -24,18 +24,18 @@ The runner archives committed HEAD, pins the current stable Go Bookworm image by
 
 | Scenario | What is timed and checked |
 | --- | --- |
-| Default-budget B+tree | Seed 196,608 shuffled 64-byte keys, then measure 1,024 distinct Value-LRU misses and four windows of 256 Get/Delete/new-Put cycles at constant live cardinality. Require index page loads, spill and eviction. Record latency distributions, throughput and logical scratch length. Reopen and check every live entry. |
+| Default-budget B+tree | Seed 196,608 shuffled 64-byte keys, then measure 1,024 distinct Value-LRU misses and four windows of 256 Get/Delete/new-Put cycles at constant live cardinality. Require B+tree page reads, spill and eviction. Record latency distributions, throughput and logical scratch length. Reopen and check every live entry. |
 | Backup verification and restore | Time the three public APIs on the same warm, immutable backup for each of 20k, 40k and 100k distinct 16-byte keys. Count completed logical DATA replay passes and bytes, including source and stage for Restore. Hash/copy volumes follow manifest lengths. A separate invocation samples process heap and apparent scratch-file length every 2 ms; short peaks can be missed. Both restored images must match the original digest. |
 | First OpenExisting | Every arm starts from a fresh private copy of the same 4,096-key image. Vary only 0, 100 or 1,000 empty, owned, unselected DATA/MANIFEST files. Time the first Open and count storage directory listings; verify removal and the full state digest after stopping the clock. |
 | BatchPut during manual Compact | With the Memory index, compare a 512-entry writer on disjoint tail keys and on captured keys spaced through the checkpoint. Each key set has its own control without Compact. The timed writer runs for three seconds after installing a common tail. Record worker wall time, entries/s, batch p99, Compact duration and actual waits caused by a staged key conflict. Reopen and verify all values and the frontier. |
 | Sustained automatic cleaner | Maintain 256 live keys across 512 batches of 16 overwrites, deleting and reinserting a batch every eight steps. Compare no added delay and a 1 ms pause per step. Record a directory census every 32 steps, write latency, rotations, and time from the last write to the first worker pass at that frontier with no eligible cleaning or pending retirement. Sampled file lengths include staging files visible during the census and retainable tombstones. Verify every recovered value. |
 
-The runner builds a measurement-only Go source overlay with counters for directory listings, selected DATA scans, staged-key conflicts and the cleaner's first idle frontier. It fails if the instrumentation anchors change. The regular library and CI build use the original sources. Index page loads and logical DATA bytes can be served by the guest page cache. These workloads measure this container filesystem and do not exercise power loss.
+The runner builds a measurement-only Go source overlay with counters for directory listings, selected DATA scans, staged-key conflicts and the cleaner's first idle frontier. It fails if the instrumentation anchors change. The regular library and CI build use the original sources. B+tree page reads and logical DATA reads can be served by the guest page cache. These workloads measure this container filesystem and do not exercise power loss.
 
 ## Selectable key indexes
 
 The [index-mode campaign](benchmarks/index-modes.md) compares Memory and B+tree
-at two live-key cardinalities and measures latency, page reads, heap, scratch
+at two live-key cardinalities and measures latency, B+tree page reads, heap, scratch
 and maintenance. The [full Go suite](benchmarks/index-full-suite.md) compares
 the then-default Memory backend with v0.8.0. The [disposable VM profiles](benchmarks/index-vm.md)
 record results for 64 B, 1 KiB and 4 KiB values.
@@ -136,12 +136,12 @@ include the latency and throughput comparison and sample-level data.
 copies of the same closed database. The fixture has one eligible sealed log with a
 surviving Put and a retained Delete, plus an active log containing live data.
 Each value size (64 B, 1 KiB, 4 KiB) uses a segment target of one file header
-plus 32 full Put records for both log rotation and manual checkpoint output.
+plus 32 full Put records for both log rotation and manual full DATA checkpoint output.
 
 | Mode | Timed interval |
 | --- | --- |
 | `automatic-incremental` | Release the real worker on reopen through its post-publication retirement directory sync. It replaces one sealed log and preserves the active log. |
-| `manual-full-checkpoint` | Run one public `Compact(ctx)` with the worker parked. It checkpoints the entire committed prefix, including the active records. |
+| `manual-full-data-checkpoint` | Run one public `Compact(ctx)` with the worker parked. It checkpoints the entire committed prefix, including the active records. |
 
 Fixture creation, cloning, Open, and verification take place outside the timer.
 For each mode the driver checks the original files that disappeared, counts the
@@ -149,7 +149,7 @@ newly published DATA file lengths (including headers), then reopens the result
 and verifies the same keys, values, and committed sequence. Net DATA bytes freed
 equals unlinked DATA bytes minus published DATA bytes. Manifest sizes and
 filesystem allocation are recorded separately where sampled. The JSONL rows
-`compaction_automatic-incremental` and `compaction_manual-full-checkpoint`
+`compaction_automatic-incremental` and `compaction_manual-full-data-checkpoint`
 include effective options, checkpoint cutoff, pruning boundary and the state
 digest. The two modes perform different amounts of work.
 
@@ -190,15 +190,15 @@ one `repack_concurrent` row. The drivers alternate which arm runs first.
 
 ## Scan workloads
 
-The primary VM profile runs an untimed traversal to warm the OS file cache,
+The primary VM profile runs an untimed traversal to warm the OS page cache,
 then measures `scan_full_warm` over all 4,096 live keys. Time to the first
 entry includes capturing the live index and loading the first record. Total
 traversal time includes the consumer checking every key and value. Reported
-bytes count value payloads.
+bytes count encoded values returned to the caller.
 
 In `scan_paused_checkpoint`, a consumer reads one of 65 entries and pauses.
 The benchmark overwrites and deletes unread keys, adds a new key and completes
-a manual checkpoint before resuming the iterator. It verifies both the old
+a manual full DATA checkpoint before resuming the iterator. It verifies both the old
 snapshot and the updated DB, checks which source files are retained, and waits
 for the worker to unlink retired files. The three mutation times describe
 progress while the snapshot is held. The workload reports checkpoint time
@@ -266,7 +266,7 @@ The interference profiles add one separately identified writer key.
   active IDs must match their declared rotating/nonrotating mode. Each
   rotating Delete follows a fully synced full-segment Put outside its timer,
   and the driver verifies all 64 Delete rotations.
-- Each of baseline, backup, manual checkpoint, their overlap and pinned-backup overlap
+- Each of baseline, backup, manual full DATA checkpoint, their overlap and pinned-backup overlap
   starts from a fresh private copy of the **same closed fixture** and runs for
   at least 500 ms and until maintenance completes. The worker is parked during
   fixture preparation and throughout all five timed windows. The plain fixture has 4,096
@@ -280,7 +280,7 @@ The interference profiles add one separately identified writer key.
   are reported; the sampler's own I/O/writer-lock acquisitions perturb all modes.
   Backup and compaction each retain actual copied DATA-file bytes (including
   headers, excluding metadata) and their complete API elapsed time, separately
-  from the combined window. For manual checkpoints, `compact_copy_source_opens`
+  from the combined window. For manual full DATA checkpoints, `compact_copy_source_opens`
   and `compact_records_copied` count source opens and successfully copied live
   records during the copy phase. The preceding validation scan is excluded.
   The driver records the overlap between the two API calls.
@@ -311,7 +311,7 @@ The interference profiles add one separately identified writer key.
   bytes are tracked separately from obsolete Put bytes.
   Each cold Open has independently acknowledged external NBD read intervals;
   cache purge and handshake time are excluded from Open latency.
-- The B+tree profile records charged index pages and scratch-file space before
+- The B+tree profile records charged B+tree pages and scratch-file space before
   Close. In Memory mode the profile retains and then releases the rebuilt key
   map and shared file registry after closing the cache and handles. The GC
   delta estimates the heap held by those objects.
@@ -395,7 +395,7 @@ Each repetition records:
 - Two full update passes and deletion of one quarter of keys, followed by reopen
   timings before and after checkpointing. These are bounded histories, not a
   production-scale startup qualification.
-- Read plus synced-writer interference on identical private fixtures during baseline, backup, manual checkpoint,
+- Read plus synced-writer interference on identical private fixtures during baseline, backup, manual full DATA checkpoint,
   backup+compaction, and a backup held through checkpoint completion. Each lasts at least
   30 ms and through maintenance completion. The automatic worker stays parked during timing.
   The pinned-backup workload releases it after restore to verify retirement. Per-worker Algorithm R reservoirs retain at most 2,048 durations.

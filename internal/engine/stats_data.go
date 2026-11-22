@@ -12,7 +12,7 @@ type dataTotals struct {
 	tombstones uint64
 }
 
-func (d *dataTotals) addFile(size, tombstones int64) {
+func (d *dataTotals) addSegment(size, tombstones int64) {
 	d.segments++
 	d.bytes += uint64(size)
 	d.tombstones += uint64(tombstones)
@@ -21,13 +21,13 @@ func (d *dataTotals) addFile(size, tombstones int64) {
 // initDataStats runs once before this DB admits callers.
 func (db *DB) initDataStats() {
 	var selected dataTotals
-	for _, entry := range db.store.Catalog.Files {
+	for _, entry := range db.store.Catalog.Entries {
 		if entry.HasPhysicalFile() {
-			selected.addFile(entry.Bytes, db.store.Files[entry.ID].DeleteBytes.Load())
+			selected.addSegment(entry.Bytes, db.store.Segments[entry.ID].DeleteBytes.Load())
 		}
 	}
-	active := db.store.Files[db.store.Current.ActiveID]
-	selected.addFile(db.store.Current.ActiveEnd, active.DeleteBytes.Load())
+	active := db.store.Segments[db.store.Current.ActiveID]
+	selected.addSegment(db.store.Current.ActiveCommittedEndOffset, active.DeleteBytes.Load())
 	db.stats.SelectedSegments = selected.segments
 	db.stats.SelectedDataBytes = selected.bytes
 	db.stats.TombstoneBytes = selected.tombstones
@@ -48,8 +48,9 @@ func (db *DB) replaceDataStatsLocked(old, next dataTotals) {
 	db.stats.TombstoneBytes = db.stats.TombstoneBytes - old.tombstones + next.tombstones
 }
 
-// sealActive seals the nonempty active prefix for a full checkpoint. The
-// log being sealed remains selected; only the new empty header is added.
+// sealActive seals the active log segment for a DATA checkpoint, an index
+// checkpoint or parity protection. The previously active segment stays selected,
+// and the new active segment contributes its header to selected DATA bytes.
 func (db *DB) sealActive() error {
 	previous := db.store.Current.ActiveID
 	err := db.store.Rotate()
@@ -62,14 +63,14 @@ func (db *DB) sealActive() error {
 
 // checkpointDataTotals counts only the immutable prefix being replaced. The
 // active file captured alongside it belongs to the tail of the new catalog.
-func checkpointDataTotals(capture *storage.Capture, outputs []format.File) (old, next dataTotals) {
-	for _, source := range capture.Files {
+func checkpointDataTotals(capture *storage.Capture, outputs []format.CatalogEntry) (old, next dataTotals) {
+	for _, source := range capture.Segments {
 		if source.Entry.ID != capture.Current.ActiveID {
-			old.addFile(source.Entry.Bytes, source.File.DeleteBytes.Load())
+			old.addSegment(source.Entry.Bytes, source.Segment.DeleteBytes.Load())
 		}
 	}
-	for _, file := range outputs {
-		next.addFile(file.Bytes, 0)
+	for _, entry := range outputs {
+		next.addSegment(entry.Bytes, 0)
 	}
 	return old, next
 }

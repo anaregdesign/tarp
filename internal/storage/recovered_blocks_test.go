@@ -14,9 +14,9 @@ import (
 
 // One long Put has a recoverable first stripe, an uncorrectable second
 // stripe and independently checked original bytes at the end.
-func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *Checkpoint, CapturedFile, []byte) {
+func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *DataCheckpoint, CapturedSegment, []byte) {
 	t.Helper()
-	cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1 << 20, MaxRecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
 	s, err := openTestStore(t, t.TempDir(), cfg, fs)
 	if err != nil {
 		t.Fatal(err)
@@ -34,26 +34,26 @@ func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *Checkpoint, Captur
 		t.Fatal(err)
 	}
 	t.Cleanup(c.Release)
-	src := c.Files[0]
-	if err := s.EnsureParity(t.Context(), c.Current.UUID, src, true, nil); err != nil {
+	src := c.Segments[0]
+	if err := s.EnsureParitySidecar(t.Context(), c.Current.UUID, src, true, nil); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(src.File.Path)
+	raw, err := os.ReadFile(src.Segment.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, s.NewCheckpoint(c), src, raw
+	return s, s.NewDataCheckpoint(c), src, raw
 }
 
 func TestRecoveredBlocksUseRawBytesOnlyFromIdentifiedOriginal(t *testing.T) {
 	_, checkpoint, src, raw := protectedRecoveryFixture(t, nil)
 	uuid := checkpoint.capture.Current.UUID
 	uuid[0] ^= 1
-	copy(raw, format.EncodeSegment(format.Segment{UUID: uuid, ID: src.File.ID, Kind: src.Entry.Kind}))
-	stripe := format.ParityBlockBytes * format.ParityDataBlocks
+	copy(raw, format.EncodeSegmentHeader(format.SegmentHeader{UUID: uuid, ID: src.Segment.ID, Kind: src.Entry.Kind}))
+	stripe := format.DataBlockBytes * format.DataBlocksPerStripe
 	raw[stripe+8] ^= 1
-	raw[stripe+format.ParityBlockBytes+8] ^= 1
-	if err := os.WriteFile(src.File.Path, raw, 0600); err != nil {
+	raw[stripe+format.DataBlockBytes+8] ^= 1
+	if err := os.WriteFile(src.Segment.Path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	stage, err := checkpoint.stageBlocks(t.Context(), src)

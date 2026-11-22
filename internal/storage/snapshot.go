@@ -16,9 +16,10 @@ import (
 	"github.com/anaregdesign/tarp/internal/index"
 )
 
-type CapturedFile struct {
-	File                *File
-	Entry               format.File
+// CapturedSegment binds a pinned DATA segment to the catalog entry used to read it.
+type CapturedSegment struct {
+	Segment             *DataSegment
+	Entry               format.CatalogEntry
 	liveKeys, liveBytes int64 // owned by the logical index at capture
 }
 
@@ -26,36 +27,37 @@ type Capture struct {
 	Current  format.Frontier
 	Catalog  format.Catalog
 	Manifest []byte
-	Files    []CapturedFile
+	Segments []CapturedSegment
 }
 
-// Capture pins exact committed prefixes, without copying the logical key index.
-// The caller holds the writer gate; metadata is immutable after publication.
+// Capture pins the selected DATA segments and captures the committed end
+// offset of the active segment. The caller holds the writer gate. Published
+// metadata is immutable, and the runtime index is captured separately.
 func (s *Store) Capture() (*Capture, error) {
-	active, err := s.Catalog.ActiveFile(s.Current)
+	active, err := s.Catalog.ActiveEntry(s.Current)
 	if err != nil {
 		return nil, err
 	}
 	c := &Capture{Current: s.Current, Catalog: s.Catalog, Manifest: bytes.Clone(s.Manifest)}
-	c.Catalog.Files = append([]format.File(nil), s.Catalog.Files...)
-	for _, entry := range s.Catalog.Files {
+	c.Catalog.Entries = append([]format.CatalogEntry(nil), s.Catalog.Entries...)
+	for _, entry := range s.Catalog.Entries {
 		if entry.HasPhysicalFile() {
-			c.Files = append(c.Files, CapturedFile{File: s.Files[entry.ID], Entry: entry})
+			c.Segments = append(c.Segments, CapturedSegment{Segment: s.Segments[entry.ID], Entry: entry})
 		}
 	}
-	c.Files = append(c.Files, CapturedFile{File: s.Files[active.ID], Entry: active})
-	for i := range c.Files {
-		captured := &c.Files[i]
-		captured.liveKeys = captured.File.LiveKeys.Load()
-		captured.liveBytes = captured.File.LiveBytes.Load()
-		captured.File.Pin()
+	c.Segments = append(c.Segments, CapturedSegment{Segment: s.Segments[active.ID], Entry: active})
+	for i := range c.Segments {
+		captured := &c.Segments[i]
+		captured.liveKeys = captured.Segment.LiveKeys.Load()
+		captured.liveBytes = captured.Segment.LiveBytes.Load()
+		captured.Segment.Pin()
 	}
 	return c, nil
 }
 
 func (c *Capture) Release() {
-	for _, entry := range c.Files {
-		entry.File.Unpin()
+	for _, entry := range c.Segments {
+		entry.Segment.Unpin()
 	}
 }
 
@@ -103,25 +105,25 @@ func (w *outputWriter) Write(b []byte) (int, error) {
 // the writer gate. The private builder independently validates key semantics,
 // including historical records that are absent from the final view.
 func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend, live index.View, selectOutput func(string, Location) (io.Writer, error)) error {
-	replay := newReplayBuilder(ctx, history, c.Catalog.PrunedThrough)
+	replay := newReplayBuilder(ctx, history, c.Catalog.PrunedThroughSequence)
 	defer replay.abort()
 	buffer := make([]byte, 32<<10)
 	reader := bufio.NewReaderSize(nil, len(buffer))
-	for _, captured := range c.Files {
+	for _, captured := range c.Segments {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		fd, header, _, err := openSelected(captured.File.Path, c.Current.UUID, captured.Entry, captured.File.ID == c.Current.ActiveID)
+		fd, header, _, err := openSelected(captured.Segment.Path, c.Current.UUID, captured.Entry, captured.Segment.ID == c.Current.ActiveID)
 		if err != nil {
 			return selectedReadFailure(captured.Entry.ID, &SourceError{Err: err})
 		}
 		copying := false
 		err = fs.Do("compact.scan", func() error {
-			span := format.NewRecordRange(captured.Entry, c.Catalog.Cutoff)
+			span := format.NewRecordSequenceValidator(captured.Entry, c.Catalog.CheckpointCutoffSequence)
 			const start = int64(format.SegmentHeaderBytes)
 			source := io.Reader(io.NewSectionReader(sourceReader{fd}, start, captured.Entry.Bytes-start))
 			var h hash.Hash
-			if captured.Entry.Digest != ([32]byte{}) {
+			if captured.Entry.DataFileDigest != ([32]byte{}) {
 				h = sha256.New()
 				h.Write(header)
 				source = io.TeeReader(source, h)
@@ -130,12 +132,12 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 			for off := start; off < captured.Entry.Bytes; {
 				copied := false
 				var callbackErr error
-				r, err := format.SelectStreamRecord(ctx, reader, off, captured.Entry.Bytes-off, buffer, func(r format.Record, key string) (_ io.Writer, outcome error) {
+				r, err := format.SelectStreamRecord(ctx, reader, off, captured.Entry.Bytes-off, buffer, func(r format.RecordHeader, key string) (_ io.Writer, outcome error) {
 					defer func() { callbackErr = outcome }()
 					if err := span.Accept(r); err != nil {
 						return nil, selectedReadFailure(captured.Entry.ID, err)
 					}
-					if err := replay.apply(captured.File, off, r, key); err != nil {
+					if err := replay.apply(captured.Segment, off, r, key); err != nil {
 						// The key is decoded before SelectStreamRecord reaches its
 						// payload checksum. A damaged Delete can fail replay first.
 						var source *SourceError
@@ -151,10 +153,10 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 					if err != nil {
 						return nil, &SourceError{Err: err}
 					}
-					if !exists || loc.FileID != captured.File.ID || loc.Offset != off {
+					if !exists || loc.FileID != captured.Segment.ID || loc.RecordOffset != off {
 						return nil, nil
 					}
-					if loc.Bytes != r.Bytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
+					if loc.RecordBytes != r.EncodedRecordBytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
 						return nil, fmt.Errorf("%w: index disagrees with captured DATA", ErrCorrupt)
 					}
 					if !copying {
@@ -164,7 +166,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 						copying = true
 					}
 					copied = true
-					return selectOutput(key, Location{File: captured.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
+					return selectOutput(key, Location{Segment: captured.Segment, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
 				})
 				if err != nil {
 					var destination *destinationError
@@ -181,7 +183,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 						return err
 					}
 				}
-				off += r.Bytes()
+				off += r.EncodedRecordBytes()
 			}
 			if err := span.Finish(); err != nil {
 				return selectedReadFailure(captured.Entry.ID, err)
@@ -195,7 +197,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 			err = errors.Join(err, &SourceError{Err: closeErr})
 		}
 		if err != nil {
-			return fmt.Errorf("%s: %w", filepath.Base(captured.File.Path), err)
+			return fmt.Errorf("%s: %w", filepath.Base(captured.Segment.Path), err)
 		}
 	}
 	if err := replay.finish(); err != nil {

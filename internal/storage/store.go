@@ -29,33 +29,39 @@ var (
 )
 
 type Config struct {
-	ValueCacheBudgetBytes, RecordBytes, TargetSegmentBytes int64
-	Handles                                                int
-	IndexedOpen                                            bool
+	ValueCacheBudgetBytes, MaxRecordBytes, TargetSegmentBytes int64
+	Handles                                                   int
+	IndexedOpen                                               bool
 }
 
-// RequiredLimits records the measured minima for a database image's live records.
-type RequiredLimits struct {
-	ValueCacheBudgetBytes, RecordBytes int64
+// LiveRecordSizes measures the largest encoded record and value-cache charge among live keys.
+// Both measurements are zero for an empty image.
+type LiveRecordSizes struct {
+	LargestLiveCacheChargeBytes, LargestLiveRecordBytes int64
 }
 
 // CheckLimits compares normalized settings with the live record requirements.
-func (cfg Config) CheckLimits(required RequiredLimits) error {
-	if cfg.ValueCacheBudgetBytes < required.ValueCacheBudgetBytes || cfg.RecordBytes < required.RecordBytes {
-		return &CompatibilityError{required}
+func (cfg Config) CheckLimits(sizes LiveRecordSizes) error {
+	if cfg.ValueCacheBudgetBytes < sizes.LargestLiveCacheChargeBytes || cfg.MaxRecordBytes < sizes.LargestLiveRecordBytes {
+		return &CompatibilityError{
+			RequiredValueCacheBudgetBytes: sizes.LargestLiveCacheChargeBytes,
+			RequiredMaxRecordBytes:        sizes.LargestLiveRecordBytes,
+		}
 	}
 	return nil
 }
 
 type CompatibilityError struct {
-	RequiredLimits
+	RequiredValueCacheBudgetBytes, RequiredMaxRecordBytes int64
 }
 
 func (e *CompatibilityError) Error() string {
-	return fmt.Sprintf("storage: require value cache budget >= %d bytes, max record size >= %d bytes", e.ValueCacheBudgetBytes, e.RecordBytes)
+	return fmt.Sprintf("storage: require value cache budget >= %d bytes, max record size >= %d bytes", e.RequiredValueCacheBudgetBytes, e.RequiredMaxRecordBytes)
 }
 
-type File struct {
+// DataSegment tracks the identity, ownership and accounting of one physical DATA
+// segment in this process. Read handles for its path are managed separately.
+type DataSegment struct {
 	// Published once the catalog selects this immutable DATA. Readers that
 	// already pinned the file can still use its binding after compaction.
 	sealed atomic.Pointer[sealedRepair]
@@ -67,26 +73,29 @@ type File struct {
 	Kind                   uint32
 	Path                   string
 	Size                   atomic.Int64
-	refs                   atomic.Int64
+	pins                   atomic.Int64
 	LiveBytes, DeleteBytes atomic.Int64
 	LiveKeys               atomic.Int64 // index ownership independent of transient read and capture pins
 }
 
-func (f *File) Pin()              { f.refs.Add(1) }
-func (f *File) References() int64 { return f.refs.Load() + f.LiveKeys.Load() }
+func (f *DataSegment) Pin() { f.pins.Add(1) }
 
-func (f *File) Unpin() {
-	if f.refs.Add(-1) < 0 {
-		panic("storage: negative file reference count")
+// References counts transient segment pins and live index entries pointing to this segment.
+func (f *DataSegment) References() int64 { return f.pins.Load() + f.LiveKeys.Load() }
+
+func (f *DataSegment) Unpin() {
+	if f.pins.Add(-1) < 0 {
+		panic("storage: negative segment pin count")
 	}
 }
 
+// Location binds a DATA record address to the process-local segment used for I/O.
 type Location struct {
-	File       *File
-	Offset     int64
-	Bytes      int64
-	ValueBytes int64
-	Sequence   uint64
+	Segment      *DataSegment
+	RecordOffset int64
+	RecordBytes  int64
+	ValueBytes   int64
+	Sequence     uint64
 }
 
 type Store struct {
@@ -99,12 +108,12 @@ type Store struct {
 	Current               format.Frontier
 	Catalog               format.Catalog
 	Manifest              []byte
-	Files                 map[uint64]*File
+	Segments              map[uint64]*DataSegment
 	active                *os.File
 	lock                  *platform.DirectoryLock
 	readers               *handles
 	nextID                uint64
-	retired               map[uint64]*File
+	retired               map[uint64]*DataSegment
 	retiredCatalogs       map[uint64]struct{}
 	retiredIndexes        map[uint64]struct{}
 	buildingIndex         atomic.Uint64
@@ -112,10 +121,11 @@ type Store struct {
 	cleanWorkspaceOnClose bool
 	// Created reports that this Open published the initial CURRENT.
 	Created bool
-	// IndexCheckpointHit reports use of the selected index at Open.
-	IndexCheckpointHit bool
-	// MaxValueBytes is the largest live value at indexed Open.
-	MaxValueBytes int64
+	// IndexCheckpointValidated records a successful import or publication. A
+	// reusable checkpoint must also match the current catalog and user sequence.
+	IndexCheckpointValidated bool
+	// LargestLiveValueBytes is the largest live value at indexed Open.
+	LargestLiveValueBytes int64
 }
 
 func DataName(uuid [16]byte, id uint64) string {
@@ -196,7 +206,7 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{Dir: absolute, Config: cfg, IO: fs, lock: lock, readers: newHandles(cfg.Handles), Files: make(map[uint64]*File)}
+	s := &Store{Dir: absolute, Config: cfg, IO: fs, lock: lock, readers: newHandles(cfg.Handles), Segments: make(map[uint64]*DataSegment)}
 	defer func() {
 		if result != nil {
 			result = errors.Join(result, s.Close())
@@ -266,11 +276,11 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 	// created by this Open. An incompatible Open preserves prior remnants.
 	s.cleanWorkspaceOnClose = !listing.hasWorkspace
 	if image != nil && image.Catalog.Index.ID != 0 && load != nil {
-		keys, err = s.loadCheckpoint(ctx, image, load)
+		keys, err = s.loadIndexCheckpoint(ctx, image, load)
 		if err != nil {
 			return nil, nil, err
 		}
-		s.IndexCheckpointHit = keys != nil
+		s.IndexCheckpointValidated = keys != nil
 	}
 	if keys == nil {
 		keys, err = newIndex(s)
@@ -292,15 +302,15 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 
 func (s *Store) recover(ctx context.Context, image *Image, listing directoryListing, keys index.Backend) error {
 	var err error
-	if s.IndexCheckpointHit {
-		err = image.replayAfterCheckpoint(ctx, keys, s.Config.IndexedOpen)
+	if s.IndexCheckpointValidated {
+		err = image.replayAfterIndexCheckpoint(ctx, keys, s.Config.IndexedOpen)
 	} else {
-		err = image.replayIndexed(ctx, keys)
+		err = image.rebuildIndexFromData(ctx, keys)
 	}
 	if err != nil {
 		return err
 	}
-	if err := s.Config.CheckLimits(image.Required); err != nil {
+	if err := s.Config.CheckLimits(image.LiveRecordSizes); err != nil {
 		return err
 	}
 	if listing.hasWorkspace {
@@ -310,26 +320,26 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 		}
 		s.cleanWorkspaceOnClose = true
 	}
-	s.Catalog, s.Manifest, s.Files = image.Catalog, image.Manifest, image.Files
-	for _, entry := range s.Catalog.Files {
+	s.Catalog, s.Manifest, s.Segments = image.Catalog, image.Manifest, image.Segments
+	for _, entry := range s.Catalog.Entries {
 		if entry.HasPhysicalFile() {
-			s.Files[entry.ID].markSealed(s.Catalog.UUID, entry)
+			s.Segments[entry.ID].markSealed(s.Catalog.UUID, entry)
 		}
 	}
-	s.MaxValueBytes = image.MaxValueBytes
-	active, err := os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
+	s.LargestLiveValueBytes = image.LargestLiveValueBytes
+	active, err := os.OpenFile(s.Segments[s.Current.ActiveID].Path, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
 	s.active = active
-	if s.Files[s.Current.ActiveID].Size.Load() != s.Current.ActiveEnd {
-		if err := s.IO.Do("recover.truncate", func() error { return s.active.Truncate(s.Current.ActiveEnd) }); err != nil {
+	if s.Segments[s.Current.ActiveID].Size.Load() != s.Current.ActiveCommittedEndOffset {
+		if err := s.IO.Do("recover.truncate", func() error { return s.active.Truncate(s.Current.ActiveCommittedEndOffset) }); err != nil {
 			return err
 		}
 		if err := s.IO.Sync(s.active, "recover.sync"); err != nil {
 			return err
 		}
-		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveEnd)
+		s.Segments[s.Current.ActiveID].Size.Store(s.Current.ActiveCommittedEndOffset)
 	}
 	if _, _, err := s.cleanupValidated(ctx, listing.objects); err != nil {
 		return err
@@ -361,19 +371,19 @@ func (s *Store) initialize() error {
 		return err
 	}
 	s.Catalog.UUID = s.Current.UUID
-	file, fd, err := s.newLog(appendData{})
+	segment, fd, err := s.newLog(appendData{})
 	if err != nil {
 		return err
 	}
 	s.active = fd
-	s.Catalog.ActiveID = file.ID
+	s.Catalog.ActiveID = segment.ID
 	candidate := s.Current
-	candidate.Generation, candidate.ActiveID, candidate.ActiveEnd = 1, file.ID, format.SegmentHeaderBytes
+	candidate.PublicationGeneration, candidate.ActiveID, candidate.ActiveCommittedEndOffset = 1, segment.ID, format.SegmentHeaderBytes
 	return s.publishCatalog(s.Catalog, candidate)
 }
 
-func (s *Store) newLog(initialRecords appendData) (*File, *os.File, error) {
-	f, err := s.reserveSegment(format.Log)
+func (s *Store) newLog(initialRecords appendData) (*DataSegment, *os.File, error) {
+	f, err := s.reserveSegment(format.RawLogKind)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -388,27 +398,27 @@ func (s *Store) newLog(initialRecords appendData) (*File, *os.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	s.Files[f.ID] = f
+	s.Segments[f.ID] = f
 	return f, fd, nil
 }
 
 // reserveSegment allocates a unique identity under the writer gate without I/O.
-func (s *Store) reserveSegment(kind uint32) (*File, error) {
+func (s *Store) reserveSegment(kind uint32) (*DataSegment, error) {
 	id, err := s.allocateID()
 	if err != nil {
 		return nil, err
 	}
-	return &File{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}, nil
+	return &DataSegment{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}, nil
 }
 
-func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords appendData) (*os.File, error) {
+func (f *DataSegment) create(uuid [16]byte, fs *IO, point string, initialRecords appendData) (*os.File, error) {
 	fd, err := os.OpenFile(f.Path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
-	b := format.EncodeSegment(format.Segment{UUID: uuid, ID: f.ID, Kind: f.Kind})
+	b := format.EncodeSegmentHeader(format.SegmentHeader{UUID: uuid, ID: f.ID, Kind: f.Kind})
 	err = fs.Write(fd, b, 0, point+".write")
-	if f.Kind == format.Log {
+	if f.Kind == format.RawLogKind {
 		f.activeDigest = sha256.New()
 		f.activeDigest.Write(b)
 	}
@@ -416,7 +426,7 @@ func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords append
 		err = initialRecords.writeAt(fd, format.SegmentHeaderBytes, f.activeDigest)
 	}
 	// Private checkpoints sync the complete file before publication.
-	if err == nil && f.Kind != format.Snapshot {
+	if err == nil && f.Kind != format.SnapshotKind {
 		err = fs.Sync(fd, point+".sync")
 	}
 	if err != nil {
@@ -429,20 +439,20 @@ func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords append
 }
 
 func (s *Store) Rotate() error {
-	if s.Current.ActiveEnd == format.SegmentHeaderBytes {
+	if s.Current.ActiveCommittedEndOffset == format.SegmentHeaderBytes {
 		return nil
 	}
-	if s.Current.Generation == math.MaxUint64 {
+	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return fault("rotation.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
-	return s.rotate(appendData{}, s.Current.Sequence, nil)
+	return s.rotate(appendData{}, s.Current.LastUserSequence, nil)
 }
 
 // A rotating append syncs the header and its initial records together. CURRENT
 // selects the new segment, catalog and user sequence in one publication.
 // Explicit checkpoint sealing selects a header-only log at the old sequence.
 func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy func() error) error {
-	file, fd, err := s.newLog(initialRecords)
+	segment, fd, err := s.newLog(initialRecords)
 	if err != nil {
 		var prepare *prepareError
 		if errors.As(err, &prepare) {
@@ -456,21 +466,21 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 		}
 	}
 	catalog := s.Catalog
-	catalog.Files = append(append([]format.File(nil), catalog.Files...), format.File{
-		ID: s.Current.ActiveID, Bytes: s.Current.ActiveEnd, Kind: format.Log,
-		First: s.Catalog.SealedEnd() + 1, Last: s.Current.Sequence,
-		Digest: [sha256.Size]byte(s.Files[s.Current.ActiveID].activeDigest.Sum(nil)),
+	catalog.Entries = append(append([]format.CatalogEntry(nil), catalog.Entries...), format.CatalogEntry{
+		ID: s.Current.ActiveID, Bytes: s.Current.ActiveCommittedEndOffset, Kind: format.RawLogKind,
+		FirstSequence: s.Catalog.SealedThroughSequence() + 1, LastSequence: s.Current.LastUserSequence,
+		DataFileDigest: [sha256.Size]byte(s.Segments[s.Current.ActiveID].activeDigest.Sum(nil)),
 	})
-	catalog.ActiveID = file.ID
+	catalog.ActiveID = segment.ID
 	candidate := s.Current
-	candidate.Generation++
-	candidate.ActiveID, candidate.ActiveEnd = file.ID, file.Size.Load()
-	candidate.Sequence = lastSequence
+	candidate.PublicationGeneration++
+	candidate.ActiveID, candidate.ActiveCommittedEndOffset = segment.ID, segment.Size.Load()
+	candidate.LastUserSequence = lastSequence
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return errors.Join(err, fd.Close())
 	}
-	sealed := catalog.Files[len(catalog.Files)-1]
-	prior := s.Files[sealed.ID]
+	sealed := catalog.Entries[len(catalog.Entries)-1]
+	prior := s.Segments[sealed.ID]
 	prior.activeDigest = nil
 	prior.markSealed(catalog.UUID, sealed)
 	old := s.active
@@ -487,7 +497,7 @@ type Entry struct {
 }
 
 func (s *Store) checkSequence(count int) error {
-	if s.Current.Sequence > math.MaxUint64-uint64(count) || s.Current.Generation == math.MaxUint64 {
+	if s.Current.LastUserSequence > math.MaxUint64-uint64(count) || s.Current.PublicationGeneration == math.MaxUint64 {
 		return fault("commit.sequence", publication.NotApplied, false, errors.New("storage: sequence or publication generation exhausted"))
 	}
 	return nil
@@ -502,7 +512,7 @@ func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() err
 	if err := s.checkSequence(1); err != nil {
 		return Location{}, err
 	}
-	sequence := s.Current.Sequence + 1
+	sequence := s.Current.LastUserSequence + 1
 	b := format.EncodeRecord(kind, sequence, key, value)
 	data := appendData{size: int64(len(b)), writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
 		if err := s.IO.Write(fd, b, off, "data.write"); err != nil {
@@ -512,15 +522,15 @@ func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() err
 		return nil
 	}}
 	if prepare != nil {
-		data.prepare = func(f *File, off int64) error {
-			return prepare(Location{File: f, Offset: off, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
+		data.prepare = func(f *DataSegment, off int64) error {
+			return prepare(Location{Segment: f, RecordOffset: off, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
 		}
 	}
-	file, offset, err := s.appendRecords(data, sequence, healthy)
+	segment, offset, err := s.appendRecords(data, sequence, healthy)
 	if err != nil {
 		return Location{}, err
 	}
-	return Location{File: file, Offset: offset, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence}, nil
+	return Location{Segment: segment, RecordOffset: offset, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence}, nil
 }
 
 // AppendBatch publishes all records at one frontier. The caller validates the
@@ -541,7 +551,7 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 	var size int64
 	for i, e := range entries {
 		n := entrysize.RecordBytes(int64(len(e.Key)), int64(len(e.Value)))
-		locations[i] = Location{Offset: size, Bytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.Sequence + uint64(i) + 1}
+		locations[i] = Location{RecordOffset: size, RecordBytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.LastUserSequence + uint64(i) + 1}
 		size += n
 	}
 	data := appendData{size: size, writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
@@ -561,9 +571,9 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 		return w.Flush()
 	}}
 	if prepare != nil {
-		data.prepare = func(f *File, off int64) error {
+		data.prepare = func(f *DataSegment, off int64) error {
 			for i, loc := range locations {
-				loc.File, loc.Offset = f, off+loc.Offset
+				loc.Segment, loc.RecordOffset = f, off+loc.RecordOffset
 				if err := prepare(i, loc); err != nil {
 					return err
 				}
@@ -571,13 +581,13 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 			return nil
 		}
 	}
-	file, offset, err := s.appendRecords(data, locations[len(locations)-1].Sequence, healthy)
+	segment, offset, err := s.appendRecords(data, locations[len(locations)-1].Sequence, healthy)
 	if err != nil {
 		return nil, err
 	}
 	for i := range locations {
-		locations[i].File = file
-		locations[i].Offset += offset
+		locations[i].Segment = segment
+		locations[i].RecordOffset += offset
 	}
 	return locations, nil
 }
@@ -589,25 +599,25 @@ func (e *prepareError) Unwrap() error { return e.err }
 
 // appendData is written synchronously to either the current or a new segment.
 type appendData struct {
-	prepare func(*File, int64) error
+	prepare func(*DataSegment, int64) error
 	size    int64
 	writeAt func(*os.File, int64, hash.Hash) error
 }
 
-func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func() error) (*File, int64, error) {
-	offset := s.Current.ActiveEnd
+func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func() error) (*DataSegment, int64, error) {
+	offset := s.Current.ActiveCommittedEndOffset
 	if offset > format.SegmentHeaderBytes && offset > s.Config.TargetSegmentBytes-data.size {
 		if err := s.rotate(data, lastSequence, healthy); err != nil {
 			return nil, 0, err
 		}
-		return s.Files[s.Current.ActiveID], format.SegmentHeaderBytes, nil
+		return s.Segments[s.Current.ActiveID], format.SegmentHeaderBytes, nil
 	}
 	if data.prepare != nil {
-		if err := data.prepare(s.Files[s.Current.ActiveID], offset); err != nil {
+		if err := data.prepare(s.Segments[s.Current.ActiveID], offset); err != nil {
 			return nil, 0, err
 		}
 	}
-	if err := data.writeAt(s.active, offset, s.Files[s.Current.ActiveID].activeDigest); err != nil {
+	if err := data.writeAt(s.active, offset, s.Segments[s.Current.ActiveID].activeDigest); err != nil {
 		return nil, 0, fault("data.write", publication.NotApplied, true, err)
 	}
 	if err := s.IO.Sync(s.active, "data.sync"); err != nil {
@@ -617,14 +627,14 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 		return nil, 0, fault("commit.health", publication.NotApplied, true, err)
 	}
 	candidate := s.Current
-	candidate.Generation++
-	candidate.Sequence, candidate.ActiveEnd = lastSequence, offset+data.size
+	candidate.PublicationGeneration++
+	candidate.LastUserSequence, candidate.ActiveCommittedEndOffset = lastSequence, offset+data.size
 	if err := s.publish(candidate); err != nil {
 		return nil, 0, err
 	}
-	file := s.Files[s.Current.ActiveID]
-	file.Size.Store(candidate.ActiveEnd)
-	return file, offset, nil
+	segment := s.Segments[s.Current.ActiveID]
+	segment.Size.Store(candidate.ActiveCommittedEndOffset)
+	return segment, offset, nil
 }
 
 func (s *Store) Read(loc Location, key string) ([]byte, error) {
@@ -637,7 +647,7 @@ func (s *Store) ReadContext(ctx context.Context, loc Location, key string) ([]by
 	}
 	value, err := s.readValue(loc, key)
 	if err != nil {
-		if err = s.RepairRead(ctx, loc.File, err); err != nil {
+		if err = s.RepairRead(ctx, loc.Segment, err); err != nil {
 			if err == ctx.Err() {
 				return nil, err
 			}
@@ -655,12 +665,12 @@ func (s *Store) ReadContext(ctx context.Context, loc Location, key string) ([]by
 }
 
 func (s *Store) readValue(loc Location, key string) ([]byte, error) {
-	h, err := s.readers.acquire(loc.File)
+	h, err := s.readers.acquire(loc.Segment)
 	if err != nil {
 		return nil, err
 	}
 	defer s.readers.release(h)
-	value, err := format.ReadValue(h.fd, loc.Offset, loc.Bytes, key, loc.Sequence)
+	value, err := format.ReadValue(h.fd, loc.RecordOffset, loc.RecordBytes, key, loc.Sequence)
 	if err != nil {
 		return nil, err
 	}
@@ -671,7 +681,7 @@ func (s *Store) readValue(loc Location, key string) ([]byte, error) {
 }
 
 func (loc Location) readError(err error) error {
-	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.Offset, err)
+	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.Segment.Path), loc.RecordOffset, err)
 }
 
 // directoryListing retains the type and ID of every object cleanup may retire.
@@ -735,7 +745,7 @@ func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry, listing
 	return nil
 }
 
-// Cleanup only runs under the writer gate; release pins never performs I/O.
+// Cleanup runs under the writer gate. Releasing a segment pin performs no I/O.
 func (s *Store) Cleanup() (removed, pinned int64, result error) {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
@@ -752,7 +762,7 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 // The caller validates the entire listing before truncating or unlinking any file.
 func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject) (removed, pinned int64, result error) {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, f := range s.Catalog.Files {
+	for _, f := range s.Catalog.Entries {
 		if f.HasPhysicalFile() {
 			selected[f.ID] = true
 		}
@@ -775,7 +785,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 			if id != s.Current.ActiveID && selected[id] {
 				continue
 			}
-			if f := s.Files[id]; !selected[id] && f != nil && f.References() != 0 {
+			if f := s.Segments[id]; !selected[id] && f != nil && f.References() != 0 {
 				// A parity publisher may still own its source pin.
 				continue
 			}
@@ -783,7 +793,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 			if selected[id] {
 				continue
 			}
-			if f := s.Files[id]; f != nil {
+			if f := s.Segments[id]; f != nil {
 				if f.References() != 0 {
 					s.retireData(f)
 					pinned += f.Size.Load()
@@ -813,7 +823,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 			s.retireSyncPending = true
 			switch obj.kind {
 			case "DATA":
-				delete(s.Files, id)
+				delete(s.Segments, id)
 				delete(s.retired, id)
 			case "INDEX":
 				delete(s.retiredIndexes, id)

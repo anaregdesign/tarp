@@ -18,14 +18,14 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-func sealForCleaning(t *testing.T, db *DB) format.File {
+func sealForCleaning(t *testing.T, db *DB) format.CatalogEntry {
 	t.Helper()
 	db.writer.Lock()
 	defer db.writer.Unlock()
 	if err := db.sealActive(); err != nil {
 		t.Fatal(err)
 	}
-	return db.store.Catalog.Files[len(db.store.Catalog.Files)-1]
+	return db.store.Catalog.Entries[len(db.store.Catalog.Entries)-1]
 }
 
 func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
@@ -57,7 +57,7 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 	mustPut(t, db, "update", "old")
 	mustPut(t, db, "keep", "stable")
 	source := sealForCleaning(t, db)
-	old := db.store.Files[source.ID]
+	old := db.store.Segments[source.ID]
 	if err := db.Delete([]byte("raw")); err != nil {
 		t.Fatal(err)
 	}
@@ -80,16 +80,16 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	clean := db.store.Catalog.Files[0]
-	if clean.Kind != format.Cleaned || clean.First != source.First || clean.Last != source.Last ||
-		db.store.Catalog.PrunedThrough != 9 || db.store.Current.Sequence != 9 || db.store.Catalog.Files[1] != tail {
+	clean := db.store.Catalog.Entries[0]
+	if clean.Kind != format.CleanedLogKind || clean.FirstSequence != source.FirstSequence || clean.LastSequence != source.LastSequence ||
+		db.store.Catalog.PrunedThroughSequence != 9 || db.store.Current.LastUserSequence != 9 || db.store.Catalog.Entries[1] != tail {
 		t.Fatalf("lost range or tail: %+v current=%+v", db.store.Catalog, db.store.Current)
 	}
 	wantValue(t, db, "keep", "stable")
 	wantValue(t, db, "del", "reinserted")
 	wantValue(t, db, "update", "new")
-	if testLoc(t, db, "keep").File.ID != clean.ID || testLoc(t, db, "update").File.ID == clean.ID ||
-		db.store.Files[clean.ID].DeleteBytes.Load() == 0 || old.LiveBytes.Load() != 0 {
+	if testLoc(t, db, "keep").Segment.ID != clean.ID || testLoc(t, db, "update").Segment.ID == clean.ID ||
+		db.store.Segments[clean.ID].DeleteBytes.Load() == 0 || old.LiveBytes.Load() != 0 {
 		t.Fatal("stale remap or missing accounting")
 	}
 	if _, pinned, _, err := db.store.RetireCleaned(); err != nil || pinned != source.Bytes {
@@ -119,8 +119,8 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 		t.Fatal(err)
 	}
 	defer restored.Close()
-	if restored.store.Current.Sequence != 6 {
-		t.Fatalf("backup lost its cut: %d", restored.store.Current.Sequence)
+	if restored.store.Current.LastUserSequence != 6 {
+		t.Fatalf("backup lost its cut: %d", restored.store.Current.LastUserSequence)
 	}
 	wantValue(t, restored, "update", "old")
 	for _, key := range []string{"raw", "del", "tail"} {
@@ -146,7 +146,7 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 		t.Fatal(err)
 	}
 	mustPut(t, reopened, "next", "")
-	if reopened.store.Current.Sequence != 10 {
+	if reopened.store.Current.LastUserSequence != 10 {
 		t.Fatal("maintenance advanced user sequence")
 	}
 }
@@ -213,7 +213,7 @@ func TestUncertainCleanerStopsQueuedWriterBeforeUnlock(t *testing.T) {
 				t.Fatal("queued write was published", err)
 			}
 			mustPut(t, recovered, "next", "")
-			if recovered.store.Current.Sequence != 4 {
+			if recovered.store.Current.LastUserSequence != 4 {
 				t.Fatal("incorrect next sequence")
 			}
 		})
@@ -311,7 +311,7 @@ func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testin
 	mustPut(t, db, "target", "obsolete")
 	source := sealForCleaning(t, db)
 	mustPut(t, db, "target", "new")
-	hidden := db.store.Files[unrelated.ID].Path
+	hidden := db.store.Segments[unrelated.ID].Path
 	if err := os.Rename(hidden, hidden+".hold"); err != nil {
 		t.Fatal(err)
 	}
@@ -321,13 +321,13 @@ func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testin
 	if err := os.Rename(hidden+".hold", hidden); err != nil {
 		t.Fatal(err)
 	}
-	if e := db.store.Catalog.Files[1]; e.ID != 0 || e.Kind != format.Cleaned || e.First != source.First || e.Last != source.Last {
+	if e := db.store.Catalog.Entries[1]; e.ID != 0 || e.Kind != format.CleanedLogKind || e.FirstSequence != source.FirstSequence || e.LastSequence != source.LastSequence {
 		t.Fatalf("invalid empty coverage %+v", e)
 	}
 	mustPut(t, db, "corrupt", "obsolete")
 	corrupt := sealForCleaning(t, db)
 	mustPut(t, db, "corrupt", "replacement")
-	path := db.store.Files[corrupt.ID].Path
+	path := db.store.Segments[corrupt.ID].Path
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -361,34 +361,34 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 	mustPut(t, db, "obsolete", "initial")
 	log := sealForCleaning(t, db)
 	mustPut(t, db, "obsolete", "updated")
-	if err := db.cleanSegment(ctx, db.store.Catalog.Files[0]); err != nil {
+	if err := db.cleanSegment(ctx, db.store.Catalog.Entries[0]); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := db.store.Catalog.Files[0]
-	if snapshot.Kind != format.Snapshot || testLoc(t, db, "stable").File.ID != snapshot.ID {
+	snapshot := db.store.Catalog.Entries[0]
+	if snapshot.Kind != format.SnapshotKind || testLoc(t, db, "stable").Segment.ID != snapshot.ID {
 		t.Fatal("snapshot was not replaced by a snapshot")
 	}
 	if err := db.cleanSegment(ctx, log); err != nil {
 		t.Fatal(err)
 	}
-	sparse := db.store.Catalog.Files[1]
+	sparse := db.store.Catalog.Entries[1]
 	if err := db.Delete([]byte("later")); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.cleanSegment(ctx, sparse); err != nil {
 		t.Fatal(err)
 	}
-	sparse = db.store.Catalog.Files[1]
-	if sparse.First != log.First || sparse.Last != log.Last || sparse.Kind != format.Cleaned ||
-		sparse.ID == 0 || db.store.Files[sparse.ID].DeleteBytes.Load() != sparse.Bytes-format.SegmentHeaderBytes {
+	sparse = db.store.Catalog.Entries[1]
+	if sparse.FirstSequence != log.FirstSequence || sparse.LastSequence != log.LastSequence || sparse.Kind != format.CleanedLogKind ||
+		sparse.ID == 0 || db.store.Segments[sparse.ID].DeleteBytes.Load() != sparse.Bytes-format.SegmentHeaderBytes {
 		t.Fatalf("second cleaning lost required delete or covered interval %+v", sparse)
 	}
 	mustPut(t, db, "stable", "later")
 	if err := db.cleanSegment(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if db.store.Catalog.Files[0] != sparse {
-		t.Fatalf("fully discarded snapshot was not removed: %+v", db.store.Catalog.Files)
+	if db.store.Catalog.Entries[0] != sparse {
+		t.Fatalf("fully discarded snapshot was not removed: %+v", db.store.Catalog.Entries)
 	}
 	if _, err := db.Compact(ctx); err != nil {
 		t.Fatal(err)
@@ -410,8 +410,8 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 		}
 	}
 	mustPut(t, got, "next", "")
-	if got.store.Current.Sequence != 9 {
-		t.Fatal("incorrect committed sequence", got.store.Current.Sequence)
+	if got.store.Current.LastUserSequence != 9 {
+		t.Fatal("incorrect committed sequence", got.store.Current.LastUserSequence)
 	}
 }
 
@@ -500,8 +500,8 @@ func TestCleanCatalogPreparationPreservesForegroundOutcome(t *testing.T) {
 			defer reopened.Close()
 			// The injected after-rename failure completed the rename on this filesystem.
 			wantValue(t, reopened, "key", "new")
-			if reopened.store.Current.Sequence != 2 {
-				t.Fatalf("reopened sequence %d", reopened.store.Current.Sequence)
+			if reopened.store.Current.LastUserSequence != 2 {
+				t.Fatalf("reopened sequence %d", reopened.store.Current.LastUserSequence)
 			}
 		})
 	}
@@ -534,7 +534,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 			db := newTestDBWithHooks(t, Options{IndexMode: IndexMemory}, ioHooks, &Hooks{CleanerStart: make(chan struct{})})
 			mustPut(t, db, "prefix", "earlier")
 			prefix := sealForCleaning(t, db)
-			var group []format.File
+			var group []format.CatalogEntry
 			for _, key := range []string{"first", "updated", "deleted", "last"} {
 				mustPut(t, db, key, "original")
 				group = append(group, sealForCleaning(t, db))
@@ -548,7 +548,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 			}
 			// Every source has been copied. Commit a new sealed tail and an
 			// active append before allowing the worker to install the group.
-			var tail format.File
+			var tail format.CatalogEntry
 			func() {
 				defer close(resume)
 				mustPut(t, db, "updated", "new")
@@ -567,7 +567,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, ok := testLookup(t, db, "deleted"); ok || testLoc(t, db, "updated").File.ID != tail.ID {
+				if _, ok := testLookup(t, db, "deleted"); ok || testLoc(t, db, "updated").Segment.ID != tail.ID {
 					t.Fatal("repacking overwrote newer index locations")
 				}
 			}
@@ -580,13 +580,13 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer image.Close()
-			files := image.store.Catalog.Files
-			if len(files) < 3 || files[0] != prefix || files[len(files)-1] != tail || image.store.Current.Sequence != 8 {
-				t.Fatalf("lost prefix or acknowledged tail: %+v, sequence %d", files, image.store.Current.Sequence)
+			entries := image.store.Catalog.Entries
+			if len(entries) < 3 || entries[0] != prefix || entries[len(entries)-1] != tail || image.store.Current.LastUserSequence != 8 {
+				t.Fatalf("lost prefix or acknowledged tail: %+v, sequence %d", entries, image.store.Current.LastUserSequence)
 			}
-			middle := files[1 : len(files)-1]
+			middle := entries[1 : len(entries)-1]
 			if tc.published {
-				if len(middle) != 1 || middle[0].Kind != format.Cleaned || middle[0].First != group[0].First || middle[0].Last != group[len(group)-1].Last {
+				if len(middle) != 1 || middle[0].Kind != format.CleanedLogKind || middle[0].FirstSequence != group[0].FirstSequence || middle[0].LastSequence != group[len(group)-1].LastSequence {
 					t.Fatalf("incomplete group replacement: %+v", middle)
 				}
 			} else if !slices.Equal(middle, group) {
@@ -614,14 +614,14 @@ func TestCleanSegmentRepairsGroupAndRestartsTombstoneAccounting(t *testing.T) {
 	first := sealForCleaning(t, db)
 	mustPut(t, db, "next", "second")
 	second := damageProtectedTail(t, db)
-	tombstones := db.store.Files[first.ID].DeleteBytes.Load()
+	tombstones := db.store.Segments[first.ID].DeleteBytes.Load()
 	if err := db.cleanSegment(t.Context(), first, second); err != nil {
 		t.Fatal(err)
 	}
-	files := db.store.Catalog.Files
-	if len(files) != 1 || files[0].Kind != format.Cleaned || files[0].First != first.First ||
-		files[0].Last != second.Last || db.store.Files[files[0].ID].DeleteBytes.Load() != tombstones {
-		t.Fatalf("replacement after repair: %+v", files)
+	entries := db.store.Catalog.Entries
+	if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].FirstSequence != first.FirstSequence ||
+		entries[0].LastSequence != second.LastSequence || db.store.Segments[entries[0].ID].DeleteBytes.Load() != tombstones {
+		t.Fatalf("replacement after repair: %+v", entries)
 	}
 	wantValue(t, db, "kept", "first")
 	wantValue(t, db, "next", "second")
@@ -633,7 +633,7 @@ func TestCleanSegmentRepairsGroupAndRestartsTombstoneAccounting(t *testing.T) {
 func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 	var verifies atomic.Int32
 	fs := &storage.IO{Hook: func(point string) error {
-		if point == "repair.verify:before" {
+		if point == "data-repair.verify:before" {
 			verifies.Add(1)
 		}
 		return nil
@@ -648,22 +648,22 @@ func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, b := testLoc(t, db, "a"), testLoc(t, db, "b")
-	source := db.store.Catalog.Files[0]
-	if source.Kind != format.Snapshot || a.File.ID != source.ID || b.File != a.File || a.Offset >= b.Offset {
+	source := db.store.Catalog.Entries[0]
+	if source.Kind != format.SnapshotKind || a.Segment.ID != source.ID || b.Segment != a.Segment || a.RecordOffset >= b.RecordOffset {
 		t.Fatal("expected two ordered records in one snapshot")
 	}
-	fd, err := os.OpenFile(b.File.Path, os.O_WRONLY, 0)
+	fd, err := os.OpenFile(b.Segment.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fd.WriteAt([]byte("a"), b.Offset+format.RecordHeaderBytes)
+	_, err = fd.WriteAt([]byte("a"), b.RecordOffset+format.RecordHeaderBytes)
 	if err := errors.Join(err, fd.Close()); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.cleanSegment(t.Context(), source); err != nil {
 		t.Fatal(err)
 	}
-	if got := db.store.Catalog.Files; len(got) != 1 || got[0].ID == source.ID || got[0].Kind != format.Snapshot || verifies.Load() != 1 {
+	if got := db.store.Catalog.Entries; len(got) != 1 || got[0].ID == source.ID || got[0].Kind != format.SnapshotKind || verifies.Load() != 1 {
 		t.Fatalf("replacement after repair: %+v, repairs %d", got, verifies.Load())
 	}
 	wantValue(t, db, "a", "first")
@@ -687,7 +687,7 @@ func TestCompactionKeepsSelectedPairOnReplacementParityFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := db.store.Current
-				entry := db.store.Catalog.Files[0]
+				entry := db.store.Catalog.Entries[0]
 				oldParity := selectedParity(t, db, entry)
 				run := func() error {
 					if operation == "clean" {
@@ -709,7 +709,7 @@ func TestCompactionKeepsSelectedPairOnReplacementParityFailure(t *testing.T) {
 				if err := run(); err != nil {
 					t.Fatal(err)
 				}
-				replacement := db.store.Catalog.Files[0]
+				replacement := db.store.Catalog.Entries[0]
 				if replacement.ID == entry.ID {
 					t.Fatal("retry did not publish a replacement")
 				}
@@ -717,7 +717,7 @@ func TestCompactionKeepsSelectedPairOnReplacementParityFailure(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := errors.Join(format.ValidateParity(t.Context(), sidecar, before.UUID, replacement), sidecar.Close()); err != nil {
+				if err := errors.Join(format.ValidateParitySidecar(t.Context(), sidecar, before.UUID, replacement), sidecar.Close()); err != nil {
 					t.Fatal(err)
 				}
 			})

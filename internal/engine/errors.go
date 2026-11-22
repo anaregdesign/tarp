@@ -116,8 +116,8 @@ type BatchLimitKind string
 const (
 	BatchInputCountLimit    BatchLimitKind = "input-count"
 	BatchEntrySizeLimit     BatchLimitKind = "entry-size"
-	BatchPayloadLimit       BatchLimitKind = "payload-bytes"
-	BatchGetValueBytesLimit BatchLimitKind = "result-bytes"
+	BatchRecordBytesLimit   BatchLimitKind = "encoded-record-bytes"
+	BatchGetValueBytesLimit BatchLimitKind = "result-value-bytes"
 )
 
 // BatchLimitError reports an oversized batch before publication. Index is the
@@ -126,7 +126,7 @@ type BatchLimitError struct {
 	Kind  BatchLimitKind
 	Index int
 	// Actual and Limit are input counts for BatchInputCountLimit, or encoded
-	// record bytes for BatchPayloadLimit, or returned value bytes for
+	// record bytes for BatchRecordBytesLimit, or returned value bytes for
 	// BatchGetValueBytesLimit. Actual includes the offending input
 	// and counts each distinct delete key once. Both fields are zero for
 	// BatchEntrySizeLimit, whose Entry reports both record and value cache limits.
@@ -143,7 +143,7 @@ func (e *BatchLimitError) Error() string {
 	case BatchGetValueBytesLimit:
 		return fmt.Sprintf("%v: BatchGet input[%d] raises the encoded value total to %d bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
 	default:
-		return fmt.Sprintf("%v: batch input[%d] raises the encoded payload to %d bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
+		return fmt.Sprintf("%v: batch input[%d] raises the encoded record total to %d bytes, limit %d", ErrTooLarge, e.Index, e.Actual, e.Limit)
 	}
 }
 
@@ -156,12 +156,12 @@ func (e *BatchLimitError) Unwrap() error {
 
 // CompatibilityError reports minima derived from the validated existing image.
 type CompatibilityError struct {
-	RequiredValueCacheBudgetBytes, RequiredRecordBytes int64
+	RequiredValueCacheBudgetBytes, RequiredMaxRecordBytes int64
 }
 
 func (e *CompatibilityError) Error() string {
 	return fmt.Sprintf("%v: require value cache budget >= %d bytes, max record size >= %d bytes",
-		ErrIncompatibleOptions, e.RequiredValueCacheBudgetBytes, e.RequiredRecordBytes)
+		ErrIncompatibleOptions, e.RequiredValueCacheBudgetBytes, e.RequiredMaxRecordBytes)
 }
 
 func (e *CompatibilityError) Unwrap() error { return ErrIncompatibleOptions }

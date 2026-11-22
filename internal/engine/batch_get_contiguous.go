@@ -7,35 +7,36 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-const maxAdjacentRecords = 32
+const maxContiguousRecords = 32
 
-// adjacentCount finds a bounded, gapless physical run in the captured order.
-// Duplicate result slots and segment boundaries end a run.
-func adjacentCount(reads []batchRead) int {
+// contiguousRecordCount returns the number of consecutive captured reads that
+// cover a bounded, contiguous byte range in one DATA segment.
+// A duplicate result slot or a gap in the byte offsets ends the range.
+func contiguousRecordCount(reads []batchRead) int {
 	first := reads[0].loc
-	if first.File == nil || first.Bytes <= 0 || first.Bytes >= storage.MaxAdjacentReadBytes || first.Offset < 0 {
+	if first.Segment == nil || first.RecordBytes <= 0 || first.RecordBytes >= storage.MaxContiguousReadBytes || first.RecordOffset < 0 {
 		return 1
 	}
-	total := first.Bytes
-	for i := 1; i < min(len(reads), maxAdjacentRecords); i++ {
+	total := first.RecordBytes
+	for i := 1; i < min(len(reads), maxContiguousRecords); i++ {
 		next := reads[i].loc
-		if next.File != first.File || first.Offset > math.MaxInt64-total || next.Offset != first.Offset+total ||
-			next.Bytes <= 0 || next.Bytes > storage.MaxAdjacentReadBytes-total {
+		if next.Segment != first.Segment || first.RecordOffset > math.MaxInt64-total || next.RecordOffset != first.RecordOffset+total ||
+			next.RecordBytes <= 0 || next.RecordBytes > storage.MaxContiguousReadBytes-total {
 			return i
 		}
-		total += next.Bytes
+		total += next.RecordBytes
 	}
-	return min(len(reads), maxAdjacentRecords)
+	return min(len(reads), maxContiguousRecords)
 }
 
-// A bounded run is one I/O job. Multiple runs and nonadjacent singletons share
-// the same worker and permit limits as individual reads.
+// Each contiguous DATA byte range is one I/O job. Range reads and individual
+// record reads share worker and permit limits.
 func (db *DB) readGroupedBatch(keys [][]byte, results []BatchResult, reads []batchRead, firstWidth int) error {
 	db.batchReadSlots <- struct{}{}
 	// Workers borrow expected keys through private output slots just as they do
 	// for individual reads. The caller's slice of key headers stays on its stack.
 	for _, r := range reads {
-		if r.loc.File != nil {
+		if r.loc.Segment != nil {
 			results[r.slot].Value = keys[r.slot]
 		}
 	}
@@ -44,17 +45,17 @@ func (db *DB) readGroupedBatch(keys [][]byte, results []BatchResult, reads []bat
 		if err := db.health(); err != nil {
 			return err
 		}
-		return db.readAdjacent(results, reads)
+		return db.readContiguous(results, reads)
 	}
 	type job struct{ start, end uint16 }
-	var local [maxAdjacentRecords]job
+	var local [maxContiguousRecords]job
 	jobs := append(local[:0], job{0, uint16(firstWidth)})
 	for i := firstWidth; i < len(reads); {
-		if reads[i].loc.File == nil {
+		if reads[i].loc.Segment == nil {
 			i++
 			continue
 		}
-		width := adjacentCount(reads[i:])
+		width := contiguousRecordCount(reads[i:])
 		jobs = append(jobs, job{uint16(i), uint16(i + width)})
 		i += width
 	}
@@ -63,9 +64,9 @@ func (db *DB) readGroupedBatch(keys [][]byte, results []BatchResult, reads []bat
 			r := reads[j.start]
 			return db.readBatchRecord(results[r.slot].Value, &results[r.slot], r, false)
 		}
-		return db.readAdjacent(results, reads[j.start:j.end])
+		return db.readContiguous(results, reads[j.start:j.end])
 	}
-	// Warm contiguous runs often finish faster than starting more workers.
+	// Warm contiguous DATA reads often finish faster than starting more workers.
 	// After a slow observation, keep the permit and parallelize the remainder.
 	for len(jobs) > 0 && db.fastSmallBatchReads.Load() {
 		if err := db.health(); err != nil {
@@ -100,12 +101,12 @@ func (db *DB) readGroupedBatch(keys [][]byte, results []BatchResult, reads []bat
 	})
 }
 
-func (db *DB) readAdjacent(results []BatchResult, reads []batchRead) error {
-	var group [maxAdjacentRecords]storage.AdjacentRead
+func (db *DB) readContiguous(results []BatchResult, reads []batchRead) error {
+	var group [maxContiguousRecords]storage.ContiguousRead
 	for i, read := range reads {
-		group[i] = storage.AdjacentRead{Location: read.loc, Key: results[read.slot].Value}
+		group[i] = storage.ContiguousRead{Location: read.loc, Key: results[read.slot].Value}
 	}
-	if err := db.store.ReadAdjacent(group[:len(reads)]); err != nil {
+	if err := db.store.ReadContiguous(group[:len(reads)]); err != nil {
 		db.readFailure(err)
 		return operationError("batch-get", "read", err)
 	}

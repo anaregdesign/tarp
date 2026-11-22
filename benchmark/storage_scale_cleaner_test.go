@@ -139,7 +139,7 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 	writeWindow := lastWrite.Sub(start)
 	// The last overwrites invalidate sealed records and wake the worker. Wait
 	// for the worker to observe this exact frontier with no reclaimable work.
-	finalSequence := engine.Observe(db).Frontier().Sequence
+	finalSequence := engine.Observe(db).Frontier().LastUserSequence
 	for scaleprobe.IdleSequence.Load() != finalSequence {
 		if status := db.AutoCompactionStatus(); status.LastError != nil {
 			t.Fatal(status.LastError)

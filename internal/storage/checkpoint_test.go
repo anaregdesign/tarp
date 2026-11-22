@@ -14,7 +14,7 @@ import (
 )
 
 func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64, Handles: 1}
 	store, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -45,19 +45,19 @@ func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
 	defer view.Close()
 	moves := store.NewRelocations()
 	defer moves.Close()
-	checkpoint := store.NewCheckpoint(capture)
-	var reserved []*File
-	reserve := func() (*File, error) {
-		file, err := store.ReserveSnapshotFile()
+	checkpoint := store.NewDataCheckpoint(capture)
+	var reserved []*DataSegment
+	reserve := func() (*DataSegment, error) {
+		segment, err := store.ReserveSnapshotSegment()
 		if err != nil {
 			return nil, err
 		}
-		reserved = append(reserved, file)
+		reserved = append(reserved, segment)
 		if len(reserved) == 2 {
 			// The exclusive create must leave this other file untouched.
-			err = os.WriteFile(file.Path, []byte("existing"), 0600)
+			err = os.WriteFile(segment.Path, []byte("existing"), 0600)
 		}
-		return file, err
+		return segment, err
 	}
 	if err := checkpoint.Copy(t.Context(), memory.New(), view, moves, reserve); !errors.Is(err, os.ErrExist) || len(reserved) != 2 {
 		t.Fatalf("copy with %d reserved files: %v", len(reserved), err)
@@ -71,15 +71,15 @@ func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
 	if data, err := os.ReadFile(reserved[1].Path); err != nil || string(data) != "existing" {
 		t.Fatalf("preexisting file after discard: %q, %v", data, err)
 	}
-	for _, file := range reserved {
-		if store.Files[file.ID] != nil {
-			t.Fatalf("unpublished snapshot %d entered the file registry", file.ID)
+	for _, segment := range reserved {
+		if store.Segments[segment.ID] != nil {
+			t.Fatalf("unpublished snapshot %d entered the DATA segment registry", segment.ID)
 		}
 	}
 }
 
 func TestCheckpointRejectsAStaleLocationWithTheRightLiveCount(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 128, TargetSegmentBytes: 512, Handles: 1}
 	db, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -110,10 +110,10 @@ func TestCheckpointRejectsAStaleLocationWithTheRightLiveCount(t *testing.T) {
 	defer capture.Release()
 	view := viewIndex.View()
 	defer view.Close()
-	checkpoint := db.NewCheckpoint(capture)
+	checkpoint := db.NewDataCheckpoint(capture)
 	moves := db.NewRelocations()
 	defer moves.Close()
-	if err := checkpoint.Copy(t.Context(), memory.New(), view, moves, db.ReserveSnapshotFile); !errors.Is(err, ErrCorrupt) {
+	if err := checkpoint.Copy(t.Context(), memory.New(), view, moves, db.ReserveSnapshotSegment); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("stale derived index accepted: %v", err)
 	}
 	if err := checkpoint.Discard(); err != nil {
@@ -150,7 +150,7 @@ func TestCheckpointSpoolsTenfoldGrowthWithinFixedPageCaches(t *testing.T) {
 				}
 				return nil
 			}}
-			cfg := Config{ValueCacheBudgetBytes: 2 << 20, RecordBytes: 1024, TargetSegmentBytes: 64 << 10, Handles: 4}
+			cfg := Config{ValueCacheBudgetBytes: 2 << 20, MaxRecordBytes: 1024, TargetSegmentBytes: 64 << 10, Handles: 4}
 			store, _, err := OpenIndexed(t.Context(), t.TempDir(), cfg, false, io, func(*Store) (index.Backend, error) { return live, nil }, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -186,10 +186,10 @@ func TestCheckpointSpoolsTenfoldGrowthWithinFixedPageCaches(t *testing.T) {
 			defer capture.Release()
 			view := live.View()
 			defer view.Close()
-			checkpoint := store.NewCheckpoint(capture)
+			checkpoint := store.NewDataCheckpoint(capture)
 			moves := store.NewRelocations()
 			defer moves.Close()
-			if err := checkpoint.Copy(t.Context(), history, view, moves, store.ReserveSnapshotFile); err != nil {
+			if err := checkpoint.Copy(t.Context(), history, view, moves, store.ReserveSnapshotSegment); err != nil {
 				t.Fatal(err)
 			}
 			// A sorted builder publishes its first cache pages after the DATA scan.
@@ -200,8 +200,8 @@ func TestCheckpointSpoolsTenfoldGrowthWithinFixedPageCaches(t *testing.T) {
 			if livePeak == 0 || historyPeak == 0 || livePeak > liveBudget || historyPeak > historyBudget {
 				t.Fatalf("foreground cache = %d, replay cache = %d", livePeak, historyPeak)
 			}
-			if len(moves.files) > len(capture.Files)+len(checkpoint.Entries()) {
-				t.Fatalf("spool retained %d DATA files", len(moves.files))
+			if len(moves.segments) > len(capture.Segments)+len(checkpoint.Entries()) {
+				t.Fatalf("spool retained %d DATA files", len(moves.segments))
 			}
 			if err := checkpoint.Protect(t.Context()); err != nil {
 				t.Fatal(err)

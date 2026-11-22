@@ -96,7 +96,7 @@ func measurePausedScan(t testing.TB, f repackFixture) pausedScanResult {
 	defer cancel()
 
 	// Reconstruct the immutable seed independently of Scan. Only digests are retained.
-	keys, value, _ := measurementInput(len(f.value), int(f.frontier.Sequence))
+	keys, value, _ := measurementInput(len(f.value), int(f.frontier.LastUserSequence))
 	seed := make(map[string][sha256.Size]byte, len(keys))
 	for i, key := range keys {
 		value[0] = f.value[0]

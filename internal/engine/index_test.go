@@ -83,12 +83,12 @@ func TestIndexedReadsRejectMissingDataFileAndReleasePins(t *testing.T) {
 				db := newTestDBWithHooks(t, opts, nil, parkedMaintenance())
 				mustPut(t, db, "a", "v")
 				mustPut(t, db, "b", "v")
-				first, missing := testLoc(t, db, "a").File, testLoc(t, db, "b").File
+				first, missing := testLoc(t, db, "a").Segment, testLoc(t, db, "b").Segment
 				if first == missing {
 					t.Fatal("test requires distinct DATA files")
 				}
 				Observe(db).ClearCache()
-				delete(db.files, missing.ID)
+				delete(db.segments, missing.ID)
 				before := first.References()
 				var err error
 				switch op {
@@ -124,11 +124,11 @@ func TestIndexedWritesAbortIfPreviousFileIsMissing(t *testing.T) {
 				mustPut(t, db, "a", "old")
 				mustPut(t, db, "b", "v")
 				old := testLoc(t, db, "a")
-				if old.File == testLoc(t, db, "b").File {
+				if old.Segment == testLoc(t, db, "b").Segment {
 					t.Fatal("expected a sealed file holding a")
 				}
 				dir, frontier := db.store.Dir, db.store.Current
-				delete(db.files, old.File.ID)
+				delete(db.segments, old.Segment.ID)
 				var err error
 				if op == "put" {
 					err = db.Put([]byte("a"), []byte("new"))

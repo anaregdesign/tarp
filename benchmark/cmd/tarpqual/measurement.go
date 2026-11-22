@@ -197,7 +197,7 @@ func measurementVM(parent context.Context, work string, cfg qualification.Measur
 				"mixed_multi_writer", "mixed_multi_writer_reads", "mixed_multi_writer_puts", "mixed_multi_writer_schedule",
 				"durable_put_rotate_false", "durable_put_rotate_true",
 				"durable_delete_rotate_false", "durable_delete_rotate_true", "resources", "guest_os_cold_virtual_device_get",
-				"compaction_automatic-incremental", "compaction_manual-full-checkpoint", "repack_parked", "repack_concurrent",
+				"compaction_automatic-incremental", "compaction_manual-full-data-checkpoint", "repack_parked", "repack_concurrent",
 				"scan_full_warm", "scan_paused_checkpoint",
 				"startup_default_history", "startup_manual_checkpoint",
 				"startup_cold_default_history", "startup_cold_manual_checkpoint",

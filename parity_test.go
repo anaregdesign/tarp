@@ -13,7 +13,7 @@ import (
 	"github.com/anaregdesign/tarp"
 )
 
-func TestRepairParityRecoversSealedDATAWhenOpenFails(t *testing.T) {
+func TestRepairDataFromParityRecoversSealedDATAWhenOpenFails(t *testing.T) {
 	dir := t.TempDir()
 	db, err := tarp.Open(dir, tarp.Options{})
 	if err != nil {
@@ -30,7 +30,7 @@ func TestRepairParityRecoversSealedDATAWhenOpenFails(t *testing.T) {
 	if err := os.Symlink(dir, alias); err != nil {
 		t.Fatal(err)
 	}
-	if err := tarp.RepairParity(t.Context(), alias); !errors.Is(err, tarp.ErrLocked) {
+	if err := tarp.RepairDataFromParity(t.Context(), alias); !errors.Is(err, tarp.ErrLocked) {
 		t.Fatalf("repair under alias while Open: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -39,7 +39,7 @@ func TestRepairParityRecoversSealedDATAWhenOpenFails(t *testing.T) {
 
 	sidecars, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
 	if err != nil || len(sidecars) != 1 {
-		t.Fatalf("parity files %v: %v", sidecars, err)
+		t.Fatalf("PARITY sidecars %v: %v", sidecars, err)
 	}
 	path := filepath.Join(dir, "DATA-"+strings.TrimPrefix(filepath.Base(sidecars[0]), "PARITY-"))
 	original, err := os.ReadFile(path)
@@ -54,7 +54,7 @@ func TestRepairParityRecoversSealedDATAWhenOpenFails(t *testing.T) {
 	if got, err := tarp.OpenExisting(t.Context(), dir, tarp.Options{}); got != nil || !errors.Is(err, tarp.ErrCorrupt) {
 		t.Fatalf("Open with corrupt sealed header: %v", err)
 	}
-	if err := tarp.RepairParity(t.Context(), dir); err != nil {
+	if err := tarp.RepairDataFromParity(t.Context(), dir); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, original) {
@@ -64,7 +64,7 @@ func TestRepairParityRecoversSealedDATAWhenOpenFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tarp.RepairParity(t.Context(), dir); err != nil {
+	if err := tarp.RepairDataFromParity(t.Context(), dir); err != nil {
 		t.Fatal(err)
 	}
 	again, err := os.Stat(path)
@@ -95,7 +95,7 @@ func TestParityRebuildsAfterRestoreAndCompaction(t *testing.T) {
 		t.Helper()
 		files := parityFiles(dir)
 		if len(files) != 1 {
-			t.Fatalf("parity files in %s: %v", dir, files)
+			t.Fatalf("PARITY sidecars in %s: %v", dir, files)
 		}
 		return files[0]
 	}
@@ -132,7 +132,7 @@ func TestParityRebuildsAfterRestoreAndCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	if files := parityFiles(backup); len(files) != 0 {
-		t.Fatalf("logical backup copied parity: %v", files)
+		t.Fatalf("file backup copied a PARITY sidecar: %v", files)
 	}
 	if info, err := tarp.VerifyBackup(ctx, backup); err != nil || info.LiveKeys != 2 {
 		t.Fatalf("verify backup: %+v, %v", info, err)
@@ -151,7 +151,7 @@ func TestParityRebuildsAfterRestoreAndCompaction(t *testing.T) {
 	}
 	recreated := parityFiles(restore)
 	if len(recreated) != len(originals) {
-		t.Fatalf("regenerated %d parity files, want %d", len(recreated), len(originals))
+		t.Fatalf("regenerated %d PARITY sidecars, want %d", len(recreated), len(originals))
 	}
 	for _, path := range recreated {
 		want, found := originals[filepath.Base(path)]
@@ -192,7 +192,7 @@ func TestParityRebuildsAfterRestoreAndCompaction(t *testing.T) {
 	if err := os.Truncate(snapshot, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := tarp.RepairParity(ctx, restore); err != nil {
+	if err := tarp.RepairDataFromParity(ctx, restore); err != nil {
 		t.Fatal(err)
 	}
 	repaired := openPublicDB(t, restore, tarp.Options{})
@@ -270,7 +270,7 @@ func TestForegroundReadsRepairSealedDATA(t *testing.T) {
 		name string
 		mode tarp.IndexMode
 	}{{"memory", tarp.IndexMemory}, {"btree", tarp.IndexBTree}} {
-		for _, method := range []string{"Get", "BatchGetSerial", "BatchGetParallel", "BatchGetAdjacent", "Scan"} {
+		for _, method := range []string{"Get", "BatchGetSerial", "BatchGetParallel", "BatchGetContiguous", "Scan"} {
 			t.Run(mode.name+"/"+method, func(t *testing.T) {
 				dir := t.TempDir()
 				opts := tarp.Options{IndexMode: mode.mode, BatchGetReadConcurrency: 4}
@@ -336,7 +336,7 @@ func TestForegroundReadsRepairSealedDATA(t *testing.T) {
 					// The backwards jump precludes coalescing. The 5 KB
 					// record bypasses the adaptive small-read serial path.
 					keys := [][]byte{[]byte("large"), []byte("b"), []byte("a"), []byte("b")}
-					if method == "BatchGetAdjacent" {
+					if method == "BatchGetContiguous" {
 						keys = [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 					}
 					got, err := db.BatchGet(keys)
@@ -447,7 +447,7 @@ func TestForegroundUnrepairableDATAIsolatedWhileHealthyRecordsRemainAvailable(t 
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Short records use a single adjacent read. The large record
+			// Short records use a single contiguous read. The large record
 			// is read independently in a batch with a verified neighbor.
 			keys := [][]byte{entries[0].Key, entries[1].Key}
 			if damage == "two lost blocks" {
@@ -542,7 +542,7 @@ func TestForegroundUnrepairableDATAIsolatedWhileHealthyRecordsRemainAvailable(t 
 			})
 			if err != nil || len(records) != 1 || !bytes.Equal(records[0].Key, entries[1].Key) ||
 				!bytes.Equal(records[0].Value, entries[1].Value) || report.Records != 1 ||
-				len(report.Unrecoverable) != 1 || report.Unrecoverable[0] != (tarp.DataRange{Start: 0, End: 8192}) {
+				len(report.UnrecoverableByteRanges) != 1 || report.UnrecoverableByteRanges[0] != (tarp.DataByteRange{Start: 0, End: 8192}) {
 				t.Fatalf("salvage returned %d records, report %+v, error %v", len(records), report, err)
 			}
 		})
@@ -603,7 +603,7 @@ func TestUnavailableForeignDATACannotSupplyAValidLookingRecord(t *testing.T) {
 		t.Fatalf("Get accepted a foreign record: %q, %v", value, err)
 	}
 	if values, err := db.BatchGet([][]byte{[]byte("a"), []byte("b")}); values != nil || !errors.Is(err, tarp.ErrDataUnavailable) {
-		t.Fatalf("adjacent BatchGet accepted foreign records: %+v, %v", values, err)
+		t.Fatalf("contiguous BatchGet accepted foreign records: %+v, %v", values, err)
 	}
 	failures := 0
 	for entry, err := range db.Scan(t.Context()) {

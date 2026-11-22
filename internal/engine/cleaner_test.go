@@ -21,33 +21,33 @@ import (
 )
 
 func TestCleanerRanksNetSavings(t *testing.T) {
-	s := &storage.Store{Files: map[uint64]*storage.File{}, Manifest: make([]byte, 64)}
+	s := &storage.Store{Segments: map[uint64]*storage.DataSegment{}, Manifest: make([]byte, 64)}
 	// Output is 64-byte header + 256 live bytes + 192 metadata bytes = 512.
 	for _, n := range []int64{1023, 1024, 1025} {
-		e := format.File{ID: 2, Kind: format.Log, Bytes: n, First: 1, Last: 3}
-		f := &storage.File{}
+		e := format.CatalogEntry{ID: 2, Kind: format.RawLogKind, Bytes: n, FirstSequence: 1, LastSequence: 3}
+		f := &storage.DataSegment{}
 		f.LiveBytes.Store(192)
 		f.DeleteBytes.Store(64)
-		s.Files[e.ID] = f
-		s.Catalog.Files = []format.File{e}
-		got, needed, _ := nextCandidate(s, 4096)
+		s.Segments[e.ID] = f
+		s.Catalog.Entries = []format.CatalogEntry{e}
+		got, needed, _ := selectCleaningInputs(s, 4096)
 		if (len(got) != 0) != (n >= 1024) || len(got) != 0 && (got[0].ID != e.ID || needed != 512) {
 			t.Fatalf("source %d: selected %+v, staging %d", n, got, needed)
 		}
 	}
-	s.Files[3] = &storage.File{}
-	s.Catalog.Files = append(s.Catalog.Files, format.File{ID: 3, Kind: format.Cleaned, Bytes: 1025, First: 4, Last: 7})
-	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 3 {
+	s.Segments[3] = &storage.DataSegment{}
+	s.Catalog.Entries = append(s.Catalog.Entries, format.CatalogEntry{ID: 3, Kind: format.CleanedLogKind, Bytes: 1025, FirstSequence: 4, LastSequence: 7})
+	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 3 {
 		t.Fatal("higher net savings should win", got)
 	}
-	s.Catalog.Files[1].Bytes = math.MaxInt64
-	s.Files[3].LiveBytes.Store(math.MaxInt64 - 64)
-	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	s.Catalog.Entries[1].Bytes = math.MaxInt64
+	s.Segments[3].LiveBytes.Store(math.MaxInt64 - 64)
+	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("large low-benefit file should be skipped", got)
 	}
-	s.Catalog.Files[1].Bytes = s.Catalog.Files[0].Bytes
-	s.Files[3].LiveBytes.Store(256)
-	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	s.Catalog.Entries[1].Bytes = s.Catalog.Entries[0].Bytes
+	s.Segments[3].LiveBytes.Store(256)
+	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("oldest covered interval should win the tie", got)
 	}
 }
@@ -57,12 +57,12 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 		kind                uint32
 		size, live, deleted int64
 	}
-	stale := segment{kind: format.Log, size: 512}
-	put := segment{kind: format.Log, size: 512, live: 32}
-	del := segment{kind: format.Cleaned, size: 512, deleted: 32}
-	empty := segment{kind: format.Cleaned}
-	full := segment{kind: format.Log, size: 1024, live: 300}
-	huge := segment{kind: format.Log, size: math.MaxInt64, live: math.MaxInt64/2 - 200}
+	stale := segment{kind: format.RawLogKind, size: 512}
+	put := segment{kind: format.RawLogKind, size: 512, live: 32}
+	del := segment{kind: format.CleanedLogKind, size: 512, deleted: 32}
+	empty := segment{kind: format.CleanedLogKind}
+	full := segment{kind: format.RawLogKind, size: 1024, live: 300}
+	huge := segment{kind: format.RawLogKind, size: math.MaxInt64, live: math.MaxInt64/2 - 200}
 	for _, tc := range []struct {
 		name         string
 		target       int64
@@ -71,32 +71,32 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 		staging      uint64
 	}{
 		{"exact benefit across empty interval", 1024, []segment{put, empty, del}, 0, 3, 512},
-		{"one byte above benefit", 1024, []segment{put, {format.Cleaned, 512, 0, 33}}, 0, 0, 0},
+		{"one byte above benefit", 1024, []segment{put, {format.CleanedLogKind, 512, 0, 33}}, 0, 0, 0},
 		{"empty output needs no header", 1024, []segment{stale, stale}, 0, 2, 384},
-		{"later single wins", 1024, []segment{put, del, {format.Log, 1024, 0, 0}}, 2, 1, 384},
-		{"snapshot boundary", 1024, []segment{stale, {format.Snapshot, 512, 0, 0}, stale}, 0, 0, 0},
-		{"oversized input", 1024, []segment{stale, {format.Log, 1025, 200, 0}}, 0, 0, 0},
-		{"live separator", 1024, []segment{stale, {format.Log, 512, 300, 0}, stale}, 0, 0, 0},
+		{"later single wins", 1024, []segment{put, del, {format.RawLogKind, 1024, 0, 0}}, 2, 1, 384},
+		{"snapshot boundary", 1024, []segment{stale, {format.SnapshotKind, 512, 0, 0}, stale}, 0, 0, 0},
+		{"oversized input", 1024, []segment{stale, {format.RawLogKind, 1025, 200, 0}}, 0, 0, 0},
+		{"live separator", 1024, []segment{stale, {format.RawLogKind, 512, 300, 0}, stale}, 0, 0, 0},
 		{"bounded output", 1024, []segment{full, full, full, full}, 0, 3, 1348},
 		{"bounded scan", 1024, slices.Repeat([]segment{stale}, 10), 0, 8, 384},
 		{"bounded scan including empty intervals", 1024, append(append([]segment{stale}, slices.Repeat([]segment{empty}, 7)...), stale), 0, 0, 0},
 		{"source size overflow", math.MaxInt64, []segment{huge, huge, huge}, 0, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &storage.Store{Files: map[uint64]*storage.File{}, Manifest: make([]byte, 256)}
+			s := &storage.Store{Segments: map[uint64]*storage.DataSegment{}, Manifest: make([]byte, 256)}
 			for i, seg := range tc.segments {
-				entry := format.File{Kind: seg.kind, Bytes: seg.size}
+				entry := format.CatalogEntry{Kind: seg.kind, Bytes: seg.size}
 				if seg.size > 0 {
 					entry.ID = uint64(i + 1)
-					f := &storage.File{}
+					f := &storage.DataSegment{}
 					f.LiveBytes.Store(seg.live)
 					f.DeleteBytes.Store(seg.deleted)
-					s.Files[entry.ID] = f
+					s.Segments[entry.ID] = f
 				}
-				s.Catalog.Files = append(s.Catalog.Files, entry)
+				s.Catalog.Entries = append(s.Catalog.Entries, entry)
 			}
-			got, staging, _ := nextCandidate(s, tc.target)
-			want := s.Catalog.Files[tc.first : tc.first+tc.count]
+			got, staging, _ := selectCleaningInputs(s, tc.target)
+			want := s.Catalog.Entries[tc.first : tc.first+tc.count]
 			if !slices.Equal(got, want) || staging != tc.staging {
 				t.Fatalf("selected %+v staging %d, want %+v staging %d", got, staging, want, tc.staging)
 			}
@@ -104,7 +104,7 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 	}
 }
 
-func TestCleanerPublishesAdjacentObsoleteLogsAndReopens(t *testing.T) {
+func TestCleanerCleansConsecutiveCatalogLogsAndReopens(t *testing.T) {
 	// Keep the cleaner's publication as the final frontier across Close.
 	opts := Options{IndexMode: IndexMemory, MaxRecordBytes: 768, TargetSegmentBytes: 1024}
 	parked := &Hooks{CleanerStart: make(chan struct{})}
@@ -147,13 +147,13 @@ func TestCleanerPublishesAdjacentObsoleteLogsAndReopens(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer image.Close()
-	files := image.store.Catalog.Files
-	if len(files) != 1 || files[0].Kind != format.Cleaned || files[0].First != first.First || files[0].Last != last.Last ||
-		files[0].ID == first.ID || files[0].ID == last.ID || image.store.Current.Generation != before.Generation+1 ||
-		image.store.Current.ActiveID != before.ActiveID || image.store.Current.Sequence != before.Sequence {
-		t.Fatalf("unexpected recovered group: %+v, frontier %+v", files, image.store.Current)
+	entries := image.store.Catalog.Entries
+	if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].FirstSequence != first.FirstSequence || entries[0].LastSequence != last.LastSequence ||
+		entries[0].ID == first.ID || entries[0].ID == last.ID || image.store.Current.PublicationGeneration != before.PublicationGeneration+1 ||
+		image.store.Current.ActiveID != before.ActiveID || image.store.Current.LastUserSequence != before.LastUserSequence {
+		t.Fatalf("unexpected recovered group: %+v, frontier %+v", entries, image.store.Current)
 	}
-	if image.store.Files[files[0].ID].DeleteBytes.Load() == 0 {
+	if image.store.Segments[entries[0].ID].DeleteBytes.Load() == 0 {
 		t.Fatal("cleaned group dropped its tombstone")
 	}
 	wantValue(t, image, "one", "1")
@@ -178,11 +178,11 @@ func TestRepackGroupLimits(t *testing.T) {
 		{"eight file limit", []int64{128, 128, 128, 128, 128, 128, 128, 128, 128}, 1, 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var files []format.File
+			var entries []format.CatalogEntry
 			for i, size := range tc.sizes {
-				files = append(files, format.File{ID: uint64(i + 1), Kind: format.Log, Bytes: size})
+				entries = append(entries, format.CatalogEntry{ID: uint64(i + 1), Kind: format.RawLogKind, Bytes: size})
 			}
-			group, bytes := repackGroup(files, target, nil)
+			group, bytes := smallSegmentRepackGroup(entries, target, nil)
 			if len(group) != tc.count || len(group) > 0 && group[0].ID != uint64(tc.first) {
 				t.Fatalf("selected %+v, want %d files starting at ID %d", group, tc.count, tc.first)
 			}
@@ -242,7 +242,7 @@ func TestDefaultOpenAutomaticallyCleans(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			source := db.store.Files[db.store.Current.ActiveID].Path
+			source := db.store.Segments[db.store.Current.ActiveID].Path
 			value := bytes.Repeat([]byte("v"), 512<<10)
 			for i := 0; i < 9; i++ {
 				value[0] = byte(i)
@@ -265,7 +265,7 @@ func TestDefaultOpenAutomaticallyCleans(t *testing.T) {
 				t.Fatalf("lost the latest value: %v", err)
 			}
 			db.writer.Lock()
-			seq := db.store.Current.Sequence
+			seq := db.store.Current.LastUserSequence
 			db.writer.Unlock()
 			if seq != 9 {
 				t.Fatalf("cleaning allocated sequence %d", seq)
@@ -286,7 +286,7 @@ func TestDefaultOpenAutomaticallyCleans(t *testing.T) {
 				t.Fatal(err)
 			}
 			image.writer.Lock()
-			next := image.store.Current.Sequence
+			next := image.store.Current.LastUserSequence
 			image.writer.Unlock()
 			if next != 10 {
 				t.Fatalf("restored next sequence %d", next)
@@ -308,7 +308,7 @@ func TestWorkerDefersForHeadroomAndRecovers(t *testing.T) {
 	}}
 	engineHooks := &Hooks{CleanerStart: start}
 	db := newTestDBWithHooks(t, Options{TargetSegmentBytes: 8192, MaxRecordBytes: 4096}, fs, engineHooks)
-	source := db.store.Files[db.store.Current.ActiveID].Path
+	source := db.store.Segments[db.store.Current.ActiveID].Path
 	for i := 0; i < 5; i++ {
 		mustPut(t, db, "hot", string(bytes.Repeat([]byte{byte(i)}, 2048)))
 	}
@@ -344,7 +344,7 @@ func TestCloseWhileWorkerWaitsForAdmission(t *testing.T) {
 }
 
 // A waiting worker holds the maintenance slot while yielding to backup. A
-// manual checkpoint must be able to wake it and take that slot before backup ends.
+// manual DATA checkpoint must be able to wake it and take that slot before backup ends.
 func TestManualCheckpointPreemptsCleanerDuringBackup(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "source")
 	seedCleanerCrashImage(t, dir)
@@ -391,7 +391,7 @@ func TestManualCheckpointPreemptsCleanerDuringBackup(t *testing.T) {
 	defer cancel()
 	result, err := db.Compact(ctx)
 	if err != nil || result.PinnedRetiredDataBytes == 0 {
-		t.Fatalf("manual checkpoint while backup is pinned: %+v, %v", result, err)
+		t.Fatalf("manual DATA checkpoint while backup is pinned: %+v, %v", result, err)
 	}
 }
 
@@ -439,7 +439,7 @@ func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		lastSealed = sealForCleaning(t, db).Last
+		lastSealed = sealForCleaning(t, db).LastSequence
 	}
 	mustPut(t, db, "hot", "tail")
 	active := db.store.Current.ActiveID
@@ -474,13 +474,13 @@ func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer image.Close()
-		files := image.store.Catalog.Files
+		entries := image.store.Catalog.Entries
 		before := image.store.Current
-		if len(files) != 1 || files[0].Kind != format.Cleaned || files[0].First != 1 || files[0].Last != lastSealed ||
-			before.Sequence != lastSealed+1 || before.ActiveID != active || image.store.Catalog.Cutoff != 0 {
+		if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].FirstSequence != 1 || entries[0].LastSequence != lastSealed ||
+			before.LastUserSequence != lastSealed+1 || before.ActiveID != active || image.store.Catalog.CheckpointCutoffSequence != 0 {
 			t.Fatalf("unexpected repacked layout: %+v, frontier %+v", image.store.Catalog, before)
 		}
-		if image.store.Files[files[0].ID].DeleteBytes.Load() == 0 {
+		if image.store.Segments[entries[0].ID].DeleteBytes.Load() == 0 {
 			t.Fatal("repacked interval dropped its tombstone")
 		}
 		for _, key := range []string{"a", "b", "c", "d"} {
@@ -525,12 +525,12 @@ func TestAutomaticRepackKeepsSnapshotsAndLogIntervalsSeparate(t *testing.T) {
 	defer live.Close()
 	waitForDataFiles(t, live, 3)
 	live.writer.Lock()
-	files := slices.Clone(live.store.Catalog.Files)
-	cutoff, after := live.store.Catalog.Cutoff, live.store.Current
+	entries := slices.Clone(live.store.Catalog.Entries)
+	cutoff, after := live.store.Catalog.CheckpointCutoffSequence, live.store.Current
 	live.writer.Unlock()
-	if len(files) != 2 || files[0].Kind != format.Snapshot || files[0].First != 0 || files[0].Last != 0 ||
-		files[1] != tail || cutoff != 4 || after.ActiveID != before.ActiveID || after.Sequence != before.Sequence {
-		t.Fatalf("snapshot repack changed the logical boundaries: cutoff %d, files %+v, frontier %+v", cutoff, files, after)
+	if len(entries) != 2 || entries[0].Kind != format.SnapshotKind || entries[0].FirstSequence != 0 || entries[0].LastSequence != 0 ||
+		entries[1] != tail || cutoff != 4 || after.ActiveID != before.ActiveID || after.LastUserSequence != before.LastUserSequence {
+		t.Fatalf("snapshot repack changed the logical boundaries: cutoff %d, files %+v, frontier %+v", cutoff, entries, after)
 	}
 	for _, key := range []string{"a", "b", "c", "d"} {
 		wantValue(t, live, key, value)
@@ -595,7 +595,7 @@ func TestCleanerPublicationCrashMatrix(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer db.Close()
-				if db.store.Current.Sequence != 9 || db.Stats().LiveKeys != 3 {
+				if db.store.Current.LastUserSequence != 9 || db.Stats().LiveKeys != 3 {
 					t.Fatal("lost the acknowledged frontier or key set")
 				}
 				for k, v := range map[string][]byte{"hot": bytes.Repeat([]byte{5}, 3000), "keep": make([]byte, 3000), "again": []byte("new")} {
@@ -608,7 +608,7 @@ func TestCleanerPublicationCrashMatrix(t *testing.T) {
 					t.Fatal("deleted key reappeared", err)
 				}
 				mustPut(t, db, "next", "")
-				if db.store.Current.Sequence != 10 {
+				if db.store.Current.LastUserSequence != 10 {
 					t.Fatal("incorrect next sequence")
 				}
 			})
@@ -662,10 +662,10 @@ func TestCleanerKeepsUnavailableInputAndReclaimsOtherObsoleteFiles(t *testing.T)
 	if again, retry := db.cleanPass(t.Context()); again || retry || !errors.Is(db.AutoCompactionStatus().LastError, ErrDataUnavailable) {
 		t.Fatalf("blocked input is being retried: %+v", db.AutoCompactionStatus())
 	}
-	if got := db.store.Catalog.Files; len(got) != 2 || got[0] != damaged || got[1].ID != 0 {
+	if got := db.store.Catalog.Entries; len(got) != 2 || got[0] != damaged || got[1].ID != 0 {
 		t.Fatalf("unexpected cleaned catalog %+v", got)
 	}
-	if _, err := os.Stat(db.store.Files[damaged.ID].Path); err != nil {
+	if _, err := os.Stat(db.store.Segments[damaged.ID].Path); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(db.store.Dir, storage.DataName(db.store.Current.UUID, obsolete.ID))); !errors.Is(err, os.ErrNotExist) {
@@ -675,13 +675,13 @@ func TestCleanerKeepsUnavailableInputAndReclaimsOtherObsoleteFiles(t *testing.T)
 }
 
 func TestRepackGroupUsesHealthyRunAfterUnavailableFile(t *testing.T) {
-	var files []format.File
+	var entries []format.CatalogEntry
 	for id := uint64(1); id <= 7; id++ {
-		files = append(files, format.File{ID: id, Kind: format.Log, Bytes: 128})
+		entries = append(entries, format.CatalogEntry{ID: id, Kind: format.RawLogKind, Bytes: 128})
 	}
 	blocked := map[uint64]*storage.UnavailableDataError{3: {FileID: 3, Err: os.ErrNotExist}}
-	group, n := repackGroup(files, 4096, blocked)
-	if !slices.Equal(group, files[3:]) || n != 4*128 {
+	group, n := smallSegmentRepackGroup(entries, 4096, blocked)
+	if !slices.Equal(group, entries[3:]) || n != 4*128 {
 		t.Fatalf("unexpected repack across unavailable file: %v, %d", group, n)
 	}
 }
@@ -694,11 +694,11 @@ func TestReadWakesCleanerToCheckpointUnrecoverableKeys(t *testing.T) {
 	if _, err := db.Compact(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if db.store.Current.Sequence != db.store.Catalog.Cutoff {
+	if db.store.Current.LastUserSequence != db.store.Catalog.CheckpointCutoffSequence {
 		t.Fatal("fixture has a post-checkpoint write")
 	}
 	entry := damageProtectedTail(t, db)
-	path := db.store.Files[entry.ID].Path
+	path := db.store.Segments[entry.ID].Path
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -747,7 +747,7 @@ func TestAutomaticCheckpointRejectsInvalidSidecarAfterUnrecoverableStripe(t *tes
 		return nil
 	}})
 	corruptUncachedCheckpointValue(t, db)
-	entry := db.store.Catalog.Files[0]
+	entry := db.store.Catalog.Entries[0]
 	path := selectedParity(t, db, entry)
 	sidecar, err := os.ReadFile(path)
 	if err != nil {

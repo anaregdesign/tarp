@@ -9,13 +9,13 @@ import (
 )
 
 type transaction struct {
-	tree           *tree
-	root, gen      uint64
-	count          int
-	allocated, old idLog
-	err            error
-	done           bool
-	packed         bool
+	tree                 *tree
+	root, rootGeneration uint64
+	count                int
+	allocated, old       idLog
+	err                  error
+	done                 bool
+	packed               bool
 }
 
 func (x *transaction) Lookup(key string) (index.Address, bool, error) {
@@ -43,14 +43,14 @@ func (x *transaction) write(n node) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return id, x.tree.p.write(id, n.encode(id), x.gen)
+	return id, x.tree.p.write(id, n.encode(id), x.rootGeneration)
 }
 
 // An overwrite changes the leaf address and, on its COW path, child IDs.
 // The caller patches a copy so every page buffer returned by the pager
 // remains immutable, including buffers for evicted private pages.
 func (x *transaction) writePatched(id uint64, p *page) (replacement, error) {
-	if !x.tree.p.private(id, x.gen) {
+	if !x.tree.p.private(id, x.rootGeneration) {
 		if err := x.retire(id); err != nil {
 			return replacement{}, err
 		}
@@ -62,7 +62,7 @@ func (x *transaction) writePatched(id uint64, p *page) (replacement, error) {
 		p.initialize(p[4], id)
 	}
 	p.seal()
-	return replacement{left: id}, x.tree.p.write(id, p, x.gen)
+	return replacement{left: id}, x.tree.p.write(id, p, x.rootGeneration)
 }
 func (x *transaction) key(key string) (keyRef, error) {
 	ref := keyRef{inline: key, length: uint64(len(key))}
@@ -72,9 +72,9 @@ func (x *transaction) key(key string) (keyRef, error) {
 	if len(key) <= maxInline {
 		return ref, nil
 	}
-	ref.inline = strings.Clone(key[:longPrefix])
-	for end := len(key); end > longPrefix; {
-		start := max(longPrefix, end-(pageSize-header))
+	ref.inline = strings.Clone(key[:inlinePrefixBytes])
+	for end := len(key); end > inlinePrefixBytes; {
+		start := max(inlinePrefixBytes, end-(pageSize-header))
 		id, err := x.alloc()
 		if err != nil {
 			return keyRef{}, err
@@ -85,7 +85,7 @@ func (x *transaction) key(key string) (keyRef, error) {
 		order.PutUint64(p[24:32], ref.tail)
 		copy(p[header:], key[start:end])
 		p.seal()
-		if err = x.tree.p.write(id, p, x.gen); err != nil {
+		if err = x.tree.p.write(id, p, x.rootGeneration); err != nil {
 			return keyRef{}, err
 		}
 		ref.tail = id
@@ -262,8 +262,8 @@ func (x *transaction) update(id uint64, edit *mutation, depth int) (replacement,
 			}
 		}
 	}
-	if len(n.cells) > 0 && n.size() <= pageSize && id != 0 && x.tree.p.private(id, x.gen) {
-		return replacement{left: id}, x.tree.p.write(id, n.encode(id), x.gen)
+	if len(n.cells) > 0 && n.size() <= pageSize && id != 0 && x.tree.p.private(id, x.rootGeneration) {
+		return replacement{left: id}, x.tree.p.write(id, n.encode(id), x.rootGeneration)
 	}
 	if id != 0 {
 		if err = x.retire(id); err != nil {
@@ -388,7 +388,7 @@ func (x *transaction) Commit() {
 	}
 	t := x.tree
 	t.mu.Lock()
-	t.root, t.count, t.generation = x.root, x.count, t.generation+1
+	t.root, t.count, t.rootGeneration = x.root, x.count, t.rootGeneration+1
 	t.packed = packedHeader{}
 	if x.packed {
 		t.packed = packedHeader{root: x.root, pages: t.p.top, keys: uint64(x.count), maxKey: t.p.maxKey.Load()}
@@ -438,7 +438,7 @@ func (x *transaction) shortKey(source keyRef, length uint64) (keyRef, error) {
 		err := copyPrefix(buf)
 		return keyRef{inline: string(buf), length: length}, err
 	}
-	inline := make([]byte, longPrefix)
+	inline := make([]byte, inlinePrefixBytes)
 	if err := copyPrefix(inline); err != nil {
 		return keyRef{}, err
 	}
@@ -447,7 +447,7 @@ func (x *transaction) shortKey(source keyRef, length uint64) (keyRef, error) {
 		return keyRef{}, err
 	}
 	key := keyRef{inline: string(inline), length: length, tail: id}
-	for remaining := length - longPrefix; remaining > 0; {
+	for remaining := length - inlinePrefixBytes; remaining > 0; {
 		p := new(page)
 		p.initialize(overflow, id)
 		n := min(remaining, uint64(pageSize-header))
@@ -465,7 +465,7 @@ func (x *transaction) shortKey(source keyRef, length uint64) (keyRef, error) {
 			order.PutUint64(p[24:32], next)
 		}
 		p.seal()
-		if err = x.tree.p.write(id, p, x.gen); err != nil {
+		if err = x.tree.p.write(id, p, x.rootGeneration); err != nil {
 			return keyRef{}, err
 		}
 		id = next

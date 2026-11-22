@@ -182,13 +182,13 @@ func TestOversizedPutIsPreMutation(t *testing.T) {
 		db := newTestDB(t, opts, nil)
 		mustPut(t, db, "a", "old")
 		before := directoryBytes(t, db.store.Dir)
-		sequence := db.store.Current.Sequence
+		sequence := db.store.Current.LastUserSequence
 		for _, k := range []string{"a", "new"} {
 			if err := db.Put([]byte(k), bytes.Repeat([]byte{1}, 100)); !errors.Is(err, ErrTooLarge) {
 				t.Fatalf("size: %v", err)
 			}
 		}
-		if !reflect.DeepEqual(before, directoryBytes(t, db.store.Dir)) || db.store.Current.Sequence != sequence {
+		if !reflect.DeepEqual(before, directoryBytes(t, db.store.Dir)) || db.store.Current.LastUserSequence != sequence {
 			t.Fatal("oversized Put mutated source files")
 		}
 		wantValue(t, db, "a", "old")
@@ -381,8 +381,8 @@ func TestPartialWriteAndCommittedCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantValue(t, db2, "k", "old")
-	active := testLoc(t, db2, "k").File.Path
-	end := db2.store.Current.ActiveEnd
+	active := testLoc(t, db2, "k").Segment.Path
+	end := db2.store.Current.ActiveCommittedEndOffset
 	if err := db2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestReopenCompatibilityBeforeTailCleanup(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	path, active := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path
+	path, active := db.store.Dir, db.store.Segments[db.store.Current.ActiveID].Path
 	f, err := os.OpenFile(active, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -644,7 +644,7 @@ func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 	db := newTestDBWithHooks(t, opts, nil, engineHooks)
 	mustPut(t, db, "sealed", "first")
 	mustPut(t, db, "active", "second")
-	sealed := filepath.Base(testLoc(t, db, "sealed").File.Path)
+	sealed := filepath.Base(testLoc(t, db, "sealed").Segment.Path)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ func TestOpenValidatesSelectedFilesBeforeCleanup(t *testing.T) {
 	}
 	original := directoryBytes(t, db.store.Dir)
 	orphan := storage.DataName(frontier.UUID, frontier.ManifestID+100)
-	tail := format.EncodeRecord(format.Put, frontier.Sequence+1, []byte("future"), []byte("uncommitted"))
+	tail := format.EncodeRecord(format.Put, frontier.LastUserSequence+1, []byte("future"), []byte("uncommitted"))
 
 	for _, damage := range []string{"missing sealed file", "short sealed file", "extended sealed file", "sealed checksum", "unknown file"} {
 		t.Run(damage, func(t *testing.T) {
@@ -821,7 +821,7 @@ func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 				mustPut(t, db, "pad", string(make([]byte, 60)))
 			}
 			activeID := db.store.Current.ActiveID
-			db.store.Current.Generation = math.MaxUint64 - 1
+			db.store.Current.PublicationGeneration = math.MaxUint64 - 1
 			err := db.Put([]byte("k"), []byte("new"))
 			if err != nil {
 				t.Fatalf("rotation=%t: %v", rotate, err)
@@ -831,7 +831,7 @@ func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 				t.Fatal(readErr)
 			}
 			frontier, decodeErr := format.DecodeFrontier(current)
-			if decodeErr != nil || frontier.Generation != math.MaxUint64 || (frontier.ActiveID != activeID) != rotate {
+			if decodeErr != nil || frontier.PublicationGeneration != math.MaxUint64 || (frontier.ActiveID != activeID) != rotate {
 				t.Fatalf("invalid last publication: %+v %v", frontier, decodeErr)
 			}
 			if err := db.Put([]byte("k"), []byte("never")); err == nil {
@@ -908,7 +908,7 @@ func TestOpenCancellationDuringReplayAllowsRetry(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	dir, active := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path
+	dir, active := db.store.Dir, db.store.Segments[db.store.Current.ActiveID].Path
 	fd, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -987,7 +987,7 @@ func TestRecoveryBoundaryFailureReleasesOwnershipAndPreservesAcknowledgment(t *t
 				if err := db.Close(); err != nil {
 					t.Fatal(err)
 				}
-				dir, path, end := db.store.Dir, db.store.Files[db.store.Current.ActiveID].Path, db.store.Current.ActiveEnd
+				dir, path, end := db.store.Dir, db.store.Segments[db.store.Current.ActiveID].Path, db.store.Current.ActiveCommittedEndOffset
 				fd, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 				if err != nil {
 					t.Fatal(err)
@@ -1184,9 +1184,9 @@ func TestSoftRotationBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestDB(t, Options{MaxRecordBytes: 100, TargetSegmentBytes: 200}, nil)
 			db.writer.Lock()
-			startID, startGeneration := db.store.Current.ActiveID, db.store.Current.Generation
+			startID, startGeneration := db.store.Current.ActiveID, db.store.Current.PublicationGeneration
 			err := db.store.Rotate() // A header-only active log must stay selected.
-			noRotation := db.store.Current.ActiveID == startID && db.store.Current.Generation == startGeneration
+			noRotation := db.store.Current.ActiveID == startID && db.store.Current.PublicationGeneration == startGeneration
 			db.writer.Unlock()
 			if err != nil || !noRotation {
 				t.Fatalf("empty rotation: %v", err)
@@ -1197,8 +1197,8 @@ func TestSoftRotationBoundary(t *testing.T) {
 			db.writer.Lock()
 			end := db.store.Current
 			db.writer.Unlock()
-			if (end.ActiveID != startID) != tc.rotate || end.Sequence != 2 {
-				t.Fatalf("active %d -> %d, sequence %d", startID, end.ActiveID, end.Sequence)
+			if (end.ActiveID != startID) != tc.rotate || end.LastUserSequence != 2 {
+				t.Fatalf("active %d -> %d, sequence %d", startID, end.ActiveID, end.LastUserSequence)
 			}
 		})
 	}
@@ -1214,11 +1214,11 @@ func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
 	}
 	dir := db.store.Dir
 	db.writer.Lock()
-	files := db.store.Catalog.Files
+	entries := db.store.Catalog.Entries
 	current := db.store.Current
 	db.writer.Unlock()
-	if len(files) != 1 || files[0].Bytes <= smaller.TargetSegmentBytes || current.ActiveEnd <= smaller.TargetSegmentBytes {
-		t.Fatalf("fixture: %v, active %d", files, current.ActiveEnd)
+	if len(entries) != 1 || entries[0].Bytes <= smaller.TargetSegmentBytes || current.ActiveCommittedEndOffset <= smaller.TargetSegmentBytes {
+		t.Fatalf("fixture: %v, active %d", entries, current.ActiveCommittedEndOffset)
 	}
 	backup := filepath.Join(t.TempDir(), "backup")
 	if err := db.Backup(context.Background(), backup); err != nil {
@@ -1254,7 +1254,7 @@ func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
 		image.writer.Lock()
 		after := image.store.Current
 		image.writer.Unlock()
-		if after.ActiveID == before.ActiveID || after.Sequence != before.Sequence+1 {
+		if after.ActiveID == before.ActiveID || after.LastUserSequence != before.LastUserSequence+1 {
 			t.Fatalf("append failed to rotate oversized active log: %#v", after)
 		}
 	}
@@ -1316,7 +1316,7 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 			frontier := image.store.Current
 			if tc.newImage {
 				wantValue(t, image, "k", "new")
-				if frontier.ActiveID == before.ActiveID || frontier.Generation != before.Generation+1 || frontier.Sequence != before.Sequence+1 {
+				if frontier.ActiveID == before.ActiveID || frontier.PublicationGeneration != before.PublicationGeneration+1 || frontier.LastUserSequence != before.LastUserSequence+1 {
 					t.Fatalf("rotating record and catalog published separately: %+v -> %+v", before, frontier)
 				}
 			} else {
@@ -1336,9 +1336,9 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 				storage.ManifestName(frontier.UUID, frontier.ManifestID): true,
 				storage.DataName(frontier.UUID, frontier.ActiveID):       true,
 			}
-			for _, file := range image.store.Catalog.Files {
-				if file.HasPhysicalFile() {
-					want[storage.DataName(frontier.UUID, file.ID)] = true
+			for _, entry := range image.store.Catalog.Entries {
+				if entry.HasPhysicalFile() {
+					want[storage.DataName(frontier.UUID, entry.ID)] = true
 				}
 			}
 			got := make(map[string]bool, len(entries))
@@ -1542,8 +1542,8 @@ func TestMissingDeletePrecedesExhaustedCountersAndPreservesBatch(t *testing.T) {
 		db := newTestDBWithHooks(t, Options{IndexMode: mode}, nil, &Hooks{CleanerStart: make(chan struct{})})
 		mustPut(t, db, "before", "preserved")
 		frontier, stats := db.store.Current, db.Stats()
-		db.store.Current.Sequence = math.MaxUint64
-		db.store.Current.Generation = math.MaxUint64
+		db.store.Current.LastUserSequence = math.MaxUint64
+		db.store.Current.PublicationGeneration = math.MaxUint64
 		exhausted := db.store.Current
 		if err := db.Delete([]byte("missing")); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("mode %d missing Delete with exhausted counters: %v", mode, err)
@@ -1566,7 +1566,7 @@ func TestMissingDeletePrecedesExhaustedCountersAndPreservesBatch(t *testing.T) {
 }
 
 func TestOperationOutcomePreservesItsOwnFaultBesideUncertainReadRepair(t *testing.T) {
-	repair := &storage.UncertainReadRepair{Err: &storage.Fault{Phase: "repair.dirsync", Outcome: Unknown, Err: syscall.EIO}}
+	repair := &storage.UncertainReadRepair{Err: &storage.Fault{Phase: "data-repair.dirsync", Outcome: Unknown, Err: syscall.EIO}}
 	write := &storage.Fault{Phase: "commit.health", Outcome: NotApplied, Err: repair}
 	for _, err := range []error{write, errors.Join(repair, write)} {
 		got := operationError("put", "append", err)
@@ -1584,7 +1584,7 @@ func TestGetRechecksUnavailableLocationAfterConcurrentMutation(t *testing.T) {
 				release := sync.OnceFunc(func() { close(resume) })
 				block := sync.OnceFunc(func() { close(entered); <-resume })
 				fs := &storage.IO{Hook: func(point string) error {
-					if point == "repair.verify:before" {
+					if point == "data-repair.verify:before" {
 						block()
 					}
 					return nil

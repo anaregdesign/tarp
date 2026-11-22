@@ -7,7 +7,7 @@
 // The default key index is a paged copy-on-write B+tree with a 16 MiB
 // working-memory budget. Set Options.IndexMode to IndexMemory for an in-memory
 // hash index. Both can reuse a persistent index checkpoint and replay
-// later commits. Full (default) verifies all committed DATA. Indexed skips the
+// the DATA log suffix after the checkpoint. Full (default) verifies all committed DATA. Indexed skips the
 // covered payloads on Open. Both modes share the Value LRU.
 //
 // Use OpenTyped with a Codec for each of the key and value types to work with
@@ -31,7 +31,7 @@
 // new DB if needed. Both accept a context to cancel recovery during startup.
 // Open starts one incremental compaction worker on each new or reopened DB.
 // It reclaims obsolete records, repacks small files and yields for writers
-// and backup. Compact explicitly builds a full checkpoint. Compaction uses
+// and backup. Compact explicitly builds a full DATA checkpoint. Compaction uses
 // PARITY to recover sealed DATA and can discard a proven irrecoverable live key.
 // CompactResult and AutoCompactionStatus report the number of dropped keys. Provide temporary
 // space for both maintenance and backup. Close joins the worker. Stats returns

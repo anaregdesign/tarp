@@ -33,12 +33,12 @@ func (w *boundedWriter) Write(b []byte) (int, error) {
 }
 
 func TestSelectRecordChecksDiscardedValuesAndBoundsKeyIO(t *testing.T) {
-	key := bytes.Repeat([]byte{0, 0xff}, streamChunk+1)
-	value := bytes.Repeat([]byte{1}, 3*streamChunk)
+	key := bytes.Repeat([]byte{0, 0xff}, streamChunkBytes+1)
+	value := bytes.Repeat([]byte{1}, 3*streamChunkBytes)
 	b := EncodeRecord(Put, 6, key, value)
 	run := func(dst io.Writer) error {
-		reader := &boundedReader{bytes.NewReader(b), streamChunk}
-		_, err := SelectRecord(context.Background(), reader, 0, int64(len(b)), make([]byte, 4*streamChunk), func(r Record, k string) (io.Writer, error) {
+		reader := &boundedReader{bytes.NewReader(b), streamChunkBytes}
+		_, err := SelectRecord(context.Background(), reader, 0, int64(len(b)), make([]byte, 4*streamChunkBytes), func(r RecordHeader, k string) (io.Writer, error) {
 			if k != string(key) || r.Sequence != 6 {
 				t.Fatal("incorrect key or sequence")
 			}
@@ -46,7 +46,7 @@ func TestSelectRecordChecksDiscardedValuesAndBoundsKeyIO(t *testing.T) {
 		})
 		return err
 	}
-	w := &boundedWriter{max: streamChunk}
+	w := &boundedWriter{max: streamChunkBytes}
 	if err := run(w); err != nil || !bytes.Equal(b, w.Bytes()) {
 		t.Fatalf("retained copy: %v", err)
 	}

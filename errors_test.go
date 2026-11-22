@@ -87,7 +87,7 @@ func TestLiveReadsReportCorruptRecordLocation(t *testing.T) {
 	for _, op := range []string{"get", "batch-get", "scan"} {
 		t.Run(op, func(t *testing.T) {
 			dir := t.TempDir()
-			// Keep this DATA active across Close so a parity repair cannot mask the read error.
+			// Keep this DATA active across Close so a DATA repair cannot mask the read error.
 			db := openPublicDB(t, dir, tarp.Options{IndexMode: tarp.IndexMemory})
 			key := []byte("k")
 			if err := db.Put(key, []byte("first")); err != nil {
@@ -188,10 +188,10 @@ func TestPublicDBReportsSizeAndReopenLimits(t *testing.T) {
 			if failed != nil || !errors.Is(err, tarp.ErrIncompatibleOptions) || !errors.As(err, &required) {
 				t.Fatalf("Open with smaller limits = %v, %v", failed, err)
 			}
-			if required.RequiredValueCacheBudgetBytes != 132 || required.RequiredRecordBytes != 52 {
+			if required.RequiredValueCacheBudgetBytes != 132 || required.RequiredMaxRecordBytes != 52 {
 				t.Fatalf("wrong reopen minima: %+v", required)
 			}
-			exact := tarp.Options{ValueCacheBudgetBytes: required.RequiredValueCacheBudgetBytes, MaxRecordBytes: required.RequiredRecordBytes}
+			exact := tarp.Options{ValueCacheBudgetBytes: required.RequiredValueCacheBudgetBytes, MaxRecordBytes: required.RequiredMaxRecordBytes}
 			if value, err := openPublicDB(t, dir, exact).Get(key); string(value) != "old" || err != nil {
 				t.Fatalf("Get after reopen at reported minima = %q, %v", value, err)
 			}
@@ -201,7 +201,7 @@ func TestPublicDBReportsSizeAndReopenLimits(t *testing.T) {
 
 func TestBatchLimitsReportOriginalInputAndPreserveSizeCause(t *testing.T) {
 	opts := tarp.Options{ValueCacheBudgetBytes: 132, MaxRecordBytes: 52, TargetSegmentBytes: 164}
-	db := openPublicDB(t, t.TempDir(), opts) // 100-byte segment payload
+	db := openPublicDB(t, t.TempDir(), opts) // space for 100 encoded record bytes
 	view, err := tarp.Bind(db, tarp.StringCodec{}, tarp.StringCodec{})
 	if err != nil {
 		t.Fatal(err)
@@ -227,10 +227,10 @@ func TestBatchLimitsReportOriginalInputAndPreserveSizeCause(t *testing.T) {
 		{"typed put entry", func() error {
 			return view.BatchPut([]tarp.TypedEntry[string, string]{{Key: "a"}, {Key: "a", Value: "long"}})
 		}, tarp.BatchEntrySizeLimit, 1, 0, 0},
-		{"repeated put payload", func() error {
+		{"repeated put record bytes", func() error {
 			return view.BatchPut([]tarp.TypedEntry[string, string]{{Key: "a"}, {Key: "a"}, {Key: "a"}})
-		}, tarp.BatchPayloadLimit, 2, 147, 100},
-		{"distinct delete payload", func() error { return view.BatchDelete([]string{"a", "a", "b", "c", "d"}) }, tarp.BatchPayloadLimit, 3, 147, 100},
+		}, tarp.BatchRecordBytesLimit, 2, 147, 100},
+		{"distinct delete record bytes", func() error { return view.BatchDelete([]string{"a", "a", "b", "c", "d"}) }, tarp.BatchRecordBytesLimit, 3, 147, 100},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.run()

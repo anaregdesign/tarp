@@ -7,13 +7,13 @@ type Bounds struct {
 	Lower, Upper string
 }
 
-// PrefixBounds takes ownership of a copy of prefix. The exclusive upper bound
+// PrefixBounds copies an encoded key prefix. The exclusive upper bound
 // increments the last non-0xff byte and drops the suffix. For an all-0xff
 // prefix every key at or above the lower bound matches.
-func PrefixBounds(prefix []byte) Bounds {
-	lower := string(prefix)
-	for i := len(prefix) - 1; i >= 0; i-- {
-		if prefix[i] != 0xff {
+func PrefixBounds(encodedPrefix []byte) Bounds {
+	lower := string(encodedPrefix)
+	for i := len(encodedPrefix) - 1; i >= 0; i-- {
+		if encodedPrefix[i] != 0xff {
 			upper := []byte(lower[:i+1])
 			upper[i]++
 			return Bounds{Lower: lower, Upper: string(upper)}

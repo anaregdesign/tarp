@@ -13,25 +13,25 @@ import (
 )
 
 const (
-	pageBytes = 4096
-	MaxDisk   = 256 << 20
+	overlayPageBytes = 4096
+	MaxDisk          = 256 << 20
 )
 
 type Stats struct {
-	Reads          uint64 `json:"reads"`
-	ReadBytes      uint64 `json:"read_bytes"`
-	Writes         uint64 `json:"writes"`
-	WrittenBytes   uint64 `json:"written_bytes"`
-	Flushes        uint64 `json:"flushes"`
-	FUAWrites      uint64 `json:"fua_writes"`
-	PersistedBytes uint64 `json:"persisted_bytes"`
-	DirtyBytes     uint64 `json:"dirty_page_bytes"`
-	DiscardedBytes uint64 `json:"discarded_page_bytes"`
+	Reads                     uint64 `json:"reads"`
+	ReadBytes                 uint64 `json:"read_bytes"`
+	Writes                    uint64 `json:"writes"`
+	WrittenBytes              uint64 `json:"written_bytes"`
+	Flushes                   uint64 `json:"flushes"`
+	FUAWrites                 uint64 `json:"fua_writes"`
+	PersistedBytes            uint64 `json:"persisted_bytes"`
+	DirtyOverlayPageBytes     uint64 `json:"dirty_overlay_page_bytes"`
+	DiscardedOverlayPageBytes uint64 `json:"discarded_overlay_page_bytes"`
 }
 
 // Disk acknowledges ordinary writes into RAM only. Flush and FUA complete only
 // after the backing file is synced. FUA persists only its own request range;
-// unrelated ordinary writes remain in RAM, even within the same cached page.
+// unrelated ordinary writes remain in RAM, even within the same NBD overlay page.
 // Close deliberately does not flush.
 type Disk struct {
 	mu    sync.Mutex
@@ -42,8 +42,8 @@ type Disk struct {
 }
 
 func CreateDisk(path string, size int64) (*Disk, error) {
-	if size <= 0 || size > MaxDisk || size%pageBytes != 0 {
-		return nil, fmt.Errorf("qualification: disk size must be page-aligned and at most %d", MaxDisk)
+	if size <= 0 || size > MaxDisk || size%overlayPageBytes != 0 {
+		return nil, fmt.Errorf("qualification: disk size must be aligned to an NBD overlay page and at most %d", MaxDisk)
 	}
 	fd, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
@@ -82,9 +82,9 @@ func (d *Disk) ReadAt(data []byte, offset int64) error {
 	}
 	length := len(data)
 	for len(data) != 0 {
-		page := offset / pageBytes * pageBytes
+		page := offset / overlayPageBytes * overlayPageBytes
 		within := int(offset - page)
-		n := min(len(data), pageBytes-within)
+		n := min(len(data), overlayPageBytes-within)
 		if cached, ok := d.dirty[page]; ok {
 			copy(data[:n], cached[within:within+n])
 		} else if _, err := d.file.ReadAt(data[:n], offset); err != nil {
@@ -113,9 +113,9 @@ func (d *Disk) WriteAt(data []byte, offset int64, fua bool) error {
 			return io.ErrShortWrite
 		}
 		end := offset + int64(length)
-		for page := offset / pageBytes * pageBytes; page < end; page += pageBytes {
+		for page := offset / overlayPageBytes * overlayPageBytes; page < end; page += overlayPageBytes {
 			if cached, ok := d.dirty[page]; ok {
-				begin, limit := max(offset, page), min(end, page+pageBytes)
+				begin, limit := max(offset, page), min(end, page+overlayPageBytes)
 				copy(cached[begin-page:limit-page], data[begin-offset:limit-offset])
 			}
 		}
@@ -129,17 +129,17 @@ func (d *Disk) WriteAt(data []byte, offset int64, fua bool) error {
 		return nil
 	}
 	for len(data) != 0 {
-		page := offset / pageBytes * pageBytes
+		page := offset / overlayPageBytes * overlayPageBytes
 		cached, ok := d.dirty[page]
 		if !ok {
-			cached = make([]byte, pageBytes)
+			cached = make([]byte, overlayPageBytes)
 			if _, err := d.file.ReadAt(cached, page); err != nil {
 				return err
 			}
 			d.dirty[page] = cached
 		}
 		within := int(offset - page)
-		n := min(len(data), pageBytes-within)
+		n := min(len(data), overlayPageBytes-within)
 		copy(cached[within:within+n], data[:n])
 		data, offset = data[n:], offset+int64(n)
 	}
@@ -159,14 +159,14 @@ func (d *Disk) flush() error {
 		if err != nil {
 			return err
 		}
-		if n != pageBytes {
+		if n != overlayPageBytes {
 			return io.ErrShortWrite
 		}
 	}
 	if err := d.file.Sync(); err != nil {
 		return err
 	}
-	d.stats.PersistedBytes += uint64(len(pages) * pageBytes)
+	d.stats.PersistedBytes += uint64(len(pages) * overlayPageBytes)
 	clear(d.dirty)
 	d.stats.Flushes++
 	return nil
@@ -179,18 +179,18 @@ func (d *Disk) Flush() error {
 }
 
 // PowerCut must follow termination of the client. It discards, rather than
-// writing back, every cached page, including previously acknowledged writes.
+// writing back, every dirty NBD overlay page, including previously acknowledged writes.
 func (d *Disk) PowerCut() Stats {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.stats.DiscardedBytes += uint64(len(d.dirty) * pageBytes)
+	d.stats.DiscardedOverlayPageBytes += uint64(len(d.dirty) * overlayPageBytes)
 	clear(d.dirty)
 	return d.snapshot()
 }
 
 func (d *Disk) snapshot() Stats {
 	result := d.stats
-	result.DirtyBytes = uint64(len(d.dirty) * pageBytes)
+	result.DirtyOverlayPageBytes = uint64(len(d.dirty) * overlayPageBytes)
 	return result
 }
 

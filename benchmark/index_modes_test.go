@@ -26,7 +26,7 @@ func TestPagedIndexBudgetAtTenfoldCardinality(t *testing.T) {
 				var key [16]byte
 				copy(key[:], "account/")
 				binary.BigEndian.PutUint64(key[8:], uint64(id))
-				err := tx.Put(string(key[:]), index.Address{FileID: 1, Sequence: uint64(id) + 1, Offset: int64(id) * 128, Bytes: 128, ValueBytes: 64})
+				err := tx.Put(string(key[:]), index.Address{FileID: 1, Sequence: uint64(id) + 1, RecordOffset: int64(id) * 128, RecordBytes: 128, ValueBytes: 64})
 				if err != nil {
 					tx.Abort()
 					t.Fatal(err)

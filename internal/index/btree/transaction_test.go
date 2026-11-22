@@ -43,7 +43,7 @@ func TestOverwriteKeepsPinnedAddressesAcrossSpillAndAbort(t *testing.T) {
 				if i%31 != 0 && i != len(keys)-1 {
 					continue
 				}
-				next := index.Address{FileID: uint64(10 + pass), Offset: int64(i * 128), Bytes: 100, ValueBytes: 32, Sequence: uint64(3000 + pass*len(keys) + i)}
+				next := index.Address{FileID: uint64(10 + pass), RecordOffset: int64(i * 128), RecordBytes: 100, ValueBytes: 32, Sequence: uint64(3000 + pass*len(keys) + i)}
 				old, found, err := tx.Apply(index.Mutation{Key: key, Address: next})
 				if err != nil || !found || old != want[key] {
 					t.Fatalf("overwrite %d on pass %d returned %v %t %v, want %v", i, pass, old, found, err, want[key])

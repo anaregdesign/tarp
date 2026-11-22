@@ -38,8 +38,8 @@ func (o Options) importCheckpoint(ctx context.Context, s *storage.Store, src io.
 		}
 	}
 	tree, err := btree.ImportPacked(ctx, src, size, dir, budget, visit)
-	if storage.IsIndexMiss(err, btree.ErrInvalidPacked) {
-		err = storage.ErrIndexMiss
+	if storage.IsIndexCheckpointUnusable(err, btree.ErrInvalidPacked) {
+		err = storage.ErrIndexCheckpointUnusable
 	}
 	if err != nil {
 		if build != nil {
@@ -74,12 +74,12 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return operationError("checkpoint index", "context", err)
 	}
-	if !db.compact.CompareAndSwap(false, true) {
+	if !db.manualCheckpoint.CompareAndSwap(false, true) {
 		return ErrBusy
 	}
 	db.cancelAutoRecovery()
 	db.resumeCleaner()
-	defer func() { db.compact.Store(false); db.notifyCleaner() }()
+	defer func() { db.manualCheckpoint.Store(false); db.notifyCleaner() }()
 	select {
 	case <-db.cleaner.gate:
 		defer func() { db.cleaner.gate <- struct{}{} }()
@@ -97,11 +97,11 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 		return operationError(op, "capture", err)
 	}
 	cp := db.store.Catalog.Index
-	if closing && db.store.IndexCheckpointHit && cp.ID != 0 && cp.Sequence == db.store.Current.Sequence && cp.Entries == uint64(len(db.store.Catalog.Files)) {
+	if closing && db.store.IndexCheckpointValidated && cp.ID != 0 && cp.CoveredSequence == db.store.Current.LastUserSequence && cp.CoveredCatalogEntries == uint64(len(db.store.Catalog.Entries)) {
 		db.writer.Unlock()
 		return nil
 	}
-	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
+	if db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		if err := db.sealActive(); err != nil {
 			db.storageFailure(err)
 			db.writer.Unlock()
@@ -110,7 +110,7 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 			return failed
 		}
 	}
-	work, err := db.store.BeginIndex()
+	work, err := db.store.BeginIndexCheckpoint()
 	db.writer.Unlock()
 	if err != nil {
 		return operationError(op, "capture", err)
@@ -158,7 +158,7 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 		return operationError(op, "pre-publication", err)
 	}
 	if err := work.Install(); err != nil {
-		if errors.Is(err, storage.ErrIndexLayoutChanged) {
+		if errors.Is(err, storage.ErrCoveredCatalogPrefixChanged) {
 			err = errors.Join(ErrBusy, err)
 		}
 		var fault *storage.Fault

@@ -29,7 +29,7 @@ func openTest(t *testing.T) *tree {
 	return tr
 }
 func addr(i uint64) index.Address {
-	return index.Address{FileID: 7, Offset: int64(i), Bytes: 65, ValueBytes: 1, Sequence: i}
+	return index.Address{FileID: 7, RecordOffset: int64(i), RecordBytes: 65, ValueBytes: 1, Sequence: i}
 }
 func verify(t *testing.T, v index.View, expected map[string]index.Address) {
 	t.Helper()

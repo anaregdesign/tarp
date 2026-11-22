@@ -69,7 +69,7 @@ func prepareContainerBatchFixture(t *testing.T, dir string, valueBytes, requests
 		pendingBytes += len(value)
 	}
 	// Separate small cold records with live filler records so two requested
-	// records cannot share a page. Readahead can still warm adjacent pages.
+	// records cannot share an OS page. Readahead can still warm neighboring OS pages.
 	padding := make([]byte, os.Getpagesize())
 	for i := range f.keys {
 		key := binary.BigEndian.AppendUint64(nil, uint64(i))

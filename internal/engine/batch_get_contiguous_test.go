@@ -14,31 +14,31 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-func TestAdjacentCountRequiresBoundedRunsInOneFile(t *testing.T) {
-	file := &storage.File{}
-	read := func(f *storage.File, offset, size int64) batchRead {
-		return batchRead{loc: storage.Location{File: f, Offset: offset, Bytes: size}}
+func TestContiguousRecordCountRequiresBoundedRunsInOneFile(t *testing.T) {
+	segment := &storage.DataSegment{}
+	read := func(f *storage.DataSegment, offset, size int64) batchRead {
+		return batchRead{loc: storage.Location{Segment: f, RecordOffset: offset, RecordBytes: size}}
 	}
 	for _, tc := range []struct {
 		reads []batchRead
 		want  int
 	}{
-		{[]batchRead{read(file, 5, 8), read(file, 13, 8), read(file, 21, 8)}, 3},
-		{[]batchRead{read(file, 5, 8), read(file, 14, 8)}, 1},
-		{[]batchRead{read(file, 13, 8), read(file, 5, 8)}, 1},
-		{[]batchRead{read(file, 5, 8), read(&storage.File{}, 13, 8)}, 1},
-		{[]batchRead{read(file, 5, 8), {}}, 1},
-		{[]batchRead{read(file, 0, 8), read(file, 8, storage.MaxAdjacentReadBytes-8)}, 2},
-		{[]batchRead{read(file, 0, 8), read(file, 8, storage.MaxAdjacentReadBytes-7)}, 1},
-		{[]batchRead{read(file, math.MaxInt64, 8), read(file, math.MinInt64+7, 8)}, 1},
+		{[]batchRead{read(segment, 5, 8), read(segment, 13, 8), read(segment, 21, 8)}, 3},
+		{[]batchRead{read(segment, 5, 8), read(segment, 14, 8)}, 1},
+		{[]batchRead{read(segment, 13, 8), read(segment, 5, 8)}, 1},
+		{[]batchRead{read(segment, 5, 8), read(&storage.DataSegment{}, 13, 8)}, 1},
+		{[]batchRead{read(segment, 5, 8), {}}, 1},
+		{[]batchRead{read(segment, 0, 8), read(segment, 8, storage.MaxContiguousReadBytes-8)}, 2},
+		{[]batchRead{read(segment, 0, 8), read(segment, 8, storage.MaxContiguousReadBytes-7)}, 1},
+		{[]batchRead{read(segment, math.MaxInt64, 8), read(segment, math.MinInt64+7, 8)}, 1},
 	} {
-		if got := adjacentCount(tc.reads); got != tc.want {
+		if got := contiguousRecordCount(tc.reads); got != tc.want {
 			t.Errorf("group size %d, want %d", got, tc.want)
 		}
 	}
 }
 
-func TestBatchGetAdjacentChecksShareReadSlotAndReleasePinsOnFailure(t *testing.T) {
+func TestBatchGetContiguousChecksShareReadSlotAndReleasePinsOnFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		gate := make(chan struct{})
 		release := sync.OnceFunc(func() { close(gate) })
@@ -59,14 +59,14 @@ func TestBatchGetAdjacentChecksShareReadSlotAndReleasePinsOnFailure(t *testing.T
 		for _, k := range []string{"a", "b", "c", "z"} {
 			mustPut(t, db, k, k)
 		}
-		file := testLoc(t, db, "a").File
-		refs := file.References()
+		segment := testLoc(t, db, "a").Segment
+		refs := segment.References()
 		first := startBatchGet(db, [][]byte{[]byte("a"), []byte("b"), []byte("a")})
 		synctest.Wait()
 		second := startBatchGet(db, [][]byte{[]byte("c")})
 		synctest.Wait()
-		if started.Load() != 1 || file.References() != refs+3 {
-			t.Fatalf("paused reads %d, pins %d", started.Load(), file.References())
+		if started.Load() != 1 || segment.References() != refs+3 {
+			t.Fatalf("paused reads %d, pins %d", started.Load(), segment.References())
 		}
 		release()
 		if out := <-first; out.results != nil || !errors.Is(out.err, format.ErrCorrupt) {
@@ -75,13 +75,13 @@ func TestBatchGetAdjacentChecksShareReadSlotAndReleasePinsOnFailure(t *testing.T
 		if out := <-second; out.results != nil || !errors.Is(out.err, ErrUnhealthy) {
 			t.Fatalf("single: %+v", out)
 		}
-		if file.References() != refs {
-			t.Fatalf("leaked pins: %d", file.References())
+		if segment.References() != refs {
+			t.Fatalf("leaked pins: %d", segment.References())
 		}
 	})
 }
 
-func TestBatchGetAdjacentRunsReadInParallelWithinSharedLimit(t *testing.T) {
+func TestBatchGetContiguousRunsReadInParallelWithinSharedLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		gate := make(chan struct{})
 		release := sync.OnceFunc(func() { close(gate) })
@@ -90,7 +90,7 @@ func TestBatchGetAdjacentRunsReadInParallelWithinSharedLimit(t *testing.T) {
 		var records atomic.Int32
 		db := newTestDBWithHooks(t, Options{BatchGetReadConcurrency: 2}, &storage.IO{Hook: func(point string) error {
 			switch point {
-			case "read.adjacent:before":
+			case "read.contiguous:before":
 				ranges.Add(1)
 				<-gate
 			case "read:before":
@@ -130,10 +130,10 @@ func TestBatchGetAdjacentRunsReadInParallelWithinSharedLimit(t *testing.T) {
 	})
 }
 
-func TestBatchGetGroups32AdjacentColdRecordsButReads33Individually(t *testing.T) {
+func TestBatchGetGroups32ContiguousColdRecordsButReads33Individually(t *testing.T) {
 	var grouped atomic.Int32
 	db := newTestDBWithHooks(t, Options{}, &storage.IO{Hook: func(point string) error {
-		if point == "read.adjacent:before" {
+		if point == "read.contiguous:before" {
 			grouped.Add(1)
 		}
 		return nil
@@ -169,7 +169,7 @@ func TestBatchGetScatteredPrefixKeepsIndividualReads(t *testing.T) {
 	var grouped, individual atomic.Int32
 	db := newTestDBWithHooks(t, Options{ValueCacheBudgetBytes: 130}, &storage.IO{Hook: func(point string) error {
 		switch point {
-		case "read.adjacent:before":
+		case "read.contiguous:before":
 			grouped.Add(1)
 		case "read:before":
 			individual.Add(1)

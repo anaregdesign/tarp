@@ -11,9 +11,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/format"
 )
 
-func adjacentReadFixture(t *testing.T) (*Store, []AdjacentRead) {
+func contiguousReadFixture(t *testing.T) (*Store, []ContiguousRead) {
 	t.Helper()
-	s, err := openTestStore(t, t.TempDir(), Config{Handles: 1, RecordBytes: 256, TargetSegmentBytes: 1024, ValueCacheBudgetBytes: 1024}, nil)
+	s, err := openTestStore(t, t.TempDir(), Config{Handles: 1, MaxRecordBytes: 256, TargetSegmentBytes: 1024, ValueCacheBudgetBytes: 1024}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,26 +27,26 @@ func adjacentReadFixture(t *testing.T) (*Store, []AdjacentRead) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	group := make([]AdjacentRead, len(locs))
+	group := make([]ContiguousRead, len(locs))
 	for i, loc := range locs {
-		group[i] = AdjacentRead{Location: loc, Key: entries[i].Key}
+		group[i] = ContiguousRead{Location: loc, Key: entries[i].Key}
 	}
-	locs[0].File.Pin()
-	t.Cleanup(locs[0].File.Unpin)
+	locs[0].Segment.Pin()
+	t.Cleanup(locs[0].Segment.Unpin)
 	return s, group
 }
 
-func TestReadAdjacentReportsSecondRecordAfterTruncationOrCorruption(t *testing.T) {
+func TestReadContiguousReportsSecondRecordAfterTruncationOrCorruption(t *testing.T) {
 	for _, damage := range []string{"missing second record", "short second record", "bad second checksum"} {
 		t.Run(damage, func(t *testing.T) {
-			s, group := adjacentReadFixture(t)
+			s, group := contiguousReadFixture(t)
 			second := group[1].Location
-			lastByte := second.Offset + second.Bytes - 1
+			lastByte := second.RecordOffset + second.RecordBytes - 1
 			wantErr := io.EOF
 			var err error
 			switch damage {
 			case "missing second record":
-				err = s.active.Truncate(second.Offset)
+				err = s.active.Truncate(second.RecordOffset)
 			case "short second record":
 				err = s.active.Truncate(lastByte)
 			case "bad second checksum":
@@ -56,8 +56,8 @@ func TestReadAdjacentReportsSecondRecordAfterTruncationOrCorruption(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = s.ReadAdjacent(group)
-			location := fmt.Sprintf("%s: record at offset %d:", filepath.Base(second.File.Path), second.Offset)
+			err = s.ReadContiguous(group)
+			location := fmt.Sprintf("%s: record at offset %d:", filepath.Base(second.Segment.Path), second.RecordOffset)
 			if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), location) {
 				t.Fatalf("read error %v, want %v at %s", err, wantErr, location)
 			}
@@ -65,14 +65,14 @@ func TestReadAdjacentReportsSecondRecordAfterTruncationOrCorruption(t *testing.T
 	}
 }
 
-func TestReadAdjacentReturnsIndependentValues(t *testing.T) {
-	s, group := adjacentReadFixture(t)
-	if err := s.ReadAdjacent(group); err != nil {
+func TestReadContiguousReturnsIndependentValues(t *testing.T) {
+	s, group := contiguousReadFixture(t)
+	if err := s.ReadContiguous(group); err != nil {
 		t.Fatal(err)
 	}
 	first := group[0].Value
 	first[0] = '!'
-	if err := s.ReadAdjacent(group); err != nil {
+	if err := s.ReadContiguous(group); err != nil {
 		t.Fatal(err)
 	}
 	if string(first) != "!ne" || string(group[0].Value) != "one" || string(group[1].Value) != "two" || string(group[2].Value) != "three" {

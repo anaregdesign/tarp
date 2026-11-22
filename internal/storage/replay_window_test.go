@@ -47,8 +47,8 @@ func TestReadOnlyReplayWindowsMatchFullValidation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if img.LiveKeys != full.LiveKeys || img.Required != full.Required || img.MaxValueBytes != full.MaxValueBytes {
-			t.Fatalf("budget %d: live=%d required=%+v maxValue=%d", budget, img.LiveKeys, img.Required, img.MaxValueBytes)
+		if img.LiveKeys != full.LiveKeys || img.LiveRecordSizes != full.LiveRecordSizes || img.LargestLiveValueBytes != full.LargestLiveValueBytes {
+			t.Fatalf("budget %d: live=%d required=%+v maxValue=%d", budget, img.LiveKeys, img.LiveRecordSizes, img.LargestLiveValueBytes)
 		}
 	}
 	// This tombstone sorts after every key retained by the first small window.
@@ -66,8 +66,8 @@ func TestReplayWindowsAdvancePastBinaryPrefixesAndOneOversizedKey(t *testing.T) 
 	for after := ""; ; {
 		w := newKeyWindow(after, 2*replayKeyCharge+4)
 		for _, key := range keys {
-			r := format.Record{Kind: format.Put, KeyBytes: int64(len(key)), Sequence: 1}
-			if err := w.apply(format.Log, 0, r, key); err != nil {
+			r := format.RecordHeader{Kind: format.Put, KeyBytes: int64(len(key)), Sequence: 1}
+			if err := w.apply(format.RawLogKind, 0, r, key); err != nil {
 				t.Fatal(err)
 			}
 			if w.used > w.limit && len(w.live) != 1 {

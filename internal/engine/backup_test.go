@@ -101,7 +101,7 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 					if meta.Files[i].Name == name {
 						files[name] = string(data)
 						meta.Files[i].Bytes = int64(len(data))
-						meta.Files[i].Hash = sha256.Sum256(data)
+						meta.Files[i].Digest = sha256.Sum256(data)
 						return
 					}
 				}
@@ -109,14 +109,14 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 			}
 			switch damage {
 			case "sequence":
-				meta.Sequence++
+				meta.LastUserSequence++
 			case "cutoff":
-				meta.Cutoff = meta.Sequence
+				meta.CheckpointCutoffSequence = meta.LastUserSequence
 			case "active suffix":
 				replaceFile(active, append([]byte(files[active]), 0))
 			case "segment identity":
 				data := []byte(files[active])
-				copy(data, format.EncodeSegment(format.Segment{UUID: current.UUID, ID: current.ActiveID + 1, Kind: format.Log}))
+				copy(data, format.EncodeSegmentHeader(format.SegmentHeader{UUID: current.UUID, ID: current.ActiveID + 1, Kind: format.RawLogKind}))
 				replaceFile(active, data)
 			case "inner signature":
 				data := []byte(files["CURRENT"])
@@ -129,16 +129,16 @@ func TestRestoreRejectsInconsistentBackupImage(t *testing.T) {
 			case "listed unselected file":
 				name := storage.DataName(current.UUID, current.ManifestID+100)
 				files[name] = ""
-				meta.Files = append(meta.Files, format.BackupFile{Name: name, Hash: sha256.Sum256(nil)})
+				meta.Files = append(meta.Files, format.BackupFile{Name: name, Digest: sha256.Sum256(nil)})
 			case "duplicate entry":
 				meta.Files = append(meta.Files, meta.Files[0])
 			case "repeated record sequence":
-				firstEnd := current.ActiveEnd
-				data := append([]byte(files[active]), format.EncodeRecord(format.Put, current.Sequence, []byte("next"), nil)...)
+				firstEnd := current.ActiveCommittedEndOffset
+				data := append([]byte(files[active]), format.EncodeRecord(format.Put, current.LastUserSequence, []byte("next"), nil)...)
 				replaceFile(active, data)
-				current.Sequence++
-				meta.Sequence = current.Sequence
-				current.ActiveEnd = int64(len(data))
+				current.LastUserSequence++
+				meta.LastUserSequence = current.LastUserSequence
+				current.ActiveCommittedEndOffset = int64(len(data))
 				replaceFile("CURRENT", format.EncodeFrontier(current))
 				wantLocation = fmt.Sprintf("%s: record at offset %d", active, firstEnd)
 			case "file digest":
@@ -337,10 +337,10 @@ func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	end := db.store.Current.ActiveEnd
-	seq := db.store.Current.Sequence
+	end := db.store.Current.ActiveCommittedEndOffset
+	seq := db.store.Current.LastUserSequence
 	// An uncommitted active-file suffix is outside the permitted read window.
-	file := testLoc(t, db, "last").File.Path
+	file := testLoc(t, db, "last").Segment.Path
 	fd, err := os.OpenFile(file, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -372,8 +372,8 @@ func TestBackupBatchesRecordsAcrossBlockBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer clone.Close()
-	if clone.store.Current.Sequence != seq {
-		t.Fatalf("restored sequence %d, want %d", clone.store.Current.Sequence, seq)
+	if clone.store.Current.LastUserSequence != seq {
+		t.Fatalf("restored sequence %d, want %d", clone.store.Current.LastUserSequence, seq)
 	}
 	for i, k := range keys {
 		v, err := clone.Get(k)
@@ -408,12 +408,12 @@ func TestBackupPayloadWriteFailureLeavesSourceHealthy(t *testing.T) {
 func TestBackupRejectsCorruptionInFinalBlock(t *testing.T) {
 	db := newTestDB(t, Options{}, nil)
 	mustPut(t, db, "multi-block", strings.Repeat("v", 80<<10))
-	file := testLoc(t, db, "multi-block").File
-	fd, err := os.OpenFile(file.Path, os.O_WRONLY, 0)
+	segment := testLoc(t, db, "multi-block").Segment
+	fd, err := os.OpenFile(segment.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fd.WriteAt([]byte("!"), db.store.Current.ActiveEnd-1)
+	_, err = fd.WriteAt([]byte("!"), db.store.Current.ActiveCommittedEndOffset-1)
 	if err := errors.Join(err, fd.Close()); err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +555,7 @@ func TestMixedStoreCheckpointAndBackup(t *testing.T) {
 		}
 		mustPut(t, image, "next", "write")
 		image.writer.Lock()
-		seq, cutoff, prune := image.store.Current.Sequence, image.store.Catalog.Cutoff, image.store.Catalog.PrunedThrough
+		seq, cutoff, prune := image.store.Current.LastUserSequence, image.store.Catalog.CheckpointCutoffSequence, image.store.Catalog.PrunedThroughSequence
 		image.writer.Unlock()
 		if seq != 10 || cutoff != 9 || prune != cutoff {
 			t.Fatalf("checkpoint sequence/cutoff/pruning %d/%d/%d", seq, cutoff, prune)
@@ -577,7 +577,7 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 	mustPut(t, db, "a", "old")
 	mustPut(t, db, "d", "keep-in-backup")
 	target := filepath.Join(t.TempDir(), "backup")
-	pinnedFile := testLoc(t, db, "a").File
+	pinnedFile := testLoc(t, db, "a").Segment
 	armed.Store(true)
 	done := make(chan error, 1)
 	go func() { done <- db.Backup(context.Background(), target) }()
@@ -779,7 +779,7 @@ func TestBackupRepairsMultipleSealedFilesAndRetainsOriginalCut(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := VerifyBackup(t.Context(), backup)
-	if err != nil || info.Sequence != second.Last || info.LiveKeys != 2 {
+	if err != nil || info.LastUserSequence != second.LastSequence || info.LiveKeys != 2 {
 		t.Fatalf("backup after repair: %+v, %v", info, err)
 	}
 	if names, err := os.ReadDir(dir); err != nil || len(names) != 1 {
@@ -792,7 +792,7 @@ func TestBackupDoesNotRepairSealedDataForDestinationFault(t *testing.T) {
 	var verifies atomic.Int32
 	fs := &storage.IO{Hook: func(p string) error {
 		switch p {
-		case "repair.verify:before":
+		case "data-repair.verify:before":
 			verifies.Add(1)
 		case "backup.copy:before":
 			return syscall.EIO
@@ -813,7 +813,7 @@ func TestBackupSourceRepairUncertaintyPreservesDestinationAndForcesReopen(t *tes
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	ioHooks := &storage.IO{Hook: func(p string) error {
-		if p == "repair.rename:after" {
+		if p == "data-repair.rename:after" {
 			cancel()
 			return context.Canceled
 		}
@@ -865,7 +865,7 @@ func TestBackupRepairsCapturedActivePrefixAfterConcurrentSeal(t *testing.T) {
 	db := newTestDBWithHooks(t, Options{}, fs, parkedMaintenance())
 	mustPut(t, db, "first", "original")
 	before := db.store.Current
-	file := db.store.Files[before.ActiveID]
+	segment := db.store.Segments[before.ActiveID]
 	dest := filepath.Join(t.TempDir(), "backup")
 	done := make(chan error, 1)
 	go func() { done <- db.Backup(t.Context(), dest) }()
@@ -880,11 +880,11 @@ func TestBackupRepairsCapturedActivePrefixAfterConcurrentSeal(t *testing.T) {
 	if err := db.ProtectParity(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	fd, err := os.OpenFile(file.Path, os.O_WRONLY, 0)
+	fd, err := os.OpenFile(segment.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fd.WriteAt([]byte("!"), before.ActiveEnd-1)
+	_, err = fd.WriteAt([]byte("!"), before.ActiveCommittedEndOffset-1)
 	if err := errors.Join(err, fd.Close()); err != nil {
 		t.Fatal(err)
 	}
@@ -893,7 +893,7 @@ func TestBackupRepairsCapturedActivePrefixAfterConcurrentSeal(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := VerifyBackup(t.Context(), dest)
-	if err != nil || info.Sequence != before.Sequence || info.LiveKeys != 1 {
+	if err != nil || info.LastUserSequence != before.LastUserSequence || info.LiveKeys != 1 {
 		t.Fatalf("backup did not preserve captured prefix: %+v, %v", info, err)
 	}
 	wantValue(t, db, "first", "original")

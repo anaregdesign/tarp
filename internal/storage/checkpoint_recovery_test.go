@@ -14,8 +14,8 @@ import (
 func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 	s, c, src, raw := protectedRecoveryFixture(t, nil)
 	raw[256] ^= 1
-	raw[format.ParityBlockBytes+256] ^= 1
-	if err := os.WriteFile(src.File.Path, raw, 0600); err != nil {
+	raw[format.DataBlockBytes+256] ^= 1
+	if err := os.WriteFile(src.Segment.Path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	keys := memory.New()
@@ -24,13 +24,13 @@ func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 	// record geometry and lies in a proven bad block. It does not start at
 	// an original record boundary. Simulate matching aggregate counters so
 	// they alone cannot establish membership.
-	addr := index.Address{FileID: src.File.ID, Sequence: 1, Offset: 200, Bytes: format.RecordHeaderBytes + 4 + 24, ValueBytes: 24}
+	addr := index.Address{FileID: src.Segment.ID, Sequence: 1, RecordOffset: 200, RecordBytes: format.RecordHeaderBytes + 4 + 24, ValueBytes: 24}
 	tx := keys.Begin()
 	if err := tx.Put("fake", addr); err != nil {
 		t.Fatal(err)
 	}
 	tx.Commit()
-	c.capture.Files[0].liveKeys, c.capture.Files[0].liveBytes = 1, addr.Bytes
+	c.capture.Segments[0].liveKeys, c.capture.Segments[0].liveBytes = 1, addr.RecordBytes
 	v := keys.View()
 	defer v.Close()
 	h := memory.New()
@@ -39,14 +39,14 @@ func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 	defer moves.Close()
 	defer lost.Close()
 	before := s.Current
-	err := c.CopyRecovered(t.Context(), h, v, moves, lost, s.ReserveSnapshotFile, nil)
+	err := c.CopyRecovered(t.Context(), h, v, moves, lost, s.ReserveSnapshotSegment, nil)
 	if !errors.Is(err, ErrCorrupt) || lost.count != 0 || s.Current != before {
 		t.Fatalf("forged index address accepted for loss: %v; lost %d", err, lost.count)
 	}
 }
 
 func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1 << 20, MaxRecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
 	s, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	for _, k := range []string{"a", "b"} {
 		v := []byte("keep")
 		if k == "b" {
-			v = bytes.Repeat([]byte{'v'}, 2*format.ParityBlockBytes)
+			v = bytes.Repeat([]byte{'v'}, 2*format.DataBlockBytes)
 		}
 		loc, err := s.Append(format.Put, []byte(k), v, func() error { return nil })
 		if err != nil {
@@ -69,8 +69,8 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 		if err := tx.Put(k, loc.Address()); err != nil {
 			t.Fatal(err)
 		}
-		loc.File.LiveKeys.Add(1)
-		loc.File.LiveBytes.Add(loc.Bytes)
+		loc.Segment.LiveKeys.Add(1)
+		loc.Segment.LiveBytes.Add(loc.RecordBytes)
 		newest = loc
 	}
 	tx.Commit()
@@ -82,17 +82,17 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Release()
-	src := c.Files[0]
-	if err := s.EnsureParity(t.Context(), c.Current.UUID, src, true, nil); err != nil {
+	src := c.Segments[0]
+	if err := s.EnsureParitySidecar(t.Context(), c.Current.UUID, src, true, nil); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(src.File.Path)
+	raw, err := os.ReadFile(src.Segment.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw[newest.Offset+format.RecordHeaderBytes] = 'a'
-	raw[format.ParityBlockBytes+20] ^= 1
-	if err := os.WriteFile(src.File.Path, raw, 0600); err != nil {
+	raw[newest.RecordOffset+format.RecordHeaderBytes] = 'a'
+	raw[format.DataBlockBytes+20] ^= 1
+	if err := os.WriteFile(src.Segment.Path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	v := keys.View()
@@ -100,9 +100,9 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	moves, lost := s.NewRelocations(), s.NewRelocations()
 	defer moves.Close()
 	defer lost.Close()
-	out := s.NewCheckpoint(c)
+	out := s.NewDataCheckpoint(c)
 	defer out.Discard()
-	if err := out.CopyRecovered(t.Context(), h, v, moves, lost, s.ReserveSnapshotFile, nil); err != nil {
+	if err := out.CopyRecovered(t.Context(), h, v, moves, lost, s.ReserveSnapshotSegment, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []struct {

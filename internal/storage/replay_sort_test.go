@@ -51,18 +51,18 @@ func TestSortedReplayKeepsBinaryKeysAndStableHistoryAcrossRuns(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 	for i := range 240 {
 		key := keys[rng.Intn(len(keys))]
-		r := format.Record{Kind: format.Put, KeyBytes: int64(len(key)), Sequence: uint64(1000 - i), ValueBytes: 13}
+		r := format.RecordHeader{Kind: format.Put, KeyBytes: int64(len(key)), Sequence: uint64(1000 - i), ValueBytes: 13}
 		if _, ok := latest[key]; ok && rng.Intn(3) == 0 {
 			r.Kind = format.Delete
 			r.ValueBytes = 0
 		}
-		a := index.Address{FileID: 2, Offset: int64(i * 200), Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+		a := index.Address{FileID: 2, RecordOffset: int64(i * 200), RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 		if r.Kind == format.Delete {
 			delete(latest, key)
 		} else {
 			latest[key] = a
 		}
-		if err := sorter.add(replayEvent{key: key, addr: a, fileKind: format.Log, recordKind: r.Kind}); err != nil {
+		if err := sorter.add(replayEvent{key: key, addr: a, fileKind: format.RawLogKind, recordKind: r.Kind}); err != nil {
 			t.Fatal(err)
 		}
 		if sorter.used > sorter.limit && len(sorter.chunk) > 1 {
@@ -97,9 +97,9 @@ func TestBulkReplayIdentifiesInvalidSourceAndAllowsPrunedDeletes(t *testing.T) {
 		ops         []uint8
 		wantErr     bool
 	}{
-		{"ordinary absent delete", 5, 4, format.Log, []uint8{format.Delete, format.Put}, true},
-		{"pruned absent delete", 4, 4, format.Log, []uint8{format.Delete, format.Put}, false},
-		{"repeated snapshot key", 1, 0, format.Snapshot, []uint8{format.Put, format.Put}, true},
+		{"ordinary absent delete", 5, 4, format.RawLogKind, []uint8{format.Delete, format.Put}, true},
+		{"pruned absent delete", 4, 4, format.RawLogKind, []uint8{format.Delete, format.Put}, false},
+		{"repeated snapshot key", 1, 0, format.SnapshotKind, []uint8{format.Put, format.Put}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			backend, err := btree.NewIn(t.TempDir(), btree.MinBudget)
@@ -110,8 +110,8 @@ func TestBulkReplayIdentifiesInvalidSourceAndAllowsPrunedDeletes(t *testing.T) {
 			builder := newReplayBuilder(t.Context(), backend, test.pruned)
 			defer builder.abort()
 			for i, kind := range test.ops {
-				r := format.Record{Sequence: test.seq, KeyBytes: 1, Kind: kind}
-				if err := builder.apply(&File{ID: 1, Kind: test.kind}, int64(i*100), r, "k"); err != nil {
+				r := format.RecordHeader{Sequence: test.seq, KeyBytes: 1, Kind: kind}
+				if err := builder.apply(&DataSegment{ID: 1, Kind: test.kind}, int64(i*100), r, "k"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -136,7 +136,7 @@ func TestReplayRunCorruptionAndCancellationRemainPrivate(t *testing.T) {
 	}
 	defer run.fd.Close()
 	w := bufio.NewWriter(run.fd)
-	if err := run.write(w, replayEvent{key: "hello", addr: index.Address{Bytes: format.RecordHeaderBytes + 5}}); err != nil {
+	if err := run.write(w, replayEvent{key: "hello", addr: index.Address{RecordBytes: format.RecordHeaderBytes + 5}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Flush(); err != nil {
@@ -172,7 +172,7 @@ func TestReplayRunCorruptionAndCancellationRemainPrivate(t *testing.T) {
 	builder.sort.dir = t.TempDir() + "/missing"
 	builder.sort.limit = 1
 	for _, key := range []string{"first", "last"} {
-		err = builder.apply(&File{ID: 1, Kind: format.Log}, 64, format.Record{Kind: format.Put, Sequence: 1, KeyBytes: int64(len(key))}, key)
+		err = builder.apply(&DataSegment{ID: 1, Kind: format.RawLogKind}, 64, format.RecordHeader{Kind: format.Put, Sequence: 1, KeyBytes: int64(len(key))}, key)
 	}
 	var work *IndexWorkError
 	var source *SourceError

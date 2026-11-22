@@ -22,13 +22,13 @@ func DecodeIndexedValue(record, key []byte, sequence uint64) ([]byte, error) {
 	return bytes.Clone(payload[len(key):]), nil
 }
 
-func decodeIndexedHeader(header []byte, size int64, keyBytes int, sequence uint64) (Record, error) {
-	r, err := DecodeRecord(header, size)
+func decodeIndexedHeader(header []byte, size int64, keyBytes int, sequence uint64) (RecordHeader, error) {
+	r, err := DecodeRecordHeader(header, size)
 	if err != nil {
-		return Record{}, err
+		return RecordHeader{}, err
 	}
-	if r.Bytes() != size || r.Sequence != sequence || r.Kind != Put || r.KeyBytes != int64(keyBytes) {
-		return Record{}, bad("indexed record identity")
+	if r.EncodedRecordBytes() != size || r.Sequence != sequence || r.Kind != Put || r.KeyBytes != int64(keyBytes) {
+		return RecordHeader{}, bad("indexed record identity")
 	}
 	return r, nil
 }

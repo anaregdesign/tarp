@@ -20,14 +20,14 @@ type Relocation struct {
 // Relocations keeps one small batch in memory. Larger operations spill all
 // moves into an unnamed file in the owning DB workspace.
 type Relocations struct {
-	small  []Relocation
-	fd     *os.File
-	writer *bufio.Writer
-	files  map[uint64]*File
-	count  int
-	maxKey int
-	bytes  int64
-	store  *Store
+	small    []Relocation
+	fd       *os.File
+	writer   *bufio.Writer
+	segments map[uint64]*DataSegment
+	count    int
+	maxKey   int
+	bytes    int64
+	store    *Store
 }
 
 const (
@@ -52,7 +52,7 @@ func (m *Relocations) open() error {
 	}
 	m.fd = fd
 	m.writer = bufio.NewWriterSize(fd, 32<<10)
-	m.files = make(map[uint64]*File)
+	m.segments = make(map[uint64]*DataSegment)
 	return nil
 }
 
@@ -93,11 +93,11 @@ func (m *Relocations) write(move Relocation) error {
 	old, next := move.Old, move.Next
 	var h [relocationHeader]byte
 	put := binary.LittleEndian.PutUint64
-	put(h[0:], old.File.ID)
-	put(h[8:], uint64(old.Offset))
-	put(h[16:], next.File.ID)
-	put(h[24:], uint64(next.Offset))
-	put(h[32:], uint64(old.Bytes))
+	put(h[0:], old.Segment.ID)
+	put(h[8:], uint64(old.RecordOffset))
+	put(h[16:], next.Segment.ID)
+	put(h[24:], uint64(next.RecordOffset))
+	put(h[32:], uint64(old.RecordBytes))
 	put(h[40:], uint64(old.ValueBytes))
 	put(h[48:], old.Sequence)
 	size, err := writeScratchRecord(m.writer, h[:], move.Key, m.bytes)
@@ -105,8 +105,8 @@ func (m *Relocations) write(move Relocation) error {
 		return err
 	}
 	m.bytes = size
-	m.files[old.File.ID] = old.File
-	m.files[next.File.ID] = next.File
+	m.segments[old.Segment.ID] = old.Segment
+	m.segments[next.Segment.ID] = next.Segment
 	m.maxKey = max(m.maxKey, len(move.Key))
 	return nil
 }
@@ -174,14 +174,14 @@ func (m *Relocations) EachBatch(maxCount int, visit func([]Relocation) error) er
 			return &IndexWorkError{Err: err}
 		}
 		get := binary.LittleEndian.Uint64
-		old := Location{File: m.files[get(h[0:])], Offset: int64(get(h[8:])), Bytes: int64(get(h[32:])), ValueBytes: int64(get(h[40:])), Sequence: get(h[48:])}
+		old := Location{Segment: m.segments[get(h[0:])], RecordOffset: int64(get(h[8:])), RecordBytes: int64(get(h[32:])), ValueBytes: int64(get(h[40:])), Sequence: get(h[48:])}
 		next := old
-		next.File, next.Offset = m.files[get(h[16:])], int64(get(h[24:]))
-		if old.File == nil || next.File == nil || old.Offset < format.SegmentHeaderBytes || next.Offset < format.SegmentHeaderBytes {
+		next.Segment, next.RecordOffset = m.segments[get(h[16:])], int64(get(h[24:]))
+		if old.Segment == nil || next.Segment == nil || old.RecordOffset < format.SegmentHeaderBytes || next.RecordOffset < format.SegmentHeaderBytes {
 			return &IndexWorkError{Err: errors.New("invalid relocation header")}
 		}
 		left -= relocationHeader
-		key, err := readScratchKey(r, h[:], old.Bytes, old.ValueBytes, left, m.maxKey)
+		key, err := readScratchKey(r, h[:], old.RecordBytes, old.ValueBytes, left, m.maxKey)
 		if err != nil {
 			return &IndexWorkError{Err: err}
 		}

@@ -8,7 +8,7 @@ import (
 )
 
 // Rotate across ordinary tails rather than revisiting one hot leaf. The
-// process-level page meter counts B+tree pager misses (including OS-cache hits).
+// B+tree page-read counter includes fetches served by the OS page cache.
 func BenchmarkEdgePrefixWorkingSet(b *testing.B) {
 	var queries []edgePrefixQuery
 	for tail := range 258 {
@@ -45,7 +45,7 @@ func BenchmarkEdgePrefixWorkingSet(b *testing.B) {
 							cursor = (cursor + 73) % len(queries)
 						}
 						after := observe.IndexMetrics()
-						b.ReportMetric(float64(after.PageReads-before.PageReads)/float64(b.N), "index-page-reads/op")
+						b.ReportMetric(float64(after.PageReads-before.PageReads)/float64(b.N), "btree-page-reads/op")
 						b.ReportMetric(float64(after.LeafReads-before.LeafReads)/float64(b.N), "index-leaf-reads/op")
 					})
 				}

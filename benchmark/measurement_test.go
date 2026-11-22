@@ -341,7 +341,7 @@ type measurementHooks struct {
 }
 
 // The worker is held from Open through the timed window for controlled interference
-// comparisons. All foreground calls and the manual checkpoint use the normal engine.
+// comparisons. All foreground calls and the manual full DATA checkpoint use the normal engine.
 func (h *measurementHooks) interferenceHooks() (*storage.IO, *engine.Hooks) {
 	h.cleanerStart = make(chan struct{})
 	return &storage.IO{Hook: h.hook, Wrote: h.wrote}, &engine.Hooks{CleanerStart: h.cleanerStart}
@@ -425,7 +425,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}
 	frontier := engine.Observe(db).Frontier()
 	captured := &measurementCapture{parent: root, uuid: frontier.UUID}
-	fixtureSequence := frontier.Sequence
+	fixtureSequence := frontier.LastUserSequence
 	start, stop := make(chan struct{}), make(chan struct{})
 	type workerResult struct {
 		latency sampledLatency
@@ -606,14 +606,14 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	output := map[string]any{
 		"maintenance_ns": maintenanceNS, "compact": compact,
 		"fixture_sequence_before_workers": fixtureSequence, "fixture_live_keys": expectedKeys,
-		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestHash),
+		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestDigest),
 		"automatic_cleaner": "held from Open through the measured foreground and manual-checkpoint window",
 		"backup_copy_bytes": backupCopied, "backup_elapsed_ns": backupEnd.Sub(backupStart).Nanoseconds(),
 		"compact_copy_bytes": compactCopied, "compact_elapsed_ns": compactEnd.Sub(compactStart).Nanoseconds(),
 		"compact_copy_source_opens":           hooks.manualSourceOpens.Load() - opensBefore,
 		"compact_records_copied":              hooks.manualRecords.Load() - recordsBefore,
 		"observed_maintenance_api_overlap_ns": overlapNS,
-		"copy_measurement_scope":              "bytes accepted by backup DATA writes and manual checkpoint DATA writes, including segment headers; metadata and foreground writes are excluded; elapsed and overlap cover complete API calls",
+		"copy_measurement_scope":              "bytes accepted by backup DATA writes and full DATA checkpoint writes, including segment headers. Metadata and foreground writes are excluded. Elapsed time and overlap cover complete API calls",
 		"overlap_coordination":                "backup-compact releases the first backup DATA write at the first checkpoint record write; pinned-backup-compact holds it through checkpoint return and retired source observation; API elapsed times include the hold",
 		"get_file_reads":                      hooks.reads.Load() - readStart,
 		"writer_callers":                      1, "caller_value_bytes": len(value), "sample_reservoir_limit_per_worker": 2048,
@@ -664,7 +664,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 			}
 		}()
 		digest, count := measurementState(t, restored)
-		restoredSequence := engine.Observe(restored).Frontier().Sequence
+		restoredSequence := engine.Observe(restored).Frontier().LastUserSequence
 		if !captured.reached || restoredSequence != captured.sequence ||
 			digest != expectedDigest || count != expectedKeys {
 			t.Fatalf("produced backup did not reopen at its witnessed capture/state: capture=%d restored=%d keys=%d/%d digest=%s/%s",
