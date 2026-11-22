@@ -17,7 +17,7 @@ import (
 )
 
 type CapturedFile struct {
-	File                *File
+	File                *DataSegment
 	Entry               format.CatalogEntry
 	liveKeys, liveBytes int64 // owned by the logical index at capture
 }

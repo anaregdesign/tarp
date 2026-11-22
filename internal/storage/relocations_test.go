@@ -16,8 +16,8 @@ func TestRelocationsStreamCheckedAddressesAcrossBufferBoundaries(t *testing.T) {
 	moves := store.NewRelocations()
 	defer moves.Close()
 	key := strings.Repeat("\x00key\xff", 10_000)
-	in := &File{ID: 4}
-	out := &File{ID: 12}
+	in := &DataSegment{ID: 4}
+	out := &DataSegment{ID: 12}
 	old := Location{File: in, Offset: 100, ValueBytes: 2, Sequence: 23, Bytes: format.RecordHeaderBytes + int64(len(key)) + 2}
 	next := old
 	next.File = out
@@ -66,7 +66,7 @@ func TestRelocationsBatchLimitsOnReplay(t *testing.T) {
 	store := &Store{Dir: t.TempDir()}
 	moves := store.NewRelocations()
 	defer moves.Close()
-	src, dst := &File{ID: 1}, &File{ID: 2}
+	src, dst := &DataSegment{ID: 1}, &DataSegment{ID: 2}
 	appendKey := func(key string) {
 		t.Helper()
 		old := Location{File: src, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + int64(len(key))}
@@ -114,9 +114,9 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 			t.Setenv("TMPDIR", filepath.Join(store.Dir, "missing-temp"))
 			moves := store.NewRelocations()
 			defer moves.Close()
-			base := Location{File: &File{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + int64(tc.keyBytes)}
+			base := Location{File: &DataSegment{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + int64(tc.keyBytes)}
 			next := base
-			next.File = &File{ID: 2}
+			next.File = &DataSegment{ID: 2}
 			key := strings.Repeat("k", tc.keyBytes)
 			for i := range tc.count {
 				base.Sequence, next.Sequence = uint64(i+1), uint64(i+1)
@@ -167,9 +167,9 @@ func TestRelocationSpillCanRetryAfterWorkspaceFailure(t *testing.T) {
 	}
 	moves := store.NewRelocations()
 	defer moves.Close()
-	old := Location{File: &File{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + 1}
+	old := Location{File: &DataSegment{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + 1}
 	next := old
-	next.File = &File{ID: 2}
+	next.File = &DataSegment{ID: 2}
 	for range RelocationBatchCount {
 		if err := moves.append("k", old, next); err != nil {
 			t.Fatal(err)

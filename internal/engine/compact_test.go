@@ -531,7 +531,7 @@ func TestMemoryCheckpointHonorsMutationsBetweenRelocationBatches(t *testing.T) {
 		entries[i] = Entry{Key: []byte(fmt.Sprintf("key-%012d", i)), Value: []byte("old")}
 	}
 	opts := Options{IndexMode: IndexMemory}
-	var source *storage.File
+	var source *storage.DataSegment
 	var db *DB
 	overwrite, remove := entries[len(entries)-2].Key, entries[len(entries)-1].Key
 	firstBatch := int64(0)

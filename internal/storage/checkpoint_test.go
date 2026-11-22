@@ -46,8 +46,8 @@ func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
 	moves := store.NewRelocations()
 	defer moves.Close()
 	checkpoint := store.NewCheckpoint(capture)
-	var reserved []*File
-	reserve := func() (*File, error) {
+	var reserved []*DataSegment
+	reserve := func() (*DataSegment, error) {
 		file, err := store.ReserveSnapshotFile()
 		if err != nil {
 			return nil, err

@@ -8,6 +8,6 @@ func (loc Location) Address() index.Address {
 }
 
 // At binds an indexed record to the DATA file protected by the caller's lease.
-func At(file *File, a index.Address) Location {
+func At(file *DataSegment, a index.Address) Location {
 	return Location{File: file, Offset: a.Offset, Bytes: a.Bytes, ValueBytes: a.ValueBytes, Sequence: a.Sequence}
 }

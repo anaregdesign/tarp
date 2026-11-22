@@ -111,7 +111,7 @@ func TestBulkReplayIdentifiesInvalidSourceAndAllowsPrunedDeletes(t *testing.T) {
 			defer builder.abort()
 			for i, kind := range test.ops {
 				r := format.RecordHeader{Sequence: test.seq, KeyBytes: 1, Kind: kind}
-				if err := builder.apply(&File{ID: 1, Kind: test.kind}, int64(i*100), r, "k"); err != nil {
+				if err := builder.apply(&DataSegment{ID: 1, Kind: test.kind}, int64(i*100), r, "k"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -172,7 +172,7 @@ func TestReplayRunCorruptionAndCancellationRemainPrivate(t *testing.T) {
 	builder.sort.dir = t.TempDir() + "/missing"
 	builder.sort.limit = 1
 	for _, key := range []string{"first", "last"} {
-		err = builder.apply(&File{ID: 1, Kind: format.RawLogKind}, 64, format.RecordHeader{Kind: format.Put, Sequence: 1, KeyBytes: int64(len(key))}, key)
+		err = builder.apply(&DataSegment{ID: 1, Kind: format.RawLogKind}, 64, format.RecordHeader{Kind: format.Put, Sequence: 1, KeyBytes: int64(len(key))}, key)
 	}
 	var work *IndexWorkError
 	var source *SourceError

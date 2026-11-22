@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 )
 
-func (s *Store) retireData(f *File) {
+func (s *Store) retireData(f *DataSegment) {
 	if s.retired == nil {
-		s.retired = make(map[uint64]*File)
+		s.retired = make(map[uint64]*DataSegment)
 	}
 	s.retired[f.ID] = f
 }

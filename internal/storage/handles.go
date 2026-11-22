@@ -11,7 +11,7 @@ import (
 )
 
 type handle struct {
-	file    *File
+	file    *DataSegment
 	fd      *os.File
 	used    int
 	retired atomic.Bool
@@ -38,18 +38,18 @@ type handles struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
 	limit    int
-	items    map[*File]*handle
+	items    map[*DataSegment]*handle
 	lru      list.List
 	closeErr error // deferred errors from returning invalidated descriptors
 }
 
 func newHandles(limit int) *handles {
-	h := &handles{limit: limit, items: make(map[*File]*handle)}
+	h := &handles{limit: limit, items: make(map[*DataSegment]*handle)}
 	h.cond = sync.NewCond(&h.mu)
 	return h
 }
 
-func (h *handles) acquire(f *File) (*handle, error) {
+func (h *handles) acquire(f *DataSegment) (*handle, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for {
@@ -103,7 +103,7 @@ func (h *handles) release(got *handle) {
 // invalidate detaches a descriptor from the lookup table immediately. Existing
 // positional reads retain their lease on that inode. It still counts toward the
 // descriptor limit until the last lease closes it.
-func (h *handles) invalidate(f *File) error {
+func (h *handles) invalidate(f *DataSegment) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	got := h.items[f]
@@ -120,7 +120,7 @@ func (h *handles) invalidate(f *File) error {
 	return got.fd.Close()
 }
 
-func (h *handles) forget(f *File) error {
+func (h *handles) forget(f *DataSegment) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	got := h.items[f]

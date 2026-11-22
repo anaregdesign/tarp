@@ -104,7 +104,7 @@ func (o Observer) ClearCache() {
 
 // CloseAndRetainMemoryIndex transfers the memory index and file registry to
 // the heap experiment. The measurement coordinates Close with all other users.
-func (o Observer) CloseAndRetainMemoryIndex() (map[string]index.Address, map[uint64]*storage.File, error) {
+func (o Observer) CloseAndRetainMemoryIndex() (map[string]index.Address, map[uint64]*storage.DataSegment, error) {
 	o.db.writer.Lock()
 	entries := o.memoryEntries()
 	o.db.writer.Unlock()

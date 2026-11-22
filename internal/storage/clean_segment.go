@@ -22,7 +22,7 @@ type CleanSegment struct {
 	sources  []CapturedFile
 	entries  []format.CatalogEntry
 	position int
-	output   *File
+	output   *DataSegment
 	uuid     [16]byte
 	cutoff   uint64
 	created  bool
@@ -85,7 +85,7 @@ func (s *Store) BeginClean(entries []format.CatalogEntry) (*CleanSegment, error)
 	if err != nil {
 		return nil, err
 	}
-	c.output = &File{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}
+	c.output = &DataSegment{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}
 	for _, source := range c.sources {
 		source.File.Pin()
 	}

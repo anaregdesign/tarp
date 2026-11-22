@@ -176,7 +176,7 @@ func nextCandidate(s *storage.Store, target int64) (inputs []format.CatalogEntry
 	return inputs, staging, blocked
 }
 
-func retainedBytes(f *storage.File) uint64 {
+func retainedBytes(f *storage.DataSegment) uint64 {
 	return uint64(f.LiveBytes.Load()) + uint64(f.DeleteBytes.Load())
 }
 

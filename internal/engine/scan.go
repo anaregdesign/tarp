@@ -57,9 +57,9 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		db.done()
 		return operationError(op, "context", err)
 	}
-	var layout map[uint64]*storage.File
+	var layout map[uint64]*storage.DataSegment
 	if values {
-		layout = make(map[uint64]*storage.File, len(db.files))
+		layout = make(map[uint64]*storage.DataSegment, len(db.files))
 		for id, f := range db.files {
 			f.Pin()
 			layout[id] = f
@@ -156,7 +156,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	return nil
 }
 
-func (db *DB) releaseScanPin(file *storage.File) {
+func (db *DB) releaseScanPin(file *storage.DataSegment) {
 	file.Unpin()
 	if file.References() == 0 {
 		db.notifyCleaner()

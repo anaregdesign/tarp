@@ -176,10 +176,10 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 	c := b.capture
 	image := Image{
 		Current: c.Current, Catalog: c.Catalog,
-		Files: make(map[uint64]*File, len(c.Files)), liveCapture: true,
+		Files: make(map[uint64]*DataSegment, len(c.Files)), liveCapture: true,
 	}
 	for _, f := range c.Files {
-		image.Files[f.File.ID] = &File{ID: f.File.ID, Kind: f.File.Kind, Path: f.File.Path}
+		image.Files[f.File.ID] = &DataSegment{ID: f.File.ID, Kind: f.File.Kind, Path: f.File.Path}
 	}
 	if err := b.store.IO.Check("index.scan:before"); err != nil {
 		return err

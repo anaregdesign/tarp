@@ -60,7 +60,7 @@ func (s *Store) RetryMaintenance(ctx context.Context, sources []CapturedFile, ru
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		var file *File
+		var file *DataSegment
 		for _, src := range sources {
 			if src.Entry.ID == read.id {
 				file = src.File

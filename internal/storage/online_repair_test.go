@@ -33,7 +33,7 @@ func (c *repairWaitContext) Done() <-chan struct{} {
 	return c.Context.Done()
 }
 
-func openedRepairFixture(t *testing.T) (repairFixture, *Store, *File) {
+func openedRepairFixture(t *testing.T) (repairFixture, *Store, *DataSegment) {
 	t.Helper()
 	fixture := newRepairFixture(t, 9000)
 	s, err := openTestStore(t, fixture.dir, Config{Handles: 2, MaxRecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)

@@ -15,8 +15,8 @@ import (
 )
 
 func TestAdjacentCountRequiresBoundedRunsInOneFile(t *testing.T) {
-	file := &storage.File{}
-	read := func(f *storage.File, offset, size int64) batchRead {
+	file := &storage.DataSegment{}
+	read := func(f *storage.DataSegment, offset, size int64) batchRead {
 		return batchRead{loc: storage.Location{File: f, Offset: offset, Bytes: size}}
 	}
 	for _, tc := range []struct {
@@ -26,7 +26,7 @@ func TestAdjacentCountRequiresBoundedRunsInOneFile(t *testing.T) {
 		{[]batchRead{read(file, 5, 8), read(file, 13, 8), read(file, 21, 8)}, 3},
 		{[]batchRead{read(file, 5, 8), read(file, 14, 8)}, 1},
 		{[]batchRead{read(file, 13, 8), read(file, 5, 8)}, 1},
-		{[]batchRead{read(file, 5, 8), read(&storage.File{}, 13, 8)}, 1},
+		{[]batchRead{read(file, 5, 8), read(&storage.DataSegment{}, 13, 8)}, 1},
 		{[]batchRead{read(file, 5, 8), {}}, 1},
 		{[]batchRead{read(file, 0, 8), read(file, 8, storage.MaxAdjacentReadBytes-8)}, 2},
 		{[]batchRead{read(file, 0, 8), read(file, 8, storage.MaxAdjacentReadBytes-7)}, 1},

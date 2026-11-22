@@ -21,11 +21,11 @@ import (
 )
 
 func TestCleanerRanksNetSavings(t *testing.T) {
-	s := &storage.Store{Files: map[uint64]*storage.File{}, Manifest: make([]byte, 64)}
+	s := &storage.Store{Files: map[uint64]*storage.DataSegment{}, Manifest: make([]byte, 64)}
 	// Output is 64-byte header + 256 live bytes + 192 metadata bytes = 512.
 	for _, n := range []int64{1023, 1024, 1025} {
 		e := format.CatalogEntry{ID: 2, Kind: format.RawLogKind, Bytes: n, FirstSequence: 1, LastSequence: 3}
-		f := &storage.File{}
+		f := &storage.DataSegment{}
 		f.LiveBytes.Store(192)
 		f.DeleteBytes.Store(64)
 		s.Files[e.ID] = f
@@ -35,7 +35,7 @@ func TestCleanerRanksNetSavings(t *testing.T) {
 			t.Fatalf("source %d: selected %+v, staging %d", n, got, needed)
 		}
 	}
-	s.Files[3] = &storage.File{}
+	s.Files[3] = &storage.DataSegment{}
 	s.Catalog.Entries = append(s.Catalog.Entries, format.CatalogEntry{ID: 3, Kind: format.CleanedLogKind, Bytes: 1025, FirstSequence: 4, LastSequence: 7})
 	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 3 {
 		t.Fatal("higher net savings should win", got)
@@ -83,12 +83,12 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 		{"source size overflow", math.MaxInt64, []segment{huge, huge, huge}, 0, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &storage.Store{Files: map[uint64]*storage.File{}, Manifest: make([]byte, 256)}
+			s := &storage.Store{Files: map[uint64]*storage.DataSegment{}, Manifest: make([]byte, 256)}
 			for i, seg := range tc.segments {
 				entry := format.CatalogEntry{Kind: seg.kind, Bytes: seg.size}
 				if seg.size > 0 {
 					entry.ID = uint64(i + 1)
-					f := &storage.File{}
+					f := &storage.DataSegment{}
 					f.LiveBytes.Store(seg.live)
 					f.DeleteBytes.Store(seg.deleted)
 					s.Files[entry.ID] = f

@@ -59,7 +59,9 @@ func (e *CompatibilityError) Error() string {
 	return fmt.Sprintf("storage: require value cache budget >= %d bytes, max record size >= %d bytes", e.RequiredValueCacheBudgetBytes, e.RequiredMaxRecordBytes)
 }
 
-type File struct {
+// DataSegment tracks the identity, ownership and accounting of one physical DATA
+// segment in this process. Read handles for its path are managed separately.
+type DataSegment struct {
 	// Published once the catalog selects this immutable DATA. Readers that
 	// already pinned the file can still use its binding after compaction.
 	sealed atomic.Pointer[sealedRepair]
@@ -76,17 +78,17 @@ type File struct {
 	LiveKeys               atomic.Int64 // index ownership independent of transient read and capture pins
 }
 
-func (f *File) Pin()              { f.refs.Add(1) }
-func (f *File) References() int64 { return f.refs.Load() + f.LiveKeys.Load() }
+func (f *DataSegment) Pin()              { f.refs.Add(1) }
+func (f *DataSegment) References() int64 { return f.refs.Load() + f.LiveKeys.Load() }
 
-func (f *File) Unpin() {
+func (f *DataSegment) Unpin() {
 	if f.refs.Add(-1) < 0 {
 		panic("storage: negative file reference count")
 	}
 }
 
 type Location struct {
-	File       *File
+	File       *DataSegment
 	Offset     int64
 	Bytes      int64
 	ValueBytes int64
@@ -103,12 +105,12 @@ type Store struct {
 	Current               format.Frontier
 	Catalog               format.Catalog
 	Manifest              []byte
-	Files                 map[uint64]*File
+	Files                 map[uint64]*DataSegment
 	active                *os.File
 	lock                  *platform.DirectoryLock
 	readers               *handles
 	nextID                uint64
-	retired               map[uint64]*File
+	retired               map[uint64]*DataSegment
 	retiredCatalogs       map[uint64]struct{}
 	retiredIndexes        map[uint64]struct{}
 	buildingIndex         atomic.Uint64
@@ -200,7 +202,7 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{Dir: absolute, Config: cfg, IO: fs, lock: lock, readers: newHandles(cfg.Handles), Files: make(map[uint64]*File)}
+	s := &Store{Dir: absolute, Config: cfg, IO: fs, lock: lock, readers: newHandles(cfg.Handles), Files: make(map[uint64]*DataSegment)}
 	defer func() {
 		if result != nil {
 			result = errors.Join(result, s.Close())
@@ -376,7 +378,7 @@ func (s *Store) initialize() error {
 	return s.publishCatalog(s.Catalog, candidate)
 }
 
-func (s *Store) newLog(initialRecords appendData) (*File, *os.File, error) {
+func (s *Store) newLog(initialRecords appendData) (*DataSegment, *os.File, error) {
 	f, err := s.reserveSegment(format.RawLogKind)
 	if err != nil {
 		return nil, nil, err
@@ -397,15 +399,15 @@ func (s *Store) newLog(initialRecords appendData) (*File, *os.File, error) {
 }
 
 // reserveSegment allocates a unique identity under the writer gate without I/O.
-func (s *Store) reserveSegment(kind uint32) (*File, error) {
+func (s *Store) reserveSegment(kind uint32) (*DataSegment, error) {
 	id, err := s.allocateID()
 	if err != nil {
 		return nil, err
 	}
-	return &File{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}, nil
+	return &DataSegment{ID: id, Kind: kind, Path: filepath.Join(s.Dir, DataName(s.Current.UUID, id))}, nil
 }
 
-func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords appendData) (*os.File, error) {
+func (f *DataSegment) create(uuid [16]byte, fs *IO, point string, initialRecords appendData) (*os.File, error) {
 	fd, err := os.OpenFile(f.Path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
@@ -516,7 +518,7 @@ func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() err
 		return nil
 	}}
 	if prepare != nil {
-		data.prepare = func(f *File, off int64) error {
+		data.prepare = func(f *DataSegment, off int64) error {
 			return prepare(Location{File: f, Offset: off, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
 		}
 	}
@@ -565,7 +567,7 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 		return w.Flush()
 	}}
 	if prepare != nil {
-		data.prepare = func(f *File, off int64) error {
+		data.prepare = func(f *DataSegment, off int64) error {
 			for i, loc := range locations {
 				loc.File, loc.Offset = f, off+loc.Offset
 				if err := prepare(i, loc); err != nil {
@@ -593,12 +595,12 @@ func (e *prepareError) Unwrap() error { return e.err }
 
 // appendData is written synchronously to either the current or a new segment.
 type appendData struct {
-	prepare func(*File, int64) error
+	prepare func(*DataSegment, int64) error
 	size    int64
 	writeAt func(*os.File, int64, hash.Hash) error
 }
 
-func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func() error) (*File, int64, error) {
+func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func() error) (*DataSegment, int64, error) {
 	offset := s.Current.ActiveCommittedEndOffset
 	if offset > format.SegmentHeaderBytes && offset > s.Config.TargetSegmentBytes-data.size {
 		if err := s.rotate(data, lastSequence, healthy); err != nil {

@@ -19,7 +19,7 @@ import (
 type Checkpoint struct {
 	store       *Store
 	capture     *Capture
-	files       []*File
+	files       []*DataSegment
 	entries     []format.CatalogEntry
 	lossSources []lossSource
 	attempted   bool
@@ -31,7 +31,7 @@ func (s *Store) NewCheckpoint(capture *Capture) *Checkpoint {
 
 // ReserveSnapshotFile assigns a name under the writer gate. Only a successfully
 // installed checkpoint registers its files in the store.
-func (s *Store) ReserveSnapshotFile() (*File, error) {
+func (s *Store) ReserveSnapshotFile() (*DataSegment, error) {
 	return s.reserveSegment(format.SnapshotKind)
 }
 
@@ -40,7 +40,7 @@ func (c *Checkpoint) Entries() []format.CatalogEntry { return c.entries }
 
 // Copy validates the captured history, copies live records in physical order and
 // records their new addresses in moves. Only reserve takes the writer gate.
-func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*File, error)) error {
+func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*DataSegment, error)) error {
 	err := c.writeSnapshot(ctx, moves, reserve, func(emit func(string, Location) (io.Writer, error)) error {
 		return c.capture.replayLive(ctx, c.store.IO, history, live, emit)
 	})
@@ -72,8 +72,8 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 
 // writeSnapshot owns private outputs through the complete source scan. Both
 // normal replay and recovery use the same rollover, sync and relocation path.
-func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, reserve func() (*File, error), scan func(func(string, Location) (io.Writer, error)) error) (result error) {
-	var file *File
+func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, reserve func() (*DataSegment, error), scan func(func(string, Location) (io.Writer, error)) error) (result error) {
+	var file *DataSegment
 	var fd *os.File
 	var offset int64
 	digest := sha256.New()

@@ -189,7 +189,7 @@ func (s *Store) buildParity(ctx context.Context, uuid [16]byte, source CapturedF
 
 // Remove only names owned by this unpublished output. An after-rename error
 // can leave an installed sidecar even though preparation did not finish.
-func (f *File) discardReplacement(fs *IO, uuid [16]byte, point string) error {
+func (f *DataSegment) discardReplacement(fs *IO, uuid [16]byte, point string) error {
 	remove := func(path string) error {
 		err := fs.Do(point, func() error { return os.Remove(path) })
 		if errors.Is(err, os.ErrNotExist) {

@@ -230,7 +230,7 @@ func TestScanKeepsUnreadValuesAcrossCompact(t *testing.T) {
 	start := make(chan struct{})
 	db := newTestDBWithHooks(t, testOptions(), nil, &Hooks{CleanerStart: start})
 	want := make(map[string]string)
-	old := make(map[string]*storage.File)
+	old := make(map[string]*storage.DataSegment)
 	for _, k := range []string{"a", "b", "c", "d"} {
 		want[k] = strings.Repeat(k, 64)
 		mustPut(t, db, k, want[k])
@@ -343,7 +343,7 @@ func requireScanError(t *testing.T, seq iter.Seq2[Entry, error], want error) {
 // Cancel as soon as capture pins the first file, without relying on timing.
 type cancelOnScanPin struct {
 	context.Context
-	file        *storage.File
+	file        *storage.DataSegment
 	initialRefs int64
 	cancel      context.CancelFunc
 }

@@ -154,7 +154,7 @@ func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, 
 		visit = builder.apply
 	} else {
 		window = newKeyWindow("", verifyWindowBytes)
-		visit = func(f *File, _ int64, r format.RecordHeader, key string) error {
+		visit = func(f *DataSegment, _ int64, r format.RecordHeader, key string) error {
 			if err := window.apply(f.Kind, capture.Catalog.PrunedThroughSequence, r, key); err != nil {
 				return &SourceError{Err: err}
 			}

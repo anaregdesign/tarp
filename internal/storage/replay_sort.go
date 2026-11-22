@@ -38,7 +38,7 @@ type sortedReplay struct {
 	levels  [64]*replayRun
 }
 
-func (s *sortedReplay) apply(f *File, off int64, r format.RecordHeader, key string) error {
+func (s *sortedReplay) apply(f *DataSegment, off int64, r format.RecordHeader, key string) error {
 	addr := index.Address{FileID: f.ID, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: f.Kind, recordKind: r.Kind}))
 }

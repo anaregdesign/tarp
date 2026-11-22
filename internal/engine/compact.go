@@ -111,7 +111,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 			}
 		}
 	}()
-	reserve := func() (*storage.File, error) {
+	reserve := func() (*storage.DataSegment, error) {
 		db.writer.Lock()
 		defer db.writer.Unlock()
 		if err := ctx.Err(); err != nil {
@@ -254,7 +254,7 @@ type lostFileTotals struct {
 
 type checkpointLosses struct {
 	tx    index.Tx
-	files map[*storage.File]lostFileTotals
+	files map[*storage.DataSegment]lostFileTotals
 }
 
 // Stage all deletions against the current index under the writer gate. No key
@@ -267,7 +267,7 @@ func (db *DB) prepareLosses(ctx context.Context, lost *storage.Relocations) (*ch
 			return err
 		}
 		if losses == nil {
-			losses = &checkpointLosses{db.keys.Begin(), make(map[*storage.File]lostFileTotals)}
+			losses = &checkpointLosses{db.keys.Begin(), make(map[*storage.DataSegment]lostFileTotals)}
 		}
 		addr, found, err := losses.tx.Apply(index.Mutation{Key: key, Delete: true})
 		if err != nil {

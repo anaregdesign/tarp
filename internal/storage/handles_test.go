@@ -67,7 +67,7 @@ func TestLeasedForeignDataStillFailsIdentityAfterAnotherReaderRepairs(t *testing
 
 func TestHandleLimitWaitsForEveryLeaseAndClosesEvictions(t *testing.T) {
 	dir := t.TempDir()
-	files := []*File{{Path: filepath.Join(dir, "a")}, {Path: filepath.Join(dir, "b")}}
+	files := []*DataSegment{{Path: filepath.Join(dir, "a")}, {Path: filepath.Join(dir, "b")}}
 	for _, file := range files {
 		if err := os.WriteFile(file.Path, nil, 0600); err != nil {
 			t.Fatal(err)
@@ -119,7 +119,7 @@ func TestHandleLimitWaitsForEveryLeaseAndClosesEvictions(t *testing.T) {
 
 func TestInvalidationKeepsLeasedInodeUntilReleaseAndHonorsLimit(t *testing.T) {
 	dir := t.TempDir()
-	file := &File{Path: filepath.Join(dir, "DATA")}
+	file := &DataSegment{Path: filepath.Join(dir, "DATA")}
 	if err := os.WriteFile(file.Path, []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}

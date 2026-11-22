@@ -21,7 +21,7 @@ type Image struct {
 	Current  format.Frontier
 	Catalog  format.Catalog
 	Manifest []byte
-	Files    map[uint64]*File
+	Files    map[uint64]*DataSegment
 	LiveRecordSizes
 	LiveKeys              uint64
 	LargestLiveValueBytes int64
@@ -74,10 +74,10 @@ func readImage(ctx context.Context, dir string) (*Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s and CURRENT: %w", manifestName, err)
 	}
-	image := &Image{Current: current, Catalog: catalog, Manifest: b, Files: make(map[uint64]*File)}
+	image := &Image{Current: current, Catalog: catalog, Manifest: b, Files: make(map[uint64]*DataSegment)}
 	for _, entry := range append(append([]format.CatalogEntry(nil), catalog.Entries...), active) {
 		if entry.HasPhysicalFile() {
-			image.Files[entry.ID] = &File{ID: entry.ID, Kind: entry.Kind, Path: filepath.Join(dir, DataName(current.UUID, entry.ID))}
+			image.Files[entry.ID] = &DataSegment{ID: entry.ID, Kind: entry.Kind, Path: filepath.Join(dir, DataName(current.UUID, entry.ID))}
 		}
 	}
 	return image, nil
@@ -87,7 +87,7 @@ func readImage(ctx context.Context, dir string) (*Image, error) {
 // decoded live entry. It owns any partial backend until it returns successfully.
 type IndexImporter func(context.Context, *Store, io.Reader, int64, func(string, index.Address) error) (index.Backend, error)
 
-type recordVisitor func(*File, int64, format.RecordHeader, string) error
+type recordVisitor func(*DataSegment, int64, format.RecordHeader, string) error
 
 // scan validates each selected record through the committed end in replay order.
 func (image *Image) scan(ctx context.Context, visit recordVisitor) error {
@@ -368,7 +368,7 @@ func (image *Image) replayAfterCheckpoint(ctx context.Context, keys index.Backen
 	return builder.finishWith(image.measureLive(ctx))
 }
 
-func applyIndexedRecord(tx index.Mutations, file *File, pruned uint64, off int64, r format.RecordHeader, key string) error {
+func applyIndexedRecord(tx index.Mutations, file *DataSegment, pruned uint64, off int64, r format.RecordHeader, key string) error {
 	// Ordinary Put overwrites any prior location. Only snapshot and Delete
 	// records need to read the previous state for validation.
 	if file.Kind == format.SnapshotKind || r.Kind == format.Delete {

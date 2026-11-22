@@ -106,13 +106,13 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 	return old, err
 }
 
-func (db *DB) dropLocation(file *storage.File) {
+func (db *DB) dropLocation(file *storage.DataSegment) {
 	if file.LiveKeys.Add(-1) == 0 {
 		delete(db.files, file.ID)
 	}
 }
 
-func (db *DB) addLocation(file *storage.File) {
+func (db *DB) addLocation(file *storage.DataSegment) {
 	if file.LiveKeys.Add(1) == 1 {
 		db.files[file.ID] = file
 	}

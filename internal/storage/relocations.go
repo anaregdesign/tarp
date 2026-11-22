@@ -23,7 +23,7 @@ type Relocations struct {
 	small  []Relocation
 	fd     *os.File
 	writer *bufio.Writer
-	files  map[uint64]*File
+	files  map[uint64]*DataSegment
 	count  int
 	maxKey int
 	bytes  int64
@@ -52,7 +52,7 @@ func (m *Relocations) open() error {
 	}
 	m.fd = fd
 	m.writer = bufio.NewWriterSize(fd, 32<<10)
-	m.files = make(map[uint64]*File)
+	m.files = make(map[uint64]*DataSegment)
 	return nil
 }
 

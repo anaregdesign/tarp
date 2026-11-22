@@ -16,7 +16,7 @@ import (
 // CopyRecovered runs only after the normal checkpoint encountered unavailable
 // sealed DATA. Healthy inputs still require strict file validation. A private
 // partial replay checks the pinned view against all readable history.
-func (c *Checkpoint) CopyRecovered(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*File, error), cached func(string, Location) ([]byte, bool, error)) error {
+func (c *Checkpoint) CopyRecovered(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error)) error {
 	r := checkpointRecovery{c: c, ctx: ctx, live: live, lost: lost, cached: cached, buf: make([]byte, 32<<10)}
 	// A readable Delete may have its predecessor in an unreadable region.
 	r.history = newReplayBuilder(ctx, history, c.capture.Current.LastUserSequence)

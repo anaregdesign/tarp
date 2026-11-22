@@ -76,7 +76,7 @@ func IsDataUnavailable(err error) bool {
 
 // UnavailableData returns the last confirmed physical failure. Values whose
 // record checks pass can still be read from the same file.
-func (f *File) UnavailableData() *UnavailableDataError {
+func (f *DataSegment) UnavailableData() *UnavailableDataError {
 	r := f.sealed.Load()
 	if r == nil {
 		return nil
@@ -96,14 +96,14 @@ type UncertainReadRepair struct{ Err error }
 func (e *UncertainReadRepair) Error() string { return e.Err.Error() }
 func (e *UncertainReadRepair) Unwrap() error { return e.Err }
 
-func (f *File) markSealed(uuid [16]byte, entry format.CatalogEntry) {
+func (f *DataSegment) markSealed(uuid [16]byte, entry format.CatalogEntry) {
 	f.sealed.CompareAndSwap(nil, &sealedRepair{uuid: uuid, entry: entry})
 }
 
 // RepairRead checks one eligible physical read failure against the pinned
 // file's immutable extent. A nil result authorizes exactly one checked retry;
 // it never certifies the failed record, a caller's index or any cached value.
-func (s *Store) RepairRead(ctx context.Context, f *File, cause error) error {
+func (s *Store) RepairRead(ctx context.Context, f *DataSegment, cause error) error {
 	if cause == nil {
 		return errors.New("storage: read repair requires a source failure")
 	}

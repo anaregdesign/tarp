@@ -32,7 +32,7 @@ func TestKeysSnapshotUsesNoDataReadsOrFilePins(t *testing.T) {
 	}
 	db.cache.Clear()
 	before := db.Stats()
-	pins := make(map[*storage.File]int64)
+	pins := make(map[*storage.DataSegment]int64)
 	for _, f := range db.files {
 		pins[f] = f.References()
 	}

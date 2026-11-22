@@ -42,7 +42,7 @@ type DB struct {
 	// indexGate coordinates point/batch lookup and DATA lease acquisition with publication.
 	// Neither DATA reads nor caller callbacks run under this lock.
 	indexGate sync.RWMutex
-	files     map[uint64]*storage.File
+	files     map[uint64]*storage.DataSegment
 	revision  uint64 // protected by state
 	cache     *cache.Cache
 	failed    atomic.Pointer[failure]
@@ -118,7 +118,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	if err != nil {
 		return nil, operationError("open", "recovery", err)
 	}
-	db := &DB{opts: opts, store: s, keys: keys, files: make(map[uint64]*storage.File), cache: cache.New(opts.ValueCacheBudgetBytes), closed: make(chan struct{}), hooks: hooks}
+	db := &DB{opts: opts, store: s, keys: keys, files: make(map[uint64]*storage.DataSegment), cache: cache.New(opts.ValueCacheBudgetBytes), closed: make(chan struct{}), hooks: hooks}
 	db.resident, _ = keys.(index.ResidentLookup)
 	db.batchReadSlots = make(chan struct{}, opts.BatchGetReadConcurrency)
 	db.cond = sync.NewCond(&db.life)

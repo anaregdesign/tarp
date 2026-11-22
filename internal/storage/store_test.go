@@ -36,7 +36,7 @@ func TestReadMissingSegmentPreservesPathErrorAndRecordOffset(t *testing.T) {
 	filename := DataName([16]byte{}, 1)
 	path := filepath.Join(t.TempDir(), filename)
 	s := &Store{readers: newHandles(1)}
-	loc := Location{File: &File{Path: path}, Offset: format.SegmentHeaderBytes}
+	loc := Location{File: &DataSegment{Path: path}, Offset: format.SegmentHeaderBytes}
 	_, err := s.Read(loc, "k")
 	var pathErr *os.PathError
 	want := fmt.Sprintf("%s: record at offset %d:", filename, loc.Offset)

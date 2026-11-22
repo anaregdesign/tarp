@@ -90,7 +90,7 @@ func validateWindows(ctx context.Context, dir string, limit int64, spill imageVe
 	after := ""
 	for {
 		w := newKeyWindow(after, limit)
-		if err := image.scan(ctx, func(f *File, _ int64, r format.RecordHeader, key string) error {
+		if err := image.scan(ctx, func(f *DataSegment, _ int64, r format.RecordHeader, key string) error {
 			return w.apply(f.Kind, image.Catalog.PrunedThroughSequence, r, key)
 		}); err != nil {
 			return nil, err
@@ -157,7 +157,7 @@ func replayWorkError(err error) error {
 	return &IndexWorkError{Err: err}
 }
 
-func (b *replayBuilder) apply(f *File, off int64, r format.RecordHeader, key string) error {
+func (b *replayBuilder) apply(f *DataSegment, off int64, r format.RecordHeader, key string) error {
 	if b.sort != nil {
 		return b.sort.apply(f, off, r, key)
 	}
