@@ -25,7 +25,7 @@ func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 func (db *DB) ScanPrefix(ctx context.Context, prefix []byte) iter.Seq2[Entry, error] {
 	bounds := index.PrefixBounds(prefix)
 	return func(yield func(Entry, error) bool) {
-		err := db.walkSnapshot(ctx, true, bounds, func(k string, value []byte) bool { return yield(Entry{Key: []byte(k), Value: value}, nil) })
+		err := db.walkSnapshot(ctx, true, bounds, func(k, value []byte) bool { return yield(Entry{Key: k, Value: value}, nil) })
 		if err != nil {
 			yield(Entry{}, err)
 		}
@@ -34,7 +34,7 @@ func (db *DB) ScanPrefix(ctx context.Context, prefix []byte) iter.Seq2[Entry, er
 
 // walkSnapshot pins the DATA layout only for a value scan. Index cursors never
 // hold a DB lock or admission across user code, which may close or mutate it.
-func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds, yield func(string, []byte) bool) error {
+func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds, yield func([]byte, []byte) bool) error {
 	op := "keys"
 	if values {
 		op = "scan"
@@ -91,6 +91,10 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	}
 	var result error
 	var stopped bool
+	var copies *prefixKeyCopies
+	if bounds.Lower != "" {
+		copies = new(prefixKeyCopies)
+	}
 	err = v.Walk(ctx, func(k string, a index.Address) bool {
 		if result = check(); result != nil {
 			return false
@@ -124,7 +128,13 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 				return false
 			}
 		}
-		stopped = !yield(k, value)
+		var key []byte
+		if copies == nil {
+			key = []byte(k)
+		} else {
+			key = copies.copyKey(k)
+		}
+		stopped = !yield(key, value)
 		return !stopped
 	})
 	if result != nil {
