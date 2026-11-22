@@ -347,7 +347,7 @@ func TestPowerCutGuest(t *testing.T) {
 		remove("k0")
 		result, compactErr := db.Compact(context.Background())
 		if compactErr != nil || result.PinnedRetiredDataBytes == 0 {
-			t.Fatalf("overlap did not preserve pinned generations: %+v %v", result, compactErr)
+			t.Fatalf("overlap did not retain the pinned DATA segments: %+v %v", result, compactErr)
 		}
 		fmt.Printf("TARP_PINNED %d\n", result.PinnedRetiredDataBytes)
 		close(releaseBackup)

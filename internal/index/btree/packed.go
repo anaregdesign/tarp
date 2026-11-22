@@ -177,15 +177,15 @@ func ImportPacked(ctx context.Context, r io.Reader, size int64, dir string, budg
 // One bit per page proves exclusive ownership of child and overflow links.
 // Keep a single bitmap window in memory and spill larger bitmaps to scratch.
 type packedSeen struct {
-	bits  [4096]byte
-	block int64
-	file  *countedFile
-	count uint64
+	bits        [4096]byte
+	windowIndex int64
+	file        *countedFile
+	count       uint64
 }
 
 func (s *packedSeen) open(p *pager) error {
-	blocks := int64((p.top-1)/(uint64(len(s.bits))*8)) + 1
-	if blocks == 1 {
+	windowCount := int64((p.top-1)/(uint64(len(s.bits))*8)) + 1
+	if windowCount == 1 {
 		return nil
 	}
 	f, err := p.temp()
@@ -193,20 +193,20 @@ func (s *packedSeen) open(p *pager) error {
 		return err
 	}
 	s.file = f
-	return f.Truncate(blocks * int64(len(s.bits)))
+	return f.Truncate(windowCount * int64(len(s.bits)))
 }
 
 func (s *packedSeen) claim(id uint64) error {
 	offset := int64((id - 1) / 8)
-	block := offset / int64(len(s.bits))
-	if s.block != block {
-		if _, err := s.file.WriteAt(s.bits[:], s.block*int64(len(s.bits))); err != nil {
+	windowIndex := offset / int64(len(s.bits))
+	if s.windowIndex != windowIndex {
+		if _, err := s.file.WriteAt(s.bits[:], s.windowIndex*int64(len(s.bits))); err != nil {
 			return err
 		}
-		if _, err := s.file.ReadAt(s.bits[:], block*int64(len(s.bits))); err != nil {
+		if _, err := s.file.ReadAt(s.bits[:], windowIndex*int64(len(s.bits))); err != nil {
 			return err
 		}
-		s.block = block
+		s.windowIndex = windowIndex
 	}
 	i := offset % int64(len(s.bits))
 	bit := byte(1 << ((id - 1) % 8))
@@ -228,7 +228,7 @@ type packedCheck struct {
 	count, longest uint64
 }
 
-// read maps structural errors from the private page codec to an image miss.
+// read maps structural errors from the private page codec to ErrInvalidPacked.
 // Other I/O errors and visitor errors keep their original meaning.
 func (c *packedCheck) read(id uint64) (*page, error) {
 	if err := c.ctx.Err(); err != nil {
@@ -356,9 +356,9 @@ func (c *packedCheck) entry(cell cell, branch bool) error {
 	c.count++
 	c.longest = max(c.longest, ref.length)
 	a := cell.address
-	if a.FileID == 0 || a.Sequence == 0 || a.Offset < format.SegmentHeaderBytes ||
-		a.Bytes < format.RecordHeaderBytes || a.ValueBytes > a.Bytes-format.RecordHeaderBytes ||
-		uint64(a.Bytes-format.RecordHeaderBytes-a.ValueBytes) != ref.length || a.Offset > math.MaxInt64-a.Bytes {
+	if a.FileID == 0 || a.Sequence == 0 || a.RecordOffset < format.SegmentHeaderBytes ||
+		a.RecordBytes < format.RecordHeaderBytes || a.ValueBytes > a.RecordBytes-format.RecordHeaderBytes ||
+		uint64(a.RecordBytes-format.RecordHeaderBytes-a.ValueBytes) != ref.length || a.RecordOffset > math.MaxInt64-a.RecordBytes {
 		return ErrInvalidPacked
 	}
 	if c.visit != nil {

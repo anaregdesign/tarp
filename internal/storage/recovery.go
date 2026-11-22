@@ -207,9 +207,9 @@ func (image *Image) measureLive(ctx context.Context) func(string, index.Address)
 			return err
 		}
 		file := image.Files[addr.FileID]
-		file.LiveBytes.Add(addr.Bytes)
+		file.LiveBytes.Add(addr.RecordBytes)
 		file.LiveKeys.Add(1)
-		return image.measure(key, addr.Bytes, addr.ValueBytes)
+		return image.measure(key, addr.RecordBytes, addr.ValueBytes)
 	}
 }
 
@@ -243,20 +243,20 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 		}
 		file := covered[addr.FileID]
 		if file == nil || !validCheckpointAddress(key, addr, file.entry, c.CheckpointCutoffSequence) {
-			return fmt.Errorf("%w: invalid covered DATA address", ErrIndexMiss)
+			return fmt.Errorf("%w: invalid covered DATA address", ErrIndexCheckpointUnusable)
 		}
-		if addr.Bytes > file.entry.Bytes-format.SegmentHeaderBytes-file.liveBytes {
-			return fmt.Errorf("%w: live record bytes exceed sealed DATA length", ErrIndexMiss)
+		if addr.RecordBytes > file.entry.Bytes-format.SegmentHeaderBytes-file.liveBytes {
+			return fmt.Errorf("%w: live record bytes exceed sealed DATA length", ErrIndexCheckpointUnusable)
 		}
-		file.liveBytes += addr.Bytes
+		file.liveBytes += addr.RecordBytes
 		file.liveKeys++
-		if err := totals.measure(key, addr.Bytes, addr.ValueBytes); err != nil {
-			return fmt.Errorf("%w: %v", ErrIndexMiss, err)
+		if err := totals.measure(key, addr.RecordBytes, addr.ValueBytes); err != nil {
+			return fmt.Errorf("%w: %v", ErrIndexCheckpointUnusable, err)
 		}
 		return nil
 	}
 	keys, deletes, err := s.readIndexCheckpoint(ctx, c, load, visit)
-	if IsIndexMiss(err) {
+	if IsIndexCheckpointUnusable(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -289,9 +289,9 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 }
 
 func validCheckpointAddress(key string, addr index.Address, entry format.CatalogEntry, cutoff uint64) bool {
-	if len(key) == 0 || addr.Sequence == 0 || addr.Offset < format.SegmentHeaderBytes ||
-		addr.Bytes < format.RecordHeaderBytes || addr.Offset > entry.Bytes-addr.Bytes ||
-		addr.ValueBytes < 0 || addr.Bytes-format.RecordHeaderBytes-int64(len(key)) != addr.ValueBytes {
+	if len(key) == 0 || addr.Sequence == 0 || addr.RecordOffset < format.SegmentHeaderBytes ||
+		addr.RecordBytes < format.RecordHeaderBytes || addr.RecordOffset > entry.Bytes-addr.RecordBytes ||
+		addr.ValueBytes < 0 || addr.RecordBytes-format.RecordHeaderBytes-int64(len(key)) != addr.ValueBytes {
 		return false
 	}
 	if entry.Kind == format.SnapshotKind {
@@ -384,7 +384,7 @@ func applyIndexedRecord(tx index.Mutations, file *DataSegment, pruned uint64, of
 	if r.Kind == format.Delete {
 		err = tx.Delete(key)
 	} else {
-		err = tx.Put(key, index.Address{FileID: file.ID, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
+		err = tx.Put(key, index.Address{FileID: file.ID, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
 	}
 	if err != nil {
 		return &IndexWorkError{Err: err}

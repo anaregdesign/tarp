@@ -45,10 +45,10 @@ func (db *DB) readBatchData(keys [][]byte, results []BatchResult, reads []batchR
 	if len(reads) == 0 {
 		return nil
 	}
-	// Limit range planning to a small batch whose first reads are adjacent.
+	// Limit range planning to a small batch whose first DATA records are contiguous in one segment.
 	// Larger plans keep the adaptive per-record scheduler.
-	if len(reads) > 1 && len(reads) <= maxAdjacentRecords {
-		if n := adjacentCount(reads); n > 1 {
+	if len(reads) > 1 && len(reads) <= maxContiguousRecords {
+		if n := contiguousRecordCount(reads); n > 1 {
 			return db.readGroupedBatch(keys, results, reads, n)
 		}
 	}
@@ -62,7 +62,7 @@ func (db *DB) readBatchData(keys [][]byte, results []BatchResult, reads []batchR
 	for _, r := range reads {
 		if r.loc.File != nil {
 			count++
-			if r.loc.Bytes > smallBatchRecordBytes {
+			if r.loc.RecordBytes > smallBatchRecordBytes {
 				small = false
 			}
 		}

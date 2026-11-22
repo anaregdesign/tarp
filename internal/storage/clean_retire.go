@@ -18,7 +18,7 @@ func (s *Store) retireData(f *DataSegment) {
 // QueueFailedCleanDiscard runs under the writer gate after an unpublished
 // output failed to discard. An unlink can have succeeded before the error,
 // so the directory still needs syncing even if the path is already gone.
-func (s *Store) QueueFailedCleanDiscard(c *CleanSegment) {
+func (s *Store) QueueFailedCleanDiscard(c *SegmentCleaning) {
 	s.retireData(c.output)
 	s.retireSyncPending = true
 }

@@ -474,7 +474,7 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer cap.Release()
-				work := s.NewCheckpoint(cap)
+				work := s.NewDataCheckpoint(cap)
 				if err := work.Copy(t.Context(), history, view, moves, s.ReserveSnapshotFile); err != nil {
 					t.Fatal(err)
 				}

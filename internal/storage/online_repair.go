@@ -22,12 +22,12 @@ type sealedRepair struct {
 	uuid  [16]byte
 	entry format.CatalogEntry
 
-	mu          sync.Mutex
-	running     *readRepair
-	uncertain   error
-	generation  atomic.Uint64 // successful full-file verifications or repairs
-	unavailable atomic.Pointer[UnavailableDataError]
-	retryAfter  time.Time
+	mu               sync.Mutex
+	running          *readRepair
+	uncertain        error
+	repairGeneration atomic.Uint64 // successful full-file verifications or repairs
+	unavailable      atomic.Pointer[UnavailableDataError]
+	retryAfter       time.Time
 }
 
 type readRepair struct {
@@ -107,7 +107,7 @@ func (s *Store) RepairRead(ctx context.Context, f *DataSegment, cause error) err
 	if cause == nil {
 		return errors.New("storage: read repair requires a source failure")
 	}
-	if f == nil || f.refs.Load() <= 0 || !repairableRead(cause) {
+	if f == nil || f.pins.Load() <= 0 || !repairableRead(cause) {
 		return cause
 	}
 	r := f.sealed.Load()
@@ -207,7 +207,7 @@ func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot,
 			r.uncertain = call.err
 		}
 		if call.err == nil {
-			r.generation.Add(1)
+			r.repairGeneration.Add(1)
 		}
 		prior := r.unavailable.Load()
 		if local, ok := call.err.(*UnavailableDataError); ok {

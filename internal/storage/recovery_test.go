@@ -338,7 +338,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 		// A short read and failed cleanup can arrive together. Preserve the
 		// operational cause even if the failed import also qualifies as a miss.
 		checkIO := func(context.Context, *Store, io.Reader, int64, func(string, index.Address) error) (index.Backend, error) {
-			return nil, fmt.Errorf("read/close: %w", errors.Join(ErrIndexMiss, io.ErrUnexpectedEOF, operational))
+			return nil, fmt.Errorf("read/close: %w", errors.Join(ErrIndexCheckpointUnusable, io.ErrUnexpectedEOF, operational))
 		}
 		if db, keys, err := OpenIndexed(t.Context(), dir, cfg, true, nil, fresh, checkIO); db != nil || keys != nil || !errors.Is(err, operational) {
 			t.Fatalf("joined index and operational failures should preserve %v: %v", operational, err)

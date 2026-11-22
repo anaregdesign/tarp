@@ -20,7 +20,7 @@ type handle struct {
 
 // Once sealed DATA is known to be damaged, a valid record checksum alone
 // cannot identify a foreign inode with the same key and sequence. Check the
-// header on the descriptor that supplied the bytes. A lease can outlive both
+// header on the descriptor that supplied the bytes. A read-handle lease can outlive both
 // replacement of the path and clearing the unavailable marker.
 func (h *handle) verifyReadIdentity() error {
 	r := h.file.sealed.Load()
@@ -128,7 +128,7 @@ func (h *handles) forget(f *DataSegment) error {
 		return nil
 	}
 	if got.used != 0 {
-		return errors.New("storage: attempted to close a leased file")
+		return errors.New("storage: attempted to close a leased DATA read handle")
 	}
 	delete(h.items, f)
 	h.lru.Remove(got.node)
@@ -142,7 +142,7 @@ func (h *handles) close() error {
 	for n := h.lru.Front(); n != nil; n = n.Next() {
 		got := n.Value.(*handle)
 		if got.used != 0 {
-			err = errors.Join(err, errors.New("storage: active lease at close"))
+			err = errors.Join(err, errors.New("storage: active read-handle lease at close"))
 		}
 		err = errors.Join(err, got.fd.Close())
 	}

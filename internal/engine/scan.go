@@ -22,8 +22,8 @@ func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 }
 
 // ScanPrefix reads matching records from the same index and DATA snapshot.
-func (db *DB) ScanPrefix(ctx context.Context, prefix []byte) iter.Seq2[Entry, error] {
-	bounds := index.PrefixBounds(prefix)
+func (db *DB) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[Entry, error] {
+	bounds := index.PrefixBounds(encodedPrefix)
 	return func(yield func(Entry, error) bool) {
 		err := db.walkSnapshot(ctx, true, bounds, func(k, value []byte) bool { return yield(Entry{Key: k, Value: value}, nil) })
 		if err != nil {
@@ -32,7 +32,7 @@ func (db *DB) ScanPrefix(ctx context.Context, prefix []byte) iter.Seq2[Entry, er
 	}
 }
 
-// walkSnapshot pins the DATA layout only for a value scan. Index cursors never
+// walkSnapshot pins the selected DATA segments for a value scan. Index cursors never
 // hold a DB lock or admission across user code, which may close or mutate it.
 func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds, yield func([]byte, []byte) bool) error {
 	op := "keys"
@@ -57,19 +57,19 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		db.done()
 		return operationError(op, "context", err)
 	}
-	var layout map[uint64]*storage.DataSegment
+	var pinnedSegments map[uint64]*storage.DataSegment
 	if values {
-		layout = make(map[uint64]*storage.DataSegment, len(db.files))
+		pinnedSegments = make(map[uint64]*storage.DataSegment, len(db.files))
 		for id, f := range db.files {
 			f.Pin()
-			layout[id] = f
+			pinnedSegments[id] = f
 		}
 	}
 	db.indexGate.RUnlock()
 	db.done()
 	defer v.Close()
 	defer func() {
-		for _, f := range layout {
+		for _, f := range pinnedSegments {
 			db.releaseScanPin(f)
 		}
 	}()
@@ -101,7 +101,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		}
 		var value []byte
 		if values {
-			f := layout[a.FileID]
+			f := pinnedSegments[a.FileID]
 			if f == nil {
 				err := missingIndexFile(a.FileID)
 				db.poison(err)

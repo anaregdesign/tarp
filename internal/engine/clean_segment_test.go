@@ -649,14 +649,14 @@ func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 	}
 	a, b := testLoc(t, db, "a"), testLoc(t, db, "b")
 	source := db.store.Catalog.Entries[0]
-	if source.Kind != format.SnapshotKind || a.File.ID != source.ID || b.File != a.File || a.Offset >= b.Offset {
+	if source.Kind != format.SnapshotKind || a.File.ID != source.ID || b.File != a.File || a.RecordOffset >= b.RecordOffset {
 		t.Fatal("expected two ordered records in one snapshot")
 	}
 	fd, err := os.OpenFile(b.File.Path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fd.WriteAt([]byte("a"), b.Offset+format.RecordHeaderBytes)
+	_, err = fd.WriteAt([]byte("a"), b.RecordOffset+format.RecordHeaderBytes)
 	if err := errors.Join(err, fd.Close()); err != nil {
 		t.Fatal(err)
 	}

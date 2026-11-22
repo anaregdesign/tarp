@@ -18,7 +18,7 @@ import (
 )
 
 func packedAddress(k string, seq uint64) index.Address {
-	return index.Address{FileID: 1, Offset: 64 + int64(seq)*64, Bytes: int64(format.RecordHeaderBytes+len(k)) + 3, ValueBytes: 3, Sequence: seq}
+	return index.Address{FileID: 1, RecordOffset: 64 + int64(seq)*64, RecordBytes: int64(format.RecordHeaderBytes+len(k)) + 3, ValueBytes: 3, Sequence: seq}
 }
 
 func TestPackedReopenSupportsWritesAndPinnedReaders(t *testing.T) {
@@ -179,9 +179,9 @@ func TestPackedRejectsDamagedImagesBeforePublication(t *testing.T) {
 				a := &n.cells[0].address
 				switch tc {
 				case "bad run length":
-					a.Bytes = 3
+					a.RecordBytes = 3
 				case "address overflow":
-					a.Offset = math.MaxInt64
+					a.RecordOffset = math.MaxInt64
 				case "missing file":
 					a.FileID = 0
 				case "missing sequence":
@@ -225,7 +225,7 @@ func TestPackedRejectsDamagedImagesBeforePublication(t *testing.T) {
 
 func TestPackedRequiresExclusiveCompleteOverflowChains(t *testing.T) {
 	k := strings.Repeat("x", pageSize+maxInline)
-	ref := keyRef{inline: k[:longPrefix], length: uint64(len(k)), tail: 2}
+	ref := keyRef{inline: k[:inlinePrefixBytes], length: uint64(len(k)), tail: 2}
 	for _, tc := range []string{"missing tail", "wrong tail length", "cycle", "shared tail"} {
 		t.Run(tc, func(t *testing.T) {
 			n := node{kind: leaf, cells: []cell{{key: ref, address: packedAddress(k, 1)}}}
@@ -234,7 +234,7 @@ func TestPackedRequiresExclusiveCompleteOverflowChains(t *testing.T) {
 			p3.initialize(overflow, 3)
 			order.PutUint16(p2[6:], pageSize-header)
 			order.PutUint64(p2[24:], 3)
-			order.PutUint16(p3[6:], uint16(len(k)-longPrefix-(pageSize-header)))
+			order.PutUint16(p3[6:], uint16(len(k)-inlinePrefixBytes-(pageSize-header)))
 			switch tc {
 			case "missing tail":
 				order.PutUint64(p2[24:], 0)

@@ -14,27 +14,27 @@ import (
 )
 
 const (
-	pageSize    = 8192
-	header      = 32
-	leaf        = 1
-	branch      = 2
-	overflow    = 3
-	maxInline   = 240
-	longPrefix  = 24
-	maxDepth    = 64
-	addressSize = 40
+	pageSize          = 8192
+	header            = 32
+	leaf              = 1
+	branch            = 2
+	overflow          = 3
+	maxInline         = 240
+	inlinePrefixBytes = 24
+	maxDepth          = 64
+	addressSize       = 40
 )
 
-var errPage = fmt.Errorf("btree: invalid index page: %w", format.ErrCorrupt)
+var errPage = fmt.Errorf("btree: invalid B+tree page: %w", format.ErrCorrupt)
 var order = binary.LittleEndian
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 type page [pageSize]byte
 
-// Layout: checksum, type, shared-prefix length, slot count, slots end,
-// lowest cell offset, reserved bytes, page ID, leftmost child/overflow next.
-// Prefix bytes and the sorted uint16 slot directory grow up from the header.
-// Variable-length cells grow down from the end.
+// Leaf and branch pages store a shared key prefix after the header. The
+// sorted uint16 slots following that prefix point to variable-length cells
+// packed from the end of the page. The page link is the leftmost child page ID
+// for a branch page or the next page ID for an overflow page.
 func (p *page) initialize(kind byte, id uint64) {
 	p[4] = kind
 	order.PutUint64(p[16:24], id)
@@ -93,18 +93,22 @@ func (p *page) check(id uint64) error {
 	return nil
 }
 
-// For a large key, inline contains its first longPrefix bytes. The remaining
+// For a large key, inline contains its first inlinePrefixBytes bytes. The remaining
 // bytes are stored in owned overflow pages and compared incrementally.
 type keyRef struct {
 	inline string
 	length uint64
 	tail   uint64
 }
+
+// A cell holds a leaf entry or a branch separator and its right child page ID.
 type cell struct {
 	key     keyRef
 	address index.Address
 	child   uint64
 }
+
+// A node is the decoded representation of a branch or leaf page.
 type node struct {
 	kind  byte
 	left  uint64
@@ -114,23 +118,23 @@ type node struct {
 // rawCell borrows immutable bytes from its page. Checking and searching short
 // keys therefore need no owned strings, including when a page is first read.
 type rawCell struct {
-	prefix, suffix      []byte
-	length, tail, child uint64
-	address             index.Address
+	sharedKeyPrefix, suffix []byte
+	length, tail, child     uint64
+	address                 index.Address
 }
 
 func (c rawCell) key() keyRef {
-	return keyRef{inline: string(c.prefix) + string(c.suffix), length: c.length, tail: c.tail}
+	return keyRef{inline: string(c.sharedKeyPrefix) + string(c.suffix), length: c.length, tail: c.tail}
 }
 func (c rawCell) compare(s *pager, key string) (int, error) {
 	if c.tail != 0 {
 		return c.key().compare(s, key)
 	}
-	n := min(len(c.prefix), len(key))
-	if cmp := compareBytesString(c.prefix[:n], key[:n]); cmp != 0 {
+	n := min(len(c.sharedKeyPrefix), len(key))
+	if cmp := compareBytesString(c.sharedKeyPrefix[:n], key[:n]); cmp != 0 {
 		return cmp, nil
 	}
-	if n < len(c.prefix) {
+	if n < len(c.sharedKeyPrefix) {
 		return 1, nil
 	}
 	return compareBytesString(c.suffix, key[n:]), nil
@@ -161,7 +165,7 @@ func (p *page) raw(i int) (rawCell, error) {
 	suffix := int(b[0])
 	b = b[1:]
 	if suffix == 255 {
-		if len(b) != 16+longPrefix+addressBytes {
+		if len(b) != 16+inlinePrefixBytes+addressBytes {
 			return c, errPage
 		}
 		c.length = order.Uint64(b[:8])
@@ -169,15 +173,15 @@ func (p *page) raw(i int) (rawCell, error) {
 		if c.length <= maxInline || c.length > math.MaxInt || c.tail == 0 {
 			return c, errPage
 		}
-		c.suffix = b[16 : 16+longPrefix]
-		b = b[16+longPrefix:]
+		c.suffix = b[16 : 16+inlinePrefixBytes]
+		b = b[16+inlinePrefixBytes:]
 	} else {
 		if len(b) != suffix+addressBytes || int(p[5])+suffix > maxInline {
 			return c, errPage
 		}
-		c.prefix = p[header : header+int(p[5])]
+		c.sharedKeyPrefix = p[header : header+int(p[5])]
 		c.suffix = b[:suffix]
-		c.length = uint64(len(c.prefix) + suffix)
+		c.length = uint64(len(c.sharedKeyPrefix) + suffix)
 		b = b[suffix:]
 	}
 	if p[4] == branch {
@@ -186,8 +190,8 @@ func (p *page) raw(i int) (rawCell, error) {
 			return c, errPage
 		}
 	} else {
-		c.address = index.Address{FileID: order.Uint64(b), Offset: int64(order.Uint64(b[8:])), Bytes: int64(order.Uint64(b[16:])), ValueBytes: int64(order.Uint64(b[24:])), Sequence: order.Uint64(b[32:])}
-		if c.address.Offset < 0 || c.address.Bytes < 0 || c.address.ValueBytes < 0 {
+		c.address = index.Address{FileID: order.Uint64(b), RecordOffset: int64(order.Uint64(b[8:])), RecordBytes: int64(order.Uint64(b[16:])), ValueBytes: int64(order.Uint64(b[24:])), Sequence: order.Uint64(b[32:])}
+		if c.address.RecordOffset < 0 || c.address.RecordBytes < 0 || c.address.ValueBytes < 0 {
 			return c, errPage
 		}
 	}
@@ -207,7 +211,7 @@ func common(a, b string) int {
 	}
 	return i
 }
-func (n node) prefix() string {
+func (n node) sharedKeyPrefix() string {
 	if len(n.cells) == 0 {
 		return ""
 	}
@@ -216,12 +220,12 @@ func (n node) prefix() string {
 	return first[:common(first, last)]
 }
 func (n node) size() int {
-	prefix := n.prefix()
-	used := header + len(prefix)
+	sharedKeyPrefix := n.sharedKeyPrefix()
+	used := header + len(sharedKeyPrefix)
 	for _, c := range n.cells {
-		size := 2 + 1 + len(c.key.inline) - len(prefix)
+		size := 2 + 1 + len(c.key.inline) - len(sharedKeyPrefix)
 		if c.key.tail != 0 {
-			size = 2 + 1 + 16 + longPrefix
+			size = 2 + 1 + 16 + inlinePrefixBytes
 		}
 		if n.kind == leaf {
 			size += addressSize
@@ -235,10 +239,10 @@ func (n node) size() int {
 func (n node) encode(id uint64) *page {
 	p := new(page)
 	p.initialize(n.kind, id)
-	prefix := n.prefix()
-	p[5] = byte(len(prefix))
-	copy(p[header:], prefix)
-	directory := header + len(prefix)
+	sharedKeyPrefix := n.sharedKeyPrefix()
+	p[5] = byte(len(sharedKeyPrefix))
+	copy(p[header:], sharedKeyPrefix)
+	directory := header + len(sharedKeyPrefix)
 	order.PutUint16(p[6:8], uint16(len(n.cells)))
 	order.PutUint16(p[8:10], uint16(directory+2*len(n.cells)))
 	order.PutUint64(p[24:32], n.left)
@@ -248,9 +252,9 @@ func (n node) encode(id uint64) *page {
 		if n.kind == branch {
 			payload = 8
 		}
-		size := 1 + len(c.key.inline) - len(prefix) + payload
+		size := 1 + len(c.key.inline) - len(sharedKeyPrefix) + payload
 		if c.key.tail != 0 {
-			size = 1 + 16 + longPrefix + payload
+			size = 1 + 16 + inlinePrefixBytes + payload
 		}
 		end -= size
 		b := p[end : end+size]
@@ -259,9 +263,9 @@ func (n node) encode(id uint64) *page {
 			order.PutUint64(b[1:9], c.key.length)
 			order.PutUint64(b[9:17], c.key.tail)
 			copy(b[17:], c.key.inline)
-			b = b[17+longPrefix:]
+			b = b[17+inlinePrefixBytes:]
 		} else {
-			suffix := c.key.inline[len(prefix):]
+			suffix := c.key.inline[len(sharedKeyPrefix):]
 			b[0] = byte(len(suffix))
 			copy(b[1:], suffix)
 			b = b[1+len(suffix):]
@@ -279,8 +283,8 @@ func (n node) encode(id uint64) *page {
 }
 func putAddress(b []byte, a index.Address) {
 	order.PutUint64(b, a.FileID)
-	order.PutUint64(b[8:], uint64(a.Offset))
-	order.PutUint64(b[16:], uint64(a.Bytes))
+	order.PutUint64(b[8:], uint64(a.RecordOffset))
+	order.PutUint64(b[16:], uint64(a.RecordBytes))
 	order.PutUint64(b[24:], uint64(a.ValueBytes))
 	order.PutUint64(b[32:], a.Sequence)
 }
@@ -453,7 +457,7 @@ func compareKeys(a, b keyRef, read func(uint64) (*page, error)) (int, uint64, er
 }
 
 // validateOrder resolves overflow bytes only when the inline prefixes do not
-// distinguish adjacent keys. The read function only accepts overflow pages.
+// distinguish neighbors in encoded-key order. The read function only accepts overflow pages.
 func (p *page) validateOrder(read func(uint64) (*page, error)) error {
 	if p[4] == overflow || p.count() < 2 {
 		return nil

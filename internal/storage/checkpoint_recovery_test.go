@@ -24,13 +24,13 @@ func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 	// record geometry and lies in a proven bad block. It does not start at
 	// an original record boundary. Simulate matching aggregate counters so
 	// they alone cannot establish membership.
-	addr := index.Address{FileID: src.File.ID, Sequence: 1, Offset: 200, Bytes: format.RecordHeaderBytes + 4 + 24, ValueBytes: 24}
+	addr := index.Address{FileID: src.File.ID, Sequence: 1, RecordOffset: 200, RecordBytes: format.RecordHeaderBytes + 4 + 24, ValueBytes: 24}
 	tx := keys.Begin()
 	if err := tx.Put("fake", addr); err != nil {
 		t.Fatal(err)
 	}
 	tx.Commit()
-	c.capture.Files[0].liveKeys, c.capture.Files[0].liveBytes = 1, addr.Bytes
+	c.capture.Files[0].liveKeys, c.capture.Files[0].liveBytes = 1, addr.RecordBytes
 	v := keys.View()
 	defer v.Close()
 	h := memory.New()
@@ -70,7 +70,7 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 			t.Fatal(err)
 		}
 		loc.File.LiveKeys.Add(1)
-		loc.File.LiveBytes.Add(loc.Bytes)
+		loc.File.LiveBytes.Add(loc.RecordBytes)
 		newest = loc
 	}
 	tx.Commit()
@@ -90,7 +90,7 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw[newest.Offset+format.RecordHeaderBytes] = 'a'
+	raw[newest.RecordOffset+format.RecordHeaderBytes] = 'a'
 	raw[format.DataBlockBytes+20] ^= 1
 	if err := os.WriteFile(src.File.Path, raw, 0600); err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	moves, lost := s.NewRelocations(), s.NewRelocations()
 	defer moves.Close()
 	defer lost.Close()
-	out := s.NewCheckpoint(c)
+	out := s.NewDataCheckpoint(c)
 	defer out.Discard()
 	if err := out.CopyRecovered(t.Context(), h, v, moves, lost, s.ReserveSnapshotFile, nil); err != nil {
 		t.Fatal(err)

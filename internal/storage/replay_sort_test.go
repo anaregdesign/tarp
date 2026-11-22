@@ -56,7 +56,7 @@ func TestSortedReplayKeepsBinaryKeysAndStableHistoryAcrossRuns(t *testing.T) {
 			r.Kind = format.Delete
 			r.ValueBytes = 0
 		}
-		a := index.Address{FileID: 2, Offset: int64(i * 200), Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+		a := index.Address{FileID: 2, RecordOffset: int64(i * 200), RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 		if r.Kind == format.Delete {
 			delete(latest, key)
 		} else {
@@ -136,7 +136,7 @@ func TestReplayRunCorruptionAndCancellationRemainPrivate(t *testing.T) {
 	}
 	defer run.fd.Close()
 	w := bufio.NewWriter(run.fd)
-	if err := run.write(w, replayEvent{key: "hello", addr: index.Address{Bytes: format.RecordHeaderBytes + 5}}); err != nil {
+	if err := run.write(w, replayEvent{key: "hello", addr: index.Address{RecordBytes: format.RecordHeaderBytes + 5}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Flush(); err != nil {

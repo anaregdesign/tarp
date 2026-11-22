@@ -19,7 +19,7 @@ import (
 type AutoCompactionStatus struct {
 	DeferredReason         string
 	DroppedKeys            uint64 // Cumulative unrecoverable live versions discarded by the worker.
-	PinnedRetiredDataBytes int64  // Retired DATA bytes held by leases at the last retirement pass.
+	PinnedRetiredDataBytes int64  // Retired DATA bytes retained by segment pins or live index references at the last retirement pass.
 	UnlinkedBytes          uint64 // Cumulative logical lengths of files unlinked by the worker, including obsolete manifests.
 	LastError              error
 }
@@ -130,10 +130,10 @@ func (db *DB) cleanYield(ctx context.Context) error {
 	}
 }
 
-// nextCandidate inspects committed per-file accounting under the writer gate.
+// selectCleaningInputs inspects committed per-file accounting under the writer gate.
 // With source bytes S and estimated output bytes W, (S-W)/(S+W) >= 1/3
 // simplifies to W <= S/2. Ranking this ratio is equivalent to minimizing W/S.
-func nextCandidate(s *storage.Store, target int64) (inputs []format.CatalogEntry, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
+func selectCleaningInputs(s *storage.Store, target int64) (inputs []format.CatalogEntry, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
 	metadata := uint64(len(s.Manifest)) + format.FrontierBytes
 	var best format.CatalogEntry
 	for i, entry := range s.Catalog.Entries {
@@ -148,7 +148,7 @@ func nextCandidate(s *storage.Store, target int64) (inputs []format.CatalogEntry
 			blocked[entry.ID] = err
 			continue
 		}
-		records := retainedBytes(f)
+		records := retainedRecordBytes(f)
 		half := uint64(entry.Bytes) / 2
 		if records > half {
 			continue
@@ -158,7 +158,7 @@ func nextCandidate(s *storage.Store, target int64) (inputs []format.CatalogEntry
 			if len(inputs) == 0 && entry.Kind != format.SnapshotKind && entry.Bytes <= target {
 				// Save the oldest eligible group as a fallback. Any qualifying
 				// single file, including later in the catalog, takes priority.
-				inputs, staging = obsoleteGroupAt(s, s.Catalog.Entries[i:], uint64(target), metadata)
+				inputs, staging = groupedLogCleaningAt(s, s.Catalog.Entries[i:], uint64(target), metadata)
 			}
 			continue
 		}
@@ -176,7 +176,7 @@ func nextCandidate(s *storage.Store, target int64) (inputs []format.CatalogEntry
 	return inputs, staging, blocked
 }
 
-func retainedBytes(f *storage.DataSegment) uint64 {
+func retainedRecordBytes(f *storage.DataSegment) uint64 {
 	return uint64(f.LiveBytes.Load()) + uint64(f.DeleteBytes.Load())
 }
 
@@ -187,12 +187,12 @@ func replacementBytes(records uint64) uint64 {
 	return format.SegmentHeaderBytes + records
 }
 
-// obsoleteGroupAt shares the cost of one publication across adjacent sealed
-// logs. Bound both the catalog lookahead under the writer gate and the amount
+// groupedLogCleaningAt shares one publication across consecutive log entries
+// in the catalog. Bound both the catalog lookahead under the writer gate and the amount
 // of DATA scanned off the gate: at most eight entries, each at most one target.
 // Sealed live bytes only decrease as writers advance. Include every tombstone
 // and keep the resulting DATA file within one target even at its estimate.
-func obsoleteGroupAt(s *storage.Store, files []format.CatalogEntry, target, metadata uint64) (group []format.CatalogEntry, staging uint64) {
+func groupedLogCleaningAt(s *storage.Store, files []format.CatalogEntry, target, metadata uint64) (group []format.CatalogEntry, staging uint64) {
 	const maxEntries = 8
 	var source, retained uint64
 	var count int
@@ -208,7 +208,7 @@ func obsoleteGroupAt(s *storage.Store, files []format.CatalogEntry, target, meta
 			break
 		}
 		size := uint64(entry.Bytes)
-		records := retainedBytes(f)
+		records := retainedRecordBytes(f)
 		if records > size/2 || records > target-format.SegmentHeaderBytes-retained || size > math.MaxInt64-source {
 			break
 		}
@@ -223,10 +223,11 @@ func obsoleteGroupAt(s *storage.Store, files []format.CatalogEntry, target, meta
 	return group, staging
 }
 
-// repackGroup picks the oldest eligible run from the immutable catalog. Try at
-// most eight physical files per start. Empty log intervals contribute coverage
-// without requiring a file read. Snapshots and logs have different replay rules.
-func repackGroup(files []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
+// smallSegmentRepackGroup finds 4–8 small DATA segments in consecutive
+// catalog entries, even when all records are live. Empty log intervals add
+// sequence coverage without a physical file. Each group contains only snapshot
+// segments or only log segments.
+func smallSegmentRepackGroup(files []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
 	const minFiles, maxFiles = 4, 8
 	for start, first := range files {
 		if !first.HasPhysicalFile() || first.Bytes > target/4 {
@@ -367,7 +368,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 	var staging uint64
 	var blocked map[uint64]*storage.UnavailableDataError
 	if err == nil {
-		inputs, staging, blocked = nextCandidate(db.store, db.opts.TargetSegmentBytes)
+		inputs, staging, blocked = selectCleaningInputs(db.store, db.opts.TargetSegmentBytes)
 	}
 	files, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)
 	db.writer.Unlock()
@@ -388,7 +389,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		// Foreground rotations publish a new catalog slice. Inspect this one
 		// outside the writer gate; BeginClean rechecks the selection.
 		var inputBytes int64
-		inputs, inputBytes = repackGroup(files, db.opts.TargetSegmentBytes, blocked)
+		inputs, inputBytes = smallSegmentRepackGroup(files, db.opts.TargetSegmentBytes, blocked)
 		staging = uint64(inputBytes) + uint64(manifestBytes) + format.FrontierBytes
 	}
 	if len(blocked) != 0 && w.recoverPending.Load() && (!w.cleanBeforeRecovery || len(inputs) == 0) {

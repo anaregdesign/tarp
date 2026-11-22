@@ -16,9 +16,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
-// CleanSegment pins the physical sources in one contiguous catalog run. Its
+// SegmentCleaning pins DATA segments represented by consecutive catalog entries. Its
 // private output is unreachable until InstallCleaned publishes the replacement.
-type CleanSegment struct {
+type SegmentCleaning struct {
 	sources  []CapturedFile
 	entries  []format.CatalogEntry
 	position int
@@ -31,13 +31,13 @@ type CleanSegment struct {
 
 // OutputBytes is the logical length of the finished replacement DATA file.
 // An empty cleaned interval has zero bytes.
-func (c *CleanSegment) OutputBytes() int64 { return c.output.Size.Load() }
+func (c *SegmentCleaning) OutputBytes() int64 { return c.output.Size.Load() }
 
-func (c *CleanSegment) Sources() []CapturedFile { return c.sources }
+func (c *SegmentCleaning) Sources() []CapturedFile { return c.sources }
 
 // ResetCopy prepares the same pinned input and reserved output ID for another
 // attempt. Nothing has been installed or relocated at this point.
-func (c *CleanSegment) ResetCopy(fs *IO) error {
+func (c *SegmentCleaning) ResetCopy(fs *IO) error {
 	if err := c.Discard(fs); err != nil {
 		return err
 	}
@@ -51,7 +51,7 @@ func (c *CleanSegment) ResetCopy(fs *IO) error {
 
 // BeginClean runs under the writer gate. The selected catalog is immutable.
 // New log rotations may append to the catalog while these sources are copied.
-func (s *Store) BeginClean(entries []format.CatalogEntry) (*CleanSegment, error) {
+func (s *Store) BeginClean(entries []format.CatalogEntry) (*SegmentCleaning, error) {
 	if len(entries) == 0 || !entries[0].HasPhysicalFile() || !entries[len(entries)-1].HasPhysicalFile() {
 		return nil, nil
 	}
@@ -67,7 +67,7 @@ func (s *Store) BeginClean(entries []format.CatalogEntry) (*CleanSegment, error)
 	if run[0].Kind == format.SnapshotKind {
 		kind = format.SnapshotKind
 	}
-	c := &CleanSegment{entries: run, position: pos, uuid: s.Current.UUID, cutoff: s.Catalog.CheckpointCutoffSequence}
+	c := &SegmentCleaning{entries: run, position: pos, uuid: s.Current.UUID, cutoff: s.Catalog.CheckpointCutoffSequence}
 	for _, entry := range run {
 		if (entry.Kind == format.SnapshotKind) != (kind == format.SnapshotKind) {
 			return nil, fmt.Errorf("%w: cleaner crossed checkpoint boundary", ErrCorrupt)
@@ -92,7 +92,7 @@ func (s *Store) BeginClean(entries []format.CatalogEntry) (*CleanSegment, error)
 	return c, nil
 }
 
-func (c *CleanSegment) Release() {
+func (c *SegmentCleaning) Release() {
 	for _, source := range c.sources {
 		source.File.Unpin()
 	}
@@ -126,7 +126,7 @@ func (w pacedOutput) Write(b []byte) (int, error) {
 
 // Copy streams each source in catalog order into the same output. Every
 // tombstone is retained until the next complete checkpoint.
-func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, history index.Backend, yield func() error, keep func(string, Location) (bool, error)) (result error) {
+func (c *SegmentCleaning) Copy(ctx context.Context, fs *IO, moves *Relocations, history index.Backend, yield func() error, keep func(string, Location) (bool, error)) (result error) {
 	writer := &outputWriter{fs: fs, offset: format.SegmentHeaderBytes, point: "clean.copy", hash: sha256.New()}
 	defer func() {
 		if writer.fd != nil {
@@ -137,7 +137,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 	defer replay.abort()
 	choose := func(r format.RecordHeader, key string, old Location) (io.Writer, error) {
 		if c.output.Kind == format.SnapshotKind {
-			if err := replay.apply(old.File, old.Offset, r, key); err != nil {
+			if err := replay.apply(old.File, old.RecordOffset, r, key); err != nil {
 				// A damaged key can look like a duplicate before the
 				// streaming decoder reaches the record's payload CRC.
 				var input *SourceError
@@ -170,7 +170,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 		}
 		if r.Kind == format.Put {
 			next := old
-			next.File, next.Offset = c.output, writer.offset
+			next.File, next.RecordOffset = c.output, writer.offset
 			if err := moves.append(key, old, next); err != nil {
 				return nil, err
 			}
@@ -198,7 +198,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 
 // Validate each file with its own original kind and sequence interval before
 // moving to the next input. Only one source descriptor is open at a time.
-func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFile, buf []byte, yield func() error, choose func(format.RecordHeader, string, Location) (io.Writer, error)) (result error) {
+func (c *SegmentCleaning) scanSource(ctx context.Context, fs *IO, source CapturedFile, buf []byte, yield func() error, choose func(format.RecordHeader, string, Location) (io.Writer, error)) (result error) {
 	if err := yield(); err != nil {
 		return err
 	}
@@ -226,7 +226,7 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 				if err := span.Accept(r); err != nil {
 					return nil, selectedReadFailure(source.Entry.ID, err)
 				}
-				old := Location{File: source.File, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+				old := Location{File: source.File, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 				var w io.Writer
 				w, callbackErr = choose(r, key, old)
 				return w, callbackErr
@@ -247,7 +247,7 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 	})
 }
 
-func (c *CleanSegment) replacement() format.CatalogEntry {
+func (c *SegmentCleaning) replacement() format.CatalogEntry {
 	replacement := format.CatalogEntry{Kind: c.output.Kind, FirstSequence: c.entries[0].FirstSequence, LastSequence: c.entries[len(c.entries)-1].LastSequence}
 	if c.created {
 		replacement.ID, replacement.Bytes, replacement.DataFileDigest = c.output.ID, c.output.Size.Load(), c.digest
@@ -257,7 +257,7 @@ func (c *CleanSegment) replacement() format.CatalogEntry {
 
 // ProtectCleaned verifies and syncs the replacement sidecar outside the writer
 // gate. A metadata-only interval has no physical DATA to protect.
-func (s *Store) ProtectCleaned(ctx context.Context, c *CleanSegment, yield func() error) error {
+func (s *Store) ProtectCleaned(ctx context.Context, c *SegmentCleaning, yield func() error) error {
 	if !c.created {
 		return nil
 	}
@@ -274,7 +274,7 @@ func (s *Store) ProtectCleaned(ctx context.Context, c *CleanSegment, yield func(
 
 // Discard removes only an exclusively created, unpublished output. Once the
 // CURRENT replacement has been attempted, recovery owns ambiguous layouts.
-func (c *CleanSegment) Discard(fs *IO) error {
+func (c *SegmentCleaning) Discard(fs *IO) error {
 	if !c.created {
 		return nil
 	}
@@ -287,7 +287,7 @@ func (c *CleanSegment) Discard(fs *IO) error {
 
 // InstallCleaned splices the replacement into the latest catalog under the
 // writer gate. Every tail rotation and append since BeginClean survives.
-func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error) error {
+func (s *Store) InstallCleaned(c *SegmentCleaning, offGate func(func() error) error) error {
 	if c.created && !c.output.parityReady {
 		return errors.New("storage: cleaner replacement is not protected")
 	}

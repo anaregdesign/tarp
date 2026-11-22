@@ -14,7 +14,7 @@ import (
 
 // One long Put has a recoverable first stripe, an uncorrectable second
 // stripe and independently checked original bytes at the end.
-func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *Checkpoint, CapturedFile, []byte) {
+func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *DataCheckpoint, CapturedFile, []byte) {
 	t.Helper()
 	cfg := Config{ValueCacheBudgetBytes: 1 << 20, MaxRecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
 	s, err := openTestStore(t, t.TempDir(), cfg, fs)
@@ -42,7 +42,7 @@ func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *Checkpoint, Captur
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, s.NewCheckpoint(c), src, raw
+	return s, s.NewDataCheckpoint(c), src, raw
 }
 
 func TestRecoveredBlocksUseRawBytesOnlyFromIdentifiedOriginal(t *testing.T) {

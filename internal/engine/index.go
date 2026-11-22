@@ -166,8 +166,8 @@ func (db *DB) relocateBatch(batch []storage.Relocation) error {
 func (db *DB) accountRelocation(move storage.Relocation) {
 	db.dropLocation(move.Old.File)
 	db.addLocation(move.Next.File)
-	move.Old.File.LiveBytes.Add(-move.Old.Bytes)
-	move.Next.File.LiveBytes.Add(move.Next.Bytes)
+	move.Old.File.LiveBytes.Add(-move.Old.RecordBytes)
+	move.Next.File.LiveBytes.Add(move.Next.RecordBytes)
 }
 
 // A durable writer has already captured file addresses for its staged keys.

@@ -14,10 +14,10 @@ import (
 type CompactResult struct {
 	DroppedKeys            uint64 // Unrecoverable live key versions omitted from the published checkpoint.
 	UnlinkedBytes          int64  // Logical lengths of files unlinked during cleanup.
-	PinnedRetiredDataBytes int64  // Logical lengths of retired DATA files still held by leases during cleanup.
+	PinnedRetiredDataBytes int64  // Retired DATA bytes retained by segment pins or live index references during cleanup.
 }
 
-// Compact replaces the complete committed prefix with an online checkpoint.
+// Compact builds a full DATA checkpoint through the captured user sequence.
 // It requires temporary space and does not impose a total disk quota.
 func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	var result CompactResult
@@ -103,7 +103,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 			capture.Release()
 		}
 	}()
-	checkpoint := db.store.NewCheckpoint(capture)
+	checkpoint := db.store.NewDataCheckpoint(capture)
 	defer func() {
 		if returned != nil && db.health() == nil {
 			if err := checkpoint.Discard(); err != nil {
@@ -134,7 +134,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 	}()
 	reset := func() error {
 		discardErr := errors.Join(checkpoint.Discard(), moves.Close())
-		checkpoint = db.store.NewCheckpoint(capture)
+		checkpoint = db.store.NewDataCheckpoint(capture)
 		moves = db.store.NewRelocations()
 		return discardErr
 	}
@@ -282,7 +282,7 @@ func (db *DB) prepareLosses(ctx context.Context, lost *storage.Relocations) (*ch
 		}
 		total := losses.files[old.File]
 		total.keys++
-		total.bytes += old.Bytes
+		total.bytes += old.RecordBytes
 		losses.files[old.File] = total
 		return nil
 	})

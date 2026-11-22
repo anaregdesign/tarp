@@ -68,7 +68,7 @@ func (r recoveryParityReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (c *Checkpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *recoveredBlocks, result error) {
+func (c *DataCheckpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *recoveredBlocks, result error) {
 	e := src.Entry
 	unavailable := func(err error) error {
 		if rootErr := c.store.checkRepairRoot(c.capture.Current.UUID); rootErr != nil {

@@ -150,7 +150,7 @@ func (t *tree) BuildSorted(ctx context.Context, produce func(put func(string, in
 		return errors.New("btree: bulk construction requires an empty index")
 	}
 	// A fresh allocator produces a dense image without retired or free pages.
-	x.packed = x.gen == 1 && t.p.top == 0
+	x.packed = x.rootGeneration == 1 && t.p.top == 0
 	current := &level{s: t.p}
 	defer func() { result = errors.Join(result, current.close()) }()
 	leafPage := newPacked(leaf, 0)

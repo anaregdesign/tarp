@@ -30,24 +30,24 @@ func TestCleanerRanksNetSavings(t *testing.T) {
 		f.DeleteBytes.Store(64)
 		s.Files[e.ID] = f
 		s.Catalog.Entries = []format.CatalogEntry{e}
-		got, needed, _ := nextCandidate(s, 4096)
+		got, needed, _ := selectCleaningInputs(s, 4096)
 		if (len(got) != 0) != (n >= 1024) || len(got) != 0 && (got[0].ID != e.ID || needed != 512) {
 			t.Fatalf("source %d: selected %+v, staging %d", n, got, needed)
 		}
 	}
 	s.Files[3] = &storage.DataSegment{}
 	s.Catalog.Entries = append(s.Catalog.Entries, format.CatalogEntry{ID: 3, Kind: format.CleanedLogKind, Bytes: 1025, FirstSequence: 4, LastSequence: 7})
-	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 3 {
+	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 3 {
 		t.Fatal("higher net savings should win", got)
 	}
 	s.Catalog.Entries[1].Bytes = math.MaxInt64
 	s.Files[3].LiveBytes.Store(math.MaxInt64 - 64)
-	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("large low-benefit file should be skipped", got)
 	}
 	s.Catalog.Entries[1].Bytes = s.Catalog.Entries[0].Bytes
 	s.Files[3].LiveBytes.Store(256)
-	if got, _, _ := nextCandidate(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("oldest covered interval should win the tie", got)
 	}
 }
@@ -95,7 +95,7 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 				}
 				s.Catalog.Entries = append(s.Catalog.Entries, entry)
 			}
-			got, staging, _ := nextCandidate(s, tc.target)
+			got, staging, _ := selectCleaningInputs(s, tc.target)
 			want := s.Catalog.Entries[tc.first : tc.first+tc.count]
 			if !slices.Equal(got, want) || staging != tc.staging {
 				t.Fatalf("selected %+v staging %d, want %+v staging %d", got, staging, want, tc.staging)
@@ -104,7 +104,7 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 	}
 }
 
-func TestCleanerPublishesAdjacentObsoleteLogsAndReopens(t *testing.T) {
+func TestCleanerCleansConsecutiveCatalogLogsAndReopens(t *testing.T) {
 	// Keep the cleaner's publication as the final frontier across Close.
 	opts := Options{IndexMode: IndexMemory, MaxRecordBytes: 768, TargetSegmentBytes: 1024}
 	parked := &Hooks{CleanerStart: make(chan struct{})}
@@ -182,7 +182,7 @@ func TestRepackGroupLimits(t *testing.T) {
 			for i, size := range tc.sizes {
 				files = append(files, format.CatalogEntry{ID: uint64(i + 1), Kind: format.RawLogKind, Bytes: size})
 			}
-			group, bytes := repackGroup(files, target, nil)
+			group, bytes := smallSegmentRepackGroup(files, target, nil)
 			if len(group) != tc.count || len(group) > 0 && group[0].ID != uint64(tc.first) {
 				t.Fatalf("selected %+v, want %d files starting at ID %d", group, tc.count, tc.first)
 			}
@@ -680,7 +680,7 @@ func TestRepackGroupUsesHealthyRunAfterUnavailableFile(t *testing.T) {
 		files = append(files, format.CatalogEntry{ID: id, Kind: format.RawLogKind, Bytes: 128})
 	}
 	blocked := map[uint64]*storage.UnavailableDataError{3: {FileID: 3, Err: os.ErrNotExist}}
-	group, n := repackGroup(files, 4096, blocked)
+	group, n := smallSegmentRepackGroup(files, 4096, blocked)
 	if !slices.Equal(group, files[3:]) || n != 4*128 {
 		t.Fatalf("unexpected repack across unavailable file: %v, %d", group, n)
 	}

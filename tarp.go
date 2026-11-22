@@ -19,7 +19,7 @@ const (
 	IndexDefault = engine.IndexDefault
 	// IndexMemory keeps all key locations in memory.
 	IndexMemory = engine.IndexMemory
-	// IndexBTree keeps key locations in a paged disk index and checkpoints on clean Close.
+	// IndexBTree keeps DATA record addresses in B+tree pages. A clean Close persists or reuses an index checkpoint.
 	IndexBTree = engine.IndexBTree
 )
 
@@ -29,8 +29,8 @@ type OpenValidation = engine.OpenValidation
 const (
 	// Full verifies all committed DATA during Open. This is the default.
 	Full = engine.Full
-	// Indexed verifies the index and replays its tail. Covered payloads
-	// receive their record checks when read. Open with Full to check all bytes.
+	// Indexed validates an available index checkpoint and replays the DATA log
+	// suffix it does not cover. Covered DATA payloads are checked on read.
 	Indexed = engine.Indexed
 )
 
@@ -52,8 +52,8 @@ type Options struct {
 	ValueCacheBudgetBytes int64
 	// MaxRecordBytes limits the encoded header, key and value of one record. Zero selects 1 MiB.
 	MaxRecordBytes int64
-	// TargetSegmentBytes sizes new logs and checkpoints. It caps the total
-	// input to a small-file repack and the output of grouped log cleaning.
+	// TargetSegmentBytes sets the target for each new log or snapshot segment.
+	// It caps small-segment repacking input and grouped log cleaning output.
 	// The default is 4 MiB. The target grows to fit one maximum record and a segment header.
 	TargetSegmentBytes int64
 	// ReadFileHandles bounds the pool of reusable DATA handles. Zero selects 64.
@@ -227,16 +227,17 @@ func publicBackupInfo(info storage.BackupInfo, err error) (BackupInfo, error) {
 	}, nil
 }
 
-// CheckpointIndex persists the key index for a committed prefix while normal writes continue.
+// CheckpointIndex persists an index checkpoint covering the captured catalog prefix
+// while normal writes continue.
 func (db *DB) CheckpointIndex(ctx context.Context) error {
 	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
 
 // CompactResult reports discarded live keys, unlinked bytes and retired DATA bytes
-// still held by leases at cleanup.
+// still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult
 
-// Compact replaces the complete committed prefix with an online checkpoint.
+// Compact builds a full DATA checkpoint through the captured user sequence.
 // It uses PARITY to recover damaged sealed DATA. A live key whose record is
 // proved irrecoverable is removed when the checkpoint commits. The operation
 // requires temporary disk space for recovery and protected snapshot files.

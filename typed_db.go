@@ -17,8 +17,8 @@ type TypedDB[K, V any] struct {
 // Embed the view privately so the caller cannot replace an owner's DB.
 type boundView[K, V any] = View[K, V]
 
-// View provides typed key and value operations on a DB owned by its caller.
-// The owner controls the lifetime of the DB and all of its views.
+// View provides live, typed access to the DB owned by its caller. Each read
+// sees the committed state at that operation. Closing the owner ends access.
 type View[K, V any] struct {
 	core       *DB
 	keyCodec   Codec[K]
@@ -38,8 +38,8 @@ func OpenTyped[K, V any](dir string, opts Options, keyCodec Codec[K], valueCodec
 	return &TypedDB[K, V]{View[K, V]{core, keyCodec, valueCodec}}, nil
 }
 
-// Bind associates non-nil codecs with an open DB. The returned view shares
-// all records with the owner. The DB does not store the codecs with its data.
+// Bind associates non-nil codecs with an open DB. The typed view shares
+// the live key and value state with the owner. The DB does not store the codecs with its data.
 func Bind[K, V any](core *DB, keyCodec Codec[K], valueCodec Codec[V]) (*View[K, V], error) {
 	if core == nil {
 		return nil, errors.New("tarp: nil DB")
@@ -185,7 +185,7 @@ func (db *TypedDB[K, V]) Backup(ctx context.Context, destination string) error {
 	return db.core.Backup(ctx, destination)
 }
 
-// CheckpointIndex persists the encoded-key index for a committed prefix.
+// CheckpointIndex persists the encoded-key index covering the captured catalog prefix.
 func (db *TypedDB[K, V]) CheckpointIndex(ctx context.Context) error {
 	return db.core.CheckpointIndex(ctx)
 }
@@ -195,7 +195,7 @@ func (db *TypedDB[K, V]) ProtectParity(ctx context.Context) error {
 	return db.core.ProtectParity(ctx)
 }
 
-// Compact builds an online checkpoint of the underlying DB.
+// Compact builds a full DATA checkpoint of the underlying DB.
 func (db *TypedDB[K, V]) Compact(ctx context.Context) (CompactResult, error) {
 	return db.core.Compact(ctx)
 }

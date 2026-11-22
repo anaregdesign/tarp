@@ -47,7 +47,7 @@ func damageProtectedReadFixture(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.WriteAt([]byte{0xff}, loc.Offset+loc.Bytes-1)
+	_, err = f.WriteAt([]byte{0xff}, loc.RecordOffset+loc.RecordBytes-1)
 	if err = errors.Join(err, f.Close()); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestScanPreservesHotCache(t *testing.T) {
 	}
 	wantValue(t, db, "b", "B")
 	if reads.Load() != 3 {
-		t.Fatal("expected a cache miss for b")
+		t.Fatal("expected a value-cache miss for b")
 	}
 }
 

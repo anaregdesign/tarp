@@ -18,9 +18,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
-// ErrIndexMiss means that authoritative replay can replace this optional file.
-var ErrIndexMiss = errors.New("storage: unusable index checkpoint")
-var ErrIndexLayoutChanged = errors.New("storage: checkpoint prefix was replaced")
+// ErrIndexCheckpointUnusable indicates that the runtime index must be rebuilt from DATA.
+var ErrIndexCheckpointUnusable = errors.New("storage: unusable index checkpoint")
+var ErrIndexLayoutChanged = errors.New("storage: the catalog prefix covered by the index checkpoint was replaced")
 
 const indexSignature = "TARPIDX1"
 const indexHeaderBytes = 48
@@ -35,7 +35,7 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	cp := c.Index
 	fd, err := OpenRegular(filepath.Join(s.Dir, IndexName(c.UUID, cp.ID)))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil, ErrIndexMiss
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
 	if err != nil {
 		return nil, nil, err
@@ -52,7 +52,7 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 		return nil, nil, err
 	}
 	if st.Size() != cp.Bytes || cp.Bytes < indexHeaderBytes || cp.CoveredCatalogEntries > uint64(len(c.Entries)) || cp.CoveredCatalogEntries > uint64((cp.Bytes-indexHeaderBytes)/8) {
-		return nil, nil, ErrIndexMiss
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
 	h := sha256.New()
 	var source io.Reader = fd
@@ -65,7 +65,7 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 		return nil, nil, indexReadError(err)
 	}
 	if string(header[:8]) != indexSignature || [32]byte(header[8:40]) != cp.CoveredLayoutFingerprint || binary.LittleEndian.Uint64(header[40:]) != cp.CoveredCatalogEntries {
-		return nil, nil, ErrIndexMiss
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
 	deletes := make([]int64, int(cp.CoveredCatalogEntries))
 	var raw [8]byte
@@ -84,7 +84,7 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 		return nil, nil, indexReadError(err)
 	}
 	if [32]byte(h.Sum(nil)) != cp.IndexFileDigest {
-		return nil, nil, ErrIndexMiss
+		return nil, nil, ErrIndexCheckpointUnusable
 	}
 	return keys, deletes, nil
 }
@@ -102,16 +102,15 @@ func (r checkpointReadMeter) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// IsIndexMiss reports whether every cause describes an unusable optional
-// index. An additional read, close or cancellation failure must reach the
+// IsIndexCheckpointUnusable reports whether every cause invalidates the index checkpoint. An additional read, close or cancellation failure must reach the
 // caller even when a decoder also found an invalid page.
-func IsIndexMiss(err error, equivalent ...error) bool {
-	return onlyCauses(err, ErrIndexMiss, equivalent...)
+func IsIndexCheckpointUnusable(err error, equivalent ...error) bool {
+	return onlyCauses(err, ErrIndexCheckpointUnusable, equivalent...)
 }
 
 func indexReadError(err error) error {
-	if IsIndexMiss(err, io.EOF, io.ErrUnexpectedEOF) {
-		return ErrIndexMiss
+	if IsIndexCheckpointUnusable(err, io.EOF, io.ErrUnexpectedEOF) {
+		return ErrIndexCheckpointUnusable
 	}
 	return err
 }

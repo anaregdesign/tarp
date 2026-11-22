@@ -38,8 +38,8 @@ func (o Options) importCheckpoint(ctx context.Context, s *storage.Store, src io.
 		}
 	}
 	tree, err := btree.ImportPacked(ctx, src, size, dir, budget, visit)
-	if storage.IsIndexMiss(err, btree.ErrInvalidPacked) {
-		err = storage.ErrIndexMiss
+	if storage.IsIndexCheckpointUnusable(err, btree.ErrInvalidPacked) {
+		err = storage.ErrIndexCheckpointUnusable
 	}
 	if err != nil {
 		if build != nil {

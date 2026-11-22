@@ -18,10 +18,10 @@ func TestRelocationsStreamCheckedAddressesAcrossBufferBoundaries(t *testing.T) {
 	key := strings.Repeat("\x00key\xff", 10_000)
 	in := &DataSegment{ID: 4}
 	out := &DataSegment{ID: 12}
-	old := Location{File: in, Offset: 100, ValueBytes: 2, Sequence: 23, Bytes: format.RecordHeaderBytes + int64(len(key)) + 2}
+	old := Location{File: in, RecordOffset: 100, ValueBytes: 2, Sequence: 23, RecordBytes: format.RecordHeaderBytes + int64(len(key)) + 2}
 	next := old
 	next.File = out
-	next.Offset = 200
+	next.RecordOffset = 200
 	for range 3 {
 		if err := moves.append(key, old, next); err != nil {
 			t.Fatal(err)
@@ -69,7 +69,7 @@ func TestRelocationsBatchLimitsOnReplay(t *testing.T) {
 	src, dst := &DataSegment{ID: 1}, &DataSegment{ID: 2}
 	appendKey := func(key string) {
 		t.Helper()
-		old := Location{File: src, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + int64(len(key))}
+		old := Location{File: src, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + int64(len(key))}
 		next := old
 		next.File = dst
 		if err := moves.append(key, old, next); err != nil {
@@ -114,7 +114,7 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 			t.Setenv("TMPDIR", filepath.Join(store.Dir, "missing-temp"))
 			moves := store.NewRelocations()
 			defer moves.Close()
-			base := Location{File: &DataSegment{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + int64(tc.keyBytes)}
+			base := Location{File: &DataSegment{ID: 1}, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + int64(tc.keyBytes)}
 			next := base
 			next.File = &DataSegment{ID: 2}
 			key := strings.Repeat("k", tc.keyBytes)
@@ -167,7 +167,7 @@ func TestRelocationSpillCanRetryAfterWorkspaceFailure(t *testing.T) {
 	}
 	moves := store.NewRelocations()
 	defer moves.Close()
-	old := Location{File: &DataSegment{ID: 1}, Offset: format.SegmentHeaderBytes, Bytes: format.RecordHeaderBytes + 1}
+	old := Location{File: &DataSegment{ID: 1}, RecordOffset: format.SegmentHeaderBytes, RecordBytes: format.RecordHeaderBytes + 1}
 	next := old
 	next.File = &DataSegment{ID: 2}
 	for range RelocationBatchCount {

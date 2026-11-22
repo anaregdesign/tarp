@@ -16,12 +16,12 @@ type parityWorker struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	// layout changes only when maintenance replaces a prefix, under writer.
-	layout uint64
+	// layoutRevision advances under the writer gate when maintenance replaces a catalog prefix.
+	layoutRevision uint64
 	// The gate serializes automatic, explicit and Close builders. Appending a
-	// sealed entry extends the cursor without enumerating the protected prefix.
-	scannedLayout uint64
-	next          int
+	// sealed entry extends the cursor without rechecking the covered catalog entries.
+	scannedLayoutRevision uint64
+	next                  int
 }
 
 func (db *DB) startMaintenance() {
@@ -59,7 +59,7 @@ func (db *DB) notifyParity() {
 
 // resetParity is called under writer after cleaning or full compaction.
 func (db *DB) resetParity() {
-	db.parity.layout++
+	db.parity.layoutRevision++
 	db.notifyParity()
 }
 
@@ -132,14 +132,14 @@ func (db *DB) ProtectParity(ctx context.Context) error {
 }
 
 type parityCut struct {
-	files  []format.CatalogEntry
-	layout uint64
-	uuid   [16]byte
+	entries        []format.CatalogEntry
+	layoutRevision uint64
+	uuid           [16]byte
 }
 
 // The caller holds writer. Published catalog slices are immutable.
 func (db *DB) parityCut() parityCut {
-	return parityCut{db.store.Catalog.Entries, db.parity.layout, db.store.Catalog.UUID}
+	return parityCut{db.store.Catalog.Entries, db.parity.layoutRevision, db.store.Catalog.UUID}
 }
 
 func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
@@ -179,26 +179,26 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 			cut = db.parityCut()
 			db.writer.Unlock()
 		}
-		files, layout, uuid := cut.files, cut.layout, cut.uuid
-		if recheck || layout != w.scannedLayout {
+		entries, layoutRevision, uuid := cut.entries, cut.layoutRevision, cut.uuid
+		if recheck || layoutRevision != w.scannedLayoutRevision {
 			w.next = 0
 		}
-		w.scannedLayout = layout
-		next := len(files)
+		w.scannedLayoutRevision = layoutRevision
+		next := len(entries)
 		var firstErr, unavailable error
-		for i := w.next; i < len(files); i++ {
+		for i := w.next; i < len(entries); i++ {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			if err := db.health(); err != nil {
 				return err
 			}
-			entry := files[i]
+			entry := entries[i]
 			if !entry.HasPhysicalFile() {
 				continue
 			}
 			db.writer.Lock()
-			if w.layout != layout {
+			if w.layoutRevision != layoutRevision {
 				db.writer.Unlock()
 				break
 			}
@@ -226,7 +226,7 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 				var source *storage.SourceError
 				if errors.As(err, &source) {
 					db.writer.Lock()
-					if w.layout == layout || slices.Contains(db.store.Catalog.Entries, entry) {
+					if w.layoutRevision == layoutRevision || slices.Contains(db.store.Catalog.Entries, entry) {
 						db.poison(err)
 					}
 					db.writer.Unlock()
@@ -237,7 +237,7 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 			}
 		}
 		db.writer.Lock()
-		changed := w.layout != layout
+		changed := w.layoutRevision != layoutRevision
 		db.writer.Unlock()
 		if changed {
 			continue

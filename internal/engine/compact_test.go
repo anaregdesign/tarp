@@ -463,7 +463,7 @@ func TestCheckpointCopiesInSourceOrderAndReusesReaders(t *testing.T) {
 	for _, key := range []string{"c", "d", "e", "f", "a", "b"} {
 		loc := testLoc(t, db, key)
 		if previous.File != nil && (loc.File.ID < previous.File.ID ||
-			loc.File.ID == previous.File.ID && loc.Offset <= previous.Offset) {
+			loc.File.ID == previous.File.ID && loc.RecordOffset <= previous.RecordOffset) {
 			t.Fatalf("key %q copied out of source order", key)
 		}
 		previous = loc

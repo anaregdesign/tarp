@@ -73,26 +73,29 @@ type DataSegment struct {
 	Kind                   uint32
 	Path                   string
 	Size                   atomic.Int64
-	refs                   atomic.Int64
+	pins                   atomic.Int64
 	LiveBytes, DeleteBytes atomic.Int64
 	LiveKeys               atomic.Int64 // index ownership independent of transient read and capture pins
 }
 
-func (f *DataSegment) Pin()              { f.refs.Add(1) }
-func (f *DataSegment) References() int64 { return f.refs.Load() + f.LiveKeys.Load() }
+func (f *DataSegment) Pin() { f.pins.Add(1) }
+
+// References counts transient segment pins and live index entries pointing to this segment.
+func (f *DataSegment) References() int64 { return f.pins.Load() + f.LiveKeys.Load() }
 
 func (f *DataSegment) Unpin() {
-	if f.refs.Add(-1) < 0 {
-		panic("storage: negative file reference count")
+	if f.pins.Add(-1) < 0 {
+		panic("storage: negative segment pin count")
 	}
 }
 
+// Location binds a DATA record address to the process-local segment used for I/O.
 type Location struct {
-	File       *DataSegment
-	Offset     int64
-	Bytes      int64
-	ValueBytes int64
-	Sequence   uint64
+	File         *DataSegment
+	RecordOffset int64
+	RecordBytes  int64
+	ValueBytes   int64
+	Sequence     uint64
 }
 
 type Store struct {
@@ -519,14 +522,14 @@ func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() err
 	}}
 	if prepare != nil {
 		data.prepare = func(f *DataSegment, off int64) error {
-			return prepare(Location{File: f, Offset: off, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
+			return prepare(Location{File: f, RecordOffset: off, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence})
 		}
 	}
 	file, offset, err := s.appendRecords(data, sequence, healthy)
 	if err != nil {
 		return Location{}, err
 	}
-	return Location{File: file, Offset: offset, Bytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence}, nil
+	return Location{File: file, RecordOffset: offset, RecordBytes: int64(len(b)), ValueBytes: int64(len(value)), Sequence: sequence}, nil
 }
 
 // AppendBatch publishes all records at one frontier. The caller validates the
@@ -547,7 +550,7 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 	var size int64
 	for i, e := range entries {
 		n := entrysize.RecordBytes(int64(len(e.Key)), int64(len(e.Value)))
-		locations[i] = Location{Offset: size, Bytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.LastUserSequence + uint64(i) + 1}
+		locations[i] = Location{RecordOffset: size, RecordBytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.LastUserSequence + uint64(i) + 1}
 		size += n
 	}
 	data := appendData{size: size, writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
@@ -569,7 +572,7 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 	if prepare != nil {
 		data.prepare = func(f *DataSegment, off int64) error {
 			for i, loc := range locations {
-				loc.File, loc.Offset = f, off+loc.Offset
+				loc.File, loc.RecordOffset = f, off+loc.RecordOffset
 				if err := prepare(i, loc); err != nil {
 					return err
 				}
@@ -583,7 +586,7 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 	}
 	for i := range locations {
 		locations[i].File = file
-		locations[i].Offset += offset
+		locations[i].RecordOffset += offset
 	}
 	return locations, nil
 }
@@ -666,7 +669,7 @@ func (s *Store) readValue(loc Location, key string) ([]byte, error) {
 		return nil, err
 	}
 	defer s.readers.release(h)
-	value, err := format.ReadValue(h.fd, loc.Offset, loc.Bytes, key, loc.Sequence)
+	value, err := format.ReadValue(h.fd, loc.RecordOffset, loc.RecordBytes, key, loc.Sequence)
 	if err != nil {
 		return nil, err
 	}
@@ -677,7 +680,7 @@ func (s *Store) readValue(loc Location, key string) ([]byte, error) {
 }
 
 func (loc Location) readError(err error) error {
-	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.Offset, err)
+	return fmt.Errorf("%s: record at offset %d: %w", filepath.Base(loc.File.Path), loc.RecordOffset, err)
 }
 
 // directoryListing retains the type and ID of every object cleanup may retire.
@@ -741,7 +744,7 @@ func (s *Store) inspectNames(ctx context.Context, entries []os.DirEntry, listing
 	return nil
 }
 
-// Cleanup only runs under the writer gate; release pins never performs I/O.
+// Cleanup runs under the writer gate. Releasing a segment pin performs no I/O.
 func (s *Store) Cleanup() (removed, pinned int64, result error) {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {

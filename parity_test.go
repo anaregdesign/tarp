@@ -270,7 +270,7 @@ func TestForegroundReadsRepairSealedDATA(t *testing.T) {
 		name string
 		mode tarp.IndexMode
 	}{{"memory", tarp.IndexMemory}, {"btree", tarp.IndexBTree}} {
-		for _, method := range []string{"Get", "BatchGetSerial", "BatchGetParallel", "BatchGetAdjacent", "Scan"} {
+		for _, method := range []string{"Get", "BatchGetSerial", "BatchGetParallel", "BatchGetContiguous", "Scan"} {
 			t.Run(mode.name+"/"+method, func(t *testing.T) {
 				dir := t.TempDir()
 				opts := tarp.Options{IndexMode: mode.mode, BatchGetReadConcurrency: 4}
@@ -336,7 +336,7 @@ func TestForegroundReadsRepairSealedDATA(t *testing.T) {
 					// The backwards jump precludes coalescing. The 5 KB
 					// record bypasses the adaptive small-read serial path.
 					keys := [][]byte{[]byte("large"), []byte("b"), []byte("a"), []byte("b")}
-					if method == "BatchGetAdjacent" {
+					if method == "BatchGetContiguous" {
 						keys = [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 					}
 					got, err := db.BatchGet(keys)
@@ -447,7 +447,7 @@ func TestForegroundUnrepairableDATAIsolatedWhileHealthyRecordsRemainAvailable(t 
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Short records use a single adjacent read. The large record
+			// Short records use a single contiguous read. The large record
 			// is read independently in a batch with a verified neighbor.
 			keys := [][]byte{entries[0].Key, entries[1].Key}
 			if damage == "two lost blocks" {
@@ -603,7 +603,7 @@ func TestUnavailableForeignDATACannotSupplyAValidLookingRecord(t *testing.T) {
 		t.Fatalf("Get accepted a foreign record: %q, %v", value, err)
 	}
 	if values, err := db.BatchGet([][]byte{[]byte("a"), []byte("b")}); values != nil || !errors.Is(err, tarp.ErrDataUnavailable) {
-		t.Fatalf("adjacent BatchGet accepted foreign records: %+v, %v", values, err)
+		t.Fatalf("contiguous BatchGet accepted foreign records: %+v, %v", values, err)
 	}
 	failures := 0
 	for entry, err := range db.Scan(t.Context()) {

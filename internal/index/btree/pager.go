@@ -122,7 +122,7 @@ func (s *pager) queue(p *page) *list.List {
 	return &s.ordinary
 }
 
-// Dirty pages are the byte-bounded write buffer. Old reader generations can
+// Dirty pages are the byte-bounded write buffer. Pinned root generations can
 // spill to disk without changing their page IDs or retaining extra heap.
 func (s *pager) cachePage(id uint64, p *page, owner uint64) error {
 	if item := s.cache[id]; item != nil {
@@ -242,7 +242,7 @@ func (s *pager) readLocked(id uint64, wantOverflow bool) (*page, error) {
 }
 
 // A page created in this transaction can be updated in place until a
-// reader-visible root is published. A cache miss simply falls back to COW.
+// reader-visible root is published. A B+tree page-cache miss falls back to copy-on-write.
 func (s *pager) private(id, owner uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -403,7 +403,7 @@ type retireQueue struct {
 	start, end int64
 }
 
-func (q *retireQueue) append(s *pager, gen uint64, l *idLog) error {
+func (q *retireQueue) append(s *pager, rootGeneration uint64, l *idLog) error {
 	if l.n == 0 && l.bytes == 0 {
 		return nil
 	}
@@ -428,7 +428,7 @@ func (q *retireQueue) append(s *pager, gen uint64, l *idLog) error {
 		return nil
 	}
 	err := l.each(func(id uint64) error {
-		order.PutUint64(buf[used:], gen)
+		order.PutUint64(buf[used:], rootGeneration)
 		order.PutUint64(buf[used+8:], id)
 		used += 16
 		if used == len(buf) {
@@ -441,7 +441,7 @@ func (q *retireQueue) append(s *pager, gen uint64, l *idLog) error {
 	}
 	return flush()
 }
-func (q *retireQueue) collect(s *pager, minGen uint64) error {
+func (q *retireQueue) collect(s *pager, oldestRootGeneration uint64) error {
 	if q.start >= q.end {
 		return nil
 	}
@@ -452,7 +452,7 @@ func (q *retireQueue) collect(s *pager, minGen uint64) error {
 			return err
 		}
 		for i := 0; i < int(n); i += 16 {
-			if order.Uint64(buf[i:]) >= minGen {
+			if order.Uint64(buf[i:]) >= oldestRootGeneration {
 				return q.compact()
 			}
 			if err := s.release(order.Uint64(buf[i+8:])); err != nil {

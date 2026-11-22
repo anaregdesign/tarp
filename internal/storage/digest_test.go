@@ -62,7 +62,7 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 	defer moves.Close()
 	work := memory.New()
 	defer work.Close()
-	compact := store.NewCheckpoint(capture)
+	compact := store.NewDataCheckpoint(capture)
 	if err := compact.Copy(t.Context(), work, view, moves, store.ReserveSnapshotFile); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("compaction: %v", err)
 	}

@@ -14,9 +14,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
-// Checkpoint owns the private snapshot files until Install attempts publication.
+// DataCheckpoint owns the private snapshot files until Install attempts publication.
 // Copy runs outside the writer gate. ReserveSnapshotFile and Install require it.
-type Checkpoint struct {
+type DataCheckpoint struct {
 	store       *Store
 	capture     *Capture
 	files       []*DataSegment
@@ -25,8 +25,8 @@ type Checkpoint struct {
 	attempted   bool
 }
 
-func (s *Store) NewCheckpoint(capture *Capture) *Checkpoint {
-	return &Checkpoint{store: s, capture: capture}
+func (s *Store) NewDataCheckpoint(capture *Capture) *DataCheckpoint {
+	return &DataCheckpoint{store: s, capture: capture}
 }
 
 // ReserveSnapshotFile assigns a name under the writer gate. Only a successfully
@@ -36,11 +36,11 @@ func (s *Store) ReserveSnapshotFile() (*DataSegment, error) {
 }
 
 // Entries describes completed snapshot files for checkpoint size accounting.
-func (c *Checkpoint) Entries() []format.CatalogEntry { return c.entries }
+func (c *DataCheckpoint) Entries() []format.CatalogEntry { return c.entries }
 
 // Copy validates the captured history, copies live records in physical order and
 // records their new addresses in moves. Only reserve takes the writer gate.
-func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*DataSegment, error)) error {
+func (c *DataCheckpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*DataSegment, error)) error {
 	err := c.writeSnapshot(ctx, moves, reserve, func(emit func(string, Location) (io.Writer, error)) error {
 		return c.capture.replayLive(ctx, c.store.IO, history, live, emit)
 	})
@@ -63,7 +63,7 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 		if err != nil {
 			return &IndexWorkError{Err: err}
 		}
-		if !exists || loc.FileID != old.File.ID || loc.Offset != old.Offset || loc.Sequence != old.Sequence {
+		if !exists || loc.FileID != old.File.ID || loc.RecordOffset != old.RecordOffset || loc.Sequence != old.Sequence {
 			return fmt.Errorf("%w: checkpoint index location disagrees with replay", ErrCorrupt)
 		}
 		return nil
@@ -72,7 +72,7 @@ func (c *Checkpoint) Copy(ctx context.Context, history index.Backend, live index
 
 // writeSnapshot owns private outputs through the complete source scan. Both
 // normal replay and recovery use the same rollover, sync and relocation path.
-func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, reserve func() (*DataSegment, error), scan func(func(string, Location) (io.Writer, error)) error) (result error) {
+func (c *DataCheckpoint) writeSnapshot(ctx context.Context, moves *Relocations, reserve func() (*DataSegment, error), scan func(func(string, Location) (io.Writer, error)) error) (result error) {
 	var file *DataSegment
 	var fd *os.File
 	var offset int64
@@ -100,7 +100,7 @@ func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, rese
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if fd == nil || offset > c.store.Config.TargetSegmentBytes-old.Bytes {
+		if fd == nil || offset > c.store.Config.TargetSegmentBytes-old.RecordBytes {
 			if err := finish(); err != nil {
 				return nil, err
 			}
@@ -120,8 +120,8 @@ func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, rese
 		}
 		writer := &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
 		next := old
-		next.File, next.Offset = file, offset
-		offset += old.Bytes
+		next.File, next.RecordOffset = file, offset
+		offset += old.RecordBytes
 		return writer, moves.append(key, old, next)
 	})
 	if err != nil {
@@ -135,7 +135,7 @@ func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, rese
 
 // Protect validates each staged snapshot against the digest computed during
 // Copy. Sync all new sidecar names together before publishing their catalog.
-func (c *Checkpoint) Protect(ctx context.Context) error {
+func (c *DataCheckpoint) Protect(ctx context.Context) error {
 	if len(c.entries) == 0 {
 		return nil
 	}
@@ -156,7 +156,7 @@ func (c *Checkpoint) Protect(ctx context.Context) error {
 
 // Install splices the captured prefix into the current tail under the writer
 // gate. A failed publication may have selected the snapshot files on disk.
-func (c *Checkpoint) Install() error {
+func (c *DataCheckpoint) Install() error {
 	s := c.store
 	for _, f := range c.files {
 		if !f.parityReady {
@@ -186,7 +186,7 @@ func (c *Checkpoint) Install() error {
 
 // Discard removes only privately owned files before publication was attempted.
 // Installation transfers cleanup to the store and its recovery protocol.
-func (c *Checkpoint) Discard() error {
+func (c *DataCheckpoint) Discard() error {
 	if c.attempted || len(c.files) == 0 {
 		return nil
 	}

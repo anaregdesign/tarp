@@ -447,7 +447,7 @@ func verifySorted(ctx context.Context, dir, scratch string, limit int64) (verifi
 		return nil, err
 	}
 	err = history.reduce(image.Catalog.PrunedThroughSequence, func(key string, addr index.Address) error {
-		return image.measure(key, addr.Bytes, addr.ValueBytes)
+		return image.measure(key, addr.RecordBytes, addr.ValueBytes)
 	})
 	if err != nil {
 		return nil, replayWorkError(err)

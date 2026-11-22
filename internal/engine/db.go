@@ -39,7 +39,7 @@ type DB struct {
 	writer engineMutex
 	state  engineMutex
 	keys   index.Backend
-	// indexGate coordinates point/batch lookup and DATA lease acquisition with publication.
+	// indexGate coordinates point/batch lookup and DATA segment pin acquisition with publication.
 	// Neither DATA reads nor caller callbacks run under this lock.
 	indexGate sync.RWMutex
 	files     map[uint64]*storage.DataSegment
@@ -457,13 +457,13 @@ func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc, old storage.Lo
 	invalidatedSealed := false
 	if old.File != nil {
 		invalidatedSealed = old.File != loc.File
-		old.File.LiveBytes.Add(-old.Bytes)
-		db.stats.LiveRecordBytes -= uint64(old.Bytes)
+		old.File.LiveBytes.Add(-old.RecordBytes)
+		db.stats.LiveRecordBytes -= uint64(old.RecordBytes)
 		db.dropLocation(old.File)
 	}
 	if kind == format.Delete {
-		loc.File.DeleteBytes.Add(loc.Bytes)
-		db.stats.TombstoneBytes += uint64(loc.Bytes)
+		loc.File.DeleteBytes.Add(loc.RecordBytes)
+		db.stats.TombstoneBytes += uint64(loc.RecordBytes)
 		db.stats.LiveKeys--
 		db.cache.Delete(entry.key)
 	} else {
@@ -471,15 +471,15 @@ func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc, old storage.Lo
 			db.stats.LiveKeys++
 		}
 		db.addLocation(loc.File)
-		loc.File.LiveBytes.Add(loc.Bytes)
-		db.stats.LiveRecordBytes += uint64(loc.Bytes)
+		loc.File.LiveBytes.Add(loc.RecordBytes)
+		db.stats.LiveRecordBytes += uint64(loc.RecordBytes)
 		if loc.ValueBytes > db.maxSeenValueBytes {
 			db.maxSeenValueBytes = loc.ValueBytes
 		}
 		db.cache.Put(entry.key, entry.value)
 	}
 	db.stats.WrittenRecords++
-	db.stats.SelectedDataBytes += uint64(loc.Bytes)
+	db.stats.SelectedDataBytes += uint64(loc.RecordBytes)
 	return invalidatedSealed
 }
 

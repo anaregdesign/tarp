@@ -29,8 +29,9 @@ type Capture struct {
 	Files    []CapturedFile
 }
 
-// Capture pins exact committed prefixes, without copying the logical key index.
-// The caller holds the writer gate; metadata is immutable after publication.
+// Capture pins the selected DATA segments and captures the committed end
+// offset of the active segment. The caller holds the writer gate. Published
+// metadata is immutable, and the runtime index is captured separately.
 func (s *Store) Capture() (*Capture, error) {
 	active, err := s.Catalog.ActiveEntry(s.Current)
 	if err != nil {
@@ -151,10 +152,10 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 					if err != nil {
 						return nil, &SourceError{Err: err}
 					}
-					if !exists || loc.FileID != captured.File.ID || loc.Offset != off {
+					if !exists || loc.FileID != captured.File.ID || loc.RecordOffset != off {
 						return nil, nil
 					}
-					if loc.Bytes != r.EncodedRecordBytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
+					if loc.RecordBytes != r.EncodedRecordBytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
 						return nil, fmt.Errorf("%w: index disagrees with captured DATA", ErrCorrupt)
 					}
 					if !copying {
@@ -164,7 +165,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 						copying = true
 					}
 					copied = true
-					return selectOutput(key, Location{File: captured.File, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
+					return selectOutput(key, Location{File: captured.File, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
 				})
 				if err != nil {
 					var destination *destinationError

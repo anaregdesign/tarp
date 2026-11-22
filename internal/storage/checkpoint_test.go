@@ -45,7 +45,7 @@ func TestCheckpointDiscardsOnlyItsOwnSnapshotFiles(t *testing.T) {
 	defer view.Close()
 	moves := store.NewRelocations()
 	defer moves.Close()
-	checkpoint := store.NewCheckpoint(capture)
+	checkpoint := store.NewDataCheckpoint(capture)
 	var reserved []*DataSegment
 	reserve := func() (*DataSegment, error) {
 		file, err := store.ReserveSnapshotFile()
@@ -110,7 +110,7 @@ func TestCheckpointRejectsAStaleLocationWithTheRightLiveCount(t *testing.T) {
 	defer capture.Release()
 	view := viewIndex.View()
 	defer view.Close()
-	checkpoint := db.NewCheckpoint(capture)
+	checkpoint := db.NewDataCheckpoint(capture)
 	moves := db.NewRelocations()
 	defer moves.Close()
 	if err := checkpoint.Copy(t.Context(), memory.New(), view, moves, db.ReserveSnapshotFile); !errors.Is(err, ErrCorrupt) {
@@ -186,7 +186,7 @@ func TestCheckpointSpoolsTenfoldGrowthWithinFixedPageCaches(t *testing.T) {
 			defer capture.Release()
 			view := live.View()
 			defer view.Close()
-			checkpoint := store.NewCheckpoint(capture)
+			checkpoint := store.NewDataCheckpoint(capture)
 			moves := store.NewRelocations()
 			defer moves.Close()
 			if err := checkpoint.Copy(t.Context(), history, view, moves, store.ReserveSnapshotFile); err != nil {

@@ -124,7 +124,7 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	select {
 	case <-ready:
 	case err := <-backupDone:
-		t.Fatalf("backup completed before the pinned-generation barrier: %v", err)
+		t.Fatalf("backup completed before the backup segment-pin barrier: %v", err)
 	}
 	fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().LastUserSequence)
 	for i := range keys {
@@ -164,7 +164,7 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	vmReleaseFiller(t, filler, 2<<20)
 	compacted, err := db.Compact(ctx)
 	if err != nil || compacted.PinnedRetiredDataBytes == 0 {
-		t.Fatalf("retry must retain the slow backup's old generation: %+v %v", compacted, err)
+		t.Fatalf("retry must retain the slow backup's retired DATA segments: %+v %v", compacted, err)
 	}
 	verdict.CheckpointRetryPassed, verdict.PinnedBytes = true, compacted.PinnedRetiredDataBytes
 	close(release)
