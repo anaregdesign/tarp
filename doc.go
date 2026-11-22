@@ -7,8 +7,10 @@
 // The default key index is a paged copy-on-write B+tree with a 16 MiB
 // working-memory budget. Set Options.IndexMode to IndexMemory for an in-memory
 // hash index. Both can reuse a persistent index checkpoint and replay
-// the DATA log suffix after the checkpoint. Full (default) verifies all committed DATA. Indexed skips the
-// covered payloads on Open. Both modes share the Value LRU.
+// the DATA log suffix after the checkpoint. Full (default) verifies all
+// committed DATA during Open. Indexed validates the covered segment headers
+// and lengths during Open and verifies individual DATA records on read.
+// Both modes use the same value cache.
 //
 // Use OpenTyped with a Codec for each of the key and value types to work with
 // Go values. NewCodec derives a codec for scalar types and their combinations

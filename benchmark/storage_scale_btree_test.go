@@ -62,7 +62,7 @@ func TestStorageScaleBTree(t *testing.T) {
 	})
 
 	// These Get keys, the churn victims and the new inserts are disjoint.
-	// Clearing only the Value LRU leaves index page residency untouched.
+	// Clear the value cache and keep the resident B+tree pages for the read probe.
 	probe.ClearCache()
 	readStart := windows * cycles
 	samples := make([]int64, readProbe)
@@ -80,7 +80,7 @@ func TestStorageScaleBTree(t *testing.T) {
 	elapsed = time.Since(start)
 	after := probe.IndexMetrics()
 	if after.LeafReads <= seed.LeafReads || db.Stats().ValueCache.Misses-cache.Misses != readProbe {
-		t.Fatal("read probe did not reload index leaves on Value LRU misses")
+		t.Fatal("read probe did not reload B+tree leaf pages on value-cache misses")
 	}
 	storageScaleRow(t, round, "btree", "value-cache-miss-get", map[string]any{
 		"live_keys": liveKeys, "latency": latency(samples, readProbe, elapsed),

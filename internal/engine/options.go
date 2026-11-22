@@ -19,7 +19,7 @@ const (
 
 const defaultBTreeMemoryBudgetBytes = 16 << 20
 
-// OpenValidation selects when covered DATA payloads are checked.
+// OpenValidation selects when DATA records covered by an index checkpoint are checked.
 type OpenValidation uint8
 
 const (
