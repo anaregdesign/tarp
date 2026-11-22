@@ -24,7 +24,7 @@ var compactionModes = [...]string{automaticIncremental, manualFullCheckpoint}
 type compactionFixture struct {
 	dir       string
 	opts      engine.Options
-	source    format.File
+	source    format.CatalogEntry
 	frontier  format.Frontier
 	stateHash string
 	liveKeys  int
@@ -69,13 +69,13 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 	put(keys[3])
 
 	probe := engine.Observe(db)
-	var source format.File
+	var source format.CatalogEntry
 	probe.Store(func(s *storage.Store) {
-		if len(s.Catalog.Files) != 1 {
-			t.Fatalf("fixture must contain one sealed log; got %d", len(s.Catalog.Files))
+		if len(s.Catalog.Entries) != 1 {
+			t.Fatalf("fixture must contain one sealed log; got %d", len(s.Catalog.Entries))
 		}
-		source = s.Catalog.Files[0]
-		if source.ID == 0 || source.Kind != format.Log ||
+		source = s.Catalog.Entries[0]
+		if source.ID == 0 || source.Kind != format.RawLogKind ||
 			s.Files[source.ID].LiveBytes.Load() != opts.MaxRecordBytes ||
 			s.Files[source.ID].DeleteBytes.Load() != int64(format.RecordHeaderBytes+len(keys[1])) {
 			t.Fatal("fixture must contain a sealed log with a surviving Put and a tombstone")
@@ -83,7 +83,7 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 	})
 	frontier := probe.Frontier()
 	hash, keysLeft := measurementState(t, db)
-	if keysLeft != 3 || frontier.Sequence != 36 {
+	if keysLeft != 3 || frontier.LastUserSequence != 36 {
 		t.Fatal("incorrect compaction fixture contents or frontier")
 	}
 	return compactionFixture{
@@ -213,20 +213,20 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 	result := compactionMeasurement{
 		Mode: mode, Options: probe.Options(), SealedSourceBytes: f.source.Bytes,
 	}
-	original := []format.File{f.source, {ID: f.frontier.ActiveID, Bytes: f.frontier.ActiveEnd}}
+	original := []format.CatalogEntry{f.source, {ID: f.frontier.ActiveID, Bytes: f.frontier.ActiveCommittedEndOffset}}
 	current := probe.Frontier()
-	selected := map[uint64]int64{current.ActiveID: current.ActiveEnd}
+	selected := map[uint64]int64{current.ActiveID: current.ActiveCommittedEndOffset}
 	probe.Store(func(s *storage.Store) {
-		result.Sequence = current.Sequence
-		result.Cutoff, result.PrunedThrough = s.Catalog.Cutoff, s.Catalog.PrunedThrough
-		for _, file := range s.Catalog.Files {
+		result.Sequence = current.LastUserSequence
+		result.Cutoff, result.PrunedThrough = s.Catalog.CheckpointCutoffSequence, s.Catalog.PrunedThroughSequence
+		for _, file := range s.Catalog.Entries {
 			switch file.Kind {
-			case format.Cleaned:
+			case format.CleanedLogKind:
 				result.CleanedIntervals++
-				if file.ID == 0 || file.First != f.source.First || file.Last != f.source.Last {
+				if file.ID == 0 || file.FirstSequence != f.source.FirstSequence || file.LastSequence != f.source.LastSequence {
 					t.Fatal("incremental replacement lost the retained records or their original interval")
 				}
-			case format.Snapshot:
+			case format.SnapshotKind:
 				result.SnapshotFiles++
 			}
 			if file.ID != 0 {
@@ -234,7 +234,7 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 			}
 		}
 	})
-	if result.Sequence != f.frontier.Sequence || result.PrunedThrough != result.Sequence {
+	if result.Sequence != f.frontier.LastUserSequence || result.PrunedThrough != result.Sequence {
 		t.Fatalf("post-maintenance frontier: %+v", result)
 	}
 	switch mode {
@@ -243,7 +243,7 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 			t.Fatalf("unexpected incremental layout: %+v", result)
 		}
 	case manualFullCheckpoint:
-		if result.SnapshotFiles == 0 || result.CleanedIntervals != 0 || result.Cutoff != f.frontier.Sequence {
+		if result.SnapshotFiles == 0 || result.CleanedIntervals != 0 || result.Cutoff != f.frontier.LastUserSequence {
 			t.Fatalf("unexpected checkpoint layout: %+v", result)
 		}
 	}
@@ -279,7 +279,7 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 		}
 	}()
 	result.ReopenedStateHash, result.LiveKeys = measurementState(t, reopened)
-	if result.ReopenedStateHash != f.stateHash || result.LiveKeys != f.liveKeys || engine.Observe(reopened).Frontier().Sequence != f.frontier.Sequence {
+	if result.ReopenedStateHash != f.stateHash || result.LiveKeys != f.liveKeys || engine.Observe(reopened).Frontier().LastUserSequence != f.frontier.LastUserSequence {
 		t.Fatalf("compaction changed reopened key state or sequence: %+v", result)
 	}
 	return result
@@ -321,7 +321,7 @@ func TestCompactionFixtureDataAccounting(t *testing.T) {
 			wantUnlinked := fixture.source.Bytes
 			if mode == manualFullCheckpoint {
 				wantOutput = 2*format.SegmentHeaderBytes + 3*record
-				wantUnlinked += fixture.frontier.ActiveEnd
+				wantUnlinked += fixture.frontier.ActiveCommittedEndOffset
 			}
 			result := fixture.measure(t, mode)
 			if result.UnlinkedDataBytes != wantUnlinked || result.PublishedDataBytes != wantOutput ||

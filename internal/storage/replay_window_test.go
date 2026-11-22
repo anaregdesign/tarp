@@ -66,8 +66,8 @@ func TestReplayWindowsAdvancePastBinaryPrefixesAndOneOversizedKey(t *testing.T) 
 	for after := ""; ; {
 		w := newKeyWindow(after, 2*replayKeyCharge+4)
 		for _, key := range keys {
-			r := format.Record{Kind: format.Put, KeyBytes: int64(len(key)), Sequence: 1}
-			if err := w.apply(format.Log, 0, r, key); err != nil {
+			r := format.RecordHeader{Kind: format.Put, KeyBytes: int64(len(key)), Sequence: 1}
+			if err := w.apply(format.RawLogKind, 0, r, key); err != nil {
 				t.Fatal(err)
 			}
 			if w.used > w.limit && len(w.live) != 1 {

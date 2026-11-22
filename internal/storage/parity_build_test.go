@@ -37,7 +37,7 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 			if err := s.Rotate(); err != nil {
 				t.Fatal(err)
 			}
-			entry := s.Catalog.Files[0]
+			entry := s.Catalog.Entries[0]
 			source := CapturedFile{File: s.Files[entry.ID], Entry: entry}
 			source.File.Pin()
 			defer source.File.Unpin()

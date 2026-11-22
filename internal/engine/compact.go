@@ -73,12 +73,12 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		db.writer.Unlock()
 		return result, err
 	}
-	if !force && db.store.Current.Sequence == db.store.Catalog.Cutoff && !db.hasUnavailableSource() {
+	if !force && db.store.Current.LastUserSequence == db.store.Catalog.CheckpointCutoffSequence && !db.hasUnavailableSource() {
 		n, pinned, err := db.store.Cleanup()
 		db.writer.Unlock()
 		return CompactResult{UnlinkedBytes: n, PinnedRetiredDataBytes: pinned}, compactCleanupError(err)
 	}
-	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
+	if db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		if err := db.sealActive(); err != nil {
 			db.storageFailure(err)
 			db.writer.Unlock()
@@ -187,7 +187,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 	}
 	losses, err := db.prepareLosses(ctx, lost)
 	if err != nil {
-		if err == errCheckpointChanged && db.store.Current.Sequence == capture.Current.Sequence {
+		if err == errCheckpointChanged && db.store.Current.LastUserSequence == capture.Current.LastUserSequence {
 			// No foreground commit could have changed the captured address.
 			err = errors.Join(format.ErrCorrupt, errors.New("checkpoint lost address disagrees with live index"))
 			db.poison(err)
@@ -330,7 +330,7 @@ func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations,
 
 // Only the selected catalog matters: a retired file may still be pinned.
 func (db *DB) hasUnavailableSource() bool {
-	for _, entry := range db.store.Catalog.Files {
+	for _, entry := range db.store.Catalog.Entries {
 		if entry.HasPhysicalFile() && db.store.Files[entry.ID].UnavailableData() != nil {
 			return true
 		}

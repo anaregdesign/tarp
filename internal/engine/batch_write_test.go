@@ -137,7 +137,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	}
 	requireWriteStats(t, db, 2, 4, 128)
 	after := db.store.Current
-	if after.Generation != before.Generation+1 || after.Sequence != before.Sequence+3 || after.ActiveID == before.ActiveID || after.ActiveEnd != 256 {
+	if after.PublicationGeneration != before.PublicationGeneration+1 || after.LastUserSequence != before.LastUserSequence+3 || after.ActiveID == before.ActiveID || after.ActiveCommittedEndOffset != 256 {
 		t.Fatalf("batch frontier: %+v -> %+v", before, after)
 	}
 	for _, entry := range entries {
@@ -160,7 +160,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 	}
 	requireWriteStats(t, db, 3, 6, 0)
 	tombstones := db.store.Files[db.store.Current.ActiveID]
-	if db.store.Current.Sequence != after.Sequence+2 || db.store.Current.Generation != after.Generation+1 ||
+	if db.store.Current.LastUserSequence != after.LastUserSequence+2 || db.store.Current.PublicationGeneration != after.PublicationGeneration+1 ||
 		tombstones.DeleteBytes.Load() != 98 || file.LiveBytes.Load() != 0 || file.References() != 0 || db.keys.Count() != 0 || db.cache.Bytes() != 0 {
 		t.Fatalf("delete accounting: frontier %+v, tombstones %d, live %d, refs %d", db.store.Current, tombstones.DeleteBytes.Load(), file.LiveBytes.Load(), file.References())
 	}

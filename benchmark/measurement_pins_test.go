@@ -25,7 +25,7 @@ type pinnedBackupMeasurement struct {
 
 func retiredPinnedBytes(s *storage.Store, files map[uint64]int64) int64 {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, file := range s.Catalog.Files {
+	for _, file := range s.Catalog.Entries {
 		selected[file.ID] = true
 	}
 	var total int64

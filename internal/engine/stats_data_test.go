@@ -20,9 +20,9 @@ func checkStatsAgainstReplay(t *testing.T, db *DB) {
 		t.Fatal(err)
 	}
 	segments := uint64(len(image.Files))
-	selected := uint64(image.Current.ActiveEnd)
+	selected := uint64(image.Current.ActiveCommittedEndOffset)
 	var live, tombstones uint64
-	for _, entry := range image.Catalog.Files {
+	for _, entry := range image.Catalog.Entries {
 		selected += uint64(entry.Bytes)
 	}
 	for _, file := range image.Files {
@@ -58,7 +58,7 @@ func TestDataStatsTrackCleanerOutputsAndIgnorePins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, file := range []format.File{source, empty} {
+	for _, file := range []format.CatalogEntry{source, empty} {
 		if err = db.cleanSegment(t.Context(), file); err != nil {
 			capture.Release()
 			t.Fatal(err)

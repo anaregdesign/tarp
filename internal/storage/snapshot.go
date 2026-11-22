@@ -18,7 +18,7 @@ import (
 
 type CapturedFile struct {
 	File                *File
-	Entry               format.File
+	Entry               format.CatalogEntry
 	liveKeys, liveBytes int64 // owned by the logical index at capture
 }
 
@@ -32,13 +32,13 @@ type Capture struct {
 // Capture pins exact committed prefixes, without copying the logical key index.
 // The caller holds the writer gate; metadata is immutable after publication.
 func (s *Store) Capture() (*Capture, error) {
-	active, err := s.Catalog.ActiveFile(s.Current)
+	active, err := s.Catalog.ActiveEntry(s.Current)
 	if err != nil {
 		return nil, err
 	}
 	c := &Capture{Current: s.Current, Catalog: s.Catalog, Manifest: bytes.Clone(s.Manifest)}
-	c.Catalog.Files = append([]format.File(nil), s.Catalog.Files...)
-	for _, entry := range s.Catalog.Files {
+	c.Catalog.Entries = append([]format.CatalogEntry(nil), s.Catalog.Entries...)
+	for _, entry := range s.Catalog.Entries {
 		if entry.HasPhysicalFile() {
 			c.Files = append(c.Files, CapturedFile{File: s.Files[entry.ID], Entry: entry})
 		}
@@ -103,7 +103,7 @@ func (w *outputWriter) Write(b []byte) (int, error) {
 // the writer gate. The private builder independently validates key semantics,
 // including historical records that are absent from the final view.
 func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend, live index.View, selectOutput func(string, Location) (io.Writer, error)) error {
-	replay := newReplayBuilder(ctx, history, c.Catalog.PrunedThrough)
+	replay := newReplayBuilder(ctx, history, c.Catalog.PrunedThroughSequence)
 	defer replay.abort()
 	buffer := make([]byte, 32<<10)
 	reader := bufio.NewReaderSize(nil, len(buffer))
@@ -117,11 +117,11 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 		}
 		copying := false
 		err = fs.Do("compact.scan", func() error {
-			span := format.NewRecordRange(captured.Entry, c.Catalog.Cutoff)
+			span := format.NewRecordSequenceValidator(captured.Entry, c.Catalog.CheckpointCutoffSequence)
 			const start = int64(format.SegmentHeaderBytes)
 			source := io.Reader(io.NewSectionReader(sourceReader{fd}, start, captured.Entry.Bytes-start))
 			var h hash.Hash
-			if captured.Entry.Digest != ([32]byte{}) {
+			if captured.Entry.DataFileDigest != ([32]byte{}) {
 				h = sha256.New()
 				h.Write(header)
 				source = io.TeeReader(source, h)
@@ -130,7 +130,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 			for off := start; off < captured.Entry.Bytes; {
 				copied := false
 				var callbackErr error
-				r, err := format.SelectStreamRecord(ctx, reader, off, captured.Entry.Bytes-off, buffer, func(r format.Record, key string) (_ io.Writer, outcome error) {
+				r, err := format.SelectStreamRecord(ctx, reader, off, captured.Entry.Bytes-off, buffer, func(r format.RecordHeader, key string) (_ io.Writer, outcome error) {
 					defer func() { callbackErr = outcome }()
 					if err := span.Accept(r); err != nil {
 						return nil, selectedReadFailure(captured.Entry.ID, err)
@@ -154,7 +154,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 					if !exists || loc.FileID != captured.File.ID || loc.Offset != off {
 						return nil, nil
 					}
-					if loc.Bytes != r.Bytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
+					if loc.Bytes != r.EncodedRecordBytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
 						return nil, fmt.Errorf("%w: index disagrees with captured DATA", ErrCorrupt)
 					}
 					if !copying {
@@ -164,7 +164,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 						copying = true
 					}
 					copied = true
-					return selectOutput(key, Location{File: captured.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
+					return selectOutput(key, Location{File: captured.File, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
 				})
 				if err != nil {
 					var destination *destinationError
@@ -181,7 +181,7 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 						return err
 					}
 				}
-				off += r.Bytes()
+				off += r.EncodedRecordBytes()
 			}
 			if err := span.Finish(); err != nil {
 				return selectedReadFailure(captured.Entry.ID, err)

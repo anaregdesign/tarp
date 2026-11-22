@@ -34,7 +34,7 @@ func TestLeasedForeignDataStillFailsIdentityAfterAnotherReaderRepairs(t *testing
 	value := bytes.Clone(fixture.originals[0][format.SegmentHeaderBytes+format.RecordHeaderBytes+len(key):])
 	value[0] ^= 1
 	record := format.EncodeRecord(format.Put, 1, []byte(key), value)
-	header := format.EncodeSegment(format.Segment{UUID: foreignUUID, ID: f.ID, Kind: f.Kind})
+	header := format.EncodeSegmentHeader(format.SegmentHeader{UUID: foreignUUID, ID: f.ID, Kind: f.Kind})
 	if err := os.WriteFile(f.Path, append(header, record...), 0600); err != nil {
 		t.Fatal(err)
 	}

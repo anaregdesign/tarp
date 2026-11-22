@@ -49,7 +49,7 @@ func TestRecoveredBlocksUseRawBytesOnlyFromIdentifiedOriginal(t *testing.T) {
 	_, checkpoint, src, raw := protectedRecoveryFixture(t, nil)
 	uuid := checkpoint.capture.Current.UUID
 	uuid[0] ^= 1
-	copy(raw, format.EncodeSegment(format.Segment{UUID: uuid, ID: src.File.ID, Kind: src.Entry.Kind}))
+	copy(raw, format.EncodeSegmentHeader(format.SegmentHeader{UUID: uuid, ID: src.File.ID, Kind: src.Entry.Kind}))
 	stripe := format.ParityBlockBytes * format.ParityDataBlocks
 	raw[stripe+8] ^= 1
 	raw[stripe+format.ParityBlockBytes+8] ^= 1

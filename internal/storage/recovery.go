@@ -63,19 +63,19 @@ func readImage(ctx context.Context, dir string) (*Image, error) {
 	if err != nil {
 		return nil, requiredFileError(manifestName, err)
 	}
-	if sha256.Sum256(b) != current.ManifestHash {
+	if sha256.Sum256(b) != current.ManifestDigest {
 		return nil, fmt.Errorf("%s: %w: selected catalog digest", manifestName, ErrCorrupt)
 	}
 	catalog, err := format.DecodeCatalog(b)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", manifestName, err)
 	}
-	active, err := catalog.ActiveFile(current)
+	active, err := catalog.ActiveEntry(current)
 	if err != nil {
 		return nil, fmt.Errorf("%s and CURRENT: %w", manifestName, err)
 	}
 	image := &Image{Current: current, Catalog: catalog, Manifest: b, Files: make(map[uint64]*File)}
-	for _, entry := range append(append([]format.File(nil), catalog.Files...), active) {
+	for _, entry := range append(append([]format.CatalogEntry(nil), catalog.Entries...), active) {
 		if entry.HasPhysicalFile() {
 			image.Files[entry.ID] = &File{ID: entry.ID, Kind: entry.Kind, Path: filepath.Join(dir, DataName(current.UUID, entry.ID))}
 		}
@@ -87,7 +87,7 @@ func readImage(ctx context.Context, dir string) (*Image, error) {
 // decoded live entry. It owns any partial backend until it returns successfully.
 type IndexImporter func(context.Context, *Store, io.Reader, int64, func(string, index.Address) error) (index.Backend, error)
 
-type recordVisitor func(*File, int64, format.Record, string) error
+type recordVisitor func(*File, int64, format.RecordHeader, string) error
 
 // scan validates each selected record through the committed end in replay order.
 func (image *Image) scan(ctx context.Context, visit recordVisitor) error {
@@ -97,11 +97,11 @@ func (image *Image) scan(ctx context.Context, visit recordVisitor) error {
 // start is a catalog entry boundary. The active segment always follows the
 // sealed entries, even when the committed prefix ends at its header.
 func (image *Image) scanFrom(ctx context.Context, start int, area string, visit recordVisitor) error {
-	active, err := image.Catalog.ActiveFile(image.Current)
+	active, err := image.Catalog.ActiveEntry(image.Current)
 	if err != nil {
 		return err
 	}
-	for _, entry := range append(append([]format.File(nil), image.Catalog.Files[start:]...), active) {
+	for _, entry := range append(append([]format.CatalogEntry(nil), image.Catalog.Entries[start:]...), active) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -124,9 +124,9 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 		}
 		var deletions int64
 		var visitErr error
-		err = scanSelectedRecords(ctx, observeDATA(fd, image.openRead, area), entry, image.Catalog.Cutoff, func(off int64, r format.Record, key string) error {
+		err = scanSelectedRecords(ctx, observeDATA(fd, image.openRead, area), entry, image.Catalog.CheckpointCutoffSequence, func(off int64, r format.RecordHeader, key string) error {
 			if r.Kind == format.Delete {
-				deletions += r.Bytes()
+				deletions += r.EncodedRecordBytes()
 			}
 			visitErr = visit(file, off, r, key)
 			return visitErr
@@ -142,9 +142,9 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 	return ctx.Err()
 }
 
-func scanSelectedRecords(ctx context.Context, rd io.ReaderAt, entry format.File, cutoff uint64, visit func(int64, format.Record, string) error, activeDigest ...hash.Hash) error {
+func scanSelectedRecords(ctx context.Context, rd io.ReaderAt, entry format.CatalogEntry, cutoff uint64, visit func(int64, format.RecordHeader, string) error, activeDigest ...hash.Hash) error {
 	var h hash.Hash
-	if entry.Digest != ([sha256.Size]byte{}) {
+	if entry.DataFileDigest != ([sha256.Size]byte{}) {
 		h = sha256.New()
 	} else if len(activeDigest) != 0 {
 		h = activeDigest[0]
@@ -157,8 +157,8 @@ func scanSelectedRecords(ctx context.Context, rd io.ReaderAt, entry format.File,
 		}
 		rd = stream
 	}
-	span := format.NewRecordRange(entry, cutoff)
-	if err := format.Scan(ctx, rd, entry.Bytes, func(off int64, r format.Record, key string) error {
+	span := format.NewRecordSequenceValidator(entry, cutoff)
+	if err := format.Scan(ctx, rd, entry.Bytes, func(off int64, r format.RecordHeader, key string) error {
 		if err := span.Accept(r); err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func scanSelectedRecords(ctx context.Context, rd io.ReaderAt, entry format.File,
 	if err := span.Finish(); err != nil {
 		return err
 	}
-	if entry.Digest != ([sha256.Size]byte{}) {
+	if entry.DataFileDigest != ([sha256.Size]byte{}) {
 		return checkSealedDigest(h, entry)
 	}
 	return nil
@@ -190,7 +190,7 @@ func (image *Image) measure(key string, recordBytes, valueBytes int64) error {
 }
 
 func (image *Image) replayIndexed(ctx context.Context, backend index.Backend) error {
-	builder := newReplayBuilder(ctx, backend, image.Catalog.PrunedThrough)
+	builder := newReplayBuilder(ctx, backend, image.Catalog.PrunedThroughSequence)
 	defer builder.abort()
 	if err := image.scan(ctx, builder.apply); err != nil {
 		return err
@@ -211,7 +211,7 @@ func (image *Image) measureLive(ctx context.Context) func(string, index.Address)
 }
 
 type coveredFile struct {
-	entry               format.File
+	entry               format.CatalogEntry
 	liveKeys, liveBytes int64
 }
 
@@ -220,15 +220,15 @@ type coveredFile struct {
 func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImporter) (index.Backend, error) {
 	c := image.Catalog
 	cp := c.Index
-	layout, err := c.IndexLayout(cp.Entries, cp.Sequence)
-	if err != nil || layout != cp.Layout {
+	layout, err := c.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	if err != nil || layout != cp.CoveredLayoutFingerprint {
 		return nil, nil
 	}
-	if err := image.checkSelectedFiles(ctx, cp.Entries); err != nil {
+	if err := image.checkSelectedFiles(ctx, cp.CoveredCatalogEntries); err != nil {
 		return nil, err
 	}
 	covered := make(map[uint64]*coveredFile)
-	for _, entry := range c.Files[:cp.Entries] {
+	for _, entry := range c.Entries[:cp.CoveredCatalogEntries] {
 		if entry.HasPhysicalFile() {
 			covered[entry.ID] = &coveredFile{entry: entry}
 		}
@@ -239,7 +239,7 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 			return err
 		}
 		file := covered[addr.FileID]
-		if file == nil || !validCheckpointAddress(key, addr, file.entry, c.Cutoff) {
+		if file == nil || !validCheckpointAddress(key, addr, file.entry, c.CheckpointCutoffSequence) {
 			return fmt.Errorf("%w: invalid covered DATA address", ErrIndexMiss)
 		}
 		if addr.Bytes > file.entry.Bytes-format.SegmentHeaderBytes-file.liveBytes {
@@ -259,17 +259,17 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 	if err != nil {
 		return nil, err
 	}
-	for i, entry := range c.Files[:cp.Entries] {
+	for i, entry := range c.Entries[:cp.CoveredCatalogEntries] {
 		var maxDeleteBytes int64
-		if entry.HasPhysicalFile() && entry.Kind != format.Snapshot {
+		if entry.HasPhysicalFile() && entry.Kind != format.SnapshotKind {
 			maxDeleteBytes = entry.Bytes - format.SegmentHeaderBytes - covered[entry.ID].liveBytes
 		}
 		if deletes[i] < 0 || deletes[i] > maxDeleteBytes {
 			return nil, keys.Close()
 		}
 	}
-	exact := cp.Sequence == image.Current.Sequence
-	for i, entry := range c.Files[:cp.Entries] {
+	exact := cp.CoveredSequence == image.Current.LastUserSequence
+	for i, entry := range c.Entries[:cp.CoveredCatalogEntries] {
 		if entry.HasPhysicalFile() {
 			file := image.Files[entry.ID]
 			file.DeleteBytes.Store(deletes[i])
@@ -285,25 +285,25 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 	return keys, nil
 }
 
-func validCheckpointAddress(key string, addr index.Address, entry format.File, cutoff uint64) bool {
+func validCheckpointAddress(key string, addr index.Address, entry format.CatalogEntry, cutoff uint64) bool {
 	if len(key) == 0 || addr.Sequence == 0 || addr.Offset < format.SegmentHeaderBytes ||
 		addr.Bytes < format.RecordHeaderBytes || addr.Offset > entry.Bytes-addr.Bytes ||
 		addr.ValueBytes < 0 || addr.Bytes-format.RecordHeaderBytes-int64(len(key)) != addr.ValueBytes {
 		return false
 	}
-	if entry.Kind == format.Snapshot {
+	if entry.Kind == format.SnapshotKind {
 		return addr.Sequence <= cutoff
 	}
-	return addr.Sequence >= entry.First && addr.Sequence <= entry.Last
+	return addr.Sequence >= entry.FirstSequence && addr.Sequence <= entry.LastSequence
 }
 
 // Check every authoritative file before consulting the optional checkpoint.
 func (image *Image) checkSelectedFiles(ctx context.Context, covered uint64) error {
-	active, err := image.Catalog.ActiveFile(image.Current)
+	active, err := image.Catalog.ActiveEntry(image.Current)
 	if err != nil {
 		return err
 	}
-	for i, entry := range append(append([]format.File(nil), image.Catalog.Files...), active) {
+	for i, entry := range append(append([]format.CatalogEntry(nil), image.Catalog.Entries...), active) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -328,7 +328,7 @@ func (image *Image) checkSelectedFiles(ctx context.Context, covered uint64) erro
 }
 
 func (image *Image) verifyCoveredFiles(ctx context.Context, entries uint64) error {
-	for _, entry := range image.Catalog.Files[:entries] {
+	for _, entry := range image.Catalog.Entries[:entries] {
 		if !entry.HasPhysicalFile() {
 			continue
 		}
@@ -348,27 +348,27 @@ func (image *Image) verifyCoveredFiles(ctx context.Context, entries uint64) erro
 func (image *Image) replayAfterCheckpoint(ctx context.Context, keys index.Backend, indexedOpen bool) error {
 	cp := image.Catalog.Index
 	if !indexedOpen {
-		if err := image.verifyCoveredFiles(ctx, cp.Entries); err != nil {
+		if err := image.verifyCoveredFiles(ctx, cp.CoveredCatalogEntries); err != nil {
 			return err
 		}
 	}
 	// Both optimized builders require an empty backend. Apply suffix records
 	// to bounded private transactions on top of the imported checkpoint.
-	builder := replayBuilder{backend: keys, pruned: image.Catalog.PrunedThrough}
+	builder := replayBuilder{backend: keys, pruned: image.Catalog.PrunedThroughSequence}
 	defer builder.abort()
-	if err := image.scanFrom(ctx, int(cp.Entries), "tail", builder.apply); err != nil {
+	if err := image.scanFrom(ctx, int(cp.CoveredCatalogEntries), "tail", builder.apply); err != nil {
 		return err
 	}
-	if cp.Sequence == image.Current.Sequence {
+	if cp.CoveredSequence == image.Current.LastUserSequence {
 		return builder.finish()
 	}
 	return builder.finishWith(image.measureLive(ctx))
 }
 
-func applyIndexedRecord(tx index.Mutations, file *File, pruned uint64, off int64, r format.Record, key string) error {
+func applyIndexedRecord(tx index.Mutations, file *File, pruned uint64, off int64, r format.RecordHeader, key string) error {
 	// Ordinary Put overwrites any prior location. Only snapshot and Delete
 	// records need to read the previous state for validation.
-	if file.Kind == format.Snapshot || r.Kind == format.Delete {
+	if file.Kind == format.SnapshotKind || r.Kind == format.Delete {
 		_, present, err := tx.Lookup(key)
 		if err != nil {
 			return &IndexWorkError{Err: err}
@@ -381,7 +381,7 @@ func applyIndexedRecord(tx index.Mutations, file *File, pruned uint64, off int64
 	if r.Kind == format.Delete {
 		err = tx.Delete(key)
 	} else {
-		err = tx.Put(key, index.Address{FileID: file.ID, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
+		err = tx.Put(key, index.Address{FileID: file.ID, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence})
 	}
 	if err != nil {
 		return &IndexWorkError{Err: err}
@@ -391,7 +391,7 @@ func applyIndexedRecord(tx index.Mutations, file *File, pruned uint64, off int64
 
 // openSelected checks the same committed file identity and bounds for reopen,
 // checkpoint replay, and online backup. A captured active prefix can grow.
-func openSelected(path string, uuid [16]byte, entry format.File, mayGrow bool) (fd *os.File, header []byte, physical int64, result error) {
+func openSelected(path string, uuid [16]byte, entry format.CatalogEntry, mayGrow bool) (fd *os.File, header []byte, physical int64, result error) {
 	return openSelectedForRead(path, uuid, entry, mayGrow, nil, "")
 }
 
@@ -420,7 +420,7 @@ func (r observedDATA) ReadAt(p []byte, off int64) (int, error) {
 	return n, err
 }
 
-func openSelectedForRead(path string, uuid [16]byte, entry format.File, mayGrow bool, observe func(string, int), area string) (fd *os.File, header []byte, physical int64, result error) {
+func openSelectedForRead(path string, uuid [16]byte, entry format.CatalogEntry, mayGrow bool, observe func(string, int), area string) (fd *os.File, header []byte, physical int64, result error) {
 	fd, err := OpenRegular(path)
 	if err != nil {
 		return nil, nil, 0, requiredFileError(filepath.Base(path), err)
@@ -448,8 +448,8 @@ func openSelectedForRead(path string, uuid [16]byte, entry format.File, mayGrow 
 	return fd, header, st.Size(), nil
 }
 
-func verifySegmentHeader(header []byte, uuid [16]byte, entry format.File) error {
-	decoded, err := format.DecodeSegment(header)
+func verifySegmentHeader(header []byte, uuid [16]byte, entry format.CatalogEntry) error {
+	decoded, err := format.DecodeSegmentHeader(header)
 	if err != nil {
 		return err
 	}
@@ -459,9 +459,9 @@ func verifySegmentHeader(header []byte, uuid [16]byte, entry format.File) error 
 	return nil
 }
 
-func validateKey(kind uint32, record format.Record, present bool, prunedThrough uint64) error {
+func validateKey(kind uint32, record format.RecordHeader, present bool, prunedThrough uint64) error {
 	switch {
-	case kind == format.Snapshot && present:
+	case kind == format.SnapshotKind && present:
 		return fmt.Errorf("%w: duplicate snapshot key", ErrCorrupt)
 	case record.Kind == format.Delete && !present && record.Sequence > prunedThrough:
 		return fmt.Errorf("%w: tombstone without a live key", ErrCorrupt)

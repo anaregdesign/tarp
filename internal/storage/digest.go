@@ -28,8 +28,8 @@ func (r *digestReader) ReadAt(b []byte, off int64) (int, error) {
 	return n, err
 }
 
-func checkSealedDigest(h hash.Hash, entry format.File) error {
-	if [sha256.Size]byte(h.Sum(nil)) != entry.Digest {
+func checkSealedDigest(h hash.Hash, entry format.CatalogEntry) error {
+	if [sha256.Size]byte(h.Sum(nil)) != entry.DataFileDigest {
 		return &SourceError{Err: fmt.Errorf("%w: sealed DATA %d digest", ErrCorrupt, entry.ID)}
 	}
 	return nil
@@ -37,7 +37,7 @@ func checkSealedDigest(h hash.Hash, entry format.File) error {
 
 // verifySelectedDigest checks a sealed file's exact committed bytes without
 // decoding records when a verified checkpoint already describes their history.
-func verifySelectedDigest(ctx context.Context, rd io.ReaderAt, entry format.File) error {
+func verifySelectedDigest(ctx context.Context, rd io.ReaderAt, entry format.CatalogEntry) error {
 	h := sha256.New()
 	var buffer [32 << 10]byte
 	for off := int64(0); off < entry.Bytes; {

@@ -40,7 +40,7 @@ func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 		if err := db.Rotate(); err != nil {
 			t.Fatal(err)
 		}
-		entry := db.Catalog.Files[i]
+		entry := db.Catalog.Entries[i]
 		path := db.Files[entry.ID].Path
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -196,9 +196,9 @@ func TestRepairParityRequiresTrustedSelectionAndSafePaths(t *testing.T) {
 			case "DATA symlink":
 				path = f.paths[0]
 			case "PARITY symlink":
-				path = filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Files[0].ID))
+				path = filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Entries[0].ID))
 			case "PARITY contents":
-				path := filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Files[0].ID))
+				path := filepath.Join(f.dir, parityName(img.Current.UUID, img.Catalog.Entries[0].ID))
 				if err := os.Truncate(path, 15); err != nil {
 					t.Fatal(err)
 				}

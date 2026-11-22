@@ -425,7 +425,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}
 	frontier := engine.Observe(db).Frontier()
 	captured := &measurementCapture{parent: root, uuid: frontier.UUID}
-	fixtureSequence := frontier.Sequence
+	fixtureSequence := frontier.LastUserSequence
 	start, stop := make(chan struct{}), make(chan struct{})
 	type workerResult struct {
 		latency sampledLatency
@@ -606,7 +606,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	output := map[string]any{
 		"maintenance_ns": maintenanceNS, "compact": compact,
 		"fixture_sequence_before_workers": fixtureSequence, "fixture_live_keys": expectedKeys,
-		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestHash),
+		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestDigest),
 		"automatic_cleaner": "held from Open through the measured foreground and manual-checkpoint window",
 		"backup_copy_bytes": backupCopied, "backup_elapsed_ns": backupEnd.Sub(backupStart).Nanoseconds(),
 		"compact_copy_bytes": compactCopied, "compact_elapsed_ns": compactEnd.Sub(compactStart).Nanoseconds(),
@@ -664,7 +664,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 			}
 		}()
 		digest, count := measurementState(t, restored)
-		restoredSequence := engine.Observe(restored).Frontier().Sequence
+		restoredSequence := engine.Observe(restored).Frontier().LastUserSequence
 		if !captured.reached || restoredSequence != captured.sequence ||
 			digest != expectedDigest || count != expectedKeys {
 			t.Fatalf("produced backup did not reopen at its witnessed capture/state: capture=%d restored=%d keys=%d/%d digest=%s/%s",

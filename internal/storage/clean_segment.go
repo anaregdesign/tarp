@@ -20,7 +20,7 @@ import (
 // private output is unreachable until InstallCleaned publishes the replacement.
 type CleanSegment struct {
 	sources  []CapturedFile
-	entries  []format.File
+	entries  []format.CatalogEntry
 	position int
 	output   *File
 	uuid     [16]byte
@@ -51,25 +51,25 @@ func (c *CleanSegment) ResetCopy(fs *IO) error {
 
 // BeginClean runs under the writer gate. The selected catalog is immutable.
 // New log rotations may append to the catalog while these sources are copied.
-func (s *Store) BeginClean(entries []format.File) (*CleanSegment, error) {
+func (s *Store) BeginClean(entries []format.CatalogEntry) (*CleanSegment, error) {
 	if len(entries) == 0 || !entries[0].HasPhysicalFile() || !entries[len(entries)-1].HasPhysicalFile() {
 		return nil, nil
 	}
-	pos := slices.Index(s.Catalog.Files, entries[0])
-	if pos < 0 || len(entries) > len(s.Catalog.Files)-pos {
+	pos := slices.Index(s.Catalog.Entries, entries[0])
+	if pos < 0 || len(entries) > len(s.Catalog.Entries)-pos {
 		return nil, nil
 	}
-	run := s.Catalog.Files[pos : pos+len(entries)]
+	run := s.Catalog.Entries[pos : pos+len(entries)]
 	if !slices.Equal(run, entries) {
 		return nil, nil
 	}
-	kind := uint32(format.Cleaned)
-	if run[0].Kind == format.Snapshot {
-		kind = format.Snapshot
+	kind := uint32(format.CleanedLogKind)
+	if run[0].Kind == format.SnapshotKind {
+		kind = format.SnapshotKind
 	}
-	c := &CleanSegment{entries: run, position: pos, uuid: s.Current.UUID, cutoff: s.Catalog.Cutoff}
+	c := &CleanSegment{entries: run, position: pos, uuid: s.Current.UUID, cutoff: s.Catalog.CheckpointCutoffSequence}
 	for _, entry := range run {
-		if (entry.Kind == format.Snapshot) != (kind == format.Snapshot) {
+		if (entry.Kind == format.SnapshotKind) != (kind == format.SnapshotKind) {
 			return nil, fmt.Errorf("%w: cleaner crossed checkpoint boundary", ErrCorrupt)
 		}
 		if !entry.HasPhysicalFile() {
@@ -135,8 +135,8 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 	}()
 	replay := replayBuilder{backend: history}
 	defer replay.abort()
-	choose := func(r format.Record, key string, old Location) (io.Writer, error) {
-		if c.output.Kind == format.Snapshot {
+	choose := func(r format.RecordHeader, key string, old Location) (io.Writer, error) {
+		if c.output.Kind == format.SnapshotKind {
 			if err := replay.apply(old.File, old.Offset, r, key); err != nil {
 				// A damaged key can look like a duplicate before the
 				// streaming decoder reaches the record's payload CRC.
@@ -162,7 +162,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 				return nil, err
 			}
 			writer.fd, c.created = fd, true
-			header := format.EncodeSegment(format.Segment{UUID: c.uuid, ID: c.output.ID, Kind: c.output.Kind})
+			header := format.EncodeSegmentHeader(format.SegmentHeader{UUID: c.uuid, ID: c.output.ID, Kind: c.output.Kind})
 			writer.hash.Write(header)
 			if err := fs.Write(fd, header, 0, "clean.header"); err != nil {
 				return nil, err
@@ -175,7 +175,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 				return nil, err
 			}
 		} else {
-			c.output.DeleteBytes.Add(r.Bytes())
+			c.output.DeleteBytes.Add(r.EncodedRecordBytes())
 		}
 		return pacedOutput{writer, yield}, nil
 	}
@@ -198,7 +198,7 @@ func (c *CleanSegment) Copy(ctx context.Context, fs *IO, moves *Relocations, his
 
 // Validate each file with its own original kind and sequence interval before
 // moving to the next input. Only one source descriptor is open at a time.
-func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFile, buf []byte, yield func() error, choose func(format.Record, string, Location) (io.Writer, error)) (result error) {
+func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFile, buf []byte, yield func() error, choose func(format.RecordHeader, string, Location) (io.Writer, error)) (result error) {
 	if err := yield(); err != nil {
 		return err
 	}
@@ -218,15 +218,15 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 		pacedErr = yield()
 		return pacedErr
 	}}, hash: digest, next: format.SegmentHeaderBytes}
-	span := format.NewRecordRange(source.Entry, c.cutoff)
+	span := format.NewRecordSequenceValidator(source.Entry, c.cutoff)
 	return fs.Do("clean.scan", func() error {
 		for off := int64(format.SegmentHeaderBytes); off < source.Entry.Bytes; {
 			var callbackErr error
-			r, err := format.SelectRecord(ctx, input, off, source.Entry.Bytes-off, buf, func(r format.Record, key string) (io.Writer, error) {
+			r, err := format.SelectRecord(ctx, input, off, source.Entry.Bytes-off, buf, func(r format.RecordHeader, key string) (io.Writer, error) {
 				if err := span.Accept(r); err != nil {
 					return nil, selectedReadFailure(source.Entry.ID, err)
 				}
-				old := Location{File: source.File, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+				old := Location{File: source.File, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 				var w io.Writer
 				w, callbackErr = choose(r, key, old)
 				return w, callbackErr
@@ -238,7 +238,7 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 				}
 				return selectedReadFailure(source.Entry.ID, err)
 			}
-			off += r.Bytes()
+			off += r.EncodedRecordBytes()
 		}
 		if err := span.Finish(); err != nil {
 			return selectedReadFailure(source.Entry.ID, err)
@@ -247,10 +247,10 @@ func (c *CleanSegment) scanSource(ctx context.Context, fs *IO, source CapturedFi
 	})
 }
 
-func (c *CleanSegment) replacement() format.File {
-	replacement := format.File{Kind: c.output.Kind, First: c.entries[0].First, Last: c.entries[len(c.entries)-1].Last}
+func (c *CleanSegment) replacement() format.CatalogEntry {
+	replacement := format.CatalogEntry{Kind: c.output.Kind, FirstSequence: c.entries[0].FirstSequence, LastSequence: c.entries[len(c.entries)-1].LastSequence}
 	if c.created {
-		replacement.ID, replacement.Bytes, replacement.Digest = c.output.ID, c.output.Size.Load(), c.digest
+		replacement.ID, replacement.Bytes, replacement.DataFileDigest = c.output.ID, c.output.Size.Load(), c.digest
 	}
 	return replacement
 }
@@ -292,7 +292,7 @@ func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error
 		return errors.New("storage: cleaner replacement is not protected")
 	}
 	start, end := c.position, c.position+len(c.entries)
-	if end > len(s.Catalog.Files) || !slices.Equal(s.Catalog.Files[start:end], c.entries) {
+	if end > len(s.Catalog.Entries) || !slices.Equal(s.Catalog.Entries[start:end], c.entries) {
 		return fmt.Errorf("%w: cleaner source selection changed", ErrCorrupt)
 	}
 	for _, source := range c.sources {
@@ -300,21 +300,21 @@ func (s *Store) InstallCleaned(c *CleanSegment, offGate func(func() error) error
 			return fmt.Errorf("%w: cleaner source registry changed", ErrCorrupt)
 		}
 	}
-	if s.Current.Generation == math.MaxUint64 {
+	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return fault("clean.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
 	catalog := s.Catalog
 	catalog.Index = format.IndexCheckpoint{}
-	catalog.Files = slices.Clone(catalog.Files)
-	catalog.PrunedThrough = s.Current.Sequence
+	catalog.Entries = slices.Clone(catalog.Entries)
+	catalog.PrunedThroughSequence = s.Current.LastUserSequence
 	replacement := c.replacement()
-	if !c.created && replacement.Kind == format.Snapshot {
-		catalog.Files = slices.Delete(catalog.Files, start, end)
+	if !c.created && replacement.Kind == format.SnapshotKind {
+		catalog.Entries = slices.Delete(catalog.Entries, start, end)
 	} else {
-		catalog.Files = slices.Replace(catalog.Files, start, end, replacement)
+		catalog.Entries = slices.Replace(catalog.Entries, start, end, replacement)
 	}
 	candidate := s.Current
-	candidate.Generation++
+	candidate.PublicationGeneration++
 	if err := s.publishCatalogFor(catalog, candidate, "clean.", offGate); err != nil {
 		if err == errCatalogChanged {
 			// A rotation changed the catalog during preparation. Publish the

@@ -20,7 +20,7 @@ type Checkpoint struct {
 	store       *Store
 	capture     *Capture
 	files       []*File
-	entries     []format.File
+	entries     []format.CatalogEntry
 	lossSources []lossSource
 	attempted   bool
 }
@@ -32,11 +32,11 @@ func (s *Store) NewCheckpoint(capture *Capture) *Checkpoint {
 // ReserveSnapshotFile assigns a name under the writer gate. Only a successfully
 // installed checkpoint registers its files in the store.
 func (s *Store) ReserveSnapshotFile() (*File, error) {
-	return s.reserveSegment(format.Snapshot)
+	return s.reserveSegment(format.SnapshotKind)
 }
 
 // Entries describes completed snapshot files for checkpoint size accounting.
-func (c *Checkpoint) Entries() []format.File { return c.entries }
+func (c *Checkpoint) Entries() []format.CatalogEntry { return c.entries }
 
 // Copy validates the captured history, copies live records in physical order and
 // records their new addresses in moves. Only reserve takes the writer gate.
@@ -88,7 +88,7 @@ func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, rese
 			return fault("output-sync", publication.NotApplied, false, err)
 		}
 		file.Size.Store(offset)
-		c.entries = append(c.entries, format.File{ID: file.ID, Bytes: offset, Kind: format.Snapshot, Digest: [32]byte(digest.Sum(nil))})
+		c.entries = append(c.entries, format.CatalogEntry{ID: file.ID, Bytes: offset, Kind: format.SnapshotKind, DataFileDigest: [32]byte(digest.Sum(nil))})
 		return nil
 	}
 	defer func() {
@@ -116,7 +116,7 @@ func (c *Checkpoint) writeSnapshot(ctx context.Context, moves *Relocations, rese
 			c.files = append(c.files, file)
 			offset = format.SegmentHeaderBytes
 			digest.Reset()
-			digest.Write(format.EncodeSegment(format.Segment{UUID: c.capture.Current.UUID, ID: file.ID, Kind: file.Kind}))
+			digest.Write(format.EncodeSegmentHeader(format.SegmentHeader{UUID: c.capture.Current.UUID, ID: file.ID, Kind: file.Kind}))
 		}
 		writer := &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
 		next := old
@@ -163,16 +163,16 @@ func (c *Checkpoint) Install() error {
 			return errors.New("storage: checkpoint replacement is not protected")
 		}
 	}
-	if s.Current.Generation == math.MaxUint64 {
+	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return fault("compact.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
 	catalog := format.Catalog{
-		UUID: s.Current.UUID, Cutoff: c.capture.Current.Sequence, PrunedThrough: c.capture.Current.Sequence,
-		ActiveID: s.Current.ActiveID, Files: append([]format.File(nil), c.entries...),
+		UUID: s.Current.UUID, CheckpointCutoffSequence: c.capture.Current.LastUserSequence, PrunedThroughSequence: c.capture.Current.LastUserSequence,
+		ActiveID: s.Current.ActiveID, Entries: append([]format.CatalogEntry(nil), c.entries...),
 	}
-	catalog.Files = append(catalog.Files, s.Catalog.Files[len(c.capture.Catalog.Files):]...)
+	catalog.Entries = append(catalog.Entries, s.Catalog.Entries[len(c.capture.Catalog.Entries):]...)
 	candidate := s.Current
-	candidate.Generation++
+	candidate.PublicationGeneration++
 	c.attempted = true
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return err

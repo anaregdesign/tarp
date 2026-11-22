@@ -516,7 +516,7 @@ func (db *DB) Close() error {
 	// Close still releases ownership and never changes committed writes.
 	// Report any selected DATA damage even when its sidecar was already built.
 	var unavailable []error
-	for _, entry := range db.store.Catalog.Files {
+	for _, entry := range db.store.Catalog.Entries {
 		if entry.HasPhysicalFile() {
 			if err := db.store.Files[entry.ID].UnavailableData(); err != nil {
 				unavailable = append(unavailable, err)

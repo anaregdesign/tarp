@@ -21,13 +21,13 @@ func (d *dataTotals) addFile(size, tombstones int64) {
 // initDataStats runs once before this DB admits callers.
 func (db *DB) initDataStats() {
 	var selected dataTotals
-	for _, entry := range db.store.Catalog.Files {
+	for _, entry := range db.store.Catalog.Entries {
 		if entry.HasPhysicalFile() {
 			selected.addFile(entry.Bytes, db.store.Files[entry.ID].DeleteBytes.Load())
 		}
 	}
 	active := db.store.Files[db.store.Current.ActiveID]
-	selected.addFile(db.store.Current.ActiveEnd, active.DeleteBytes.Load())
+	selected.addFile(db.store.Current.ActiveCommittedEndOffset, active.DeleteBytes.Load())
 	db.stats.SelectedSegments = selected.segments
 	db.stats.SelectedDataBytes = selected.bytes
 	db.stats.TombstoneBytes = selected.tombstones
@@ -62,7 +62,7 @@ func (db *DB) sealActive() error {
 
 // checkpointDataTotals counts only the immutable prefix being replaced. The
 // active file captured alongside it belongs to the tail of the new catalog.
-func checkpointDataTotals(capture *storage.Capture, outputs []format.File) (old, next dataTotals) {
+func checkpointDataTotals(capture *storage.Capture, outputs []format.CatalogEntry) (old, next dataTotals) {
 	for _, source := range capture.Files {
 		if source.Entry.ID != capture.Current.ActiveID {
 			old.addFile(source.Entry.Bytes, source.File.DeleteBytes.Load())

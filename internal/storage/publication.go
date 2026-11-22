@@ -68,15 +68,15 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 		if candidate.ManifestID != s.Current.ManifestID {
 			return errCatalogChanged
 		}
-		if s.Current.Generation == math.MaxUint64 {
+		if s.Current.PublicationGeneration == math.MaxUint64 {
 			return fault("clean.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 		}
 		candidate = s.Current
-		candidate.Generation++
+		candidate.PublicationGeneration++
 	} else if err := prepare(); err != nil {
 		return err
 	}
-	candidate.ManifestID, candidate.ManifestHash = id, sha256.Sum256(b)
+	candidate.ManifestID, candidate.ManifestDigest = id, sha256.Sum256(b)
 	previous := s.Current.ManifestID
 	if err := s.publishFor(candidate, actor); err != nil {
 		return err

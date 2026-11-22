@@ -38,8 +38,8 @@ type sortedReplay struct {
 	levels  [64]*replayRun
 }
 
-func (s *sortedReplay) apply(f *File, off int64, r format.Record, key string) error {
-	addr := index.Address{FileID: f.ID, Offset: off, Bytes: r.Bytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
+func (s *sortedReplay) apply(f *File, off int64, r format.RecordHeader, key string) error {
+	addr := index.Address{FileID: f.ID, Offset: off, Bytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
 	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: f.Kind, recordKind: r.Kind}))
 }
 
@@ -217,7 +217,7 @@ func (s *sortedReplay) reduce(pruned uint64, emit func(string, index.Address) er
 			key = e.key
 			present = false
 		}
-		if err := validateKey(e.fileKind, format.Record{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
+		if err := validateKey(e.fileKind, format.RecordHeader{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
 			return &SourceError{Err: fmt.Errorf("DATA %d offset %d: %w", e.addr.FileID, e.addr.Offset, err)}
 		}
 		present = e.recordKind != format.Delete

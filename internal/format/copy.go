@@ -19,7 +19,7 @@ const streamChunk = 32 << 10
 // SelectRecord validates one complete record. After its key is available, choose
 // selects a destination or returns nil to discard the bytes. The caller publishes
 // staged output only after validation succeeds. Even a discarded value is checked.
-func SelectRecord(ctx context.Context, src io.ReaderAt, offset, available int64, buffer []byte, choose func(Record, string) (io.Writer, error)) (Record, error) {
+func SelectRecord(ctx context.Context, src io.ReaderAt, offset, available int64, buffer []byte, choose func(RecordHeader, string) (io.Writer, error)) (RecordHeader, error) {
 	at := offset
 	read := func(p []byte) error {
 		err := readChunk(ctx, src, p, at)
@@ -29,20 +29,20 @@ func SelectRecord(ctx context.Context, src io.ReaderAt, offset, available int64,
 	return selectRecord(ctx, read, offset, available, buffer, choose)
 }
 
-func selectRecord(ctx context.Context, read func([]byte) error, offset, available int64, buffer []byte, choose func(Record, string) (io.Writer, error)) (Record, error) {
+func selectRecord(ctx context.Context, read func([]byte) error, offset, available int64, buffer []byte, choose func(RecordHeader, string) (io.Writer, error)) (RecordHeader, error) {
 	if len(buffer) == 0 {
-		return Record{}, fmt.Errorf("format: empty copy buffer")
+		return RecordHeader{}, fmt.Errorf("format: empty copy buffer")
 	}
 	buffer = buffer[:min(len(buffer), streamChunk)]
 	var header [RecordHeaderBytes]byte
 	if err := read(header[:]); err != nil {
-		return Record{}, err
+		return RecordHeader{}, err
 	}
-	r, err := DecodeRecord(header[:], available)
+	r, err := DecodeRecordHeader(header[:], available)
 	if err != nil {
 		return r, err
 	}
-	if offset < 0 || offset > math.MaxInt64-r.Bytes() || uint64(r.KeyBytes) > uint64(int(^uint(0)>>1)) {
+	if offset < 0 || offset > math.MaxInt64-r.EncodedRecordBytes() || uint64(r.KeyBytes) > uint64(int(^uint(0)>>1)) {
 		return r, bad("record bounds")
 	}
 
@@ -113,8 +113,8 @@ func writeChunk(ctx context.Context, dst io.Writer, chunk []byte) error {
 }
 
 // CopyRecord validates the bytes it copies. An expected identity selects a Put.
-func CopyRecord(ctx context.Context, src io.ReaderAt, dst io.Writer, offset, available int64, expected *Identity, buffer []byte) (Record, error) {
-	return SelectRecord(ctx, src, offset, available, buffer, func(r Record, key string) (io.Writer, error) {
+func CopyRecord(ctx context.Context, src io.ReaderAt, dst io.Writer, offset, available int64, expected *Identity, buffer []byte) (RecordHeader, error) {
+	return SelectRecord(ctx, src, offset, available, buffer, func(r RecordHeader, key string) (io.Writer, error) {
 		if expected != nil && (r.Kind != Put || r.Sequence != expected.Sequence || key != expected.Key) {
 			return nil, bad("copied record identity")
 		}
@@ -124,9 +124,9 @@ func CopyRecord(ctx context.Context, src io.ReaderAt, dst io.Writer, offset, ava
 
 // ReadRecordKey consumes one complete record from a forward-only stream,
 // validates it, and returns the key without retaining its value.
-func ReadRecordKey(ctx context.Context, src io.Reader, offset, available int64, buffer []byte) (Record, string, error) {
+func ReadRecordKey(ctx context.Context, src io.Reader, offset, available int64, buffer []byte) (RecordHeader, string, error) {
 	var key string
-	r, err := SelectStreamRecord(ctx, src, offset, available, buffer, func(_ Record, k string) (io.Writer, error) {
+	r, err := SelectStreamRecord(ctx, src, offset, available, buffer, func(_ RecordHeader, k string) (io.Writer, error) {
 		key = k
 		return nil, nil
 	})
@@ -134,7 +134,7 @@ func ReadRecordKey(ctx context.Context, src io.Reader, offset, available int64, 
 }
 
 // SelectStreamRecord validates and optionally copies the same bytes from a forward-only stream.
-func SelectStreamRecord(ctx context.Context, src io.Reader, offset, available int64, buffer []byte, choose func(Record, string) (io.Writer, error)) (Record, error) {
+func SelectStreamRecord(ctx context.Context, src io.Reader, offset, available int64, buffer []byte, choose func(RecordHeader, string) (io.Writer, error)) (RecordHeader, error) {
 	read := func(p []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err

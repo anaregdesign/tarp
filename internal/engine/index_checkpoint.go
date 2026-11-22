@@ -97,11 +97,11 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 		return operationError(op, "capture", err)
 	}
 	cp := db.store.Catalog.Index
-	if closing && db.store.IndexCheckpointHit && cp.ID != 0 && cp.Sequence == db.store.Current.Sequence && cp.Entries == uint64(len(db.store.Catalog.Files)) {
+	if closing && db.store.IndexCheckpointHit && cp.ID != 0 && cp.CoveredSequence == db.store.Current.LastUserSequence && cp.CoveredCatalogEntries == uint64(len(db.store.Catalog.Entries)) {
 		db.writer.Unlock()
 		return nil
 	}
-	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
+	if db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		if err := db.sealActive(); err != nil {
 			db.storageFailure(err)
 			db.writer.Unlock()

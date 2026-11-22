@@ -214,6 +214,6 @@ func (c *measurementCapture) observe() error {
 	if current.UUID != c.uuid {
 		return errors.New("measurement captured a different fixture UUID")
 	}
-	c.sequence, c.reached = current.Sequence, true
+	c.sequence, c.reached = current.LastUserSequence, true
 	return nil
 }

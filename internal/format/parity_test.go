@@ -18,8 +18,8 @@ import (
 var parityTestUUID = [16]byte{1, 2, 3}
 
 // Each value length gives the fixture precise physical record boundaries.
-func parityFixture(lengths ...int) ([]byte, File, []int) {
-	raw := EncodeSegment(Segment{UUID: parityTestUUID, ID: 7, Kind: Log})
+func parityFixture(lengths ...int) ([]byte, CatalogEntry, []int) {
+	raw := EncodeSegmentHeader(SegmentHeader{UUID: parityTestUUID, ID: 7, Kind: RawLogKind})
 	var headers []int
 	for i, size := range lengths {
 		key := []byte{0, 255}
@@ -30,10 +30,10 @@ func parityFixture(lengths ...int) ([]byte, File, []int) {
 		headers = append(headers, len(raw))
 		raw = append(raw, EncodeRecord(Put, uint64(i+1), key, value)...)
 	}
-	return raw, File{ID: 7, Kind: Log, First: 1, Last: uint64(len(lengths)), Bytes: int64(len(raw)), Digest: sha256.Sum256(raw)}, headers
+	return raw, CatalogEntry{ID: 7, Kind: RawLogKind, FirstSequence: 1, LastSequence: uint64(len(lengths)), Bytes: int64(len(raw)), DataFileDigest: sha256.Sum256(raw)}, headers
 }
 
-func parityFor(t testing.TB, raw []byte, e File) []byte {
+func parityFor(t testing.TB, raw []byte, e CatalogEntry) []byte {
 	t.Helper()
 	var out bytes.Buffer
 	if err := WriteParity(t.Context(), bytes.NewReader(raw), &out, parityTestUUID, e); err != nil {
@@ -50,9 +50,9 @@ func parityFor(t testing.TB, raw []byte, e File) []byte {
 }
 
 func TestParityGoldenSingleDataBlock(t *testing.T) {
-	raw := EncodeSegment(Segment{UUID: parityTestUUID, ID: 7, Kind: Log})
+	raw := EncodeSegmentHeader(SegmentHeader{UUID: parityTestUUID, ID: 7, Kind: RawLogKind})
 	raw = append(raw, EncodeRecord(Put, 1, []byte{0, 255}, []byte{1, 2, 3})...)
-	e := File{ID: 7, Kind: Log, Bytes: int64(len(raw)), Digest: sha256.Sum256(raw)}
+	e := CatalogEntry{ID: 7, Kind: RawLogKind, Bytes: int64(len(raw)), DataFileDigest: sha256.Sum256(raw)}
 	sidecar := parityFor(t, raw, e)
 	const header = "54415250504152320102030000000000000000000000000007000000000000007500000000000000fe0d896c3bb484d389ef04942770c118c95d5e5cff9619b8f459101c5dee4b2f010000000010000010000000e2be9e8a"
 	const stripe = "0000000000000000f5a4c0b60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5a4c0b6203fca63"
@@ -105,7 +105,7 @@ func TestParityRepairsCatalogHeaderAndPayloadInOneStripe(t *testing.T) {
 	for _, foreign := range []bool{false, true} {
 		input := bytes.Clone(raw)
 		if foreign {
-			copy(input, EncodeSegment(Segment{UUID: parityTestUUID, ID: entry.ID + 1, Kind: Snapshot}))
+			copy(input, EncodeSegmentHeader(SegmentHeader{UUID: parityTestUUID, ID: entry.ID + 1, Kind: SnapshotKind}))
 			if crc32.Checksum(input[:ParityBlockBytes], table) != crc32.Checksum(raw[:ParityBlockBytes], table) {
 				t.Fatal("fixture requires equivalent CRCs for two valid segment headers")
 			}
@@ -115,7 +115,7 @@ func TestParityRepairsCatalogHeaderAndPayloadInOneStripe(t *testing.T) {
 		input[ParityBlockBytes+17] ^= 1
 		var recovered bytes.Buffer
 		err := RecoverParity(t.Context(), bytes.NewReader(input), bytes.NewReader(sidecar), &recovered, parityTestUUID, entry)
-		if err != nil || sha256.Sum256(recovered.Bytes()) != entry.Digest || !bytes.Equal(recovered.Bytes(), raw) {
+		if err != nil || sha256.Sum256(recovered.Bytes()) != entry.DataFileDigest || !bytes.Equal(recovered.Bytes(), raw) {
 			t.Fatalf("restore header and payload (foreign header %t): %v", foreign, err)
 		}
 		// Header replacement alone cannot certify the remaining bytes of block zero.
@@ -187,11 +187,11 @@ func TestParityRejectsDamagedSidecarAndForeignIdentity(t *testing.T) {
 			case "uuid":
 				uuid[7]++
 			case "kind":
-				entry.Kind = Cleaned
+				entry.Kind = CleanedLogKind
 			case "ID":
 				entry.ID++
 			case "digest":
-				entry.Digest[0]++
+				entry.DataFileDigest[0]++
 			case "length":
 				entry.Bytes++
 			case "signature":
@@ -260,24 +260,24 @@ func TestParitySourceChecksRejectCorruptionAndInvalidHistory(t *testing.T) {
 			entry := e
 			switch tc {
 			case "catalog digest":
-				entry.Digest[0]++
+				entry.DataFileDigest[0]++
 			case "extra":
 				b = append(b, 2)
 			case "short":
 				b = b[:len(b)-1]
 			case "header identity":
-				copy(b, EncodeSegment(Segment{UUID: parityTestUUID, ID: 11, Kind: Log}))
-				entry.Digest = sha256.Sum256(b)
+				copy(b, EncodeSegmentHeader(SegmentHeader{UUID: parityTestUUID, ID: 11, Kind: RawLogKind}))
+				entry.DataFileDigest = sha256.Sum256(b)
 			case "record metadata":
 				b[SegmentHeaderBytes+1]++
-				entry.Digest = sha256.Sum256(b)
+				entry.DataFileDigest = sha256.Sum256(b)
 			case "record payload":
 				b[len(b)-1]++
-				entry.Digest = sha256.Sum256(b)
+				entry.DataFileDigest = sha256.Sum256(b)
 			case "trailing partial header":
 				b = append(b, 1)
 				entry.Bytes++
-				entry.Digest = sha256.Sum256(b)
+				entry.DataFileDigest = sha256.Sum256(b)
 			case "invalid entry":
 				entry.ID = 0
 			}
@@ -456,9 +456,9 @@ func TestParityRejectsStripeCopiedFromAnotherFile(t *testing.T) {
 	original := parityFor(t, raw, e)
 	foreign := bytes.Clone(raw)
 	foreignID := e.ID + 1
-	copy(foreign, EncodeSegment(Segment{UUID: parityTestUUID, ID: foreignID, Kind: e.Kind}))
+	copy(foreign, EncodeSegmentHeader(SegmentHeader{UUID: parityTestUUID, ID: foreignID, Kind: e.Kind}))
 	other := e
-	other.ID, other.Digest = foreignID, sha256.Sum256(foreign)
+	other.ID, other.DataFileDigest = foreignID, sha256.Sum256(foreign)
 	foreignParity := parityFor(t, foreign, other)
 	// The payload, ordinal, anchors and XOR are identical for stripe one.
 	// The stripe still belongs to a different selected DATA file.

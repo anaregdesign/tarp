@@ -38,7 +38,7 @@ func TestSelectRecordChecksDiscardedValuesAndBoundsKeyIO(t *testing.T) {
 	b := EncodeRecord(Put, 6, key, value)
 	run := func(dst io.Writer) error {
 		reader := &boundedReader{bytes.NewReader(b), streamChunk}
-		_, err := SelectRecord(context.Background(), reader, 0, int64(len(b)), make([]byte, 4*streamChunk), func(r Record, k string) (io.Writer, error) {
+		_, err := SelectRecord(context.Background(), reader, 0, int64(len(b)), make([]byte, 4*streamChunk), func(r RecordHeader, k string) (io.Writer, error) {
 			if k != string(key) || r.Sequence != 6 {
 				t.Fatal("incorrect key or sequence")
 			}

@@ -126,7 +126,7 @@ func vmExhaustion(t *testing.T, dir, output string, seed uint64) {
 	case err := <-backupDone:
 		t.Fatalf("backup completed before the pinned-generation barrier: %v", err)
 	}
-	fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().Sequence)
+	fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().LastUserSequence)
 	for i := range keys {
 		put(keys[i], current[i])
 	}

@@ -133,10 +133,10 @@ func (db *DB) cleanYield(ctx context.Context) error {
 // nextCandidate inspects committed per-file accounting under the writer gate.
 // With source bytes S and estimated output bytes W, (S-W)/(S+W) >= 1/3
 // simplifies to W <= S/2. Ranking this ratio is equivalent to minimizing W/S.
-func nextCandidate(s *storage.Store, target int64) (inputs []format.File, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
+func nextCandidate(s *storage.Store, target int64) (inputs []format.CatalogEntry, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
 	metadata := uint64(len(s.Manifest)) + format.FrontierBytes
-	var best format.File
-	for i, entry := range s.Catalog.Files {
+	var best format.CatalogEntry
+	for i, entry := range s.Catalog.Entries {
 		if !entry.HasPhysicalFile() {
 			continue
 		}
@@ -155,10 +155,10 @@ func nextCandidate(s *storage.Store, target int64) (inputs []format.File, stagin
 		}
 		output := replacementBytes(records)
 		if output > half || metadata > half-output {
-			if len(inputs) == 0 && entry.Kind != format.Snapshot && entry.Bytes <= target {
+			if len(inputs) == 0 && entry.Kind != format.SnapshotKind && entry.Bytes <= target {
 				// Save the oldest eligible group as a fallback. Any qualifying
 				// single file, including later in the catalog, takes priority.
-				inputs, staging = obsoleteGroupAt(s, s.Catalog.Files[i:], uint64(target), metadata)
+				inputs, staging = obsoleteGroupAt(s, s.Catalog.Entries[i:], uint64(target), metadata)
 			}
 			continue
 		}
@@ -166,12 +166,12 @@ func nextCandidate(s *storage.Store, target int64) (inputs []format.File, stagin
 		if best.HasPhysicalFile() {
 			a, b := bits.Mul64(output, uint64(best.Bytes))
 			c, d := bits.Mul64(staging, uint64(entry.Bytes))
-			if a > c || a == c && (b > d || b == d && (entry.First > best.First || entry.First == best.First && entry.ID >= best.ID)) {
+			if a > c || a == c && (b > d || b == d && (entry.FirstSequence > best.FirstSequence || entry.FirstSequence == best.FirstSequence && entry.ID >= best.ID)) {
 				continue
 			}
 		}
 		best, staging = entry, output
-		inputs = s.Catalog.Files[i : i+1]
+		inputs = s.Catalog.Entries[i : i+1]
 	}
 	return inputs, staging, blocked
 }
@@ -192,12 +192,12 @@ func replacementBytes(records uint64) uint64 {
 // of DATA scanned off the gate: at most eight entries, each at most one target.
 // Sealed live bytes only decrease as writers advance. Include every tombstone
 // and keep the resulting DATA file within one target even at its estimate.
-func obsoleteGroupAt(s *storage.Store, files []format.File, target, metadata uint64) (group []format.File, staging uint64) {
+func obsoleteGroupAt(s *storage.Store, files []format.CatalogEntry, target, metadata uint64) (group []format.CatalogEntry, staging uint64) {
 	const maxEntries = 8
 	var source, retained uint64
 	var count int
 	for i, entry := range files[:min(len(files), maxEntries)] {
-		if entry.Kind == format.Snapshot || uint64(entry.Bytes) > target {
+		if entry.Kind == format.SnapshotKind || uint64(entry.Bytes) > target {
 			break
 		}
 		if !entry.HasPhysicalFile() {
@@ -226,18 +226,18 @@ func obsoleteGroupAt(s *storage.Store, files []format.File, target, metadata uin
 // repackGroup picks the oldest eligible run from the immutable catalog. Try at
 // most eight physical files per start. Empty log intervals contribute coverage
 // without requiring a file read. Snapshots and logs have different replay rules.
-func repackGroup(files []format.File, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.File, int64) {
+func repackGroup(files []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
 	const minFiles, maxFiles = 4, 8
 	for start, first := range files {
 		if !first.HasPhysicalFile() || first.Bytes > target/4 {
 			continue
 		}
-		var group []format.File
+		var group []format.CatalogEntry
 		var total, largest, groupBytes int64
 		count := 0
 		for i := start; i < len(files) && count < maxFiles; i++ {
 			entry := files[i]
-			if (entry.Kind == format.Snapshot) != (first.Kind == format.Snapshot) {
+			if (entry.Kind == format.SnapshotKind) != (first.Kind == format.SnapshotKind) {
 				break
 			}
 			if !entry.HasPhysicalFile() {
@@ -363,13 +363,13 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		return false, false
 	}
 	removed, pinned, pending, err := db.store.RetireCleaned()
-	var inputs []format.File
+	var inputs []format.CatalogEntry
 	var staging uint64
 	var blocked map[uint64]*storage.UnavailableDataError
 	if err == nil {
 		inputs, staging, blocked = nextCandidate(db.store, db.opts.TargetSegmentBytes)
 	}
-	files, manifestBytes := db.store.Catalog.Files, len(db.store.Manifest)
+	files, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)
 	db.writer.Unlock()
 	w.mu.Lock()
 	w.status.PinnedRetiredDataBytes = pinned

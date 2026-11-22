@@ -37,7 +37,7 @@ type salvageReader struct {
 	pending           bytes.Buffer
 	synced            bool
 	afterGap          bool
-	span              format.RecordRange
+	span              format.RecordSequenceValidator
 	visit             func(SalvagedRecord) error
 	report            SalvageReport
 }
@@ -72,17 +72,17 @@ func (r *salvageReader) block(off int64, first uint16, b []byte) error {
 			return err
 		}
 		wire := r.pending.Bytes()
-		rec, err := format.DecodeRecord(wire[:format.RecordHeaderBytes], r.end-r.start)
+		rec, err := format.DecodeRecordHeader(wire[:format.RecordHeaderBytes], r.end-r.start)
 		if err != nil {
 			return fmt.Errorf("salvage record at %d: %w", r.start, err)
 		}
-		if rec.Bytes() > r.limit {
-			return &CompatibilityError{RequiredLimits{RecordBytes: rec.Bytes()}}
+		if rec.EncodedRecordBytes() > r.limit {
+			return &CompatibilityError{RequiredLimits{RecordBytes: rec.EncodedRecordBytes()}}
 		}
-		if rec.Bytes() > int64(len(wire)) {
+		if rec.EncodedRecordBytes() > int64(len(wire)) {
 			break
 		}
-		payload := wire[format.RecordHeaderBytes:rec.Bytes()]
+		payload := wire[format.RecordHeaderBytes:rec.EncodedRecordBytes()]
 		if crc32.Checksum(payload, salvageCRC) != rec.PayloadCRC {
 			return fmt.Errorf("%w: salvage record checksum at %d", ErrCorrupt, r.start)
 		}
@@ -104,8 +104,8 @@ func (r *salvageReader) block(off int64, first uint16, b []byte) error {
 			return err
 		}
 		r.report.Records++
-		r.pending.Next(int(rec.Bytes()))
-		r.start += rec.Bytes()
+		r.pending.Next(int(rec.EncodedRecordBytes()))
+		r.start += rec.EncodedRecordBytes()
 	}
 	return nil
 }
@@ -119,8 +119,8 @@ func SalvageData(ctx context.Context, dir string, id uint64, limit int64, visit 
 		return report, err
 	}
 	defer func() { result = errors.Join(result, s.Close()) }()
-	var entry format.File
-	for _, f := range image.Catalog.Files {
+	var entry format.CatalogEntry
+	for _, f := range image.Catalog.Entries {
 		if f.ID == id && f.HasPhysicalFile() {
 			entry = f
 			break
@@ -152,7 +152,7 @@ func SalvageData(ctx context.Context, dir string, id uint64, limit int64, visit 
 		return report, err
 	}
 	reader := salvageReader{ctx: ctx, end: entry.Bytes, limit: limit, visit: visit,
-		span: format.NewRecordRange(entry, image.Catalog.Cutoff)}
+		span: format.NewRecordSequenceValidator(entry, image.Catalog.CheckpointCutoffSequence)}
 	err = format.WalkParityBlocks(ctx, source, metadata, image.Current.UUID, entry, reader.block)
 	if err == nil && reader.pending.Len() != 0 {
 		err = fmt.Errorf("%w: incomplete final salvage record", ErrCorrupt)

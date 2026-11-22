@@ -136,7 +136,7 @@ func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := DataName(c.Current.UUID, c.Catalog.Files[0].ID)
+	name := DataName(c.Current.UUID, c.Catalog.Entries[0].ID)
 	path := filepath.Join(dir, name)
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -148,7 +148,7 @@ func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) 
 	}
 	for i, f := range meta.Files {
 		if f.Name == name {
-			meta.Files[i].Hash = sha256.Sum256(b)
+			meta.Files[i].Digest = sha256.Sum256(b)
 		}
 	}
 	if err := os.WriteFile(listPath, format.EncodeBackup(meta), 0600); err != nil {

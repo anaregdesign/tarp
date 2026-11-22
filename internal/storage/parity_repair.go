@@ -31,7 +31,7 @@ func RepairParity(ctx context.Context, dir string, fs *IO) (result error) {
 		}
 	}()
 	var failures error
-	for _, entry := range image.Catalog.Files {
+	for _, entry := range image.Catalog.Entries {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(err, failures)
 		}
@@ -93,7 +93,7 @@ func lockParityImage(ctx context.Context, dir string, fs *IO) (_ *Store, _ *Imag
 	return s, image, nil
 }
 
-func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.File, online bool) (bool, error) {
+func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.CatalogEntry, online bool) (bool, error) {
 	path := filepath.Join(s.Dir, DataName(uuid, entry.ID))
 	// A completely missing short segment can still be reconstructed when
 	// each stripe is missing only one block. The codec decides from lengths.
@@ -204,7 +204,7 @@ func unavailableReconstruction(err error) bool {
 	return onlyCauses(err, ErrCorrupt, syscall.EIO)
 }
 
-func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [16]byte, entry format.File, online bool) (stage repairStage, result error) {
+func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [16]byte, entry format.CatalogEntry, online bool) (stage repairStage, result error) {
 	sidecar, err := OpenRegular(filepath.Join(s.Dir, parityName(uuid, entry.ID)))
 	if err != nil {
 		stage.unavailable = errors.Is(err, os.ErrNotExist)

@@ -311,7 +311,7 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 		s.cleanWorkspaceOnClose = true
 	}
 	s.Catalog, s.Manifest, s.Files = image.Catalog, image.Manifest, image.Files
-	for _, entry := range s.Catalog.Files {
+	for _, entry := range s.Catalog.Entries {
 		if entry.HasPhysicalFile() {
 			s.Files[entry.ID].markSealed(s.Catalog.UUID, entry)
 		}
@@ -322,14 +322,14 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 		return err
 	}
 	s.active = active
-	if s.Files[s.Current.ActiveID].Size.Load() != s.Current.ActiveEnd {
-		if err := s.IO.Do("recover.truncate", func() error { return s.active.Truncate(s.Current.ActiveEnd) }); err != nil {
+	if s.Files[s.Current.ActiveID].Size.Load() != s.Current.ActiveCommittedEndOffset {
+		if err := s.IO.Do("recover.truncate", func() error { return s.active.Truncate(s.Current.ActiveCommittedEndOffset) }); err != nil {
 			return err
 		}
 		if err := s.IO.Sync(s.active, "recover.sync"); err != nil {
 			return err
 		}
-		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveEnd)
+		s.Files[s.Current.ActiveID].Size.Store(s.Current.ActiveCommittedEndOffset)
 	}
 	if _, _, err := s.cleanupValidated(ctx, listing.objects); err != nil {
 		return err
@@ -368,12 +368,12 @@ func (s *Store) initialize() error {
 	s.active = fd
 	s.Catalog.ActiveID = file.ID
 	candidate := s.Current
-	candidate.Generation, candidate.ActiveID, candidate.ActiveEnd = 1, file.ID, format.SegmentHeaderBytes
+	candidate.PublicationGeneration, candidate.ActiveID, candidate.ActiveCommittedEndOffset = 1, file.ID, format.SegmentHeaderBytes
 	return s.publishCatalog(s.Catalog, candidate)
 }
 
 func (s *Store) newLog(initialRecords appendData) (*File, *os.File, error) {
-	f, err := s.reserveSegment(format.Log)
+	f, err := s.reserveSegment(format.RawLogKind)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -406,9 +406,9 @@ func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords append
 	if err != nil {
 		return nil, err
 	}
-	b := format.EncodeSegment(format.Segment{UUID: uuid, ID: f.ID, Kind: f.Kind})
+	b := format.EncodeSegmentHeader(format.SegmentHeader{UUID: uuid, ID: f.ID, Kind: f.Kind})
 	err = fs.Write(fd, b, 0, point+".write")
-	if f.Kind == format.Log {
+	if f.Kind == format.RawLogKind {
 		f.activeDigest = sha256.New()
 		f.activeDigest.Write(b)
 	}
@@ -416,7 +416,7 @@ func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords append
 		err = initialRecords.writeAt(fd, format.SegmentHeaderBytes, f.activeDigest)
 	}
 	// Private checkpoints sync the complete file before publication.
-	if err == nil && f.Kind != format.Snapshot {
+	if err == nil && f.Kind != format.SnapshotKind {
 		err = fs.Sync(fd, point+".sync")
 	}
 	if err != nil {
@@ -429,13 +429,13 @@ func (f *File) create(uuid [16]byte, fs *IO, point string, initialRecords append
 }
 
 func (s *Store) Rotate() error {
-	if s.Current.ActiveEnd == format.SegmentHeaderBytes {
+	if s.Current.ActiveCommittedEndOffset == format.SegmentHeaderBytes {
 		return nil
 	}
-	if s.Current.Generation == math.MaxUint64 {
+	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return fault("rotation.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
-	return s.rotate(appendData{}, s.Current.Sequence, nil)
+	return s.rotate(appendData{}, s.Current.LastUserSequence, nil)
 }
 
 // A rotating append syncs the header and its initial records together. CURRENT
@@ -456,20 +456,20 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 		}
 	}
 	catalog := s.Catalog
-	catalog.Files = append(append([]format.File(nil), catalog.Files...), format.File{
-		ID: s.Current.ActiveID, Bytes: s.Current.ActiveEnd, Kind: format.Log,
-		First: s.Catalog.SealedEnd() + 1, Last: s.Current.Sequence,
-		Digest: [sha256.Size]byte(s.Files[s.Current.ActiveID].activeDigest.Sum(nil)),
+	catalog.Entries = append(append([]format.CatalogEntry(nil), catalog.Entries...), format.CatalogEntry{
+		ID: s.Current.ActiveID, Bytes: s.Current.ActiveCommittedEndOffset, Kind: format.RawLogKind,
+		FirstSequence: s.Catalog.SealedThroughSequence() + 1, LastSequence: s.Current.LastUserSequence,
+		DataFileDigest: [sha256.Size]byte(s.Files[s.Current.ActiveID].activeDigest.Sum(nil)),
 	})
 	catalog.ActiveID = file.ID
 	candidate := s.Current
-	candidate.Generation++
-	candidate.ActiveID, candidate.ActiveEnd = file.ID, file.Size.Load()
-	candidate.Sequence = lastSequence
+	candidate.PublicationGeneration++
+	candidate.ActiveID, candidate.ActiveCommittedEndOffset = file.ID, file.Size.Load()
+	candidate.LastUserSequence = lastSequence
 	if err := s.publishCatalog(catalog, candidate); err != nil {
 		return errors.Join(err, fd.Close())
 	}
-	sealed := catalog.Files[len(catalog.Files)-1]
+	sealed := catalog.Entries[len(catalog.Entries)-1]
 	prior := s.Files[sealed.ID]
 	prior.activeDigest = nil
 	prior.markSealed(catalog.UUID, sealed)
@@ -487,7 +487,7 @@ type Entry struct {
 }
 
 func (s *Store) checkSequence(count int) error {
-	if s.Current.Sequence > math.MaxUint64-uint64(count) || s.Current.Generation == math.MaxUint64 {
+	if s.Current.LastUserSequence > math.MaxUint64-uint64(count) || s.Current.PublicationGeneration == math.MaxUint64 {
 		return fault("commit.sequence", publication.NotApplied, false, errors.New("storage: sequence or publication generation exhausted"))
 	}
 	return nil
@@ -502,7 +502,7 @@ func (s *Store) AppendPrepared(kind uint8, key, value []byte, healthy func() err
 	if err := s.checkSequence(1); err != nil {
 		return Location{}, err
 	}
-	sequence := s.Current.Sequence + 1
+	sequence := s.Current.LastUserSequence + 1
 	b := format.EncodeRecord(kind, sequence, key, value)
 	data := appendData{size: int64(len(b)), writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
 		if err := s.IO.Write(fd, b, off, "data.write"); err != nil {
@@ -541,7 +541,7 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 	var size int64
 	for i, e := range entries {
 		n := entrysize.RecordBytes(int64(len(e.Key)), int64(len(e.Value)))
-		locations[i] = Location{Offset: size, Bytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.Sequence + uint64(i) + 1}
+		locations[i] = Location{Offset: size, Bytes: n, ValueBytes: int64(len(e.Value)), Sequence: s.Current.LastUserSequence + uint64(i) + 1}
 		size += n
 	}
 	data := appendData{size: size, writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
@@ -595,7 +595,7 @@ type appendData struct {
 }
 
 func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func() error) (*File, int64, error) {
-	offset := s.Current.ActiveEnd
+	offset := s.Current.ActiveCommittedEndOffset
 	if offset > format.SegmentHeaderBytes && offset > s.Config.TargetSegmentBytes-data.size {
 		if err := s.rotate(data, lastSequence, healthy); err != nil {
 			return nil, 0, err
@@ -617,13 +617,13 @@ func (s *Store) appendRecords(data appendData, lastSequence uint64, healthy func
 		return nil, 0, fault("commit.health", publication.NotApplied, true, err)
 	}
 	candidate := s.Current
-	candidate.Generation++
-	candidate.Sequence, candidate.ActiveEnd = lastSequence, offset+data.size
+	candidate.PublicationGeneration++
+	candidate.LastUserSequence, candidate.ActiveCommittedEndOffset = lastSequence, offset+data.size
 	if err := s.publish(candidate); err != nil {
 		return nil, 0, err
 	}
 	file := s.Files[s.Current.ActiveID]
-	file.Size.Store(candidate.ActiveEnd)
+	file.Size.Store(candidate.ActiveCommittedEndOffset)
 	return file, offset, nil
 }
 
@@ -752,7 +752,7 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 // The caller validates the entire listing before truncating or unlinking any file.
 func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject) (removed, pinned int64, result error) {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, f := range s.Catalog.Files {
+	for _, f := range s.Catalog.Entries {
 		if f.HasPhysicalFile() {
 			selected[f.ID] = true
 		}

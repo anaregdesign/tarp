@@ -20,7 +20,7 @@ import (
 // Bind its trusted extent once; a repair never consults mutable catalog state.
 type sealedRepair struct {
 	uuid  [16]byte
-	entry format.File
+	entry format.CatalogEntry
 
 	mu          sync.Mutex
 	running     *readRepair
@@ -96,7 +96,7 @@ type UncertainReadRepair struct{ Err error }
 func (e *UncertainReadRepair) Error() string { return e.Err.Error() }
 func (e *UncertainReadRepair) Unwrap() error { return e.Err }
 
-func (f *File) markSealed(uuid [16]byte, entry format.File) {
+func (f *File) markSealed(uuid [16]byte, entry format.CatalogEntry) {
 	f.sealed.CompareAndSwap(nil, &sealedRepair{uuid: uuid, entry: entry})
 }
 

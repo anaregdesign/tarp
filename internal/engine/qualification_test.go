@@ -214,7 +214,7 @@ func TestPowerCutGuest(t *testing.T) {
 	}
 	faults := &storage.IO{Hook: func(p string) error {
 		if mode == "overlap" && p == "backup.copy:before" && captured.CompareAndSwap(false, true) {
-			fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().Sequence)
+			fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().LastUserSequence)
 			close(captureReady)
 			<-releaseBackup
 		}
@@ -266,7 +266,7 @@ func TestPowerCutGuest(t *testing.T) {
 	put("oracle", "acknowledged")
 	if mode == "rotate" {
 		pendingBytes := int64(format.RecordHeaderBytes + len("oracle") + len("possible"))
-		for Observe(db).Frontier().ActiveEnd+pendingBytes <= db.opts.TargetSegmentBytes {
+		for Observe(db).Frontier().ActiveCommittedEndOffset+pendingBytes <= db.opts.TargetSegmentBytes {
 			put("p", "")
 		}
 	}
@@ -275,7 +275,7 @@ func TestPowerCutGuest(t *testing.T) {
 	}
 	backup := filepath.Join(filepath.Dir(dir), filepath.Base(dir)+"-restore-source")
 	if mode == "restore" {
-		fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().Sequence)
+		fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().LastUserSequence)
 		if err := db.Backup(context.Background(), backup); err != nil {
 			t.Fatal(err)
 		}
@@ -310,7 +310,7 @@ func TestPowerCutGuest(t *testing.T) {
 	case "compact":
 		_, err = db.Compact(context.Background())
 	case "backup":
-		fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().Sequence)
+		fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().LastUserSequence)
 		err = db.Backup(context.Background(), output)
 	case "restore":
 		err = restoreWithIO(context.Background(), RestoreRequest{

@@ -113,7 +113,7 @@ func (db *DB) ProtectParity(ctx context.Context) error {
 		db.writer.Unlock()
 		return operationError(op, "capture", err)
 	}
-	if db.store.Current.ActiveEnd != format.SegmentHeaderBytes {
+	if db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		if err := db.sealActive(); err != nil {
 			db.storageFailure(err)
 			db.writer.Unlock()
@@ -132,14 +132,14 @@ func (db *DB) ProtectParity(ctx context.Context) error {
 }
 
 type parityCut struct {
-	files  []format.File
+	files  []format.CatalogEntry
 	layout uint64
 	uuid   [16]byte
 }
 
 // The caller holds writer. Published catalog slices are immutable.
 func (db *DB) parityCut() parityCut {
-	return parityCut{db.store.Catalog.Files, db.parity.layout, db.store.Catalog.UUID}
+	return parityCut{db.store.Catalog.Entries, db.parity.layout, db.store.Catalog.UUID}
 }
 
 func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
@@ -226,7 +226,7 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 				var source *storage.SourceError
 				if errors.As(err, &source) {
 					db.writer.Lock()
-					if w.layout == layout || slices.Contains(db.store.Catalog.Files, entry) {
+					if w.layout == layout || slices.Contains(db.store.Catalog.Entries, entry) {
 						db.poison(err)
 					}
 					db.writer.Unlock()

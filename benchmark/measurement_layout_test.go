@@ -44,23 +44,23 @@ func observedLayout(db *engine.DB) measurementLayout {
 
 func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 	layout := measurementLayout{
-		Sequence: s.Current.Sequence, CheckpointCutoff: s.Catalog.Cutoff, PrunedThrough: s.Catalog.PrunedThrough,
-		SelectedDataFiles: 1, SelectedDataBytes: s.Current.ActiveEnd,
+		Sequence: s.Current.LastUserSequence, CheckpointCutoff: s.Catalog.CheckpointCutoffSequence, PrunedThrough: s.Catalog.PrunedThroughSequence,
+		SelectedDataFiles: 1, SelectedDataBytes: s.Current.ActiveCommittedEndOffset,
 		SelectedMetadataBytes: int64(len(s.Manifest)) + format.FrontierBytes,
 		RetainedDeleteBytes:   s.Files[s.Current.ActiveID].DeleteBytes.Load(),
 	}
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, e := range s.Catalog.Files {
+	for _, e := range s.Catalog.Entries {
 		if e.ID == 0 {
 			layout.EmptyCleanedIntervals++
 			continue
 		}
 		switch e.Kind {
-		case format.Log:
+		case format.RawLogKind:
 			layout.RawSealedFiles++
-		case format.Snapshot:
+		case format.SnapshotKind:
 			layout.SnapshotFiles++
-		case format.Cleaned:
+		case format.CleanedLogKind:
 			layout.CleanedFiles++
 		}
 		selected[e.ID] = true

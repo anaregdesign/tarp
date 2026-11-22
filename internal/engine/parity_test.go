@@ -16,7 +16,7 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-func selectedParity(t *testing.T, db *DB, entry format.File) string {
+func selectedParity(t *testing.T, db *DB, entry format.CatalogEntry) string {
 	t.Helper()
 	db.writer.Lock()
 	uuid := db.store.Catalog.UUID
@@ -70,7 +70,7 @@ func TestParityBuildAllowsForegroundRotationAndContextCancellation(t *testing.T)
 		t.Fatal(err)
 	}
 	db.writer.Lock()
-	files := db.store.Catalog.Files
+	files := db.store.Catalog.Entries
 	uuid := db.store.Catalog.UUID
 	db.writer.Unlock()
 	for _, entry := range files {
@@ -82,8 +82,8 @@ func TestParityBuildAllowsForegroundRotationAndContextCancellation(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	if db.store.Catalog.Index.ID != 0 || db.store.Current.ActiveEnd != format.SegmentHeaderBytes || len(files) != 3 {
-		t.Fatalf("explicit protection sealed the foreground tail: files %v, index %v, active end %v", files, db.store.Catalog.Index, db.store.Current.ActiveEnd)
+	if db.store.Catalog.Index.ID != 0 || db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes || len(files) != 3 {
+		t.Fatalf("explicit protection sealed the foreground tail: files %v, index %v, active end %v", files, db.store.Catalog.Index, db.store.Current.ActiveCommittedEndOffset)
 	}
 }
 
@@ -220,7 +220,7 @@ func TestParitySourceReadFailurePoisonsOnlyStillSelectedData(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("did not begin building explicit cut")
 			}
-			old := db.store.Catalog.Files[0]
+			old := db.store.Catalog.Entries[0]
 			if compact {
 				result, err := db.Compact(t.Context())
 				if err != nil || result.PinnedRetiredDataBytes != old.Bytes {
@@ -239,8 +239,8 @@ func TestParitySourceReadFailurePoisonsOnlyStillSelectedData(t *testing.T) {
 				t.Fatalf("obsolete source failed recapture: %v", err)
 			}
 			wantValue(t, db, "key", "acknowledged")
-			now := db.store.Catalog.Files[0]
-			if now.Kind != format.Snapshot || now.ID == old.ID {
+			now := db.store.Catalog.Entries[0]
+			if now.Kind != format.SnapshotKind || now.ID == old.ID {
 				t.Fatalf("invalid snapshot %+v", now)
 			}
 			if _, err := os.Stat(selectedParity(t, db, now)); err != nil {
@@ -272,8 +272,8 @@ func TestParityProtectsCleanedDataAndSkipsMetadataOnlyIntervals(t *testing.T) {
 	if err := db.cleanSegment(t.Context(), sparse); err != nil {
 		t.Fatal(err)
 	}
-	entries := db.store.Catalog.Files
-	if len(entries) != 2 || entries[0].HasPhysicalFile() || entries[1].Kind != format.Cleaned || !entries[1].HasPhysicalFile() {
+	entries := db.store.Catalog.Entries
+	if len(entries) != 2 || entries[0].HasPhysicalFile() || entries[1].Kind != format.CleanedLogKind || !entries[1].HasPhysicalFile() {
 		t.Fatalf("invalid fixture %+v", entries)
 	}
 	found, err := filepath.Glob(filepath.Join(db.store.Dir, "PARITY-*"))
@@ -296,7 +296,7 @@ func TestProtectParityRejectsStagedOutputCorruptionAndRetries(t *testing.T) {
 	if err := db.ProtectParity(t.Context()); !errors.Is(err, format.ErrInvalidParity) || db.health() != nil {
 		t.Fatalf("damaged stage classification: %v, health %v", err, db.health())
 	}
-	entry := db.store.Catalog.Files[0]
+	entry := db.store.Catalog.Entries[0]
 	if _, err := os.Stat(selectedParity(t, db, entry)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("published invalid sidecar: %v", err)
 	}

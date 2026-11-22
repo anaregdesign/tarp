@@ -123,7 +123,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	indexPath := filepath.Join(dir, IndexName(s.Current.UUID, s.Catalog.Index.ID))
-	coveredPath := s.Files[s.Catalog.Files[0].ID].Path
+	coveredPath := s.Files[s.Catalog.Entries[0].ID].Path
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -150,13 +150,13 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		coveredPayload := db.Catalog.Files[0].Bytes - format.SegmentHeaderBytes
+		coveredPayload := db.Catalog.Entries[0].Bytes - format.SegmentHeaderBytes
 		coveredHeader := int64(2 * format.SegmentHeaderBytes)
 		if indexed {
 			coveredPayload = 0
 			coveredHeader = format.SegmentHeaderBytes
 		}
-		tailPayload := db.Catalog.Files[1].Bytes + db.Current.ActiveEnd - 2*format.SegmentHeaderBytes
+		tailPayload := db.Catalog.Entries[1].Bytes + db.Current.ActiveCommittedEndOffset - 2*format.SegmentHeaderBytes
 		if reads["covered-payload"] != coveredPayload || reads["tail-payload"] != tailPayload ||
 			reads["covered-header"] != coveredHeader || reads["tail-header"] < 2*format.SegmentHeaderBytes ||
 			reads["replay-header"] != 0 || reads["replay-payload"] != 0 {
@@ -285,8 +285,8 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 	}
 	a, target := makeCheckpoint(dir, "ours")
 	b, other := makeCheckpoint(clone, "peer")
-	if a.UUID != b.UUID || a.Sequence != b.Sequence || a.Generation != b.Generation || a.ActiveID != b.ActiveID ||
-		a.ActiveEnd != b.ActiveEnd || a.ManifestID != b.ManifestID || filepath.Base(target) != filepath.Base(other) || a.ManifestHash == b.ManifestHash {
+	if a.UUID != b.UUID || a.LastUserSequence != b.LastUserSequence || a.PublicationGeneration != b.PublicationGeneration || a.ActiveID != b.ActiveID ||
+		a.ActiveCommittedEndOffset != b.ActiveCommittedEndOffset || a.ManifestID != b.ManifestID || filepath.Base(target) != filepath.Base(other) || a.ManifestDigest == b.ManifestDigest {
 		t.Fatal("copies should differ only in authenticated history at the same physical cut")
 	}
 	own, err := os.ReadFile(target)
@@ -348,7 +348,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []uint64{image.Current.ActiveID, image.Catalog.Files[0].ID} {
+	for _, id := range []uint64{image.Current.ActiveID, image.Catalog.Entries[0].ID} {
 		path := image.Files[id].Path
 		data, err := os.ReadFile(path)
 		if err != nil {

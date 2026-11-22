@@ -116,7 +116,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := s.Files[s.Current.ActiveID].Path
-	end := s.Current.ActiveEnd
+	end := s.Current.ActiveCommittedEndOffset
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 					return nil
 				}}
 				if tc.point == "partial-data" {
-					start := before.ActiveEnd
+					start := before.ActiveCommittedEndOffset
 					if rotate {
 						start = format.SegmentHeaderBytes
 					}
@@ -343,7 +343,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 				defer keys.Close()
 				after := reopened.Current
 				if tc.committed {
-					if after.Sequence != before.Sequence+2 || after.Generation != before.Generation+1 || (after.ActiveID != before.ActiveID) != rotate {
+					if after.LastUserSequence != before.LastUserSequence+2 || after.PublicationGeneration != before.PublicationGeneration+1 || (after.ActiveID != before.ActiveID) != rotate {
 						t.Fatalf("frontier after batch: %+v -> %+v", before, after)
 					}
 					for _, e := range entries {
@@ -365,7 +365,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 }
 
 func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
-	s := &Store{Current: format.Frontier{Sequence: math.MaxUint64 - 1}}
+	s := &Store{Current: format.Frontier{LastUserSequence: math.MaxUint64 - 1}}
 	_, err := s.AppendBatch(format.Put, []Entry{{Key: []byte("a")}, {Key: []byte("b")}}, nil)
 	var f *Fault
 	if !errors.As(err, &f) || f.Unsafe || f.Outcome != publication.NotApplied {
@@ -396,7 +396,7 @@ func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
 		t.Fatalf("rejected rotation: error %v, frontier %+v, last ID %d (was %d), files %d (was %d)", err, s.Current, s.nextID, lastID, len(s.Files), files)
 	}
 	loc, err := s.Append(format.Put, []byte("after"), value, healthy)
-	if err != nil || candidate == before.ActiveID || loc.File.ID != candidate || loc.Sequence != before.Sequence+1 {
+	if err != nil || candidate == before.ActiveID || loc.File.ID != candidate || loc.Sequence != before.LastUserSequence+1 {
 		t.Fatalf("retry used location %+v, wanted file %d, error %v", loc, candidate, err)
 	}
 }

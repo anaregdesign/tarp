@@ -65,7 +65,7 @@ func (s *Store) EnsureParity(ctx context.Context, uuid [16]byte, source Captured
 	return nil
 }
 
-func checkParity(ctx context.Context, path string, uuid [16]byte, entry format.File) error {
+func checkParity(ctx context.Context, path string, uuid [16]byte, entry format.CatalogEntry) error {
 	fd, err := OpenRegular(path)
 	if err != nil {
 		return err

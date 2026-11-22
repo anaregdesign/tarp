@@ -38,11 +38,11 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 		t.Fatal(err)
 	}
 	before := store.Current
-	source := store.Catalog.Files[0]
+	source := store.Catalog.Entries[0]
 	path := store.Files[source.ID].Path
 	b, err := os.ReadFile(path)
-	if err != nil || sha256.Sum256(b) != source.Digest {
-		t.Fatalf("sealed bytes %x: %v", source.Digest, err)
+	if err != nil || sha256.Sum256(b) != source.DataFileDigest {
+		t.Fatalf("sealed bytes %x: %v", source.DataFileDigest, err)
 	}
 	copy(b[format.SegmentHeaderBytes:], format.EncodeRecord(format.Put, 1, []byte("key"), []byte("tampered")))
 	if err := os.WriteFile(path, b, 0600); err != nil {
@@ -69,7 +69,7 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 	if err := compact.Discard(); err != nil {
 		t.Fatal(err)
 	}
-	clean, err := store.BeginClean([]format.File{source})
+	clean, err := store.BeginClean([]format.CatalogEntry{source})
 	if err != nil {
 		t.Fatal(err)
 	}

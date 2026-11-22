@@ -51,7 +51,7 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	if err != nil {
 		return nil, nil, err
 	}
-	if st.Size() != cp.Bytes || cp.Bytes < indexHeaderBytes || cp.Entries > uint64(len(c.Files)) || cp.Entries > uint64((cp.Bytes-indexHeaderBytes)/8) {
+	if st.Size() != cp.Bytes || cp.Bytes < indexHeaderBytes || cp.CoveredCatalogEntries > uint64(len(c.Entries)) || cp.CoveredCatalogEntries > uint64((cp.Bytes-indexHeaderBytes)/8) {
 		return nil, nil, ErrIndexMiss
 	}
 	h := sha256.New()
@@ -64,10 +64,10 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	if _, err := io.ReadFull(rd, header[:]); err != nil {
 		return nil, nil, indexReadError(err)
 	}
-	if string(header[:8]) != indexSignature || [32]byte(header[8:40]) != cp.Layout || binary.LittleEndian.Uint64(header[40:]) != cp.Entries {
+	if string(header[:8]) != indexSignature || [32]byte(header[8:40]) != cp.CoveredLayoutFingerprint || binary.LittleEndian.Uint64(header[40:]) != cp.CoveredCatalogEntries {
 		return nil, nil, ErrIndexMiss
 	}
-	deletes := make([]int64, int(cp.Entries))
+	deletes := make([]int64, int(cp.CoveredCatalogEntries))
 	var raw [8]byte
 	for i := range deletes {
 		if err := ctx.Err(); err != nil {
@@ -83,7 +83,7 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 	if err != nil {
 		return nil, nil, indexReadError(err)
 	}
-	if [32]byte(h.Sum(nil)) != cp.Digest {
+	if [32]byte(h.Sum(nil)) != cp.IndexFileDigest {
 		return nil, nil, ErrIndexMiss
 	}
 	return keys, deletes, nil
@@ -130,11 +130,11 @@ type IndexBuild struct {
 func (b *IndexBuild) Sources() []CapturedFile { return b.capture.Files }
 
 func (s *Store) BeginIndex() (*IndexBuild, error) {
-	if s.Current.ActiveEnd != format.SegmentHeaderBytes {
+	if s.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		return nil, errors.New("storage: index checkpoint requires a sealed boundary")
 	}
-	n, seq := uint64(len(s.Catalog.Files)), s.Current.Sequence
-	layout, err := s.Catalog.IndexLayout(n, seq)
+	n, seq := uint64(len(s.Catalog.Entries)), s.Current.LastUserSequence
+	layout, err := s.Catalog.CoveredLayoutFingerprint(n, seq)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (s *Store) BeginIndex() (*IndexBuild, error) {
 		return nil, err
 	}
 	s.buildingIndex.Store(id)
-	return &IndexBuild{store: s, capture: c, descriptor: format.IndexCheckpoint{ID: id, Entries: n, Sequence: seq, Layout: layout}}, nil
+	return &IndexBuild{store: s, capture: c, descriptor: format.IndexCheckpoint{ID: id, CoveredCatalogEntries: n, CoveredSequence: seq, CoveredLayoutFingerprint: layout}}, nil
 }
 
 func (b *IndexBuild) Release() error {
@@ -206,13 +206,13 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 	out := bufio.NewWriterSize(writer, 32<<10)
 	var header [indexHeaderBytes]byte
 	copy(header[:8], indexSignature)
-	copy(header[8:40], b.descriptor.Layout[:])
-	binary.LittleEndian.PutUint64(header[40:], b.descriptor.Entries)
+	copy(header[8:40], b.descriptor.CoveredLayoutFingerprint[:])
+	binary.LittleEndian.PutUint64(header[40:], b.descriptor.CoveredCatalogEntries)
 	if _, err := out.Write(header[:]); err != nil {
 		return err
 	}
 	var raw [8]byte
-	for _, entry := range c.Catalog.Files {
+	for _, entry := range c.Catalog.Entries {
 		var count int64
 		if entry.HasPhysicalFile() {
 			count = image.Files[entry.ID].DeleteBytes.Load()
@@ -232,7 +232,7 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 		return err
 	}
 	b.descriptor.Bytes = writer.offset
-	b.descriptor.Digest = [32]byte(h.Sum(nil))
+	b.descriptor.IndexFileDigest = [32]byte(h.Sum(nil))
 	return nil
 }
 
@@ -261,16 +261,16 @@ func (b *IndexBuild) Install() error {
 	}
 	s := b.store
 	cp := b.descriptor
-	layout, err := s.Catalog.IndexLayout(cp.Entries, cp.Sequence)
-	if err != nil || layout != cp.Layout {
+	layout, err := s.Catalog.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	if err != nil || layout != cp.CoveredLayoutFingerprint {
 		return ErrIndexLayoutChanged
 	}
-	if s.Current.Generation == math.MaxUint64 {
+	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return errors.New("storage: publication generation exhausted")
 	}
 	catalog, frontier := s.Catalog, s.Current
 	catalog.Index = cp
-	frontier.Generation++
+	frontier.PublicationGeneration++
 	if err := s.publishCatalogFor(catalog, frontier, "index.", nil); err != nil {
 		var f *Fault
 		if errors.As(err, &f) && f.Outcome == publication.Unknown {
