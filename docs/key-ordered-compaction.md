@@ -65,9 +65,41 @@ The work scales with the **retained suffix records and affected segment bytes**.
 
 ## Adoption and follow-up
 
-The experimental 16,384-record graph reduced the mean number of distinct 4 KiB DATA file ranges per vertex from 70.89 to 9.00. The sorted average was 9.01 after 4,096 overwrites of the first key, and 24.82 after 4,096 distributed overwrites. Before updates, sampled cold prefix reads fell from 296 to 112 KiB and from 2.34 to 0.084 ms. Those bytes are Linux VM process I/O. The prototype staged up to 32 MiB and 65,536 records in RAM. The production external sort and its foreground interference still require measurement. [Experiment and sampling details](https://github.com/anaregdesign/tarp/blob/fedad012a6d88170f59741ddd1048bc37d54943b/docs/benchmarks/key-locality-150.md).
+The experimental 16,384-record graph reduced the mean number of distinct 4 KiB DATA file ranges per vertex from 70.89 to 9.00. The sorted average was 9.01 after 4,096 overwrites of the first key, and 24.82 after 4,096 distributed overwrites. Before updates, sampled cold prefix reads fell from 296 to 112 KiB and from 2.34 to 0.084 ms. Those bytes are Linux VM process I/O. The prototype staged up to 32 MiB and 65,536 records in RAM. [Experiment and sampling details](https://github.com/anaregdesign/tarp/blob/fedad012a6d88170f59741ddd1048bc37d54943b/docs/benchmarks/key-locality-150.md).
 
 Compare foreground alone, ordinary `Compact`, and `CompactByKey` on the same starting image. Use both index modes, variable-size edges, a database larger than the sort budget, and workloads with a repeatedly updated first key, hot ranges, and scattered updates. Include deletes and reinsertions. Measure cold prefix latency and process read bytes, distinct DATA ranges, checkpoint duration, validation and copy reads, DATA/PARITY and scratch writes, peak memory, scratch and pinned bytes. Record durable Put throughput and p99 during the overlapping window. Issue #150 proposes at least 1,000 overlapping Puts per pattern, throughput at least 95% of foreground alone, p99 at most 1.10× baseline and a measurable cold-read improvement. Report the ordinary-compaction comparison separately to isolate the cost of sorting.
+
+### Hosted Linux qualification
+
+Revision `2af4ec7d562f` ran in a 2-CPU container on ext4 with `go version go1.27.4 linux/amd64`. Every arm used image `sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea`. [Qualification run](https://github.com/anaregdesign/tarp/actions/runs/44983593909) · [Raw per-trial measurements and environment](benchmarks/key-ordered-checkpoint.jsonl.gz).
+
+The fixture contained 16,385 variable-size records and 4,653,340 encoded key bytes, exceeding the 4 MiB sort allowance. Each writer trial checked all final values after a Full reopen.
+
+Median of three cold `ScanPrefix` calls after requesting eviction of fixture DATA pages. Reads are Linux process `read_bytes`. The full-read control registered I/O on each fixture.
+
+| Index | Prefix | Rows | Compact KiB | CompactByKey KiB | Compact ms | CompactByKey ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BTree | 0 | 56 | 244 | 64 | 8.24 | 0.68 |
+| BTree | 192 | 56 | 264 | 88 | 8.99 | 0.90 |
+| BTree | 384 | 2048 | 7980 | 1380 | 240.39 | 14.99 |
+| Memory | 0 | 56 | 244 | 48 | 9.66 | 2.67 |
+| Memory | 192 | 56 | 264 | 88 | 9.42 | 2.01 |
+| Memory | 384 | 2048 | 8488 | 1508 | 212.82 | 38.51 |
+
+Each writer trial issued four groups of 256 durable Puts with one simultaneous checkpoint per group. Ratios below compare the same foreground operation slots to a foreground-only trial, then take the median of three paired trial ratios. The joined rate divides Puts by total elapsed time including the wait for each checkpoint. The final column gives DATA and PARITY MiB written by four ordered checkpoints.
+
+| Index | Updates | Overlapping Puts | Compact rate / p99 | CompactByKey rate / p99 | Ordered joined rate | Ordered DATA / PARITY MiB |
+| --- | --- | ---: | --- | --- | ---: | --- |
+| BTree | first | 3072 | 73% / 2.62× | 97% / 1.66× | 75% | 16.00 / 1.03 |
+| BTree | hot | 3072 | 75% / 2.70× | 97% / 1.79× | 75% | 16.00 / 1.03 |
+| BTree | spread | 3072 | 81% / 1.57× | 96% / 1.12× | 63% | 41.57 / 2.68 |
+| Memory | first | 2610 | 83% / 2.41× | 91% / 2.30× | 93% | 16.00 / 1.03 |
+| Memory | hot | 2587 | 83% / 2.55× | 90% / 2.09× | 92% | 16.00 / 1.03 |
+| Memory | spread | 3072 | 83% / 2.22× | 93% / 1.68× | 76% | 41.57 / 2.68 |
+
+Cold prefix reads improved in all six cases. Ordered checkpoints kept 96–97% of foreground-only throughput in BTree and 90–93% in Memory during overlapping Puts. All six p99 ratios exceeded the 1.10× target. An application with a foreground latency requirement should schedule this work in a quiet window. This run measured physical output bytes and process read bytes. Peak memory, scratch and pinned space still need separate measurement.
+
+### Additional qualification cases
 
 Tests should walk physical DATA offsets across multiple output files, verify the exact keys and original sequences against a captured oracle, and exercise unchanged-cutoff calls, empty images and oversized records. Cover both index modes, concurrent cross-boundary batches, delete/reinsert, pinned scans and backups, Full and Indexed reopen, backup/restore, recovery from damaged DATA, scratch exhaustion, cancellation, uncertain publication and retry. Check file ownership and the selected image after failures.
 
