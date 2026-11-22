@@ -20,7 +20,7 @@ import (
 
 // ErrIndexCheckpointUnusable indicates that the runtime index must be rebuilt from DATA.
 var ErrIndexCheckpointUnusable = errors.New("storage: unusable index checkpoint")
-var ErrIndexLayoutChanged = errors.New("storage: the catalog prefix covered by the index checkpoint was replaced")
+var ErrCoveredCatalogPrefixChanged = errors.New("storage: the catalog prefix covered by the index checkpoint was replaced")
 
 const indexSignature = "TARPIDX1"
 const indexHeaderBytes = 48
@@ -115,9 +115,9 @@ func indexReadError(err error) error {
 	return err
 }
 
-// IndexBuild owns a pinned DATA selection and a private, named staging file.
-// Only BeginIndex and Install require the writer gate.
-type IndexBuild struct {
+// IndexCheckpointBuild owns a pinned DATA selection and a private, named staging file.
+// Only BeginIndexCheckpoint and Install require the writer gate.
+type IndexCheckpointBuild struct {
 	store         *Store
 	capture       *Capture
 	descriptor    format.IndexCheckpoint
@@ -126,14 +126,14 @@ type IndexBuild struct {
 	filePublished bool
 }
 
-func (b *IndexBuild) Sources() []CapturedFile { return b.capture.Files }
+func (b *IndexCheckpointBuild) Sources() []CapturedFile { return b.capture.Files }
 
-func (s *Store) BeginIndex() (*IndexBuild, error) {
+func (s *Store) BeginIndexCheckpoint() (*IndexCheckpointBuild, error) {
 	if s.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		return nil, errors.New("storage: index checkpoint requires a sealed boundary")
 	}
 	n, seq := uint64(len(s.Catalog.Entries)), s.Current.LastUserSequence
-	layout, err := s.Catalog.CoveredLayoutFingerprint(n, seq)
+	fingerprint, err := s.Catalog.CoveredLayoutFingerprint(n, seq)
 	if err != nil {
 		return nil, err
 	}
@@ -146,10 +146,10 @@ func (s *Store) BeginIndex() (*IndexBuild, error) {
 		return nil, err
 	}
 	s.buildingIndex.Store(id)
-	return &IndexBuild{store: s, capture: c, descriptor: format.IndexCheckpoint{ID: id, CoveredCatalogEntries: n, CoveredSequence: seq, CoveredLayoutFingerprint: layout}}, nil
+	return &IndexCheckpointBuild{store: s, capture: c, descriptor: format.IndexCheckpoint{ID: id, CoveredCatalogEntries: n, CoveredSequence: seq, CoveredLayoutFingerprint: fingerprint}}, nil
 }
 
-func (b *IndexBuild) Release() error {
+func (b *IndexCheckpointBuild) Release() error {
 	b.capture.Release()
 	defer b.store.buildingIndex.CompareAndSwap(b.descriptor.ID, 0)
 	path := b.stage
@@ -169,7 +169,7 @@ func (b *IndexBuild) Release() error {
 	return nil
 }
 
-func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(context.Context, index.Backend, io.Writer) error) (result error) {
+func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, export func(context.Context, index.Backend, io.Writer) error) (result error) {
 	// Isolate recovery counters from live accounting. The capture pins the
 	// original files even if rotations occur during the scan.
 	c := b.capture
@@ -183,7 +183,7 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 	if err := b.store.IO.Check("index.scan:before"); err != nil {
 		return err
 	}
-	if err := image.replayIndexed(ctx, tree); err != nil {
+	if err := image.rebuildIndexFromData(ctx, tree); err != nil {
 		var work *IndexWorkError
 		if errors.As(err, &work) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -237,7 +237,7 @@ func (b *IndexBuild) Write(ctx context.Context, tree index.Backend, export func(
 
 // PublishFile durably names the candidate outside the writer gate. Its
 // reserved ID protects it from cleanup until selector publication or discard.
-func (b *IndexBuild) PublishFile() error {
+func (b *IndexCheckpointBuild) PublishFile() error {
 	s := b.store
 	path := filepath.Join(s.Dir, IndexName(b.capture.Current.UUID, b.descriptor.ID))
 	if err := s.IO.Do("index.rename", func() error {
@@ -254,15 +254,15 @@ func (b *IndexBuild) PublishFile() error {
 	return err
 }
 
-func (b *IndexBuild) Install() error {
+func (b *IndexCheckpointBuild) Install() error {
 	if !b.filePublished || b.final == "" {
 		return errors.New("storage: checkpoint file has not been published")
 	}
 	s := b.store
 	cp := b.descriptor
-	layout, err := s.Catalog.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
-	if err != nil || layout != cp.CoveredLayoutFingerprint {
-		return ErrIndexLayoutChanged
+	fingerprint, err := s.Catalog.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	if err != nil || fingerprint != cp.CoveredLayoutFingerprint {
+		return ErrCoveredCatalogPrefixChanged
 	}
 	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return errors.New("storage: publication generation exhausted")
@@ -278,7 +278,7 @@ func (b *IndexBuild) Install() error {
 		return err
 	}
 	b.final = "" // The catalog now owns the file.
-	s.IndexCheckpointHit = true
+	s.IndexCheckpointValidated = true
 	// A cleanup failure represents an already published checkpoint.
 	if _, _, _, err := s.RetireCleaned(); err != nil {
 		return fault("index.cleanup", publication.Committed, false, err)

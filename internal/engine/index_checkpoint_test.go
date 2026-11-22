@@ -132,7 +132,7 @@ func TestCheckpointIndexConcurrentRotationPreservesTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			if !db.store.IndexCheckpointHit {
+			if !db.store.IndexCheckpointValidated {
 				t.Fatal("miss on rotated suffix")
 			}
 			wantValue(t, db, "a", "tail")
@@ -192,7 +192,7 @@ func TestCheckpointIndexRepairsSealedDataBeforePacking(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if !reopened.store.IndexCheckpointHit {
+	if !reopened.store.IndexCheckpointValidated {
 		t.Fatal("failed to load packed index")
 	}
 	wantValue(t, reopened, "b", "second")

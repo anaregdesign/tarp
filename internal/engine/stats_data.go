@@ -48,8 +48,9 @@ func (db *DB) replaceDataStatsLocked(old, next dataTotals) {
 	db.stats.TombstoneBytes = db.stats.TombstoneBytes - old.tombstones + next.tombstones
 }
 
-// sealActive seals the nonempty active prefix for a full checkpoint. The
-// log being sealed remains selected; only the new empty header is added.
+// sealActive seals the active log segment for a DATA checkpoint, an index
+// checkpoint or parity protection. The previously active segment stays selected,
+// and the new active segment contributes its header to selected DATA bytes.
 func (db *DB) sealActive() error {
 	previous := db.store.Current.ActiveID
 	err := db.store.Rotate()

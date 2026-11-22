@@ -27,7 +27,7 @@ type AutoCompactionStatus struct {
 type cleaner struct {
 	wake    chan struct{}
 	resume  chan struct{} // foreground work released or manual checkpoint requested
-	gate    chan struct{} // one shared maintenance slot for the worker and Compact
+	gate    chan struct{} // one maintenance slot for the worker, Compact and CheckpointIndex
 	cancel  context.CancelFunc
 	done    chan struct{}
 	writers atomic.Int64
@@ -100,7 +100,7 @@ func (db *DB) deferCleaning(reason string, err error) {
 	w.mu.Unlock()
 }
 
-var errManualPriority = errors.New("tarp: manual checkpoint requested")
+var errManualCheckpointPriority = errors.New("tarp: manual checkpoint requested")
 
 // Called between bounded I/O chunks, outside of DB locks.
 func (db *DB) cleanYield(ctx context.Context) error {
@@ -111,8 +111,8 @@ func (db *DB) cleanYield(ctx context.Context) error {
 		if err := db.health(); err != nil {
 			return err
 		}
-		if db.compact.Load() {
-			return errManualPriority
+		if db.manualCheckpoint.Load() {
+			return errManualCheckpointPriority
 		}
 		switch {
 		case db.backup.Load():
@@ -279,7 +279,7 @@ func (db *DB) recoverDamaged(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	w.mu.Lock()
 	w.recoverCancel = cancel
-	if db.compact.Load() || db.backup.Load() {
+	if db.manualCheckpoint.Load() || db.backup.Load() {
 		cancel()
 	}
 	w.mu.Unlock()
@@ -345,7 +345,7 @@ func (db *DB) runCleaner(ctx context.Context) {
 
 func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 	w := &db.cleaner
-	if db.compact.Load() {
+	if db.manualCheckpoint.Load() {
 		db.deferCleaning("manual checkpoint", nil)
 		return false, false
 	}
@@ -393,7 +393,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		staging = uint64(inputBytes) + uint64(manifestBytes) + format.FrontierBytes
 	}
 	if len(blocked) != 0 && w.recoverPending.Load() && (!w.cleanBeforeRecovery || len(inputs) == 0) {
-		// Never drop tombstones in a partial clean. Full checkpoint recovery
+		// Incremental cleaning retains tombstones. Full DATA checkpoint recovery
 		// must validate every selected file, so a known missing sidecar or
 		// staging failure would prevent publication for this cutoff.
 		eligible := true
@@ -463,7 +463,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		// The next pass can reclaim other inputs without retrying the damaged file.
 		db.deferCleaning("unavailable DATA", err)
 		return true, false
-	case errors.Is(err, errManualPriority), errors.Is(err, context.Canceled):
+	case errors.Is(err, errManualCheckpointPriority), errors.Is(err, context.Canceled):
 		return false, false
 	case errors.Is(publicCause(err), ErrNoSpace) && db.health() == nil:
 		db.deferCleaning("space", publicCause(err))

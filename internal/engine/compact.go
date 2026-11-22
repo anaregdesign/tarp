@@ -31,13 +31,13 @@ func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	if err := ctx.Err(); err != nil {
 		return result, operationError("compact", "context", err)
 	}
-	if !db.compact.CompareAndSwap(false, true) {
+	if !db.manualCheckpoint.CompareAndSwap(false, true) {
 		return result, ErrBusy
 	}
 	db.cancelAutoRecovery()
 	db.resumeCleaner()
 	defer func() {
-		db.compact.Store(false)
+		db.manualCheckpoint.Store(false)
 		db.notifyCleaner()
 	}()
 	select {

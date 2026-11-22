@@ -344,7 +344,7 @@ func TestCloseWhileWorkerWaitsForAdmission(t *testing.T) {
 }
 
 // A waiting worker holds the maintenance slot while yielding to backup. A
-// manual checkpoint must be able to wake it and take that slot before backup ends.
+// manual DATA checkpoint must be able to wake it and take that slot before backup ends.
 func TestManualCheckpointPreemptsCleanerDuringBackup(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "source")
 	seedCleanerCrashImage(t, dir)
@@ -391,7 +391,7 @@ func TestManualCheckpointPreemptsCleanerDuringBackup(t *testing.T) {
 	defer cancel()
 	result, err := db.Compact(ctx)
 	if err != nil || result.PinnedRetiredDataBytes == 0 {
-		t.Fatalf("manual checkpoint while backup is pinned: %+v, %v", result, err)
+		t.Fatalf("manual DATA checkpoint while backup is pinned: %+v, %v", result, err)
 	}
 }
 

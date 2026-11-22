@@ -121,8 +121,9 @@ type Store struct {
 	cleanWorkspaceOnClose bool
 	// Created reports that this Open published the initial CURRENT.
 	Created bool
-	// IndexCheckpointHit reports use of the selected index at Open.
-	IndexCheckpointHit bool
+	// IndexCheckpointValidated records a successful import or publication. A
+	// reusable checkpoint must also match the current catalog and user sequence.
+	IndexCheckpointValidated bool
 	// LargestLiveValueBytes is the largest live value at indexed Open.
 	LargestLiveValueBytes int64
 }
@@ -275,11 +276,11 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 	// created by this Open. An incompatible Open preserves prior remnants.
 	s.cleanWorkspaceOnClose = !listing.hasWorkspace
 	if image != nil && image.Catalog.Index.ID != 0 && load != nil {
-		keys, err = s.loadCheckpoint(ctx, image, load)
+		keys, err = s.loadIndexCheckpoint(ctx, image, load)
 		if err != nil {
 			return nil, nil, err
 		}
-		s.IndexCheckpointHit = keys != nil
+		s.IndexCheckpointValidated = keys != nil
 	}
 	if keys == nil {
 		keys, err = newIndex(s)
@@ -301,10 +302,10 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 
 func (s *Store) recover(ctx context.Context, image *Image, listing directoryListing, keys index.Backend) error {
 	var err error
-	if s.IndexCheckpointHit {
-		err = image.replayAfterCheckpoint(ctx, keys, s.Config.IndexedOpen)
+	if s.IndexCheckpointValidated {
+		err = image.replayAfterIndexCheckpoint(ctx, keys, s.Config.IndexedOpen)
 	} else {
-		err = image.replayIndexed(ctx, keys)
+		err = image.rebuildIndexFromData(ctx, keys)
 	}
 	if err != nil {
 		return err

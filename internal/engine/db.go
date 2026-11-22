@@ -47,14 +47,14 @@ type DB struct {
 	cache     *cache.Cache
 	failed    atomic.Pointer[failure]
 
-	life     engineMutex
-	cond     *sync.Cond
-	active   int
-	closing  bool
-	closed   chan struct{}
-	closeErr error
-	backup   atomic.Bool
-	compact  atomic.Bool
+	life             engineMutex
+	cond             *sync.Cond
+	active           int
+	closing          bool
+	closed           chan struct{}
+	closeErr         error
+	backup           atomic.Bool
+	manualCheckpoint atomic.Bool // Compact or CheckpointIndex has reserved the maintenance slot.
 
 	// Keep the snapshot after the fields shared by Get and lifecycle admission.
 	// Its placement affects parallel cache-hit throughput.

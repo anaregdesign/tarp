@@ -417,7 +417,7 @@ func putCatalogEntry(b []byte, f CatalogEntry) {
 // log intervals. The prefix must include every snapshot segment.
 func (c Catalog) CoveredLayoutFingerprint(coveredEntries, coveredSequence uint64) ([sha256.Size]byte, error) {
 	if coveredEntries > uint64(len(c.Entries)) || coveredEntries < uint64(len(c.Entries)) && c.Entries[coveredEntries].Kind == SnapshotKind {
-		return [sha256.Size]byte{}, bad("checkpoint prefix")
+		return [sha256.Size]byte{}, bad("index checkpoint catalog prefix")
 	}
 	prefix := c
 	prefix.Entries = c.Entries[:coveredEntries]
@@ -483,7 +483,7 @@ func DecodeCatalog(b []byte) (Catalog, error) {
 		switch kind {
 		case SnapshotKind:
 			if c.CheckpointCutoffSequence == 0 || previous != c.CheckpointCutoffSequence || first != 0 || last != 0 {
-				return c, bad("snapshot outside checkpoint prefix")
+				return c, bad("snapshot segment outside the full DATA checkpoint")
 			}
 		case RawLogKind, CleanedLogKind:
 			if previous == math.MaxUint64 || first != previous+1 || last < first {

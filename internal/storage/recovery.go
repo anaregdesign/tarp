@@ -39,7 +39,7 @@ func Validate(ctx context.Context, dir string) (*Image, error) {
 	}
 	backend := memory.New()
 	defer backend.Close()
-	if err := image.replayIndexed(ctx, backend); err != nil {
+	if err := image.rebuildIndexFromData(ctx, backend); err != nil {
 		return nil, err
 	}
 	return image, nil
@@ -192,7 +192,7 @@ func (image *Image) measure(key string, recordBytes, valueBytes int64) error {
 	return nil
 }
 
-func (image *Image) replayIndexed(ctx context.Context, backend index.Backend) error {
+func (image *Image) rebuildIndexFromData(ctx context.Context, backend index.Backend) error {
 	builder := newReplayBuilder(ctx, backend, image.Catalog.PrunedThroughSequence)
 	defer builder.abort()
 	if err := image.scan(ctx, builder.apply); err != nil {
@@ -218,13 +218,13 @@ type coveredFile struct {
 	liveKeys, liveBytes int64
 }
 
-// loadCheckpoint treats malformed derived state as a miss. Nothing measured
+// loadIndexCheckpoint falls back to DATA replay when the checkpoint is unusable. Nothing measured
 // during import is published until the entire checkpoint has been accepted.
-func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImporter) (index.Backend, error) {
+func (s *Store) loadIndexCheckpoint(ctx context.Context, image *Image, load IndexImporter) (index.Backend, error) {
 	c := image.Catalog
 	cp := c.Index
-	layout, err := c.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
-	if err != nil || layout != cp.CoveredLayoutFingerprint {
+	fingerprint, err := c.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	if err != nil || fingerprint != cp.CoveredLayoutFingerprint {
 		return nil, nil
 	}
 	if err := image.checkSelectedFiles(ctx, cp.CoveredCatalogEntries); err != nil {
@@ -348,7 +348,7 @@ func (image *Image) verifyCoveredFiles(ctx context.Context, entries uint64) erro
 	return ctx.Err()
 }
 
-func (image *Image) replayAfterCheckpoint(ctx context.Context, keys index.Backend, indexedOpen bool) error {
+func (image *Image) replayAfterIndexCheckpoint(ctx context.Context, keys index.Backend, indexedOpen bool) error {
 	cp := image.Catalog.Index
 	if !indexedOpen {
 		if err := image.verifyCoveredFiles(ctx, cp.CoveredCatalogEntries); err != nil {

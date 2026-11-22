@@ -41,7 +41,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = image.replayIndexed(t.Context(), m)
+	err = image.rebuildIndexFromData(t.Context(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = image.replayIndexed(t.Context(), failing)
+		err = image.rebuildIndexFromData(t.Context(), failing)
 		var source *SourceError
 		if !errors.As(err, &source) || !errors.Is(err, ErrCorrupt) || failing.Count() != 0 {
 			t.Fatalf("failed replay: count=%d, err=%v", failing.Count(), err)
@@ -96,7 +96,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	if err := s.Rotate(); err != nil {
 		t.Fatal(err)
 	}
-	build, err := s.BeginIndex()
+	build, err := s.BeginIndexCheckpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	}
 	oracle := memory.New()
 	defer oracle.Close()
-	if err := want.replayIndexed(t.Context(), oracle); err != nil {
+	if err := want.rebuildIndexFromData(t.Context(), oracle); err != nil {
 		t.Fatal(err)
 	}
 	cfg.MaxRecordBytes, cfg.ValueCacheBudgetBytes = want.LargestLiveRecordBytes, want.LargestLiveCacheChargeBytes
@@ -162,8 +162,8 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 			reads["replay-header"] != 0 || reads["replay-payload"] != 0 {
 			t.Fatalf("indexed=%t: Open DATA reads %v, want covered %d and tail %d payload bytes", indexed, reads, coveredPayload, tailPayload)
 		}
-		if !db.IndexCheckpointHit || keys.Count() != oracle.Count() || db.LargestLiveValueBytes != want.LargestLiveValueBytes {
-			t.Fatalf("indexed=%t: hit=%t, live=%d, max value=%d", indexed, db.IndexCheckpointHit, keys.Count(), db.LargestLiveValueBytes)
+		if !db.IndexCheckpointValidated || keys.Count() != oracle.Count() || db.LargestLiveValueBytes != want.LargestLiveValueBytes {
+			t.Fatalf("indexed=%t: hit=%t, live=%d, max value=%d", indexed, db.IndexCheckpointValidated, keys.Count(), db.LargestLiveValueBytes)
 		}
 		for _, key := range []string{"largest", "survives", "gone", "new"} {
 			got, found, err := keys.Lookup(key)
@@ -203,7 +203,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !db.IndexCheckpointHit {
+	if !db.IndexCheckpointValidated {
 		t.Fatal("Indexed open did not reuse the checkpoint")
 	}
 	// A subsequent checkpoint must validate the previously attested DATA
@@ -212,7 +212,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := db.Current
-	refresh, err := db.BeginIndex()
+	refresh, err := db.BeginIndexCheckpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 		if err := db.Rotate(); err != nil {
 			t.Fatal(err)
 		}
-		build, err := db.BeginIndex()
+		build, err := db.BeginIndexCheckpoint()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -308,8 +308,8 @@ func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, found, err := keys.Lookup("ours")
-		if db.IndexCheckpointHit || !found || err != nil || keys.Count() != 1 || db.Files[got.FileID].LiveKeys.Load() != 1 {
-			t.Fatalf("retry recovered checkpoint=%t, key=%+v, live=%d, err=%v", db.IndexCheckpointHit, got, keys.Count(), err)
+		if db.IndexCheckpointValidated || !found || err != nil || keys.Count() != 1 || db.Files[got.FileID].LiveKeys.Load() != 1 {
+			t.Fatalf("retry recovered checkpoint=%t, key=%+v, live=%d, err=%v", db.IndexCheckpointValidated, got, keys.Count(), err)
 		}
 		if err := errors.Join(keys.Close(), db.Close()); err != nil {
 			t.Fatal(err)
