@@ -92,21 +92,25 @@ def foreground(directory):
     data = index(rows(directory, "foreground"), ("trace", "arm", "trial"), product(traces, arms, trials))
     lines = []
     for trace, arm in product(traces, arms):
-        rates, rates_joined, p99s, rate_changes, p99_changes = [], [], [], [], []
+        rates, rates_joined, p99s = [], [], []
+        loop_changes, joined_changes, p99_changes = [], [], []
         for trial in trials:
             r, base = data[trace, arm, trial], data[trace, "default", trial]
             if r["trace_sha256"] != base["trace_sha256"]:
                 raise ValueError(f"unpaired write traces in {trace}/{arm}/{trial}")
             rate, p99 = r["updates_per_s_during_put_loops"], r["put_latency"]["p99_ns"]
             rates.append(rate)
-            rates_joined.append(r["updates_per_s_including_worker_joins"])
+            joined = r["updates_per_s_including_worker_joins"]
+            rates_joined.append(joined)
             p99s.append(p99 / 1e6)
-            rate_changes.append(100 * (rate / base["updates_per_s_during_put_loops"] - 1))
+            loop_changes.append(100 * (rate / base["updates_per_s_during_put_loops"] - 1))
+            joined_changes.append(100 * (joined / base["updates_per_s_including_worker_joins"] - 1))
             p99_changes.append(100 * (p99 / base["put_latency"]["p99_ns"] - 1))
-        lines.append([trace, arm, f"{median(rates):.1f}", f"{median(rate_changes):+.1f}%",
-                      f"{median(rates_joined):.1f}", f"{median(p99s):.2f}", f"{median(p99_changes):+.1f}%"])
+        lines.append([trace, arm, f"{median(rates):.1f}", f"{median(loop_changes):+.1f}%",
+                      f"{median(rates_joined):.1f}", f"{median(joined_changes):+.1f}%",
+                      f"{median(p99s):.2f}", f"{median(p99_changes):+.1f}%"])
     table("Durable foreground Put", "Levels are medians of eight trials. Percentage changes are medians of per-trial ratios to default for the same trace and trial. Each p99 is calculated within its trial.",
-          ["Trace", "Arm", "Put-loop ops/s", "Paired change", "Ops/s incl. joins", "Put p99 ms", "Paired p99 change"], lines)
+          ["Trace", "Arm", "Put-loop ops/s", "Paired Put-loop change", "Ops/s incl. joins", "Paired incl. joins change", "Put p99 ms", "Paired p99 change"], lines)
 
 
 if __name__ == "__main__":
