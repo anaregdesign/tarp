@@ -19,14 +19,16 @@ import (
 // SegmentCleaning pins DATA segments represented by consecutive catalog entries. Its
 // private output is unreachable until InstallCleaned publishes the replacement.
 type SegmentCleaning struct {
-	sources  []CapturedSegment
-	entries  []format.CatalogEntry
-	position int
-	output   *DataSegment
-	uuid     [16]byte
-	cutoff   uint64
-	created  bool
-	digest   [sha256.Size]byte
+	sources         []CapturedSegment
+	entries         []format.CatalogEntry
+	position        int
+	output          *DataSegment
+	uuid            [16]byte
+	cutoff          uint64
+	orderedSnapshot bool
+	bounds          snapshotBoundsBuilder
+	created         bool
+	digest          [sha256.Size]byte
 }
 
 // OutputBytes is the logical length of the finished replacement DATA file.
@@ -46,6 +48,7 @@ func (c *SegmentCleaning) ResetCopy(fs *IO) error {
 	c.output.Size.Store(0)
 	c.output.DeleteBytes.Store(0)
 	c.digest = [sha256.Size]byte{}
+	c.bounds = snapshotBoundsBuilder{}
 	return nil
 }
 
@@ -67,7 +70,7 @@ func (s *Store) BeginClean(entries []format.CatalogEntry) (*SegmentCleaning, err
 	if run[0].Kind == format.SnapshotKind {
 		kind = format.SnapshotKind
 	}
-	c := &SegmentCleaning{entries: run, position: pos, uuid: s.Current.UUID, cutoff: s.Catalog.CheckpointCutoffSequence}
+	c := &SegmentCleaning{entries: run, position: pos, uuid: s.Current.UUID, cutoff: s.Catalog.CheckpointCutoffSequence, orderedSnapshot: kind == format.SnapshotKind && s.HasOrderedBase()}
 	for _, entry := range run {
 		if (entry.Kind == format.SnapshotKind) != (kind == format.SnapshotKind) {
 			return nil, fmt.Errorf("%w: cleaner crossed checkpoint boundary", ErrCorrupt)
@@ -167,6 +170,12 @@ func (c *SegmentCleaning) Copy(ctx context.Context, fs *IO, moves *Relocations, 
 			if err := fs.Write(fd, header, 0, "clean.header"); err != nil {
 				return nil, err
 			}
+		}
+		if c.orderedSnapshot {
+			if c.bounds.last >= key {
+				return nil, fmt.Errorf("%w: unordered clean snapshot output", ErrCorrupt)
+			}
+			c.bounds.add(key, writer.offset)
 		}
 		if r.Kind == format.Put {
 			next := old
@@ -324,6 +333,9 @@ func (s *Store) InstallCleaned(c *SegmentCleaning, offGate func(func() error) er
 		return err
 	}
 	if c.created {
+		if c.orderedSnapshot {
+			c.bounds.complete(c.output, &s.fences)
+		}
 		c.output.markSealed(catalog.UUID, replacement)
 		s.Segments[c.output.ID] = c.output
 	}

@@ -456,6 +456,11 @@ func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {
 			if result != (tarp.CompactResult{}) {
 				t.Fatalf("Compact returned %+v", result)
 			}
+			result, err = db.CompactByKey(tc.ctx)
+			check("compact", err)
+			if result != (tarp.CompactResult{}) {
+				t.Fatalf("CompactByKey returned %+v", result)
+			}
 			check("backup", db.Backup(tc.ctx, target))
 			info, err := tarp.VerifyBackup(tc.ctx, backup)
 			check("verify-backup", err)
@@ -504,9 +509,10 @@ func TestPublicDBClosedTakesPrecedenceOverInvalidInput(t *testing.T) {
 	}
 	_, getErr := db.Get(nil)
 	_, compactErr := db.Compact(nil)
+	_, orderedErr := db.CompactByKey(nil)
 	for name, err := range map[string]error{
 		"get": getErr, "put": db.Put(nil, nil), "delete": db.Delete(nil),
-		"backup": db.Backup(nil, ""), "compact": compactErr,
+		"backup": db.Backup(nil, ""), "compact": compactErr, "compact by key": orderedErr,
 	} {
 		if !errors.Is(err, tarp.ErrClosed) {
 			t.Errorf("%s after Close = %v", name, err)
@@ -1318,5 +1324,64 @@ func TestScanPrefixTakesFreshSnapshotsAndReleasesOnBreak(t *testing.T) {
 				t.Fatalf("canceled scan yielded %d times", count)
 			}
 		})
+	}
+}
+
+func TestCompactByKeyBackupAndReopenPreserveLatestValues(t *testing.T) {
+	dir := t.TempDir()
+	db := openPublicDB(t, dir, tarp.Options{IndexMode: tarp.IndexBTree})
+	// Share a long binary prefix so the B+tree uses overflow keys.
+	prefix := bytes.Repeat([]byte{0xff, 0}, 4096)
+	left := append(bytes.Clone(prefix), 1)
+	right := append(bytes.Clone(prefix), 2)
+	if err := db.BatchPut([]tarp.Entry{{Key: right, Value: []byte("right")}, {Key: left, Value: []byte("old")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CompactByKey(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Delete(right); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Put(left, []byte("left")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CompactByKey(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CheckpointIndex(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup")
+	if err := db.Backup(t.Context(), backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := tarp.VerifyBackup(t.Context(), backup); err != nil || info.LiveKeys != 1 {
+		t.Fatalf("VerifyBackup = %+v, %v", info, err)
+	}
+	restored := filepath.Join(t.TempDir(), "restored")
+	if err := tarp.Restore(t.Context(), tarp.RestoreRequest{Source: backup, Destination: restored}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		dir  string
+		opts tarp.Options
+	}{
+		{dir, tarp.Options{IndexMode: tarp.IndexBTree, OpenValidation: tarp.Indexed}},
+		{restored, tarp.Options{IndexMode: tarp.IndexMemory, OpenValidation: tarp.Full}},
+	} {
+		image := openPublicDB(t, tc.dir, tc.opts)
+		if _, err := image.CompactByKey(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := image.Get(left); string(got) != "left" || err != nil {
+			t.Fatalf("latest live value = %q, %v", got, err)
+		}
+		if _, err := image.Get(right); !errors.Is(err, tarp.ErrNotFound) {
+			t.Fatalf("deleted key in reopened image: %v", err)
+		}
 	}
 }

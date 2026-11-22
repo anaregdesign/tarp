@@ -30,6 +30,7 @@ type sortedReplay struct {
 	ctx         context.Context
 	dir         string
 	limit, used int64
+	budget      *orderedScratchBudget
 	chunk       []replayEvent
 	// Consecutive ordered replay chunks can share a single on-disk sort run.
 	// Sort runs merge in pairs. Each level holds at most one older run.
@@ -69,7 +70,7 @@ func (s *sortedReplay) flushChunk() error {
 		}
 	}
 	if s.pending == nil {
-		run, err := newReplayRun(s.dir)
+		run, err := s.newRun()
 		if err != nil {
 			return err
 		}
@@ -109,18 +110,18 @@ func (s *sortedReplay) push(r *replayRun) error {
 		}
 		r = merged
 	}
-	return errors.Join(errors.New("too many replay runs"), r.fd.Close())
+	return errors.Join(errors.New("too many replay runs"), r.close())
 }
 
 func (s *sortedReplay) merge(old, newer *replayRun) (result *replayRun, err error) {
 	defer func() {
-		err = errors.Join(err, old.fd.Close(), newer.fd.Close())
+		err = errors.Join(err, old.close(), newer.close())
 		if err != nil && result != nil {
-			err = errors.Join(err, result.fd.Close())
+			err = errors.Join(err, result.close())
 			result = nil
 		}
 	}()
-	result, err = newReplayRun(s.dir)
+	result, err = s.newRun()
 	if err != nil {
 		return nil, err
 	}
@@ -134,12 +135,12 @@ func (s *sortedReplay) merge(old, newer *replayRun) (result *replayRun, err erro
 
 func (s *sortedReplay) close() (err error) {
 	if s.pending != nil {
-		err = s.pending.fd.Close()
+		err = s.pending.close()
 		s.pending = nil
 	}
 	for i, run := range s.levels {
 		if run != nil {
-			err = errors.Join(err, run.fd.Close())
+			err = errors.Join(err, run.close())
 			s.levels[i] = nil
 		}
 	}
@@ -235,6 +236,21 @@ type replayRun struct {
 	fd     *os.File
 	bytes  int64
 	maxKey int
+	budget *orderedScratchBudget
+}
+
+func (s *sortedReplay) newRun() (*replayRun, error) {
+	r, err := newReplayRun(s.dir)
+	if err == nil {
+		r.budget = s.budget
+	}
+	return r, err
+}
+
+func (r *replayRun) close() error {
+	r.budget.release(uint64(r.bytes))
+	r.budget = nil
+	return r.fd.Close()
 }
 
 func newReplayRun(dir string) (*replayRun, error) {
@@ -259,8 +275,13 @@ func (r *replayRun) write(w *bufio.Writer, e replayEvent) error {
 	put(h[32:], e.addr.Sequence)
 	binary.LittleEndian.PutUint32(h[40:], e.fileKind)
 	h[44] = e.recordKind
+	charge := uint64(len(e.key)) + replayHeaderBytes
+	if err := r.budget.grow(charge); err != nil {
+		return err
+	}
 	size, err := writeScratchRecord(w, h[:], e.key, r.bytes)
 	if err != nil {
+		r.budget.release(charge)
 		return err
 	}
 	r.bytes = size

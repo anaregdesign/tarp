@@ -247,6 +247,14 @@ keys are disjoint. A batch that overlaps a staged key waits for the writer to
 commit or abort, then checks the addresses again. The B+tree takes the writer gate
 for each relocation batch. Later Put/Delete wins.
 
+`CompactByKey(ctx)` shares the full DATA checkpoint cutoff, atomic publication,
+conditional relocation and loss-recovery protocol. It sorts encoded keys and
+can carry previously verified immutable snapshot segments and their PARITY
+forward under the same identities. It checks the new log suffix and changed
+base ranges. Values in reused files can still have latent damage until checked.
+Order certification is local to the open handle. Backup and restore use the
+existing DATA and catalog formats.
+
 Old paths remain until they are unselected, have no index references, and have
 no reader/backup/compaction pins. The compaction releases its own capture pins
 before cleanup; successful unlinks also remove retired registry objects.

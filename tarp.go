@@ -245,6 +245,15 @@ func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	return (*engine.DB)(db).Compact(ctx)
 }
 
+// CompactByKey builds a full DATA checkpoint in encoded-key order. Concurrent
+// writes after its cutoff form the next log suffix. On this handle, subsequent
+// calls can reuse unchanged snapshot segments without rereading their values.
+// A healthy ordered checkpoint with no later writes or pending cleanup is a no-op.
+// Repair, cancellation and publication outcomes follow Compact.
+func (db *DB) CompactByKey(ctx context.Context) (CompactResult, error) {
+	return (*engine.DB)(db).CompactByKey(ctx)
+}
+
 // AutoCompactionStatus reports the background compaction worker's activity since Open.
 type AutoCompactionStatus = engine.AutoCompactionStatus
 

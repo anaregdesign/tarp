@@ -199,6 +199,11 @@ func (db *TypedDB[K, V]) Compact(ctx context.Context) (CompactResult, error) {
 	return db.core.Compact(ctx)
 }
 
+// CompactByKey clusters the underlying snapshot in encoded-key order.
+func (db *TypedDB[K, V]) CompactByKey(ctx context.Context) (CompactResult, error) {
+	return db.core.CompactByKey(ctx)
+}
+
 // AutoCompactionStatus returns the underlying DB's automatic maintenance status.
 func (db *TypedDB[K, V]) AutoCompactionStatus() AutoCompactionStatus {
 	return db.core.AutoCompactionStatus()

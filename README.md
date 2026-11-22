@@ -315,7 +315,7 @@ See the [runnable batch example](typed_batch_test.go).
 ## Contract
 
 `DB` provides `Get`, `Scan`, `ScanPrefix`, `Keys`, `KeysPrefix`, upserting `Put`, `Delete`, `Close`, online `Backup`,
-`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `AutoCompactionStatus`. Use `Open` to create or
+`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact` and `CompactByKey`, and `AutoCompactionStatus`. Use `Open` to create or
 reopen a database and `Restore` to restore a backup offline.
 
 - Keys and values are `[]byte`. Empty keys are rejected; empty values are valid.
@@ -551,6 +551,16 @@ in `AutoCompactionStatus`.
 If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
+
+Call `CompactByKey(ctx)` after an import or in an application-selected maintenance
+window to place related values together for `ScanPrefix`. It writes the retained
+snapshot records in encoded-key order across DATA segments. Later writes append
+to the log. On the same handle, the next call sorts the new log suffix and
+rewrites affected snapshot ranges. A healthy, unchanged checkpoint with no
+pending cleanup returns without reading DATA or writing a MANIFEST. On reopen
+the first call verifies the snapshot order before reusing it. A delta checkpoint
+can leave latent damage in a reused segment for its next checked read. The
+method is also available on `TypedDB`. See [key-ordered compaction](docs/key-ordered-compaction.md).
 
 ### Recovering damaged DATA
 

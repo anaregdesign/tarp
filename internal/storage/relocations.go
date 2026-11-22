@@ -28,6 +28,7 @@ type Relocations struct {
 	maxKey   int
 	bytes    int64
 	store    *Store
+	budget   *orderedScratchBudget
 }
 
 const (
@@ -100,8 +101,13 @@ func (m *Relocations) write(move Relocation) error {
 	put(h[32:], uint64(old.RecordBytes))
 	put(h[40:], uint64(old.ValueBytes))
 	put(h[48:], old.Sequence)
+	charge := uint64(len(move.Key)) + relocationHeader
+	if err := m.budget.grow(charge); err != nil {
+		return err
+	}
 	size, err := writeScratchRecord(m.writer, h[:], move.Key, m.bytes)
 	if err != nil {
+		m.budget.release(charge)
 		return err
 	}
 	m.bytes = size
@@ -135,6 +141,8 @@ func (m *Relocations) Close() error {
 	if m.fd == nil {
 		return nil
 	}
+	m.budget.release(uint64(m.bytes))
+	m.budget = nil
 	return m.fd.Close()
 }
 

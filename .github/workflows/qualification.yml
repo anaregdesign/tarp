@@ -12,7 +12,7 @@ on:
         required: true
         default: probe
         type: choice
-        options: [probe, controls, campaign, runtime, measure, compact-compare, index-checkpoint]
+        options: [probe, controls, campaign, runtime, measure, compact-compare, index-checkpoint, key-checkpoint]
       value-bytes:
         description: One bounded measurement profile; unused by other modes
         required: true
@@ -54,7 +54,7 @@ concurrency:
 
 jobs:
   probe:
-    if: inputs.confirmation == 'disposable-vm-only' && inputs.mode != 'index-checkpoint'
+    if: inputs.confirmation == 'disposable-vm-only' && inputs.mode != 'index-checkpoint' && inputs.mode != 'key-checkpoint'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -92,21 +92,23 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  index-checkpoint:
-    if: inputs.mode == 'index-checkpoint' && inputs.confirmation == 'disposable-vm-only'
+  checkpoint-measurement:
+    if: (inputs.mode == 'index-checkpoint' || inputs.mode == 'key-checkpoint') && inputs.confirmation == 'disposable-vm-only'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Measure index checkpoint recovery
-        run: bash benchmark/scripts/container-index-checkpoint.sh "$RUNNER_TEMP/index-checkpoint"
+      - name: Measure checkpoint behavior
+        env:
+          CHECKPOINT_MEASUREMENT: ${{ inputs.mode }}
+        run: bash benchmark/scripts/container-index-checkpoint.sh "$RUNNER_TEMP/$CHECKPOINT_MEASUREMENT" "$CHECKPOINT_MEASUREMENT"
       - name: Retain checkpoint measurements
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: index-checkpoint-${{ github.run_id }}
-          path: ${{ runner.temp }}/index-checkpoint/
+          name: ${{ inputs.mode }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/${{ inputs.mode }}/
           if-no-files-found: error

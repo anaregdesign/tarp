@@ -41,7 +41,7 @@ func TestBoundViewSharesRecordsAndOwnerControlsLifetime(t *testing.T) {
 	if err := db.Put(nil, 1); !errors.Is(err, tarp.ErrEmptyKey) {
 		t.Fatalf("Put empty key = %v", err)
 	}
-	for _, method := range []string{"Close", "Backup", "Compact", "Stats", "AutoCompactionStatus"} {
+	for _, method := range []string{"Close", "Backup", "Compact", "CompactByKey", "Stats", "AutoCompactionStatus"} {
 		if _, present := reflect.TypeOf(db).MethodByName(method); present {
 			t.Fatalf("bound view exposes owner method %s", method)
 		}
@@ -453,5 +453,35 @@ func TestTypedPrefixDecodesOnlyMatchingKeysAndValues(t *testing.T) {
 				t.Fatalf("ScanPrefix yielded %d codec errors", count)
 			}
 		})
+	}
+}
+
+func TestTypedCompactByKeyUsesStoredKeyBytes(t *testing.T) {
+	dir := t.TempDir()
+	db, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.Int16Codec{}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, key := range []int16{-1, 17, -31, 0, 17} {
+		if err := db.Put(key, fmt.Sprint(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.CompactByKey(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := openPublicDB(t, dir, tarp.Options{})
+	for _, key := range []int16{0, 17, -31, -1} {
+		encoded, err := (tarp.Int16Codec{}).Encode(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := raw.Get(encoded); err != nil || string(got) != fmt.Sprint(key) {
+			t.Fatalf("Get(%x) = %q, %v; want %d", encoded, got, err, key)
+		}
 	}
 }
