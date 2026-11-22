@@ -193,15 +193,15 @@ func measurementVM(parent context.Context, work string, cfg qualification.Measur
 				verdict.WorkingKeys != expectedKeys || verdict.Repetitions != 5 || verdict.Rows != rows || activeKind != "" {
 				return false, errors.New("incomplete measurement verdict")
 			}
-			required := []string{"cache_hit_1_worker", "cache_hit_4_worker", "cache_hit_batch", "cache_hit_batch_4_worker", "application_miss_os_warm",
+			required := []string{"value_cache_hit_workers_1", "value_cache_hit_workers_4", "value_cache_hit_batch_workers_1", "value_cache_hit_batch_workers_4", "value_cache_miss_os_warm",
 				"mixed_multi_writer", "mixed_multi_writer_reads", "mixed_multi_writer_puts", "mixed_multi_writer_schedule",
 				"durable_put_rotate_false", "durable_put_rotate_true",
 				"durable_delete_rotate_false", "durable_delete_rotate_true", "resources", "guest_os_cold_virtual_device_get",
 				"compaction_automatic-incremental", "compaction_manual-full-data-checkpoint", "repack_parked", "repack_concurrent",
-				"scan_full_warm", "scan_paused_checkpoint",
-				"startup_default_history", "startup_manual_checkpoint",
-				"startup_cold_default_history", "startup_cold_manual_checkpoint",
-				"complete_index_default_history", "complete_index_manual_checkpoint"}
+				"scan_full_warm", "scan_paused_full_data_checkpoint",
+				"startup_default_history", "startup_full_data_checkpoint",
+				"startup_cold_default_history", "startup_cold_full_data_checkpoint",
+				"complete_index_default_history", "complete_index_full_data_checkpoint"}
 			for _, mode := range []string{"baseline", "backup", "compact", "backup-compact", "pinned-backup-compact"} {
 				required = append(required, "interference_"+mode, "interference_"+mode+"_read", "interference_"+mode+"_durable_put")
 			}

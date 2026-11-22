@@ -59,18 +59,19 @@ type foregroundPut struct {
 }
 
 type maintenanceWindow struct {
-	Mode            string
-	StartNS         int64
-	ElapsedNS       int64
-	DATABytes       int
-	CopyWrites      int
-	BackupReads     int
-	SourceOpens     int
-	Records         int
-	PaceSleeps      int
-	CaptureSequence uint64
-	StateSHA256     string
-	Puts            []foregroundPut
+	Mode                     string
+	StartNS                  int64
+	ElapsedNS                int64
+	DATABytes                int
+	CopyWrites               int
+	BackupReads              int
+	SourceOpens              int
+	Records                  int
+	PaceSleeps               int
+	BackupLastUserSequence   uint64 `json:",omitempty"`
+	CheckpointCutoffSequence uint64 `json:",omitempty"`
+	StateSHA256              string
+	Puts                     []foregroundPut
 }
 
 func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [][]byte, value []byte, mode string) {
@@ -257,11 +258,11 @@ func measureForeground(t *testing.T, fixture string, opts engine.Options, keys [
 		t.Fatal("foreground digest or sequence mismatch")
 	}
 	if mode == "backup" {
-		window.CaptureSequence = frontier.LastUserSequence
+		window.BackupLastUserSequence = frontier.LastUserSequence
 	}
 	if strings.HasPrefix(mode, "compact") {
-		window.CaptureSequence = observed.CheckpointCutoff
-		if observed.CheckpointCutoff != initial.LastUserSequence || window.Records != count {
+		window.CheckpointCutoffSequence = observed.CheckpointCutoffSequence
+		if observed.CheckpointCutoffSequence != initial.LastUserSequence || window.Records != count {
 			t.Fatal("incorrect checkpoint prefix")
 		}
 	}

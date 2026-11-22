@@ -116,7 +116,7 @@ func TestBatchPutMemory(t *testing.T) {
 	}
 	row := map[string]any{
 		"mode": mode, "encoded_batch_bytes": encodedBytes, "data_writes": writes,
-		"selected_segments_after_put": after.SelectedSegments, "surviving_value_bytes": survivorBytes,
+		"selected_data_segments_after_put": after.SelectedSegments, "surviving_value_bytes": survivorBytes,
 		"open_heap_bytes": openHeap, "input_ready_heap_bytes": inputHeap,
 		"first_data_write_heap_bytes": writeHeap, "published_inputs_live_heap_bytes": publishedHeap,
 		"published_inputs_released_heap_bytes": releasedHeap, "survivor_heap_bytes": retainedHeap,

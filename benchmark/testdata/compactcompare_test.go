@@ -1,71 +1,33 @@
-//go:build linux
-
 package benchmark
 
 import (
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
-	"strconv"
 	"testing"
 	"time"
 
-	"github.com/anaregdesign/tarp/benchmark/guesttest"
-	"github.com/anaregdesign/tarp/benchmark/qualification"
 	"github.com/anaregdesign/tarp/internal/engine"
 	"github.com/anaregdesign/tarp/internal/format"
 )
 
-// The diagnostic-only binary supplies timings for individual Compact stages.
-var compactDiagnostic = func() map[string]int64 { return nil }
-var compactGateSamples = func() map[string][]int64 { return nil }
+// Only the tarpprofile binary installs the foreground window's mutex observer.
+var compactLockProfile func(*testing.T, engine.Observer, *measurementHooks) func() map[string]compactLockHolds
 
-// Both comparison arms measure these fields in the same committed CURRENT format.
-func captureMeasuredFrontier(frontier format.Frontier) (lastUserSequence uint64, manifestDigest [32]byte) {
-	encoded := format.EncodeFrontier(frontier)
-	return binary.LittleEndian.Uint64(encoded[96:104]), [32]byte(encoded[48:80])
+type compactLockHolds struct {
+	Observations        uint64  `json:"observations"`
+	TotalHoldNS         uint64  `json:"total_hold_ns"`
+	MaximumHoldNS       int64   `json:"maximum_hold_ns"`
+	RetainedPrefixCount int     `json:"retained_prefix_count"`
+	SampledHoldNS       []int64 `json:"sampled_hold_ns"`
 }
 
-// TestCompactCompare is compiled into each arm's benchmark package. A single
-// seed invocation prepares the closed disk image used by both binaries.
-func TestCompactCompare(t *testing.T) {
-	mode := os.Getenv("TARP_COMPARE_MODE")
-	if mode == "" {
-		t.Skip("requires the paired Compact measurement guest")
-	}
-	arm := os.Getenv("TARP_COMPARE_ARM")
-	round, err := strconv.Atoi(os.Getenv("TARP_COMPARE_ROUND"))
-	if (arm != "base" && arm != "next") || err != nil || round < 0 {
-		t.Fatalf("invalid measurement arm %q or round %q", arm, os.Getenv("TARP_COMPARE_ROUND"))
-	}
-	const fixture = "/mnt/tarp-data/compare-fixture"
-	keys, value, opts := measurementInput(64, qualification.MeasurementKeys)
-	// This driver is also copied into v0.8.0, which has only a memory index
-	// and uses the original value LRU field name.
-	fields := reflect.ValueOf(&opts).Elem()
-	if mode := fields.FieldByName("IndexMode"); mode.IsValid() {
-		const indexMemory = 1 // engine.IndexMemory in the selectable-index arms.
-		mode.SetUint(indexMemory)
-	}
-	budget := fields.FieldByName("ValueCacheBudgetBytes")
-	if !budget.IsValid() {
-		budget = fields.FieldByName("CacheBytes")
-	}
-	budget.SetInt(64 << 10)
+func runCompactCompare(t *testing.T, fixture, arm, mode string, round, keyCount int) map[string]any {
+	t.Helper()
+	keys, value, opts := measurementInput(64, keyCount)
+	opts.IndexMode, opts.ValueCacheBudgetBytes = engine.IndexMemory, 64<<10
 	opts.TargetSegmentBytes, opts.ReadFileHandles = 1<<20, 4
-	if mode == "seed" {
-		if arm != "base" || round != 0 {
-			t.Fatal("only the baseline seeds the shared fixture")
-		}
-		guesttest.MountTarget(t, true, "compact-compare-64", 42)
-	} else {
-		guesttest.RequireDisposableGuest(t)
-	}
-	t.Setenv("TMPDIR", filepath.Dir(fixture))
 	if mode == "seed" {
 		source := filepath.Join(t.TempDir(), "db")
 		db, err := engine.Open(source, opts)
@@ -81,18 +43,17 @@ func TestCompactCompare(t *testing.T) {
 			t.Fatal(err)
 		}
 		measurementPrepareFixture(t, source, fixture, opts, keys, value)
-		fmt.Printf("TARP_COMPARE {\"mode\":\"seed\",\"arm\":\"base\",\"round\":0,\"seed_keys\":%d}\n", len(keys))
-		return
+		return map[string]any{"mode": mode, "arm": arm, "round": round, "seed_keys": len(keys)}
 	}
 
 	db, hooks := measurementOpenClone(t, fixture, opts)
 	probe := engine.Observe(db)
 	dir := probe.Dir()
 	initial := probe.Frontier()
-	initialSequence, sourceManifestDigest := captureMeasuredFrontier(initial)
-	// 4,096 initial Puts, 1,024 overwrites and 256 delete/reinsert pairs.
-	if initialSequence != 5632 {
-		t.Fatalf("fixture sequence %d", initialSequence)
+	initialLastUserSequence := initial.LastUserSequence
+	// Match the initial Puts, overwrites and delete/reinsert pairs in the fixture.
+	if initialLastUserSequence != uint64(keyCount+min(1024, keyCount)+2*min(256, keyCount/4)) {
+		t.Fatalf("fixture sequence %d", initialLastUserSequence)
 	}
 	row := map[string]any{}
 	var puts int64
@@ -107,7 +68,7 @@ func TestCompactCompare(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		row["fixture_sequence_before_workers"], _ = captureMeasuredFrontier(probe.Frontier())
+		row["fixture_last_user_sequence_before_workers"] = probe.Frontier().LastUserSequence
 		// All foreground workers and the inventory sampler are parked.
 		start := time.Now()
 		_, err := db.Compact(t.Context())
@@ -118,7 +79,7 @@ func TestCompactCompare(t *testing.T) {
 		row["compact_records_copied"] = hooks.manualRecords.Load()
 		row["compact_copy_bytes"] = hooks.manualBytes.Load()
 		row["compact_copy_source_opens"] = hooks.manualSourceOpens.Load()
-	case "overlap", "fixed", "diagnostic", "baseline", "pinned":
+	case "overlap", "fixed", "lock-profile", "baseline", "pinned":
 		originalMode := "compact"
 		minimum := 500 * time.Millisecond
 		switch mode {
@@ -128,6 +89,13 @@ func TestCompactCompare(t *testing.T) {
 			originalMode = "baseline"
 		case "pinned":
 			originalMode = pinnedBackupMode
+		}
+		var finishProfile func() map[string]compactLockHolds
+		if mode == "lock-profile" {
+			if compactLockProfile == nil {
+				t.Fatal("lock-profile window requires the tarpprofile binary")
+			}
+			finishProfile = compactLockProfile(t, probe, hooks)
 		}
 		// The fixed window continues the same traffic after Compact returns.
 		row = measureInterferenceFor(t, db, hooks, keys[:8], value, originalMode, minimum)
@@ -153,35 +121,8 @@ func TestCompactCompare(t *testing.T) {
 			}
 			row[worker] = sample
 		}
-		if mode == "diagnostic" {
-			stages := compactDiagnostic()
-			if stages == nil {
-				t.Fatal("missing per-stage instrumentation in diagnostic binary")
-			}
-			gateSamples := compactGateSamples()
-			for _, gate := range []string{"relocation_writer", "relocation_index_gate"} {
-				calls := stages[gate+"_acquires"]
-				for _, event := range []string{"_wait_ns", "_hold_ns"} {
-					intervals, ok := gateSamples[gate+event]
-					var total int64
-					for _, ns := range intervals {
-						total += ns
-					}
-					if !ok || int64(len(intervals)) != calls || total != stages[gate+event] || !slices.IsSorted(intervals) {
-						t.Fatalf("invalid %s%s intervals for %d acquisitions", gate, event, calls)
-					}
-				}
-				holds := gateSamples[gate+"_hold_ns"]
-				var longest int64
-				if len(holds) > 0 {
-					longest = holds[len(holds)-1]
-				}
-				if calls != stages[gate+"_hold_calls"] || longest != stages[gate+"_max_hold_ns"] {
-					t.Fatalf("invalid %s hold measurements: %+v", gate, stages)
-				}
-			}
-			row["stages"] = stages
-			row["relocation_gate_samples"] = gateSamples
+		if finishProfile != nil {
+			row["lock_holds"] = finishProfile()
 		}
 	default:
 		t.Fatalf("unknown comparison mode %q", mode)
@@ -193,7 +134,7 @@ func TestCompactCompare(t *testing.T) {
 			t.Fatal("foreground-only window observed Compact activity")
 		}
 	} else {
-		// All 4,097 keys are 16 bytes and their records fit in one snapshot.
+		// All keys are 16 bytes and their DATA records fit in one snapshot segment.
 		wantBytes := format.SegmentHeaderBytes + count*(format.RecordHeaderBytes+16+int64(len(value)))
 		if records != count || copyBytes != wantBytes || row["compact_elapsed_ns"].(int64) <= 0 {
 			t.Fatalf("Compact copied %d records and %d bytes; want %d and %d", records, copyBytes, count, wantBytes)
@@ -209,27 +150,43 @@ func TestCompactCompare(t *testing.T) {
 	}
 	digest, live := measurementState(t, reopened)
 	frontier := engine.Observe(reopened).Frontier()
-	reopenedSequence, _ := captureMeasuredFrontier(frontier)
+	reopenedLastUserSequence := frontier.LastUserSequence
 	layout := observedLayout(reopened)
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wantSequence := initialSequence + 1 + uint64(puts)
+	wantLastUserSequence := initialLastUserSequence + 1 + uint64(puts)
 	if int64(live) != count || live != row["fixture_live_keys"].(int) || digest != row["fixture_state_sha256"].(string) ||
-		initial.UUID != frontier.UUID || reopenedSequence != wantSequence || row["fixture_sequence_before_workers"].(uint64) != initialSequence+1 {
-		t.Fatalf("reopened state: digest %s, %d keys, sequence %d (want %d)", digest, live, reopenedSequence, wantSequence)
+		initial.UUID != frontier.UUID || reopenedLastUserSequence != wantLastUserSequence || row["fixture_last_user_sequence_before_workers"].(uint64) != initialLastUserSequence+1 {
+		t.Fatalf("reopened state: digest %s, %d keys, sequence %d (want %d)", digest, live, reopenedLastUserSequence, wantLastUserSequence)
 	}
-	if mode != "baseline" && (layout.CheckpointCutoff < initialSequence+1 || layout.CheckpointCutoff > reopenedSequence ||
-		layout.SnapshotFiles == 0 || layout.UnselectedPinnedBytes != 0) {
+	if mode != "baseline" && (layout.CheckpointCutoffSequence < initialLastUserSequence+1 || layout.CheckpointCutoffSequence > reopenedLastUserSequence ||
+		layout.SnapshotSegments == 0 || layout.UnselectedPinnedDataBytes != 0) {
 		t.Fatalf("unexpected reopened checkpoint layout: %+v", layout)
 	}
 	row["arm"], row["round"], row["mode"] = arm, round, mode
-	row["source_manifest_sha256"] = fmt.Sprintf("%x", sourceManifestDigest)
-	row["successful_puts"], row["reopened_sequence"], row["reopened_live_keys"] = puts, reopenedSequence, live
-	row["reopened_state_sha256"], row["reopened_checkpoint_cutoff"] = digest, layout.CheckpointCutoff
-	encoded, err := json.Marshal(row)
-	if err != nil {
-		t.Fatal(err)
+	row["source_manifest_sha256"] = fmt.Sprintf("%x", initial.ManifestDigest)
+	row["successful_puts"], row["reopened_last_user_sequence"], row["reopened_live_keys"] = puts, reopenedLastUserSequence, live
+	row["reopened_state_sha256"], row["reopened_checkpoint_cutoff_sequence"] = digest, layout.CheckpointCutoffSequence
+	return row
+}
+
+// CI runs seed and next in separate archives against one small closed fixture.
+func TestCompactComparisonFixture(t *testing.T) {
+	const keys = 8
+	fixture := os.Getenv("TARP_COMPACT_TEST_FIXTURE")
+	if fixture == "" {
+		fixture = filepath.Join(t.TempDir(), "fixture")
 	}
-	fmt.Printf("TARP_COMPARE %s\n", encoded)
+	t.Run("seed", func(t *testing.T) {
+		runCompactCompare(t, fixture, "base", "seed", 0, keys)
+	})
+	for _, arm := range []string{"base", "next"} {
+		t.Run(arm, func(t *testing.T) {
+			row := runCompactCompare(t, fixture, arm, "parked", 1, keys)
+			if row["reopened_last_user_sequence"] != uint64(21) || row["compact_records_copied"] != int64(9) {
+				t.Fatalf("unexpected sequence %v or copied DATA records %v", row["reopened_last_user_sequence"], row["compact_records_copied"])
+			}
+		})
+	}
 }

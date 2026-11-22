@@ -313,7 +313,7 @@ func (image *Image) checkSelectedFiles(ctx context.Context, covered uint64) erro
 		if !entry.HasPhysicalFile() {
 			continue
 		}
-		area := "tail"
+		area := "log_suffix"
 		if uint64(i) < covered {
 			area = "covered"
 		}
@@ -359,7 +359,7 @@ func (image *Image) replayAfterIndexCheckpoint(ctx context.Context, keys index.B
 	// to bounded private transactions on top of the imported checkpoint.
 	builder := replayBuilder{backend: keys, pruned: image.Catalog.PrunedThroughSequence}
 	defer builder.abort()
-	if err := image.scanFrom(ctx, int(cp.CoveredCatalogEntries), "tail", builder.apply); err != nil {
+	if err := image.scanFrom(ctx, int(cp.CoveredCatalogEntries), "log_suffix", builder.apply); err != nil {
 		return err
 	}
 	if cp.CoveredSequence == image.Current.LastUserSequence {
@@ -400,25 +400,25 @@ func openSelected(path string, uuid [16]byte, entry format.CatalogEntry, mayGrow
 
 type observedDATA struct {
 	io.ReaderAt
-	observe         func(string, int)
-	header, payload string
+	observe                       func(string, int)
+	segmentHeader, encodedRecords string
 }
 
 func observeDATA(rd io.ReaderAt, observe func(string, int), area string) io.ReaderAt {
 	if observe == nil {
 		return rd
 	}
-	return observedDATA{rd, observe, area + "-header", area + "-payload"}
+	return observedDATA{rd, observe, area + "_segment_header", area + "_encoded_records"}
 }
 
 func (r observedDATA) ReadAt(p []byte, off int64) (int, error) {
 	n, err := r.ReaderAt.ReadAt(p, off)
 	header := int(min(int64(n), max(0, format.SegmentHeaderBytes-off)))
 	if header > 0 {
-		r.observe(r.header, header)
+		r.observe(r.segmentHeader, header)
 	}
 	if n > header {
-		r.observe(r.payload, n-header)
+		r.observe(r.encodedRecords, n-header)
 	}
 	return n, err
 }

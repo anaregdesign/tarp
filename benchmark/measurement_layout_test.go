@@ -15,22 +15,22 @@ import (
 // committed frontier. The registry can additionally contain retired files or
 // staging. Neither count is a filesystem block allocation measurement.
 type measurementLayout struct {
-	Sequence              uint64 `json:"sequence"`
-	CheckpointCutoff      uint64 `json:"checkpoint_cutoff"`
-	PrunedThrough         uint64 `json:"pruned_through"`
-	RawSealedFiles        int    `json:"raw_sealed_files"`
-	SnapshotFiles         int    `json:"snapshot_files"`
-	CleanedFiles          int    `json:"cleaned_files"`
-	EmptyCleanedIntervals int    `json:"empty_cleaned_intervals"`
-	SelectedDataFiles     int    `json:"selected_data_files"`
-	SelectedDataBytes     int64  `json:"selected_data_bytes"`
-	SelectedRecordBytes   int64  `json:"selected_record_bytes"`
-	LivePutBytes          int64  `json:"live_put_bytes"`
-	RetainedDeleteBytes   int64  `json:"retained_delete_bytes"`
-	ObsoletePutBytes      int64  `json:"obsolete_put_bytes"`
-	SelectedMetadataBytes int64  `json:"selected_metadata_bytes"`
-	RegisteredDataBytes   int64  `json:"registered_data_bytes"`
-	UnselectedPinnedBytes int64  `json:"unselected_pinned_data_bytes"`
+	LastUserSequence          uint64 `json:"last_user_sequence"`
+	CheckpointCutoffSequence  uint64 `json:"checkpoint_cutoff_sequence"`
+	PrunedThroughSequence     uint64 `json:"pruned_through_sequence"`
+	SealedRawLogSegments      int    `json:"sealed_raw_log_segments"`
+	SnapshotSegments          int    `json:"snapshot_segments"`
+	CleanedLogSegments        int    `json:"cleaned_log_segments"`
+	EmptyCleanedIntervals     int    `json:"empty_cleaned_intervals"`
+	SelectedDataSegments      int    `json:"selected_data_segments"`
+	SelectedDataBytes         int64  `json:"selected_data_bytes"`
+	SelectedRecordBytes       int64  `json:"selected_record_bytes"`
+	LiveRecordBytes           int64  `json:"live_record_bytes"`
+	RetainedDeleteBytes       int64  `json:"retained_delete_bytes"`
+	ObsoletePutBytes          int64  `json:"obsolete_put_bytes"`
+	SelectedMetadataBytes     int64  `json:"selected_metadata_bytes"`
+	RegisteredDataBytes       int64  `json:"registered_data_bytes"`
+	UnselectedPinnedDataBytes int64  `json:"unselected_pinned_data_bytes"`
 }
 
 func observedLayout(db *engine.DB) measurementLayout {
@@ -44,8 +44,10 @@ func observedLayout(db *engine.DB) measurementLayout {
 
 func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 	layout := measurementLayout{
-		Sequence: s.Current.LastUserSequence, CheckpointCutoff: s.Catalog.CheckpointCutoffSequence, PrunedThrough: s.Catalog.PrunedThroughSequence,
-		SelectedDataFiles: 1, SelectedDataBytes: s.Current.ActiveCommittedEndOffset,
+		LastUserSequence:         s.Current.LastUserSequence,
+		CheckpointCutoffSequence: s.Catalog.CheckpointCutoffSequence,
+		PrunedThroughSequence:    s.Catalog.PrunedThroughSequence,
+		SelectedDataSegments:     1, SelectedDataBytes: s.Current.ActiveCommittedEndOffset,
 		SelectedMetadataBytes: int64(len(s.Manifest)) + format.FrontierBytes,
 		RetainedDeleteBytes:   s.Segments[s.Current.ActiveID].DeleteBytes.Load(),
 	}
@@ -57,25 +59,25 @@ func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 		}
 		switch e.Kind {
 		case format.RawLogKind:
-			layout.RawSealedFiles++
+			layout.SealedRawLogSegments++
 		case format.SnapshotKind:
-			layout.SnapshotFiles++
+			layout.SnapshotSegments++
 		case format.CleanedLogKind:
-			layout.CleanedFiles++
+			layout.CleanedLogSegments++
 		}
 		selected[e.ID] = true
-		layout.SelectedDataFiles++
+		layout.SelectedDataSegments++
 		layout.SelectedDataBytes += e.Bytes
 		layout.RetainedDeleteBytes += s.Segments[e.ID].DeleteBytes.Load()
 	}
-	layout.SelectedRecordBytes = layout.SelectedDataBytes - int64(layout.SelectedDataFiles)*format.SegmentHeaderBytes
-	layout.LivePutBytes = liveBytes
-	layout.ObsoletePutBytes = layout.SelectedRecordBytes - layout.LivePutBytes - layout.RetainedDeleteBytes
+	layout.SelectedRecordBytes = layout.SelectedDataBytes - int64(layout.SelectedDataSegments)*format.SegmentHeaderBytes
+	layout.LiveRecordBytes = liveBytes
+	layout.ObsoletePutBytes = layout.SelectedRecordBytes - layout.LiveRecordBytes - layout.RetainedDeleteBytes
 	for id, segment := range s.Segments {
 		size := segment.Size.Load()
 		layout.RegisteredDataBytes += size
 		if !selected[id] && segment.References() > 0 {
-			layout.UnselectedPinnedBytes += size
+			layout.UnselectedPinnedDataBytes += size
 		}
 	}
 	return layout
@@ -133,11 +135,11 @@ func TestMeasurementLayoutAccountsForCanonicalRecords(t *testing.T) {
 	dir := testfixture.WriteMixedStore(t, 8)
 	db, _ := openStartupSample(t, dir, engine.Options{})
 	layout := observedLayout(db)
-	// The fixture has one physical file for each kind plus its active log.
-	// The empty interval covers sequences 3 and 4 with no physical header.
-	if layout.Sequence != 9 || layout.CheckpointCutoff != 2 || layout.PrunedThrough != 8 ||
-		layout.RawSealedFiles != 1 || layout.CleanedFiles != 1 || layout.SnapshotFiles != 1 ||
-		layout.EmptyCleanedIntervals != 1 || layout.SelectedDataFiles != 4 {
+	// The fixture has one segment of each sealed kind and one active log segment.
+	// The empty interval covers user sequences 3 and 4 with zero DATA segments.
+	if layout.LastUserSequence != 9 || layout.CheckpointCutoffSequence != 2 || layout.PrunedThroughSequence != 8 ||
+		layout.SealedRawLogSegments != 1 || layout.CleanedLogSegments != 1 || layout.SnapshotSegments != 1 ||
+		layout.EmptyCleanedIntervals != 1 || layout.SelectedDataSegments != 4 {
 		t.Fatalf("incorrect replay layout: %+v", layout)
 	}
 	bytesOf := func(key, value string) int64 {
@@ -145,7 +147,7 @@ func TestMeasurementLayoutAccountsForCanonicalRecords(t *testing.T) {
 	}
 	wantedLive := bytesOf("checkpoint", "kept") + bytesOf("empty", "") + bytesOf("tail", "new")
 	wantedDeletes := bytesOf("pruned-put", "") + bytesOf("pruned-snapshot-key", "")
-	if layout.LivePutBytes != wantedLive || layout.RetainedDeleteBytes != wantedDeletes ||
+	if layout.LiveRecordBytes != wantedLive || layout.RetainedDeleteBytes != wantedDeletes ||
 		layout.ObsoletePutBytes != 0 || layout.SelectedRecordBytes != wantedLive+wantedDeletes ||
 		layout.SelectedDataBytes != 4*format.SegmentHeaderBytes+layout.SelectedRecordBytes ||
 		layout.RegisteredDataBytes != layout.SelectedDataBytes || layout.SelectedMetadataBytes == 0 {
@@ -170,10 +172,10 @@ func TestMeasurementLayoutAccountsForCanonicalRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkpoint := observedLayout(db)
-	if checkpoint.SelectedDataFiles != 2 || checkpoint.SnapshotFiles != 1 || checkpoint.EmptyCleanedIntervals != 0 ||
+	if checkpoint.SelectedDataSegments != 2 || checkpoint.SnapshotSegments != 1 || checkpoint.EmptyCleanedIntervals != 0 ||
 		checkpoint.RetainedDeleteBytes != 0 || checkpoint.ObsoletePutBytes != 0 ||
-		checkpoint.UnselectedPinnedBytes == 0 || checkpoint.UnselectedPinnedBytes != result.PinnedRetiredDataBytes ||
-		checkpoint.RegisteredDataBytes != checkpoint.SelectedDataBytes+checkpoint.UnselectedPinnedBytes {
+		checkpoint.UnselectedPinnedDataBytes == 0 || checkpoint.UnselectedPinnedDataBytes != result.PinnedRetiredDataBytes ||
+		checkpoint.RegisteredDataBytes != checkpoint.SelectedDataBytes+checkpoint.UnselectedPinnedDataBytes {
 		t.Fatalf("incorrect post-checkpoint inventory: %+v (Compact %+v)", checkpoint, result)
 	}
 }

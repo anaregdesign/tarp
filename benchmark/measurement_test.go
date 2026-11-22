@@ -76,9 +76,9 @@ func BenchmarkGet(b *testing.B) {
 	for _, size := range []int{64, 1024, 4096} {
 		b.Run(fmt.Sprint(size), func(b *testing.B) {
 			for _, miss := range []bool{false, true} {
-				name := "application-hit"
+				name := "value-cache-hit"
 				if miss {
-					name = "application-miss-os-warm"
+					name = "value-cache-miss-os-warm"
 				}
 				b.Run(name, func(b *testing.B) {
 					db, keys, _ := benchmarkDB(b, size, miss)
@@ -93,7 +93,7 @@ func BenchmarkGet(b *testing.B) {
 					}
 				})
 			}
-			b.Run("application-hit-parallel", func(b *testing.B) {
+			b.Run("value-cache-hit-parallel", func(b *testing.B) {
 				db, keys, _ := benchmarkDB(b, size, false)
 				b.SetParallelism(1)
 				b.ResetTimer()
@@ -302,7 +302,7 @@ func resourceSample(t *testing.T, db *engine.DB) map[string]any {
 	}
 	result := map[string]any{
 		"heap_alloc_bytes": before.HeapAlloc, "runtime_sys_bytes": before.Sys, "process_peak_rss_bytes": peakRSS,
-		"cache_logical_bytes": cacheBytes, "cache_limit_bytes": probe.Options().ValueCacheBudgetBytes,
+		"value_cache_charge_bytes": cacheBytes, "value_cache_budget_bytes": probe.Options().ValueCacheBudgetBytes,
 		"live_keys": liveKeys, "index_mode": probe.Options().IndexMode, "index_metrics": probe.IndexMetrics(),
 		"open_process_fds_including_sampler": len(fds), "read_handle_limit": probe.Options().ReadFileHandles,
 		"directory_logical_file_bytes": logical, "directory_allocated_bytes": allocated, "layout": observedLayout(db),
@@ -425,7 +425,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	}
 	frontier := engine.Observe(db).Frontier()
 	captured := &measurementCapture{parent: root, uuid: frontier.UUID}
-	fixtureSequence := frontier.LastUserSequence
+	fixtureLastUserSequence := frontier.LastUserSequence
 	start, stop := make(chan struct{}), make(chan struct{})
 	type workerResult struct {
 		latency sampledLatency
@@ -605,7 +605,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 	close(stop)
 	output := map[string]any{
 		"maintenance_ns": maintenanceNS, "compact": compact,
-		"fixture_sequence_before_workers": fixtureSequence, "fixture_live_keys": expectedKeys,
+		"fixture_last_user_sequence_before_workers": fixtureLastUserSequence, "fixture_live_keys": expectedKeys,
 		"fixture_state_sha256": expectedDigest, "fixture_manifest_sha256": fmt.Sprintf("%x", frontier.ManifestDigest),
 		"automatic_cleaner": "held from Open through the measured foreground and manual-checkpoint window",
 		"backup_copy_bytes": backupCopied, "backup_elapsed_ns": backupEnd.Sub(backupStart).Nanoseconds(),
@@ -664,13 +664,13 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 			}
 		}()
 		digest, count := measurementState(t, restored)
-		restoredSequence := engine.Observe(restored).Frontier().LastUserSequence
-		if !captured.reached || restoredSequence != captured.sequence ||
+		restoredLastUserSequence := engine.Observe(restored).Frontier().LastUserSequence
+		if !captured.reached || restoredLastUserSequence != captured.lastUserSequence ||
 			digest != expectedDigest || count != expectedKeys {
 			t.Fatalf("produced backup did not reopen at its witnessed capture/state: capture=%d restored=%d keys=%d/%d digest=%s/%s",
-				captured.sequence, restoredSequence, count, expectedKeys, digest, expectedDigest)
+				captured.lastUserSequence, restoredLastUserSequence, count, expectedKeys, digest, expectedDigest)
 		}
-		output["backup_capture_sequence"], output["restored_sequence"] = captured.sequence, restoredSequence
+		output["backup_last_user_sequence"], output["restored_last_user_sequence"] = captured.lastUserSequence, restoredLastUserSequence
 		output["restored_live_keys"], output["restored_state_sha256"], output["backup_reopen_verified"] = count, digest, true
 		if mode == pinnedBackupMode {
 			pins, err := verifyBackupReclamation(t.Context(), probe, hooks, target, pinnedFiles)
@@ -751,8 +751,8 @@ func TestMeasurementProfiles(t *testing.T) {
 					return err
 				}
 				before := hooks.reads.Load()
-				write("cache_hit_1_worker", size, repetition, measureCalls(t, 2048, 1, get))
-				write("cache_hit_4_workers", size, repetition, measureCalls(t, 2048, 4, get))
+				write("value_cache_hit_workers_1", size, repetition, measureCalls(t, 2048, 1, get))
+				write("value_cache_hit_workers_4", size, repetition, measureCalls(t, 2048, 4, get))
 				if hooks.reads.Load() != before {
 					t.Fatal("declared cache-hit profile performed file reads")
 				}
@@ -769,7 +769,7 @@ func TestMeasurementProfiles(t *testing.T) {
 					}
 				}
 				runtime.ReadMemStats(&memAfter)
-				write("cache_hit_allocation", size, repetition, map[string]any{
+				write("value_cache_hit_allocation", size, repetition, map[string]any{
 					"allocations_per_op": allocations, "allocated_bytes_per_op": float64(memAfter.TotalAlloc-memBefore.TotalAlloc) / 100,
 				})
 				holds := make([]int64, 2048)
@@ -783,7 +783,7 @@ func TestMeasurementProfiles(t *testing.T) {
 						}
 					})
 				}
-				write("cache_state_hold_probe_not_end_to_end", size, repetition, latency(holds, int64(len(holds)), 0))
+				write("value_cache_lookup_under_state_lock", size, repetition, latency(holds, int64(len(holds)), 0))
 				write("resources_hot", size, repetition, resourceSample(t, db))
 				if err := db.Close(); err != nil {
 					t.Fatal(err)
@@ -797,7 +797,7 @@ func TestMeasurementProfiles(t *testing.T) {
 					t.Fatal(err)
 				}
 				before = hooks.reads.Load()
-				write("application_miss_os_warm", size, repetition, measureCalls(t, 2048, 1, get))
+				write("value_cache_miss_os_warm", size, repetition, measureCalls(t, 2048, 1, get))
 				if hooks.reads.Load()-before != 2048 {
 					t.Fatal("declared miss profile admitted cache hits")
 				}
@@ -819,10 +819,10 @@ func TestMeasurementProfiles(t *testing.T) {
 				if err := db.Close(); err != nil {
 					t.Fatal(err)
 				}
-				for _, state := range []string{"default_history", "manual_checkpoint"} {
+				for _, state := range []string{"default_history", "full_data_checkpoint"} {
 					source := filepath.Join(startupFixtures, state)
 					if repetition == 1 {
-						if state == "manual_checkpoint" {
+						if state == "full_data_checkpoint" {
 							measurementCheckpointFixture(t, dir, opts)
 						}
 						measurementCloneClosed(t, dir, source)

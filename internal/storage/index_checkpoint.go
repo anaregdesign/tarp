@@ -97,7 +97,7 @@ type checkpointReadMeter struct {
 func (r checkpointReadMeter) Read(b []byte) (int, error) {
 	n, err := r.Reader.Read(b)
 	if n > 0 {
-		r.observe("index", n)
+		r.observe("index_checkpoint_file", n)
 	}
 	return n, err
 }

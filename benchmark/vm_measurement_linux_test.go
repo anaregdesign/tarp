@@ -222,9 +222,9 @@ func vmResources(t *testing.T, db *engine.DB) map[string]any {
 	}
 	sample["layout"] = observedLayout(db)
 	stats := db.Stats()
-	sample["live_keys"], sample["cache_logical_bytes"] = stats.LiveKeys, stats.ValueCache.UsedBytes
+	sample["live_keys"], sample["value_cache_charge_bytes"] = stats.LiveKeys, stats.ValueCache.UsedBytes
 	sample["index_mode"], sample["index_metrics"] = engine.Observe(db).Options().IndexMode, engine.Observe(db).IndexMetrics()
-	sample["cache_limit_bytes"], sample["read_handle_limit"] = engine.Observe(db).Options().ValueCacheBudgetBytes, engine.Observe(db).Options().ReadFileHandles
+	sample["value_cache_budget_bytes"], sample["read_handle_limit"] = engine.Observe(db).Options().ValueCacheBudgetBytes, engine.Observe(db).Options().ReadFileHandles
 	sample["process_fds_including_sampler"], sample["read_data_fds"], sample["write_data_fds"] = len(fds), readFDs, writeFDs
 	sample["directory_logical_file_bytes"], sample["directory_allocated_bytes"] = logical, allocated
 	sample["filesystem_available_bytes"] = guesttest.AvailableBytes(t)
@@ -362,7 +362,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		before := hooks.reads.Load()
 		for _, workers := range []int{1, 4} {
 			result := measureCalls(t, 8192, workers, func(i int) error { return get(hot[i%len(hot)]) })
-			vmMeasureLatency(write, fmt.Sprintf("cache_hit_%d_worker", workers), repetition, result)
+			vmMeasureLatency(write, fmt.Sprintf("value_cache_hit_workers_%d", workers), repetition, result)
 		}
 		var beforeMemory, afterMemory runtime.MemStats
 		runtime.ReadMemStats(&beforeMemory)
@@ -379,13 +379,13 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 				t.Fatal(err)
 			}
 		})
-		write("cache_hit_batch", repetition, map[string]any{
+		write("value_cache_hit_batch_workers_1", repetition, map[string]any{
 			"workers": 1, "operations": 10000, "wall_ns": elapsed.Nanoseconds(), "ns_per_op": float64(elapsed.Nanoseconds()) / 10000,
 			"allocated_bytes_per_op": float64(afterMemory.TotalAlloc-beforeMemory.TotalAlloc) / 10000,
 			"allocations_per_op":     allocations, "allocation_probe_gomaxprocs": 1,
 			"storage_reads": hooks.reads.Load() - before, "returned_value_copy_included": true,
 		})
-		write("cache_hit_batch_4_worker", repetition, vmParallelHitBatch(t, get, hot))
+		write("value_cache_hit_batch_workers_4", repetition, vmParallelHitBatch(t, get, hot))
 		if hooks.reads.Load() != before {
 			t.Fatal("qualified cache hits performed storage reads")
 		}
@@ -400,9 +400,9 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		vmDeviceInterval(t, &interval, "warm", func() {
 			warm = measureCalls(t, 8192, 1, func(i int) error { return get(keys[i%len(keys)]) })
 		})
-		vmMeasureLatency(write, "application_miss_os_warm", repetition, warm)
+		vmMeasureLatency(write, "value_cache_miss_os_warm", repetition, warm)
 		if hooks.reads.Load()-before != 8192 {
-			t.Fatal("qualified application-miss window included cache hits")
+			t.Fatal("qualified value-cache-miss window included cache hits")
 		}
 		mixed := measureMixed(t, db, keys, value, true)
 		vmMeasureLatency(write, "mixed_multi_writer", repetition, mixed.all)
@@ -517,7 +517,7 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 		for _, mode := range compactionModes {
 			write("compaction_"+mode, repetition, compactionFixture.measure(t, mode))
 		}
-		write("scan_paused_checkpoint", repetition, measurePausedScan(t, repack))
+		write("scan_paused_full_data_checkpoint", repetition, measurePausedScan(t, repack))
 		for _, mode := range repackModesFor(repetition) {
 			write("repack_"+mode, repetition, repack.measure(t, mode))
 		}
@@ -533,8 +533,8 @@ func vmPrimaryMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 			})
 		}
 	}
-	for _, state := range []string{"default_history", "manual_checkpoint"} {
-		if state == "manual_checkpoint" {
+	for _, state := range []string{"default_history", "full_data_checkpoint"} {
+		if state == "full_data_checkpoint" {
 			measurementCheckpointFixture(t, dir, opts)
 		}
 		for repetition := 1; repetition <= qualification.MeasurementReps; repetition++ {

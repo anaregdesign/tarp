@@ -18,24 +18,24 @@ import (
 )
 
 type cleanerSpaceSample struct {
-	RetiredDataBytes uint64 `json:"retired_data_bytes"`
-	WindowNS         int64  `json:"window_ns"`
-	BatchPuts        int    `json:"batch_puts"`
-	Rotations        int64  `json:"rotations"`
-	DataBytes        int64  `json:"data_file_bytes"`
-	DataFiles        int    `json:"data_files"`
-	LiveBytes        uint64 `json:"live_record_bytes"`
-	SelectedBytes    uint64 `json:"selected_data_bytes"`
-	ObsoleteBytes    uint64 `json:"obsolete_put_bytes"`
-	UnlinkedBytes    uint64 `json:"worker_unlinked_bytes"`
+	UnlinkedDataBytes   uint64 `json:"unlinked_data_bytes"`
+	WindowNS            int64  `json:"window_ns"`
+	BatchPuts           int    `json:"batch_puts"`
+	Rotations           int64  `json:"rotations"`
+	DataFileBytes       int64  `json:"data_file_bytes"`
+	DataFileCount       int    `json:"data_files"`
+	LiveRecordBytes     uint64 `json:"live_record_bytes"`
+	SelectedDataBytes   uint64 `json:"selected_data_bytes"`
+	ObsoletePutBytes    uint64 `json:"obsolete_put_bytes"`
+	WorkerUnlinkedBytes uint64 `json:"worker_unlinked_bytes"`
 }
 
 // A best-effort on-disk census. The worker can retire files during ReadDir.
 func sampleCleanerSpace(t *testing.T, db *engine.DB, puts int, rotations int64, start time.Time) cleanerSpaceSample {
 	t.Helper()
 	stats := db.Stats()
-	row := cleanerSpaceSample{RetiredDataBytes: scaleprobe.RetiredDataBytes.Load(), WindowNS: time.Since(start).Nanoseconds(), BatchPuts: puts, Rotations: rotations, LiveBytes: stats.LiveRecordBytes,
-		SelectedBytes: stats.SelectedDataBytes, ObsoleteBytes: stats.ObsoletePutBytes, UnlinkedBytes: db.AutoCompactionStatus().UnlinkedBytes}
+	row := cleanerSpaceSample{UnlinkedDataBytes: scaleprobe.UnlinkedDataBytes.Load(), WindowNS: time.Since(start).Nanoseconds(), BatchPuts: puts, Rotations: rotations, LiveRecordBytes: stats.LiveRecordBytes,
+		SelectedDataBytes: stats.SelectedDataBytes, ObsoletePutBytes: stats.ObsoletePutBytes, WorkerUnlinkedBytes: db.AutoCompactionStatus().UnlinkedBytes}
 	entries, err := os.ReadDir(engine.Observe(db).Dir())
 	if err != nil {
 		t.Fatal(err)
@@ -51,8 +51,8 @@ func sampleCleanerSpace(t *testing.T, db *engine.DB, puts int, rotations int64, 
 		if err != nil {
 			t.Fatal(err)
 		}
-		row.DataBytes += info.Size()
-		row.DataFiles++
+		row.DataFileBytes += info.Size()
+		row.DataFileCount++
 	}
 	return row
 }
@@ -101,8 +101,8 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 		}
 	}
 	startRotations := rotations.Load()
-	scaleprobe.IdleSequence.Store(0)
-	scaleprobe.RetiredDataBytes.Store(0)
+	scaleprobe.IdleLastUserSequence.Store(0)
+	scaleprobe.UnlinkedDataBytes.Store(0)
 	close(admit)
 	start := time.Now()
 	timeline := []cleanerSpaceSample{sampleCleanerSpace(t, db, 0, 0, start)}
@@ -139,19 +139,19 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 	writeWindow := lastWrite.Sub(start)
 	// The last overwrites invalidate sealed records and wake the worker. Wait
 	// for the worker to observe this exact frontier with no reclaimable work.
-	finalSequence := engine.Observe(db).Frontier().LastUserSequence
-	for scaleprobe.IdleSequence.Load() != finalSequence {
+	lastUserSequence := engine.Observe(db).Frontier().LastUserSequence
+	for scaleprobe.IdleLastUserSequence.Load() != lastUserSequence {
 		if status := db.AutoCompactionStatus(); status.LastError != nil {
 			t.Fatal(status.LastError)
 		}
 		if time.Since(lastWrite) > time.Minute {
-			t.Fatalf("cleaner did not drain at sequence %d: %+v", finalSequence, db.AutoCompactionStatus())
+			t.Fatalf("cleaner did not drain at last user sequence %d: %+v", lastUserSequence, db.AutoCompactionStatus())
 		}
 		time.Sleep(time.Millisecond)
 	}
 	drainNS := max(int64(0), scaleprobe.IdleAtNS.Load()-lastWrite.Sub(scaleprobe.ClockStart).Nanoseconds())
 	final := sampleCleanerSpace(t, db, steps, rotations.Load()-startRotations, start)
-	if final.Rotations < 32 || final.RetiredDataBytes == 0 || final.LiveBytes == 0 || db.Stats().LiveKeys != keyCount {
+	if final.Rotations < 32 || final.UnlinkedDataBytes == 0 || final.LiveRecordBytes == 0 || db.Stats().LiveKeys != keyCount {
 		t.Fatalf("insufficient sustained churn or wrong live set: %+v", final)
 	}
 	if err := db.Close(); err != nil {
@@ -179,6 +179,6 @@ func measureCleanerChurn(t *testing.T, round int, gap time.Duration) {
 		"keys": keyCount, "target_segment_bytes": opts.TargetSegmentBytes, "batch_size": batchSize, "write_window_ns": writeWindow.Nanoseconds(),
 		"put": latency(puts, int64(len(puts)), writeWindow), "delete": latency(deletes, int64(len(deletes)), writeWindow),
 		"entries_per_second": float64(batchSize*(len(puts)+len(deletes))) / writeWindow.Seconds(),
-		"timeline":           timeline, "drained": final, "drain_observed_ns": drainNS, "final_sequence": finalSequence,
+		"timeline":           timeline, "drained": final, "drain_observed_ns": drainNS, "last_user_sequence": lastUserSequence,
 	})
 }

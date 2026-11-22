@@ -11,7 +11,6 @@ cpu=${TARP_PREFIX_CPU:-2}
 repo=$(git rev-parse --show-toplevel)
 base=$(git -C "$repo" rev-parse --verify --end-of-options "${2:-59ddf19}^{commit}")
 tip=$(git -C "$repo" rev-parse --verify --end-of-options "${3:-HEAD}^{commit}")
-image=docker.io/library/golang@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea
 mkdir -p "$1"
 out=$(cd "$1" && pwd -P)
 [[ -z $(ls -A "$out") ]] || { echo "results directory must be empty: $out" >&2; exit 2; }
@@ -37,8 +36,14 @@ git -C "$repo" archive "$tip" | tar -x -C "$tmp/prefix"
         echo "baseline-overlay $(git -C "$repo" rev-parse "$tip:benchmark/$file") benchmark/$file"
     done
 } > "$out/sources.txt"
+curl -fsSL --retry 2 'https://go.dev/dl/?mode=json' -o "$out/go-releases.json"
+version=$(python3 -c 'import json,sys
+print(max((v["version"] for v in json.load(open(sys.argv[1])) if v["stable"]), key=lambda v: tuple(map(int, v[2:].split(".")))))' "$out/go-releases.json")
 platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
-docker pull --platform "$platform" "$image" > "$out/image-pull.log"
+docker pull --platform "$platform" "golang:${version#go}-bookworm" > "$out/image-pull.log"
+digest=$(awk '/^Digest: sha256:/ {print $2}' "$out/image-pull.log")
+[[ $digest =~ ^sha256:[a-f0-9]{64}$ ]]
+image=docker.io/library/golang@$digest
 {
     echo "$image"
     docker image inspect "$image" --format '{{.Id}} {{.Os}}/{{.Architecture}} {{json .RepoDigests}}'
@@ -50,10 +55,11 @@ echo "Measuring $base vs $tip on CPU $cpu, $rounds rounds. Results: $out"
 if ! docker run -i --rm --cidfile "$tmp/cid" --pull=never --platform "$platform" --network none --cpuset-cpus "$cpu" \
     -v "$tmp/filter:/filter:ro" -v "$tmp/prefix:/prefix:ro" -v "$out:/out" --mount type=volume,dst=/bench \
     -e GOMAXPROCS=1 -e GOTOOLCHAIN=local -e GOPROXY=off -e TMPDIR=/bench/tmp -e GOCACHE=/bench/gocache \
-    -e TARP_EDGE_PREFIX_FIXTURES=/bench/seeds -e "ROUNDS=$rounds" "$image" bash -seu > "$out/campaign.log" 2>&1 <<'GUEST'
+    -e TARP_EDGE_PREFIX_FIXTURES=/bench/seeds -e "ROUNDS=$rounds" -e "EXPECTED_GO_VERSION=$version" "$image" bash -seu > "$out/campaign.log" 2>&1 <<'GUEST'
 set -o pipefail
 trap 'chown --reference=/out /out/*' EXIT
 mkdir -p "$TMPDIR"
+test "$(go env GOVERSION)" = "$EXPECTED_GO_VERSION"
 {
     date -u
     go version

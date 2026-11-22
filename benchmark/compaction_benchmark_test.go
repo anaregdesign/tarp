@@ -93,20 +93,20 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 }
 
 type compactionMeasurement struct {
-	Mode               string         `json:"mode"`
-	ElapsedNS          int64          `json:"elapsed_ns"`
-	Options            engine.Options `json:"options"`
-	SealedSourceBytes  int64          `json:"sealed_source_bytes"`
-	UnlinkedDataBytes  int64          `json:"unlinked_data_bytes"`
-	PublishedDataBytes int64          `json:"published_data_bytes"`
-	NetDataBytesFreed  int64          `json:"net_data_bytes_freed"`
-	Sequence           uint64         `json:"committed_sequence"`
-	Cutoff             uint64         `json:"checkpoint_cutoff"`
-	PrunedThrough      uint64         `json:"pruned_through"`
-	CleanedIntervals   int            `json:"cleaned_intervals"`
-	SnapshotFiles      int            `json:"snapshot_files"`
-	ReopenedStateHash  string         `json:"reopened_state_sha256"`
-	LiveKeys           int            `json:"live_keys"`
+	Mode                     string         `json:"mode"`
+	ElapsedNS                int64          `json:"elapsed_ns"`
+	Options                  engine.Options `json:"options"`
+	SealedSourceBytes        int64          `json:"sealed_source_bytes"`
+	UnlinkedDataBytes        int64          `json:"unlinked_data_bytes"`
+	PublishedDataBytes       int64          `json:"published_data_bytes"`
+	NetDataBytesFreed        int64          `json:"net_data_bytes_freed"`
+	LastUserSequence         uint64         `json:"last_user_sequence"`
+	CheckpointCutoffSequence uint64         `json:"checkpoint_cutoff_sequence"`
+	PrunedThroughSequence    uint64         `json:"pruned_through_sequence"`
+	CleanedIntervals         int            `json:"cleaned_intervals"`
+	SnapshotSegments         int            `json:"snapshot_segments"`
+	ReopenedStateHash        string         `json:"reopened_state_sha256"`
+	LiveKeys                 int            `json:"live_keys"`
 }
 
 // The two arms run on private copies of one closed store. Only worker admission
@@ -217,8 +217,8 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 	current := probe.Frontier()
 	selected := map[uint64]int64{current.ActiveID: current.ActiveCommittedEndOffset}
 	probe.Store(func(s *storage.Store) {
-		result.Sequence = current.LastUserSequence
-		result.Cutoff, result.PrunedThrough = s.Catalog.CheckpointCutoffSequence, s.Catalog.PrunedThroughSequence
+		result.LastUserSequence = current.LastUserSequence
+		result.CheckpointCutoffSequence, result.PrunedThroughSequence = s.Catalog.CheckpointCutoffSequence, s.Catalog.PrunedThroughSequence
 		for _, entry := range s.Catalog.Entries {
 			switch entry.Kind {
 			case format.CleanedLogKind:
@@ -227,23 +227,23 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 					t.Fatal("incremental replacement lost the retained records or their original interval")
 				}
 			case format.SnapshotKind:
-				result.SnapshotFiles++
+				result.SnapshotSegments++
 			}
 			if entry.ID != 0 {
 				selected[entry.ID] = entry.Bytes
 			}
 		}
 	})
-	if result.Sequence != f.frontier.LastUserSequence || result.PrunedThrough != result.Sequence {
+	if result.LastUserSequence != f.frontier.LastUserSequence || result.PrunedThroughSequence != result.LastUserSequence {
 		t.Fatalf("post-maintenance frontier: %+v", result)
 	}
 	switch mode {
 	case automaticIncremental:
-		if result.CleanedIntervals != 1 || result.SnapshotFiles != 0 || result.Cutoff != 0 || current.ActiveID != f.frontier.ActiveID {
+		if result.CleanedIntervals != 1 || result.SnapshotSegments != 0 || result.CheckpointCutoffSequence != 0 || current.ActiveID != f.frontier.ActiveID {
 			t.Fatalf("unexpected incremental layout: %+v", result)
 		}
 	case manualFullDataCheckpoint:
-		if result.SnapshotFiles == 0 || result.CleanedIntervals != 0 || result.Cutoff != f.frontier.LastUserSequence {
+		if result.SnapshotSegments == 0 || result.CleanedIntervals != 0 || result.CheckpointCutoffSequence != f.frontier.LastUserSequence {
 			t.Fatalf("unexpected checkpoint layout: %+v", result)
 		}
 	}

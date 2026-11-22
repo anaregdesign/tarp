@@ -131,11 +131,11 @@ V1 cloned the full hash table. The bounded map (`7a44bca`) copied only matching 
 
 The runner pins the multi-platform Go image digest `sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea`. The tested arm64 image ID is `sha256:4cfad6c86f5248fedf89ff52d3e120187779bf26bfeeb8265047464d3e6c226c`. Go 1.27.4 was the latest stable toolchain at campaign start. [Go releases](https://go.dev/dl/)
 
-From a checkout containing the runner, fetch the PR history to make the measured commit available and use a fresh result directory. It builds the original production code with only the four benchmark drivers overlaid and builds the prototype from its commit. It alternates warm arm order across rounds and seeds each cold fixture once. Warm samples use Go's 100 ms calibration except for the 256-query rotating workload.
+For the recorded image and workload, use the runner from commit `678dd2c9` and a fresh result directory. It builds the original production code with only the four benchmark drivers overlaid and builds the prototype from its commit. It alternates warm arm order across rounds and seeds each cold fixture once. Warm samples use Go's 100 ms calibration except for the 256-query rotating workload.
 
 ```sh
 git fetch origin refs/pull/149/head
-benchmark/scripts/container-edge-prefix.sh /path/to/new-results 59ddf199 678dd2c9 3
+git show 678dd2c9:benchmark/scripts/container-edge-prefix.sh | bash -s -- /path/to/new-results 59ddf199 678dd2c9 3
 ```
 
 The [raw evidence archive](prefix-148-raw.tar.gz) contains all 384 decision samples, VM and source metadata, tuning logs, CPU profiles and one-line parameter patches. The accompanying `summarize.py` validates sample counts, expected matches and fixture identities and regenerates the [matrix](prefix-148.csv). Within the unpacked archive, run `python3 summarize.py`. The decision sample count is 288 raw warm, 24 typed warm, 24 rotating and 48 DATA-evicted observations.

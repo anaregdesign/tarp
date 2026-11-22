@@ -103,8 +103,8 @@ func prepareIndexFixture(t *testing.T, name string) indexFixture {
 	f.indexBytes = st.Size()
 	checkpointRow(t, "creation", map[string]any{
 		"fixture": name, "seed_rounds": rounds, "live_keys": checkpointMeasureKeys,
-		"covered_records": rounds * checkpointMeasureKeys, "checkpoint_ns": f.buildNS, "close_exact_ns": closeExact.Nanoseconds(),
-		"index_bytes": f.indexBytes, "heap_baseline_bytes": res.baselineHeap,
+		"covered_records": rounds * checkpointMeasureKeys, "index_checkpoint_ns": f.buildNS, "close_exact_ns": closeExact.Nanoseconds(),
+		"index_checkpoint_file_bytes": f.indexBytes, "heap_baseline_bytes": res.baselineHeap,
 		"peak_heap_bytes": res.peakHeap, "peak_scratch_bytes": res.peakScratch, "resource_samples": res.samples,
 	})
 	// Memory Close leaves the tail uncheckpointed so every clone starts with
@@ -115,7 +115,7 @@ func prepareIndexFixture(t *testing.T, name string) indexFixture {
 		t.Fatal(err)
 	}
 	checkpointFill(t, db, 128, rounds)
-	if name == "post_compaction_miss" {
+	if name == "full_data_checkpoint_invalidated_index_checkpoint" {
 		if _, err := db.Compact(t.Context()); err != nil {
 			t.Fatal(err)
 		}
@@ -176,7 +176,12 @@ func measureIndexOpen(t *testing.T, f indexFixture, name, cache, arm string, rou
 	if arm == "indexed" {
 		opts.OpenValidation = engine.Indexed
 	}
-	reads := map[string]int64{"covered-header": 0, "covered-payload": 0, "tail-header": 0, "tail-payload": 0, "replay-header": 0, "replay-payload": 0, "index": 0}
+	reads := map[string]int64{
+		"covered_segment_header": 0, "covered_encoded_records": 0,
+		"log_suffix_segment_header": 0, "log_suffix_encoded_records": 0,
+		"replay_segment_header": 0, "replay_encoded_records": 0,
+		"index_checkpoint_file": 0,
+	}
 	probe := &storage.IO{OpenRead: func(k string, n int) { reads[k] += int64(n) }}
 	conditionIndexFiles(t, dir, cache)
 	runtime.GC()
@@ -195,13 +200,13 @@ func measureIndexOpen(t *testing.T, f indexFixture, name, cache, arm string, rou
 	if count := db.Stats().LiveKeys; count != checkpointMeasureKeys {
 		t.Fatalf("Open returned %d live keys", count)
 	}
-	hit := arm != "replay" && name != "post_compaction_miss"
+	hit := arm != "replay" && name != "full_data_checkpoint_invalidated_index_checkpoint"
 	if hit {
-		if reads["index"] != f.indexBytes || reads["tail-payload"] == 0 || reads["replay-payload"] != 0 ||
-			(reads["covered-payload"] == 0) != (arm == "indexed") {
+		if reads["index_checkpoint_file"] != f.indexBytes || reads["log_suffix_encoded_records"] == 0 || reads["replay_encoded_records"] != 0 ||
+			(reads["covered_encoded_records"] == 0) != (arm == "indexed") {
 			t.Fatalf("%s expected a hit with a committed suffix: %v", arm, reads)
 		}
-	} else if reads["replay-payload"] == 0 || reads["index"] != 0 {
+	} else if reads["replay_encoded_records"] == 0 || reads["index_checkpoint_file"] != 0 {
 		t.Fatalf("%s expected full authoritative replay: %v", arm, reads)
 	}
 	metrics := engine.Observe(db).IndexMetrics()
@@ -216,13 +221,13 @@ func measureIndexOpen(t *testing.T, f indexFixture, name, cache, arm string, rou
 	closeNS := time.Since(start).Nanoseconds()
 	var dataBytes int64
 	for k, n := range reads {
-		if k != "index" {
+		if k != "index_checkpoint_file" {
 			dataBytes += n
 		}
 	}
 	checkpointRow(t, "open", map[string]any{
-		"fixture": name, "arm": arm, "cache": cache, "round": round, "hit": hit, "ns": openNS,
-		"close_ns": closeNS, "reads": reads, "data_read_bytes": dataBytes, "index_read_bytes": reads["index"],
+		"fixture": name, "arm": arm, "os_page_cache": cache, "round": round, "index_checkpoint_imported": hit, "open_ns": openNS,
+		"close_ns": closeNS, "read_bytes_by_region": reads, "data_read_bytes": dataBytes, "index_checkpoint_file_read_bytes": reads["index_checkpoint_file"],
 		"peak_heap_bytes": res.peakHeap, "heap_baseline_bytes": res.baselineHeap, "peak_scratch_bytes": res.peakScratch,
 		"resource_samples": res.samples, "foreground_pager_peak_scratch_bytes": metrics.ScratchPeakBytes,
 		"state_sha256": digest,
@@ -297,8 +302,8 @@ func measureCheckpointWrites(t *testing.T, f indexFixture, name string, overlap 
 		t.Fatal(err)
 	}
 	checkpointRow(t, "overlap", map[string]any{
-		"fixture": name, "concurrent_checkpoint": overlap, "all_puts": latency(samples, writes, duration),
-		"started_during_checkpoint": len(during), "overlapping_put_ns": during,
+		"fixture": name, "concurrent_index_checkpoint": overlap, "all_puts": latency(samples, writes, duration),
+		"puts_started_during_index_checkpoint": len(during), "overlapping_put_ns": during,
 	})
 }
 
@@ -311,17 +316,17 @@ func TestIndexCheckpointMeasurement(t *testing.T) {
 	}
 	checkpointRow(t, "methodology", map[string]any{
 		"go": runtime.Version(), "goarch": runtime.GOARCH, "gomaxprocs": runtime.GOMAXPROCS(0), "rounds": 3,
-		"fixture":    "6144 distinct 16-byte keys, 256-byte values, batches of 128. Long history applies eight full passes, mostly live one pass. Park automatic cleaning. Each fixture has a 128-record tail. Compact invalidates the third fixture's checkpoint.",
-		"cache":      "Private regular files read sequentially for warm, synced with POSIX_FADV_DONTNEED for cold. Advice does not guarantee device or host cache eviction.",
-		"timing":     "Independent cloned input per call; rotate arm order. Timed Open includes byte instrumentation and concurrent resource sampling. Verify SHA-256 of the full logical state outside the timer. Each measured BTree Close includes a refresh for the committed tail or miss.",
-		"resources":  "Logical bytes returned by DATA and INDEX file reads, including headers read again during hashing. Heap objects and apparent sizes of open index/replay files in .tarp-work sampled every 2ms; samples can miss short peaks. Foreground pager reports a separate internal high-water mark.",
-		"overlap":    "32 durable overwrites on independent clones with and without a concurrent checkpoint. Release the scan hook immediately before writes; record which calls began before checkpoint completion.",
-		"break_even": "Ceiling of the explicit checkpoint creation cost divided by the positive difference between median replay and median hit Open latency. A null count indicates no saving.",
+		"fixture":       "6144 distinct 16-byte keys, 256-byte values, batches of 128. Long history applies eight full passes, mostly live one pass. Park automatic cleaning. Each fixture has a 128-record tail. Compact invalidates the third fixture's checkpoint.",
+		"os_page_cache": "Private regular files read sequentially for warm, synced with POSIX_FADV_DONTNEED for cold. Advice does not guarantee device or host cache eviction.",
+		"timing":        "Independent cloned input per call; rotate arm order. Timed Open includes byte instrumentation and concurrent resource sampling. Verify SHA-256 of the full logical state outside the timer. Each measured BTree Close includes a refresh for the committed tail or miss.",
+		"resources":     "Logical bytes returned by DATA and INDEX file reads, including headers read again during hashing. Heap objects and apparent sizes of open index/replay files in .tarp-work sampled every 2ms; samples can miss short peaks. Foreground pager reports a separate internal high-water mark.",
+		"overlap":       "32 durable overwrites on independent clones with and without a concurrent checkpoint. Release the scan hook immediately before writes; record which calls began before checkpoint completion.",
+		"break_even":    "Ceiling of the explicit checkpoint creation cost divided by the positive difference between median replay and median hit Open latency. A null count indicates no saving.",
 	})
-	for _, name := range []string{"long_overwrite", "mostly_live", "post_compaction_miss"} {
+	for _, name := range []string{"long_overwrite", "mostly_live", "full_data_checkpoint_invalidated_index_checkpoint"} {
 		t.Run(name, func(t *testing.T) {
 			f := prepareIndexFixture(t, name)
-			if name != "post_compaction_miss" {
+			if name != "full_data_checkpoint_invalidated_index_checkpoint" {
 				for _, overlap := range []bool{false, true} {
 					t.Run(fmt.Sprintf("overlap_%t", overlap), func(t *testing.T) { measureCheckpointWrites(t, f, name, overlap) })
 				}
@@ -337,7 +342,7 @@ func TestIndexCheckpointMeasurement(t *testing.T) {
 						})
 					}
 				}
-				if name == "post_compaction_miss" || t.Failed() {
+				if name == "full_data_checkpoint_invalidated_index_checkpoint" || t.Failed() {
 					continue
 				}
 				for _, series := range times {
@@ -350,8 +355,8 @@ func TestIndexCheckpointMeasurement(t *testing.T) {
 						payback = (f.buildNS + saved - 1) / saved
 					}
 					checkpointRow(t, "break_even", map[string]any{
-						"fixture": name, "arm": arm, "cache": cache, "saved_ns_per_reopen": saved,
-						"checkpoint_ns": f.buildNS, "reopens": payback,
+						"fixture": name, "arm": arm, "os_page_cache": cache, "saved_ns_per_reopen": saved,
+						"index_checkpoint_ns": f.buildNS, "reopens": payback,
 					})
 				}
 			}

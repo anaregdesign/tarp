@@ -82,7 +82,7 @@ func TestStorageScaleBTree(t *testing.T) {
 	if after.LeafReads <= seed.LeafReads || db.Stats().ValueCache.Misses-cache.Misses != readProbe {
 		t.Fatal("read probe did not reload index leaves on Value LRU misses")
 	}
-	storageScaleRow(t, round, "btree", "value-cold-get", map[string]any{
+	storageScaleRow(t, round, "btree", "value-cache-miss-get", map[string]any{
 		"live_keys": liveKeys, "latency": latency(samples, readProbe, elapsed),
 		"ops_per_second": readProbe / elapsed.Seconds(), "index_before": seed, "index_after": after,
 	})

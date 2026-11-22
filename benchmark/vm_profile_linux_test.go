@@ -77,8 +77,8 @@ func vmProfileMeasurements(t *testing.T, size int, write vmMeasureWriter) {
 					}
 					if mode == pinnedBackupMode && name == "writer" {
 						row["pinned_backup"] = data["pinned_backup"]
-						row["backup_capture_sequence"] = data["backup_capture_sequence"]
-						row["restored_sequence"] = data["restored_sequence"]
+						row["backup_last_user_sequence"] = data["backup_last_user_sequence"]
+						row["restored_last_user_sequence"] = data["restored_last_user_sequence"]
 						row["restored_state_sha256"] = data["restored_state_sha256"]
 					}
 					write("lock_hold_"+mode+"_"+name, repetition, row)
@@ -143,7 +143,7 @@ func vmPendingMemory(t *testing.T, opts engine.Options, value []byte, callers, r
 	write("pending_owned_buffers", repetition, map[string]any{
 		"callers": callers, "foreground_writer_waiters": waiters,
 		"owned_key_value_bytes": queuedBytes, "copied_bytes_after_completion": copied.Load(),
-		"before": before, "all_callers_queued": after, "cache_limit_bytes": opts.ValueCacheBudgetBytes,
+		"before": before, "all_callers_queued": after, "value_cache_budget_bytes": opts.ValueCacheBudgetBytes,
 		"scope": "observed index/cache input copies while the writer gate was held and after all Puts completed; process memory also includes caller and goroutine costs",
 	})
 }

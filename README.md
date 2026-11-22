@@ -6,13 +6,13 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses [v0.12.0](https://github.com/anaregdesign/tarp/tree/v0.12.0).
+uses [v0.13.0](https://github.com/anaregdesign/tarp/tree/v0.13.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.12.0
+go get github.com/anaregdesign/tarp@v0.13.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -68,6 +68,20 @@ During v0, each revision supports its current Go API, database format and
 backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
+
+v0.13.0 keeps the v0.12.0 database and backup formats. Update Go callers and
+consumers of batch-limit diagnostics when upgrading from v0.12.0.
+
+| v0.12.0 | v0.13.0 |
+| --- | --- |
+| `RepairParity` | `RepairDataFromParity` |
+| `BackupInfo.Sequence` | `BackupInfo.LastUserSequence` |
+| `BackupInfo.RequiredLimits.ValueCacheBudgetBytes` | `BackupInfo.LargestLiveCacheChargeBytes` |
+| `BackupInfo.RequiredLimits.MaxRecordBytes` | `BackupInfo.LargestLiveRecordBytes` |
+| `CompatibilityError.RequiredRecordBytes` | `CompatibilityError.RequiredMaxRecordBytes` |
+| `DataRange` and `SalvageReport.Unrecoverable` | `DataByteRange` and `SalvageReport.UnrecoverableByteRanges` |
+| `BatchPayloadLimit` (`payload-bytes`) | `BatchRecordBytesLimit` (`encoded-record-bytes`) |
+| `BatchGetValueBytesLimit` (`result-bytes`) | `BatchGetValueBytesLimit` (`result-value-bytes`) |
 
 v0.12.0 can open v0.11.0 databases and restore v0.11.0 backups directly.
 `Options{}` now selects the disk-backed B+tree. Allow space on the database
@@ -188,8 +202,8 @@ and `Decode([]byte) (T, error)`. Use compatible codecs on reopen and after
 
 `KeysPrefix(ctx, prefix)` yields matching keys using the index alone.
 `ScanPrefix(ctx, prefix)` yields matching key/value entries and reads their
-values from DATA. PR #149 added both methods to `DB`, `TypedDB` and `View`
-after v0.12.0. On a raw DB with keys such as `job/42`, use
+values from DATA. Both methods are available on `DB`, `TypedDB` and `View`
+starting in v0.13.0. On a raw DB with keys such as `job/42`, use
 `db.ScanPrefix(ctx, []byte("job/"))`.
 
 The prefix is a `[]byte` matching the start of the stored key encoding. Both

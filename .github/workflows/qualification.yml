@@ -30,10 +30,10 @@ on:
         type: string
         required: false
       compact-pair:
-        description: Compare releases, v0.9.0 with the selected ref, or that candidate in fixed 5s windows
+        description: Compare the selected ref with the current-format baseline, use fixed 5s windows, or compare historical releases
         type: choice
-        default: releases
-        options: [releases, candidate, candidate-fixed]
+        default: candidate
+        options: [candidate, candidate-fixed, releases]
       group:
         description: Bounded phase group; all is limited to 192 cases and 50 minutes
         required: true

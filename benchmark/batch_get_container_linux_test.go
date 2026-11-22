@@ -88,7 +88,7 @@ func TestContainerBatchGet(t *testing.T) {
 			for round, limits := range orders {
 				seed := int64(72_000 + round)
 				traces := make(map[string][]containerBatchRequest)
-				for _, mode := range []string{"distinct", "hit", "duplicate"} {
+				for _, mode := range []string{"distinct", "value-cache-hit", "duplicate"} {
 					traces[mode] = fixture.trace(seed, mode)
 				}
 				for position, option := range limits {
@@ -127,13 +127,13 @@ func measureContainerBatchLimit(t *testing.T, fixture *containerBatchFixture, st
 		slices.Reverse(clients)
 	}
 	for _, n := range clients {
-		scenarios := []string{"warm", "evicted", "hit", "duplicate"}
+		scenarios := []string{"warm", "evicted", "value-cache-hit", "duplicate"}
 		if (round+position+n)%2 != 0 {
 			slices.Reverse(scenarios)
 		}
 		for _, scenario := range scenarios {
 			trace := traces["distinct"]
-			if scenario == "hit" || scenario == "duplicate" {
+			if scenario == "value-cache-hit" || scenario == "duplicate" {
 				trace = traces[scenario]
 			}
 			row := containerBatchTrial{Kind: "trial", Round: round + 1, Seed: seed, ValueBytes: size,
