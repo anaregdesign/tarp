@@ -633,7 +633,7 @@ func TestCleanSegmentRepairsGroupAndRestartsTombstoneAccounting(t *testing.T) {
 func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 	var verifies atomic.Int32
 	fs := &storage.IO{Hook: func(point string) error {
-		if point == "repair.verify:before" {
+		if point == "data-repair.verify:before" {
 			verifies.Add(1)
 		}
 		return nil
@@ -717,7 +717,7 @@ func TestCompactionKeepsSelectedPairOnReplacementParityFailure(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := errors.Join(format.ValidateParity(t.Context(), sidecar, before.UUID, replacement), sidecar.Close()); err != nil {
+				if err := errors.Join(format.ValidateParitySidecar(t.Context(), sidecar, before.UUID, replacement), sidecar.Close()); err != nil {
 					t.Fatal(err)
 				}
 			})

@@ -268,8 +268,8 @@ func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 	}
 	info, err := tarp.VerifyBackup(t.Context(), req.Source)
 	wantLimits := tarp.RestoreLimits{ValueCacheBudgetBytes: 128 + 1 + valueBytes, MaxRecordBytes: 48 + 1 + valueBytes}
-	if err != nil || info.Sequence != 1 || info.LiveKeys != 1 || info.DatabaseID == ([16]byte{}) ||
-		info.RequiredLimits != wantLimits {
+	if err != nil || info.LastUserSequence != 1 || info.LiveKeys != 1 || info.DatabaseID == ([16]byte{}) ||
+		info.LargestLiveCacheChargeBytes != wantLimits.ValueCacheBudgetBytes || info.LargestLiveRecordBytes != wantLimits.MaxRecordBytes {
 		t.Fatalf("verified backup = %+v, %v", info, err)
 	}
 	if _, err := os.Lstat(filepath.Join(req.Source, "LOCK")); !errors.Is(err, os.ErrNotExist) {
@@ -295,7 +295,7 @@ func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 		for _, err := range []error{info.CheckLimits(limits), tarp.Restore(t.Context(), req)} {
 			var incompatible *tarp.CompatibilityError
 			if !errors.Is(err, tarp.ErrIncompatibleOptions) || !errors.As(err, &incompatible) ||
-				incompatible.RequiredValueCacheBudgetBytes != wantLimits.ValueCacheBudgetBytes || incompatible.RequiredRecordBytes != wantLimits.MaxRecordBytes {
+				incompatible.RequiredValueCacheBudgetBytes != wantLimits.ValueCacheBudgetBytes || incompatible.RequiredMaxRecordBytes != wantLimits.MaxRecordBytes {
 				t.Fatalf("checking limits %+v: %v", limits, err)
 			}
 		}
@@ -320,7 +320,7 @@ func TestVerifiedBackupChecksDestinationLimitsBeforeRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := tarp.VerifyBackup(t.Context(), empty)
-	if err != nil || got != (tarp.BackupInfo{DatabaseID: info.DatabaseID, Sequence: 2}) {
+	if err != nil || got != (tarp.BackupInfo{DatabaseID: info.DatabaseID, LastUserSequence: 2}) {
 		t.Fatalf("verified empty backup of restored database = %+v, %v", got, err)
 	}
 }
@@ -925,7 +925,7 @@ func TestIndexedOpenRepairsCoveredDataOnFirstValueRead(t *testing.T) {
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
 	if err != nil || len(files) != 1 {
-		t.Fatalf("parity files %v, %v", files, err)
+		t.Fatalf("PARITY sidecars %v, %v", files, err)
 	}
 	path := filepath.Join(dir, strings.Replace(filepath.Base(files[0]), "PARITY-", "DATA-", 1))
 	original, err := os.ReadFile(path)

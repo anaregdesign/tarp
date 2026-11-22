@@ -14,7 +14,7 @@ import (
 func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 	s, c, src, raw := protectedRecoveryFixture(t, nil)
 	raw[256] ^= 1
-	raw[format.ParityBlockBytes+256] ^= 1
+	raw[format.DataBlockBytes+256] ^= 1
 	if err := os.WriteFile(src.File.Path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 }
 
 func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1 << 20, MaxRecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
 	s, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	for _, k := range []string{"a", "b"} {
 		v := []byte("keep")
 		if k == "b" {
-			v = bytes.Repeat([]byte{'v'}, 2*format.ParityBlockBytes)
+			v = bytes.Repeat([]byte{'v'}, 2*format.DataBlockBytes)
 		}
 		loc, err := s.Append(format.Put, []byte(k), v, func() error { return nil })
 		if err != nil {
@@ -83,7 +83,7 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	}
 	defer c.Release()
 	src := c.Files[0]
-	if err := s.EnsureParity(t.Context(), c.Current.UUID, src, true, nil); err != nil {
+	if err := s.EnsureParitySidecar(t.Context(), c.Current.UUID, src, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(src.File.Path)
@@ -91,7 +91,7 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw[newest.Offset+format.RecordHeaderBytes] = 'a'
-	raw[format.ParityBlockBytes+20] ^= 1
+	raw[format.DataBlockBytes+20] ^= 1
 	if err := os.WriteFile(src.File.Path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

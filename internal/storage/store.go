@@ -29,30 +29,34 @@ var (
 )
 
 type Config struct {
-	ValueCacheBudgetBytes, RecordBytes, TargetSegmentBytes int64
-	Handles                                                int
-	IndexedOpen                                            bool
+	ValueCacheBudgetBytes, MaxRecordBytes, TargetSegmentBytes int64
+	Handles                                                   int
+	IndexedOpen                                               bool
 }
 
-// RequiredLimits records the measured minima for a database image's live records.
-type RequiredLimits struct {
-	ValueCacheBudgetBytes, RecordBytes int64
+// LiveRecordSizes measures the largest encoded record and value-cache charge among live keys.
+// Both measurements are zero for an empty image.
+type LiveRecordSizes struct {
+	LargestLiveCacheChargeBytes, LargestLiveRecordBytes int64
 }
 
 // CheckLimits compares normalized settings with the live record requirements.
-func (cfg Config) CheckLimits(required RequiredLimits) error {
-	if cfg.ValueCacheBudgetBytes < required.ValueCacheBudgetBytes || cfg.RecordBytes < required.RecordBytes {
-		return &CompatibilityError{required}
+func (cfg Config) CheckLimits(sizes LiveRecordSizes) error {
+	if cfg.ValueCacheBudgetBytes < sizes.LargestLiveCacheChargeBytes || cfg.MaxRecordBytes < sizes.LargestLiveRecordBytes {
+		return &CompatibilityError{
+			RequiredValueCacheBudgetBytes: sizes.LargestLiveCacheChargeBytes,
+			RequiredMaxRecordBytes:        sizes.LargestLiveRecordBytes,
+		}
 	}
 	return nil
 }
 
 type CompatibilityError struct {
-	RequiredLimits
+	RequiredValueCacheBudgetBytes, RequiredMaxRecordBytes int64
 }
 
 func (e *CompatibilityError) Error() string {
-	return fmt.Sprintf("storage: require value cache budget >= %d bytes, max record size >= %d bytes", e.ValueCacheBudgetBytes, e.RecordBytes)
+	return fmt.Sprintf("storage: require value cache budget >= %d bytes, max record size >= %d bytes", e.RequiredValueCacheBudgetBytes, e.RequiredMaxRecordBytes)
 }
 
 type File struct {
@@ -114,8 +118,8 @@ type Store struct {
 	Created bool
 	// IndexCheckpointHit reports use of the selected index at Open.
 	IndexCheckpointHit bool
-	// MaxValueBytes is the largest live value at indexed Open.
-	MaxValueBytes int64
+	// LargestLiveValueBytes is the largest live value at indexed Open.
+	LargestLiveValueBytes int64
 }
 
 func DataName(uuid [16]byte, id uint64) string {
@@ -300,7 +304,7 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 	if err != nil {
 		return err
 	}
-	if err := s.Config.CheckLimits(image.Required); err != nil {
+	if err := s.Config.CheckLimits(image.LiveRecordSizes); err != nil {
 		return err
 	}
 	if listing.hasWorkspace {
@@ -316,7 +320,7 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 			s.Files[entry.ID].markSealed(s.Catalog.UUID, entry)
 		}
 	}
-	s.MaxValueBytes = image.MaxValueBytes
+	s.LargestLiveValueBytes = image.LargestLiveValueBytes
 	active, err := os.OpenFile(s.Files[s.Current.ActiveID].Path, os.O_RDWR, 0)
 	if err != nil {
 		return err

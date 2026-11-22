@@ -27,7 +27,7 @@ func TestLeasedForeignDataStillFailsIdentityAfterAnotherReaderRepairs(t *testing
 		t.Fatal(err)
 	}
 	// The key, sequence, length and record CRC are all valid. Only the first
-	// parity block differs, so restoring the sidecar enables the later repair.
+	// DATA block differs, so restoring the sidecar enables the later repair.
 	foreignUUID := s.Current.UUID
 	foreignUUID[3] ^= 2
 	key := "0"

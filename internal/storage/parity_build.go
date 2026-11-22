@@ -15,17 +15,17 @@ import (
 
 // Small segments normally fit in one buffered write. Larger sidecars batch
 // several stripes of metadata and parity into each filesystem request.
-func parityBufferSize(bytes int64) int {
-	if bytes <= format.ParityBlockBytes*format.ParityDataBlocks {
-		return int(min(bytes, format.ParityBlockBytes)) + 256
+func parityIOBufferBytes(bytes int64) int {
+	if bytes <= format.DataBlockBytes*format.DataBlocksPerStripe {
+		return int(min(bytes, format.DataBlockBytes)) + 256
 	}
 	return 32 << 10
 }
 
-// EnsureParity verifies or creates the sidecar for one pinned immutable DATA
+// EnsureParitySidecar verifies or creates the sidecar for one pinned immutable DATA
 // file. The caller serializes builders and holds the DATA pin through publication.
 // No store-wide metadata or writer lock is needed during these operations.
-func (s *Store) EnsureParity(ctx context.Context, uuid [16]byte, source CapturedFile, recheck bool, yield func() error) error {
+func (s *Store) EnsureParitySidecar(ctx context.Context, uuid [16]byte, source CapturedFile, recheck bool, yield func() error) error {
 	f := source.File
 	if unavailable := f.UnavailableData(); unavailable != nil {
 		if !recheck {
@@ -70,7 +70,7 @@ func checkParity(ctx context.Context, path string, uuid [16]byte, entry format.C
 	if err != nil {
 		return err
 	}
-	err = format.ValidateParity(ctx, bufio.NewReaderSize(fd, parityBufferSize(entry.Bytes)), uuid, entry)
+	err = format.ValidateParitySidecar(ctx, bufio.NewReaderSize(fd, parityIOBufferBytes(entry.Bytes)), uuid, entry)
 	if closeErr := fd.Close(); closeErr != nil {
 		return closeErr
 	}
@@ -85,7 +85,7 @@ type paritySource struct {
 func (r paritySource) ReadAt(b []byte, off int64) (int, error) {
 	// Pace stripe reads. The codec also performs small header lookaheads
 	// and one final EOF probe, which need no separate delay.
-	if len(b) > 1 && off%(format.ParityDataBlocks*format.ParityBlockBytes) == 0 {
+	if len(b) > 1 && off%(format.DataBlocksPerStripe*format.DataBlockBytes) == 0 {
 		if err := r.yield(); err != nil {
 			return 0, err
 		}
@@ -134,9 +134,9 @@ func (s *Store) buildParity(ctx context.Context, uuid [16]byte, source CapturedF
 			return paceErr
 		}}
 	}
-	writer := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: point + ".write"}, parityBufferSize(source.Entry.Bytes))
+	writer := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: point + ".write"}, parityIOBufferBytes(source.Entry.Bytes))
 	err = s.IO.Do(point+".scan", func() error {
-		err := format.WriteParity(ctx, input, writer, uuid, source.Entry)
+		err := format.WriteParitySidecar(ctx, input, writer, uuid, source.Entry)
 		if err != nil && paceErr == nil {
 			return selectedReadFailure(source.Entry.ID, err)
 		}
@@ -157,7 +157,7 @@ func (s *Store) buildParity(ctx context.Context, uuid [16]byte, source CapturedF
 	if _, err := fd.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if err := format.ValidateParity(ctx, bufio.NewReaderSize(fd, parityBufferSize(source.Entry.Bytes)), uuid, source.Entry); err != nil {
+	if err := format.ValidateParitySidecar(ctx, bufio.NewReaderSize(fd, parityIOBufferBytes(source.Entry.Bytes)), uuid, source.Entry); err != nil {
 		return err
 	}
 	if err := s.IO.Sync(fd, point+".sync"); err != nil {

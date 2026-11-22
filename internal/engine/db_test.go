@@ -1566,7 +1566,7 @@ func TestMissingDeletePrecedesExhaustedCountersAndPreservesBatch(t *testing.T) {
 }
 
 func TestOperationOutcomePreservesItsOwnFaultBesideUncertainReadRepair(t *testing.T) {
-	repair := &storage.UncertainReadRepair{Err: &storage.Fault{Phase: "repair.dirsync", Outcome: Unknown, Err: syscall.EIO}}
+	repair := &storage.UncertainReadRepair{Err: &storage.Fault{Phase: "data-repair.dirsync", Outcome: Unknown, Err: syscall.EIO}}
 	write := &storage.Fault{Phase: "commit.health", Outcome: NotApplied, Err: repair}
 	for _, err := range []error{write, errors.Join(repair, write)} {
 		got := operationError("put", "append", err)
@@ -1584,7 +1584,7 @@ func TestGetRechecksUnavailableLocationAfterConcurrentMutation(t *testing.T) {
 				release := sync.OnceFunc(func() { close(resume) })
 				block := sync.OnceFunc(func() { close(entered); <-resume })
 				fs := &storage.IO{Hook: func(point string) error {
-					if point == "repair.verify:before" {
+					if point == "data-repair.verify:before" {
 						block()
 					}
 					return nil

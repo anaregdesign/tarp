@@ -46,8 +46,8 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, err := validateReadOnly(t.Context(), dir, verifyWindowBytes)
-	if err != nil || image.Required != raw.Required || image.LiveKeys != uint64(len(puts)) || m.Count() != len(puts) {
-		t.Fatalf("replayed %d, limits %+v, err=%v", image.LiveKeys, image.Required, err)
+	if err != nil || image.LiveRecordSizes != raw.LiveRecordSizes || image.LiveKeys != uint64(len(puts)) || m.Count() != len(puts) {
+		t.Fatalf("replayed %d, limits %+v, err=%v", image.LiveKeys, image.LiveRecordSizes, err)
 	}
 	var live int64
 	for _, f := range image.Files {
@@ -80,7 +80,7 @@ func TestUnpublishedReplayDropsCorruptHistoryAndCanRetry(t *testing.T) {
 // recoverable by treating the suffix as an independent initial bulk build.
 func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	dir, scratch := t.TempDir(), t.TempDir()
-	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 2048, RecordBytes: 1024, TargetSegmentBytes: 4096}
+	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 2048, MaxRecordBytes: 1024, TargetSegmentBytes: 4096}
 	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 	if err := want.replayIndexed(t.Context(), oracle); err != nil {
 		t.Fatal(err)
 	}
-	cfg.RecordBytes, cfg.ValueCacheBudgetBytes = want.Required.RecordBytes, want.Required.ValueCacheBudgetBytes
+	cfg.MaxRecordBytes, cfg.ValueCacheBudgetBytes = want.LargestLiveRecordBytes, want.LargestLiveCacheChargeBytes
 	fresh := func(*Store) (index.Backend, error) { return memory.New(), nil }
 	load := func(ctx context.Context, _ *Store, r io.Reader, n int64, visit func(string, index.Address) error) (index.Backend, error) {
 		return btree.ImportPacked(ctx, r, n, scratch, btree.MinBudget, visit)
@@ -162,8 +162,8 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 			reads["replay-header"] != 0 || reads["replay-payload"] != 0 {
 			t.Fatalf("indexed=%t: Open DATA reads %v, want covered %d and tail %d payload bytes", indexed, reads, coveredPayload, tailPayload)
 		}
-		if !db.IndexCheckpointHit || keys.Count() != oracle.Count() || db.MaxValueBytes != want.MaxValueBytes {
-			t.Fatalf("indexed=%t: hit=%t, live=%d, max value=%d", indexed, db.IndexCheckpointHit, keys.Count(), db.MaxValueBytes)
+		if !db.IndexCheckpointHit || keys.Count() != oracle.Count() || db.LargestLiveValueBytes != want.LargestLiveValueBytes {
+			t.Fatalf("indexed=%t: hit=%t, live=%d, max value=%d", indexed, db.IndexCheckpointHit, keys.Count(), db.LargestLiveValueBytes)
 		}
 		for _, key := range []string{"largest", "survives", "gone", "new"} {
 			got, found, err := keys.Lookup(key)
@@ -240,7 +240,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 }
 
 func TestOpenRejectsIndexFromDivergentCopyAndRetriesFromDATA(t *testing.T) {
-	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 1024, RecordBytes: 200, TargetSegmentBytes: 1024, IndexedOpen: true}
+	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 1024, MaxRecordBytes: 200, TargetSegmentBytes: 1024, IndexedOpen: true}
 	dir, clone, scratch := t.TempDir(), t.TempDir(), t.TempDir()
 	db, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {

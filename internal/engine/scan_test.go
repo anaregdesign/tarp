@@ -73,7 +73,7 @@ func TestForegroundRepairPreservesReadConsistencyDuringWrites(t *testing.T) {
 					case reads <- struct{}{}:
 					default:
 					}
-				case "repair.rename:before":
+				case "data-repair.rename:before":
 					if replacements.Add(1) == 1 {
 						close(paused)
 						<-resume
@@ -169,7 +169,7 @@ func TestScanCanceledDuringRepairReleasesTheSnapshotAndAllowsRetry(t *testing.T)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	fs := &storage.IO{Hook: func(point string) error {
-		if point == "repair.sync:after" {
+		if point == "data-repair.sync:after" {
 			cancel()
 		}
 		return nil
@@ -189,7 +189,7 @@ func TestScanCancellationPreservesUncertainRepairOutcome(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	fs := &storage.IO{Hook: func(point string) error {
-		if point == "repair.dirsync:before" {
+		if point == "data-repair.dirsync:before" {
 			cancel()
 			return ctx.Err()
 		}

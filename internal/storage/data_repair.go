@@ -15,9 +15,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/publication"
 )
 
-// RepairParity takes ordinary exclusive database ownership without running
+// RepairDataFromParity takes ordinary exclusive database ownership without running
 // Open's recovery or cleanup. Each selected sealed file is a separate repair.
-func RepairParity(ctx context.Context, dir string, fs *IO) (result error) {
+func RepairDataFromParity(ctx context.Context, dir string, fs *IO) (result error) {
 	s, image, err := lockParityImage(ctx, dir, fs)
 	if err != nil {
 		return err
@@ -27,7 +27,7 @@ func RepairParity(ctx context.Context, dir string, fs *IO) (result error) {
 		result = errors.Join(result, s.Close())
 		var uncertain *Fault
 		if repaired && result != nil && !errors.As(result, &uncertain) {
-			result = fault("repair.partial", publication.Committed, false, result)
+			result = fault("data-repair.partial", publication.Committed, false, result)
 		}
 	}()
 	var failures error
@@ -38,7 +38,7 @@ func RepairParity(ctx context.Context, dir string, fs *IO) (result error) {
 		if !entry.HasPhysicalFile() {
 			continue
 		}
-		changed, err := s.repairSealed(ctx, s.Current.UUID, entry, false)
+		changed, err := s.repairSealedData(ctx, s.Current.UUID, entry, false)
 		repaired = repaired || changed
 		if err != nil {
 			err = fmt.Errorf("%s: %w", DataName(s.Current.UUID, entry.ID), err)
@@ -93,7 +93,7 @@ func lockParityImage(ctx context.Context, dir string, fs *IO) (_ *Store, _ *Imag
 	return s, image, nil
 }
 
-func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.CatalogEntry, online bool) (bool, error) {
+func (s *Store) repairSealedData(ctx context.Context, uuid [16]byte, entry format.CatalogEntry, online bool) (bool, error) {
 	path := filepath.Join(s.Dir, DataName(uuid, entry.ID))
 	// A completely missing short segment can still be reconstructed when
 	// each stripe is missing only one block. The codec decides from lengths.
@@ -120,7 +120,7 @@ func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.Ca
 			damage = fmt.Errorf("%w: expected %d bytes, found %d", ErrCorrupt, entry.Bytes, info.Size())
 		}
 	}
-	stage, err := s.stageParityRepair(ctx, data, uuid, entry, online)
+	stage, err := s.stageDataRepair(ctx, data, uuid, entry, online)
 	if fd != nil {
 		if closeErr := fd.Close(); closeErr != nil {
 			stage.unavailable = false
@@ -146,17 +146,17 @@ func (s *Store) repairSealed(ctx context.Context, uuid [16]byte, entry format.Ca
 	}
 	// Sync and close the complete, verified candidate before a single atomic
 	// replacement. A later offline retry rechecks the authoritative digest.
-	if err := errors.Join(ctx.Err(), s.IO.Check("repair.rename:before")); err != nil {
+	if err := errors.Join(ctx.Err(), s.IO.Check("data-repair.rename:before")); err != nil {
 		return false, errors.Join(err, discardRepair(stage.path))
 	}
 	if err := os.Rename(stage.path, path); err != nil {
-		return false, fault("repair.rename", publication.Unknown, false, errors.Join(err, discardRepair(stage.path)))
+		return false, fault("data-repair.rename", publication.Unknown, false, errors.Join(err, discardRepair(stage.path)))
 	}
-	if err := s.IO.Check("repair.rename:after"); err != nil {
-		return false, fault("repair.rename", publication.Unknown, false, err)
+	if err := s.IO.Check("data-repair.rename:after"); err != nil {
+		return false, fault("data-repair.rename", publication.Unknown, false, err)
 	}
-	if err := s.IO.SyncDir(s.Dir, "repair.dirsync"); err != nil {
-		return false, fault("repair.dirsync", publication.Unknown, false, err)
+	if err := s.IO.SyncDir(s.Dir, "data-repair.dirsync"); err != nil {
+		return false, fault("data-repair.dirsync", publication.Unknown, false, err)
 	}
 	return true, nil
 }
@@ -204,7 +204,7 @@ func unavailableReconstruction(err error) bool {
 	return onlyCauses(err, ErrCorrupt, syscall.EIO)
 }
 
-func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [16]byte, entry format.CatalogEntry, online bool) (stage repairStage, result error) {
+func (s *Store) stageDataRepair(ctx context.Context, data io.ReaderAt, uuid [16]byte, entry format.CatalogEntry, online bool) (stage repairStage, result error) {
 	sidecar, err := OpenRegular(filepath.Join(s.Dir, parityName(uuid, entry.ID)))
 	if err != nil {
 		stage.unavailable = errors.Is(err, os.ErrNotExist)
@@ -236,8 +236,8 @@ func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [1
 	}
 	defer closeFile(fd)
 	stage.path = fd.Name()
-	out := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: "repair.write"}, parityBufferSize(entry.Bytes))
-	if err := format.RecoverParity(ctx, data, sidecar, out, uuid, entry); err != nil {
+	out := bufio.NewWriterSize(&outputWriter{fs: s.IO, fd: fd, point: "data-repair.write"}, parityIOBufferBytes(entry.Bytes))
+	if err := format.RecoverDataFromParity(ctx, data, sidecar, out, uuid, entry); err != nil {
 		stage.unavailable = unavailableReconstruction(err)
 		return stage, err
 	}
@@ -250,14 +250,14 @@ func (s *Store) stageParityRepair(ctx context.Context, data io.ReaderAt, uuid [1
 		return stage, err
 	}
 	if info.Size() != entry.Bytes {
-		return stage, fmt.Errorf("%w: wrong length after parity repair", ErrCorrupt)
+		return stage, fmt.Errorf("%w: wrong length after DATA repair", ErrCorrupt)
 	}
 	// Read back the staged file; a successful write count alone cannot prove
 	// that the destination contains the bytes validated by the decoder.
 	if err := verifySelectedDigest(ctx, fd, entry); err != nil {
 		return stage, err
 	}
-	err = s.IO.Sync(fd, "repair.sync")
+	err = s.IO.Sync(fd, "data-repair.sync")
 	stage.unavailable = repairSpaceError(err)
 	return stage, err
 }

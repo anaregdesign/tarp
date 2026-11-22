@@ -206,7 +206,7 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 			f.Pin()
 			db.writer.Unlock()
 
-			err := db.store.EnsureParity(ctx, uuid, storage.CapturedFile{File: f, Entry: entry}, recheck, yield)
+			err := db.store.EnsureParitySidecar(ctx, uuid, storage.CapturedFile{File: f, Entry: entry}, recheck, yield)
 			f.Unpin()
 			if db.cleaner.pinned.Load() {
 				db.notifyCleaner()

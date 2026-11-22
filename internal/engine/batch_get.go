@@ -104,7 +104,7 @@ func (db *DB) batchCounts(hits, misses, absent, duplicate int) {
 	add(&db.stats.BatchGetDuplicateInputs, duplicate)
 }
 
-func checkBatchBytes(count int, limit, maximum int64, size func(int) int64) error {
+func checkBatchGetValueBytes(count int, limit, maximum int64, size func(int) int64) error {
 	high, upper := bits.Mul64(uint64(count), uint64(maximum))
 	if high == 0 && upper <= uint64(limit) {
 		return nil
@@ -128,7 +128,7 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 	}
 	hits, uncached := db.peekBatch(keys, results, true)
 	if uncached == 0 {
-		err := checkBatchBytes(len(keys), db.opts.MaxBatchGetValueBytes, db.maxSeenValueBytes, func(i int) int64 { return int64(len(results[i].Value)) })
+		err := checkBatchGetValueBytes(len(keys), db.opts.MaxBatchGetValueBytes, db.maxSeenValueBytes, func(i int) int64 { return int64(len(results[i].Value)) })
 		if err == nil {
 			db.batchCounts(hits, 0, 0, len(keys)-hits)
 		}
@@ -229,7 +229,7 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		db.poison(err)
 		return nil, operationError("batch-get", "index", err)
 	}
-	err := checkBatchBytes(len(keys), db.opts.MaxBatchGetValueBytes, maximum, func(i int) int64 {
+	err := checkBatchGetValueBytes(len(keys), db.opts.MaxBatchGetValueBytes, maximum, func(i int) int64 {
 		if results[i].Found {
 			return int64(len(results[i].Value))
 		}
@@ -277,7 +277,7 @@ func (db *DB) rejectBatchFile(reads []batchRead, id uint64) error {
 // captureResidentMisses runs entirely under state. A missing first key favors
 // probing the hash index first, avoiding an LRU lookup for remaining absent keys.
 func (db *DB) captureResidentMisses(keys [][]byte, results []BatchResult) ([]batchRead, error) {
-	if err := checkBatchBytes(len(keys), db.opts.MaxBatchGetValueBytes, db.maxSeenValueBytes, func(i int) int64 {
+	if err := checkBatchGetValueBytes(len(keys), db.opts.MaxBatchGetValueBytes, db.maxSeenValueBytes, func(i int) int64 {
 		a, _ := db.resident.LookupResident(keys[i])
 		return a.ValueBytes
 	}); err != nil {

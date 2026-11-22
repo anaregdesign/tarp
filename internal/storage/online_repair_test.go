@@ -36,7 +36,7 @@ func (c *repairWaitContext) Done() <-chan struct{} {
 func openedRepairFixture(t *testing.T) (repairFixture, *Store, *File) {
 	t.Helper()
 	fixture := newRepairFixture(t, 9000)
-	s, err := openTestStore(t, fixture.dir, Config{Handles: 2, RecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
+	s, err := openTestStore(t, fixture.dir, Config{Handles: 2, MaxRecordBytes: 1 << 20, ValueCacheBudgetBytes: 1 << 20, TargetSegmentBytes: 1 << 20}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +67,9 @@ func TestReadRepairSharesPublicationAndHandlesLaterDamage(t *testing.T) {
 	var verified, renames atomic.Int64
 	s.IO = &IO{Hook: func(point string) error {
 		switch point {
-		case "repair.verify:before":
+		case "data-repair.verify:before":
 			verified.Add(1)
-		case "repair.rename:before":
+		case "data-repair.rename:before":
 			if renames.Add(1) == 1 {
 				close(entered)
 				<-resume
@@ -140,9 +140,9 @@ func TestReadRepairRetainsUncertainPublicationUntilReopen(t *testing.T) {
 	var starts int
 	s.IO = &IO{Hook: func(point string) error {
 		switch point {
-		case "repair.verify:before":
+		case "data-repair.verify:before":
 			starts++
-		case "repair.dirsync:before":
+		case "data-repair.dirsync:before":
 			return context.Canceled
 		}
 		return nil
@@ -170,7 +170,7 @@ func TestReadRepairCancellationCanHandOverToAnotherCaller(t *testing.T) {
 	defer cancel()
 	var starts atomic.Int64
 	s.IO = &IO{Hook: func(point string) error {
-		if point == "repair.verify:before" && starts.Add(1) == 1 {
+		if point == "data-repair.verify:before" && starts.Add(1) == 1 {
 			close(started)
 			<-resume
 		}
@@ -235,7 +235,7 @@ func TestUnavailableReadThrottlesRepairAndAcceptsRestoredParity(t *testing.T) {
 	}
 	var attempts int
 	s.IO = &IO{Hook: func(point string) error {
-		if point == "repair.verify:before" {
+		if point == "data-repair.verify:before" {
 			attempts++
 		}
 		return nil
@@ -302,7 +302,7 @@ func TestUnavailableReadRetriesOncePrivateStagingSpaceReturns(t *testing.T) {
 	for _, tc := range []struct {
 		point string
 		cause error
-	}{{"repair.write:before", syscall.ENOSPC}, {"repair.sync:before", syscall.EDQUOT}} {
+	}{{"data-repair.write:before", syscall.ENOSPC}, {"data-repair.sync:before", syscall.EDQUOT}} {
 		t.Run(tc.point, func(t *testing.T) {
 			fixture, s, f := openedRepairFixture(t)
 			b := bytes.Clone(fixture.originals[0])
@@ -352,7 +352,7 @@ func TestReconstructionDistinguishesParityReadFromOutputMediaError(t *testing.T)
 	source := bytes.NewReader(fixture.originals[0])
 	// Read the valid parity header, then fail within its stripe.
 	parity := io.MultiReader(io.LimitReader(fd, 128), iotest.ErrReader(syscall.EIO))
-	err = format.RecoverParity(t.Context(), source, parity, io.Discard, s.Current.UUID, entry)
+	err = format.RecoverDataFromParity(t.Context(), source, parity, io.Discard, s.Current.UUID, entry)
 	if !errors.Is(err, syscall.EIO) || !unavailableReconstruction(err) || unavailableReconstruction(&destinationError{syscall.EIO}) {
 		t.Fatalf("media read classification: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestUnavailableReadRequiresVerifiedInputFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "staged write", "sync":
-				at := map[string]string{"staged write": "repair.write:before", "sync": "repair.sync:before"}[mode]
+				at := map[string]string{"staged write": "data-repair.write:before", "sync": "data-repair.sync:before"}[mode]
 				s.IO = &IO{Hook: func(point string) error {
 					if point == at {
 						return ErrCorrupt
@@ -441,7 +441,7 @@ func TestDataUnavailableClassificationPreservesIndependentFailures(t *testing.T)
 func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 	for _, name := range []string{"checkpoint", "cleaner"} {
 		t.Run(name, func(t *testing.T) {
-			cfg := Config{Handles: 1, RecordBytes: 1024, ValueCacheBudgetBytes: 1024, TargetSegmentBytes: 4096}
+			cfg := Config{Handles: 1, MaxRecordBytes: 1024, ValueCacheBudgetBytes: 1024, TargetSegmentBytes: 4096}
 			s, err := openTestStore(t, t.TempDir(), cfg, nil)
 			if err != nil {
 				t.Fatal(err)

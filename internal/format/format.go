@@ -169,7 +169,7 @@ func Scan(ctx context.Context, f io.ReaderAt, end int64, visit func(int64, Recor
 	if end == start {
 		return ctx.Err()
 	}
-	size := int(min(int64(streamChunk), end-start))
+	size := int(min(int64(streamChunkBytes), end-start))
 	stream := bufio.NewReaderSize(io.NewSectionReader(exactReadAt{f}, start, end-start), size)
 	buffer := make([]byte, size)
 	for offset := start; offset < end; {
@@ -512,10 +512,10 @@ type BackupFile struct {
 
 // Backup source settings are advisory; restore derives live minima by replay.
 type Backup struct {
-	UUID                                       [16]byte
-	LastUserSequence, CheckpointCutoffSequence uint64
-	SourceCacheBytes, SourceRecordBytes        int64
-	Files                                      []BackupFile
+	UUID                                              [16]byte
+	LastUserSequence, CheckpointCutoffSequence        uint64
+	SourceValueCacheBudgetBytes, SourceMaxRecordBytes int64
+	Files                                             []BackupFile
 }
 
 const (
@@ -526,7 +526,7 @@ const (
 func EncodeBackup(b Backup) []byte {
 	p := make([]byte, backupPrefixBytes)
 	copy(p, b.UUID[:])
-	for i, n := range []uint64{b.LastUserSequence, b.CheckpointCutoffSequence, uint64(b.SourceCacheBytes), uint64(b.SourceRecordBytes), uint64(len(b.Files))} {
+	for i, n := range []uint64{b.LastUserSequence, b.CheckpointCutoffSequence, uint64(b.SourceValueCacheBudgetBytes), uint64(b.SourceMaxRecordBytes), uint64(len(b.Files))} {
 		order.PutUint64(p[16+8*i:], n)
 	}
 	for _, f := range b.Files {
@@ -551,9 +551,9 @@ func DecodeBackup(b []byte) (Backup, error) {
 	}
 	copy(result.UUID[:], p[:16])
 	result.LastUserSequence, result.CheckpointCutoffSequence = order.Uint64(p[16:]), order.Uint64(p[24:])
-	result.SourceCacheBytes = int64(order.Uint64(p[32:]))
-	result.SourceRecordBytes = int64(order.Uint64(p[40:]))
-	if result.SourceCacheBytes < 0 || result.SourceRecordBytes < 0 {
+	result.SourceValueCacheBudgetBytes = int64(order.Uint64(p[32:]))
+	result.SourceMaxRecordBytes = int64(order.Uint64(p[40:]))
+	if result.SourceValueCacheBudgetBytes < 0 || result.SourceMaxRecordBytes < 0 {
 		return result, bad("backup source settings")
 	}
 	count := order.Uint64(p[48:])

@@ -140,7 +140,8 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 }
 
 // ProtectParity seals a nonempty active DATA segment, then verifies or builds
-// recovery files for the sealed selection. Writes after the seal can continue.
+// PARITY sidecars for the selected sealed DATA segments. Writers can continue
+// appending to the new active segment.
 func (db *DB) ProtectParity(ctx context.Context) error {
 	return (*engine.DB)(db).ProtectParity(ctx)
 }
@@ -176,23 +177,28 @@ func Restore(ctx context.Context, req RestoreRequest) error {
 	})
 }
 
-// BackupInfo describes a verified backup at its committed sequence.
+// BackupInfo describes a verified file backup at its last committed user sequence.
+// An empty backup has zero live keys and zero size measurements.
 type BackupInfo struct {
-	DatabaseID [16]byte // Database UUID, shared by its backups and restored copies.
-	Sequence   uint64   // Last committed user sequence in the backup.
-	LiveKeys   uint64   // Number of keys present at Sequence.
-	// RequiredLimits gives the largest live value-cache charge and encoded record size.
-	// Both are zero for an empty image. Zero option fields select defaults.
-	RequiredLimits RestoreLimits
+	DatabaseID       [16]byte // Database UUID, shared by its backups and restored copies.
+	LastUserSequence uint64   // Last committed user sequence in the backup.
+	LiveKeys         uint64   // Number of keys present at LastUserSequence.
+	// LargestLiveCacheChargeBytes is the largest logical value-cache charge for one live entry.
+	LargestLiveCacheChargeBytes int64
+	// LargestLiveRecordBytes is the largest encoded live record, including its header.
+	LargestLiveRecordBytes int64
 }
 
 // CheckLimits checks whether a target configuration can restore this backup,
-// using the measured RequiredLimits without reading the backup again. Zero fields
+// using the measured live record sizes without reading the backup again. Zero fields
 // select the same defaults as Open. Invalid limits match ErrInvalidOptions.
 // Insufficient limits match ErrIncompatibleOptions and expose *CompatibilityError
 // through errors.As.
 func (info BackupInfo) CheckLimits(limits RestoreLimits) error {
-	return engine.RestoreLimits(limits).Check(engine.RestoreLimits(info.RequiredLimits))
+	return engine.RestoreLimits(limits).Check(storage.LiveRecordSizes{
+		LargestLiveCacheChargeBytes: info.LargestLiveCacheChargeBytes,
+		LargestLiveRecordBytes:      info.LargestLiveRecordBytes,
+	})
 }
 
 // VerifyBackup checks an immutable backup's file set, checksums and committed
@@ -213,13 +219,11 @@ func publicBackupInfo(info storage.BackupInfo, err error) (BackupInfo, error) {
 		return BackupInfo{}, err
 	}
 	return BackupInfo{
-		DatabaseID: info.DatabaseID,
-		Sequence:   info.Sequence,
-		LiveKeys:   info.LiveKeys,
-		RequiredLimits: RestoreLimits{
-			ValueCacheBudgetBytes: info.Required.ValueCacheBudgetBytes,
-			MaxRecordBytes:        info.Required.RecordBytes,
-		},
+		DatabaseID:                  info.DatabaseID,
+		LastUserSequence:            info.LastUserSequence,
+		LiveKeys:                    info.LiveKeys,
+		LargestLiveCacheChargeBytes: info.LargestLiveCacheChargeBytes,
+		LargestLiveRecordBytes:      info.LargestLiveRecordBytes,
 	}, nil
 }
 

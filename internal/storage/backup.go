@@ -118,7 +118,7 @@ func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, 
 		}
 	}()
 	meta := format.Backup{UUID: capture.Current.UUID, LastUserSequence: capture.Current.LastUserSequence, CheckpointCutoffSequence: capture.Catalog.CheckpointCutoffSequence,
-		SourceCacheBytes: cfg.ValueCacheBudgetBytes, SourceRecordBytes: cfg.RecordBytes}
+		SourceValueCacheBudgetBytes: cfg.ValueCacheBudgetBytes, SourceMaxRecordBytes: cfg.MaxRecordBytes}
 	addBytes := func(name string, b []byte) error {
 		if err := fs.NewFile(filepath.Join(stage, name), b, "backup.metadata"); err != nil {
 			return err
@@ -319,7 +319,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err != nil {
 		return err
 	}
-	if err := cfg.CheckLimits(backup.info.Required); err != nil {
+	if err := cfg.CheckLimits(backup.info.LiveRecordSizes); err != nil {
 		return err
 	}
 	stage, err := os.MkdirTemp(filepath.Dir(target), ".tarp-restore-")
@@ -341,7 +341,7 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err != nil {
 		return err
 	}
-	if err := cfg.CheckLimits(image.Required); err != nil {
+	if err := cfg.CheckLimits(image.LiveRecordSizes); err != nil {
 		return err
 	}
 	err = publishDirectory(ctx, fs, stage, target, "restore")
@@ -351,9 +351,9 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 
 // BackupInfo describes a fully verified backup. Size minima come from live records.
 type BackupInfo struct {
-	DatabaseID         [16]byte
-	Sequence, LiveKeys uint64
-	Required           RequiredLimits
+	DatabaseID                 [16]byte
+	LastUserSequence, LiveKeys uint64
+	LiveRecordSizes
 }
 
 type verifiedBackup struct {
@@ -522,8 +522,8 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 	return verifiedBackup{
 		files: meta.Files,
 		info: BackupInfo{
-			DatabaseID: image.Current.UUID, Sequence: image.Current.LastUserSequence, LiveKeys: image.LiveKeys,
-			Required: image.Required,
+			DatabaseID: image.Current.UUID, LastUserSequence: image.Current.LastUserSequence, LiveKeys: image.LiveKeys,
+			LiveRecordSizes: image.LiveRecordSizes,
 		},
 	}, nil
 }

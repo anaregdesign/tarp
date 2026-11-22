@@ -13,7 +13,7 @@ import (
 
 func adjacentReadFixture(t *testing.T) (*Store, []AdjacentRead) {
 	t.Helper()
-	s, err := openTestStore(t, t.TempDir(), Config{Handles: 1, RecordBytes: 256, TargetSegmentBytes: 1024, ValueCacheBudgetBytes: 1024}, nil)
+	s, err := openTestStore(t, t.TempDir(), Config{Handles: 1, MaxRecordBytes: 256, TargetSegmentBytes: 1024, ValueCacheBudgetBytes: 1024}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

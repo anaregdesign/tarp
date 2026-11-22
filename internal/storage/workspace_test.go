@@ -144,7 +144,7 @@ func TestIndexCreationFailureReleasesWorkspaceAndReportsInitialization(t *testin
 	}{{"fresh", false, publication.Committed}, {"existing", true, publication.NotApplied}} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "db")
-			cfg := Config{Handles: 1, RecordBytes: 256, TargetSegmentBytes: 1024, ValueCacheBudgetBytes: 1024}
+			cfg := Config{Handles: 1, MaxRecordBytes: 256, TargetSegmentBytes: 1024, ValueCacheBudgetBytes: 1024}
 			if tc.existing {
 				s, err := openTestStore(t, dir, cfg, nil)
 				if err != nil {

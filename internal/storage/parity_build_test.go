@@ -11,7 +11,7 @@ import (
 )
 
 func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
-	for _, valueBytes := range []int{5, 32 * format.ParityBlockBytes * format.ParityDataBlocks} {
+	for _, valueBytes := range []int{5, 32 * format.DataBlockBytes * format.DataBlocksPerStripe} {
 		name := "tiny"
 		if valueBytes > 5 {
 			name = "multiple stripes"
@@ -23,7 +23,7 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 					writes++
 				}
 			}}
-			cfg := Config{ValueCacheBudgetBytes: 4 << 20, RecordBytes: 3 << 20, TargetSegmentBytes: 4 << 20, Handles: 1}
+			cfg := Config{ValueCacheBudgetBytes: 4 << 20, MaxRecordBytes: 3 << 20, TargetSegmentBytes: 4 << 20, Handles: 1}
 			s, err := openTestStore(t, t.TempDir(), cfg, io)
 			if err != nil {
 				t.Fatal(err)
@@ -41,7 +41,7 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 			source := CapturedFile{File: s.Files[entry.ID], Entry: entry}
 			source.File.Pin()
 			defer source.File.Unpin()
-			ensure := func() error { return s.EnsureParity(t.Context(), s.Current.UUID, source, true, nil) }
+			ensure := func() error { return s.EnsureParitySidecar(t.Context(), s.Current.UUID, source, true, nil) }
 			if err := ensure(); err != nil {
 				t.Fatal(err)
 			}

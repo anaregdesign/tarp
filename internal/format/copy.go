@@ -14,7 +14,8 @@ type Identity struct {
 	Sequence uint64
 }
 
-const streamChunk = 32 << 10
+// streamChunkBytes bounds record copy chunks and the sequential replay read-ahead buffer.
+const streamChunkBytes = 32 << 10
 
 // SelectRecord validates one complete record. After its key is available, choose
 // selects a destination or returns nil to discard the bytes. The caller publishes
@@ -33,7 +34,7 @@ func selectRecord(ctx context.Context, read func([]byte) error, offset, availabl
 	if len(buffer) == 0 {
 		return RecordHeader{}, fmt.Errorf("format: empty copy buffer")
 	}
-	buffer = buffer[:min(len(buffer), streamChunk)]
+	buffer = buffer[:min(len(buffer), streamChunkBytes)]
 	var header [RecordHeaderBytes]byte
 	if err := read(header[:]); err != nil {
 		return RecordHeader{}, err

@@ -397,7 +397,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		// staging failure would prevent publication for this cutoff.
 		eligible := true
 		for _, unavailable := range blocked {
-			if !errors.Is(unavailable.Err, format.ErrParityGap) {
+			if !errors.Is(unavailable.Err, format.ErrUnrecoverableDataBlocks) {
 				eligible = false
 				break
 			}
@@ -447,7 +447,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		// Reserve space for the sidecar and allocation blocks alongside DATA,
 		// the catalog and CURRENT. Staging already includes catalog metadata.
 		outputBytes := staging - uint64(manifestBytes) - format.FrontierBytes
-		if err == nil && available < staging+format.ParityBytes(outputBytes)+4*4096 {
+		if err == nil && available < staging+format.ParitySidecarBytes(outputBytes)+4*4096 {
 			err = ErrNoSpace
 		}
 	}

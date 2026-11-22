@@ -18,14 +18,14 @@ import (
 )
 
 type Image struct {
-	Current       format.Frontier
-	Catalog       format.Catalog
-	Manifest      []byte
-	Files         map[uint64]*File
-	Required      RequiredLimits
-	LiveKeys      uint64
-	MaxValueBytes int64
-	openRead      func(string, int)
+	Current  format.Frontier
+	Catalog  format.Catalog
+	Manifest []byte
+	Files    map[uint64]*File
+	LiveRecordSizes
+	LiveKeys              uint64
+	LargestLiveValueBytes int64
+	openRead              func(string, int)
 	// Only an index build has a live capture whose pinned DATA can be repaired.
 	liveCapture bool
 }
@@ -177,15 +177,18 @@ func scanSelectedRecords(ctx context.Context, rd io.ReaderAt, entry format.Catal
 
 func (image *Image) measure(key string, recordBytes, valueBytes int64) error {
 	image.LiveKeys++
-	image.MaxValueBytes = max(image.MaxValueBytes, valueBytes)
-	if recordBytes <= image.Required.RecordBytes {
+	image.LargestLiveValueBytes = max(image.LargestLiveValueBytes, valueBytes)
+	if recordBytes <= image.LargestLiveRecordBytes {
 		return nil
 	}
 	charge := entrysize.CacheCharge(uint64(len(key)), uint64(valueBytes))
 	if charge > math.MaxInt64 {
 		return fmt.Errorf("%w: unrepresentable live cache charge", ErrCorrupt)
 	}
-	image.Required = RequiredLimits{ValueCacheBudgetBytes: int64(charge), RecordBytes: recordBytes}
+	image.LiveRecordSizes = LiveRecordSizes{
+		LargestLiveCacheChargeBytes: int64(charge),
+		LargestLiveRecordBytes:      recordBytes,
+	}
 	return nil
 }
 
@@ -280,7 +283,7 @@ func (s *Store) loadCheckpoint(ctx context.Context, image *Image, load IndexImpo
 		}
 	}
 	if exact {
-		image.LiveKeys, image.MaxValueBytes, image.Required = totals.LiveKeys, totals.MaxValueBytes, totals.Required
+		image.LiveKeys, image.LargestLiveValueBytes, image.LiveRecordSizes = totals.LiveKeys, totals.LargestLiveValueBytes, totals.LiveRecordSizes
 	}
 	return keys, nil
 }

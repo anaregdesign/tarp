@@ -212,7 +212,7 @@ func TestBatchGetSizeBoundCannotWrap(t *testing.T) {
 	// result already exceeds the limit. No payload allocation is necessary.
 	const size = 1<<62 + 1
 	var limit *BatchLimitError
-	err := checkBatchBytes(4, math.MaxInt64, size, func(int) int64 { return size })
+	err := checkBatchGetValueBytes(4, math.MaxInt64, size, func(int) int64 { return size })
 	if !errors.As(err, &limit) || limit.Index != 1 || limit.Actual != 2*uint64(size) || limit.Limit != math.MaxInt64 {
 		t.Fatalf("large result: %+v", err)
 	}

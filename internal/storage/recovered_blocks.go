@@ -117,16 +117,16 @@ func (c *Checkpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *reco
 	}
 	// The caller owns stage even if a later DATA or sidecar operation fails.
 	stage := &recoveredBlocks{File: scratch, end: e.Bytes}
-	blocks := (e.Bytes-1)/format.ParityBlockBytes + 1
+	blocks := (e.Bytes-1)/format.DataBlockBytes + 1
 	if blocks > (math.MaxInt64-e.Bytes)/3 {
 		return stage, fmt.Errorf("storage: recovery image too large")
 	}
 	stage.rangesAt = e.Bytes + blocks*3
 	dataHash, descHash := sha256.New(), sha256.New()
-	var raw [format.ParityBlockBytes]byte
+	var raw [format.DataBlockBytes]byte
 	var desc [3]byte
-	reader := bufio.NewReaderSize(recoveryParityReader{side, c.store.IO, unavailable}, parityBufferSize(e.Bytes))
-	err = format.WalkParityBlocks(ctx, data, reader, c.capture.Current.UUID, e, func(off int64, first uint16, block []byte) error {
+	reader := bufio.NewReaderSize(recoveryParityReader{side, c.store.IO, unavailable}, parityIOBufferBytes(e.Bytes))
+	err = format.WalkDataBlocksFromParity(ctx, data, reader, c.capture.Current.UUID, e, func(off int64, first uint16, block []byte) error {
 		if data.err != nil {
 			return unavailable(data.err)
 		}
@@ -156,7 +156,7 @@ func (c *Checkpoint) stageBlocks(ctx context.Context, src CapturedFile) (_ *reco
 		if err := c.store.IO.Write(scratch, block, off, "compact.recover.data"); err != nil {
 			return err
 		}
-		return c.store.IO.Write(scratch, desc[:], e.Bytes+off/format.ParityBlockBytes*3, "compact.recover.descriptor")
+		return c.store.IO.Write(scratch, desc[:], e.Bytes+off/format.DataBlockBytes*3, "compact.recover.descriptor")
 	})
 	if errors.Is(err, format.ErrInvalidParity) {
 		return stage, unavailable(err)
@@ -197,7 +197,7 @@ func (b *recoveredBlocks) descriptor(i int64) (uint16, bool, error) {
 }
 
 func (b *recoveredBlocks) overlapsGap(off, size int64) (bool, error) {
-	for i := off / format.ParityBlockBytes; i <= (off+size-1)/format.ParityBlockBytes; i++ {
+	for i := off / format.DataBlockBytes; i <= (off+size-1)/format.DataBlockBytes; i++ {
 		_, gap, err := b.descriptor(i)
 		if err != nil || gap {
 			return gap, err
@@ -210,7 +210,7 @@ func (b *recoveredBlocks) overlapsGap(off, size int64) (bool, error) {
 // record's length could not be decoded. A valid raw record at the anchored
 // offset can still be rescued when other bytes in the block are damaged.
 func (b *recoveredBlocks) nextAnchor(ctx context.Context, off int64) (int64, error) {
-	for i := off / format.ParityBlockBytes; i <= (b.end-1)/format.ParityBlockBytes; i++ {
+	for i := off / format.DataBlockBytes; i <= (b.end-1)/format.DataBlockBytes; i++ {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
@@ -218,8 +218,8 @@ func (b *recoveredBlocks) nextAnchor(ctx context.Context, off int64) (int64, err
 		if err != nil {
 			return 0, err
 		}
-		next := i*format.ParityBlockBytes + int64(anchor)
-		if anchor != format.ParityNoAnchor && next > off {
+		next := i*format.DataBlockBytes + int64(anchor)
+		if anchor != format.NoRecordAnchor && next > off {
 			return next, nil
 		}
 	}
@@ -230,7 +230,7 @@ func (b *recoveredBlocks) nextAnchor(ctx context.Context, off int64) (int64, err
 // unparsed interval can contain multiple records when a header was lost. A
 // parsed interval belongs to exactly one record. The sorted private spool
 // bounds memory for very large files and rejects forged offsets inside
-// readable records even if another byte in the same parity block was damaged.
+// readable records even if another byte in the same DATA block was damaged.
 const recoveryRangeBytes = 21
 const (
 	rangeUnparsed byte = 1 << iota

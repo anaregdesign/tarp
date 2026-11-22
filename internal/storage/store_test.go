@@ -106,7 +106,7 @@ func TestOpenPreservesUnrecognizedFilesBeforeCleanup(t *testing.T) {
 
 func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 256, TargetSegmentBytes: 1024, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 256, TargetSegmentBytes: 1024, Handles: 1}
 	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 	}
 
 	tooSmall := cfg
-	tooSmall.RecordBytes = 1
+	tooSmall.MaxRecordBytes = 1
 	rejected, keys, err := OpenIndexed(t.Context(), dir, tooSmall, true, nil, newBTree, nil)
 	var limits *CompatibilityError
 	if rejected != nil || keys != nil || !errors.As(err, &limits) {
@@ -196,7 +196,7 @@ func TestOpenPreservesWorkspaceAndTailUntilValidationSucceeds(t *testing.T) {
 
 func TestOpenReservesFileIDsBeforeRemovingUnselectedFiles(t *testing.T) {
 	dir := t.TempDir()
-	cfg := Config{ValueCacheBudgetBytes: 1024, RecordBytes: 128, TargetSegmentBytes: 1024, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1024, MaxRecordBytes: 128, TargetSegmentBytes: 1024, Handles: 1}
 	s, err := openTestStore(t, dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +276,7 @@ func TestAppendBatchRecoversOnlyCompleteFrontiers(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("rotate=%v/%s", rotate, tc.point), func(t *testing.T) {
 				dir := t.TempDir()
-				cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 128 << 10, TargetSegmentBytes: 1 << 20, Handles: 1}
+				cfg := Config{ValueCacheBudgetBytes: 1 << 20, MaxRecordBytes: 128 << 10, TargetSegmentBytes: 1 << 20, Handles: 1}
 				if rotate {
 					cfg.TargetSegmentBytes = format.SegmentHeaderBytes + batchBytes
 				}
@@ -374,7 +374,7 @@ func TestAppendBatchRejectsExhaustedSequenceBeforeIO(t *testing.T) {
 }
 
 func TestRejectedRotatingPreparationKeepsIdentityForRetry(t *testing.T) {
-	cfg := Config{ValueCacheBudgetBytes: 4096, RecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 4096, MaxRecordBytes: 256, TargetSegmentBytes: format.SegmentHeaderBytes + 256, Handles: 1}
 	s, err := openTestStore(t, t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)

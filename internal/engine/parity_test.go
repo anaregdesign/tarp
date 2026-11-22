@@ -78,7 +78,7 @@ func TestParityBuildAllowsForegroundRotationAndContextCancellation(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := errors.Join(format.ValidateParity(t.Context(), fd, uuid, entry), fd.Close()); err != nil {
+		if err := errors.Join(format.ValidateParitySidecar(t.Context(), fd, uuid, entry), fd.Close()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -124,7 +124,7 @@ func TestProtectParityPreservesSourceAndRetriesFailedPublication(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := errors.Join(format.ValidateParity(t.Context(), fd, db.store.Catalog.UUID, entry), fd.Close()); err != nil {
+			if err := errors.Join(format.ValidateParitySidecar(t.Context(), fd, db.store.Catalog.UUID, entry), fd.Close()); err != nil {
 				t.Fatal(err)
 			}
 		})

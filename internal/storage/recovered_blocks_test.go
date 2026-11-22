@@ -16,7 +16,7 @@ import (
 // stripe and independently checked original bytes at the end.
 func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *Checkpoint, CapturedFile, []byte) {
 	t.Helper()
-	cfg := Config{ValueCacheBudgetBytes: 1 << 20, RecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
+	cfg := Config{ValueCacheBudgetBytes: 1 << 20, MaxRecordBytes: 1 << 20, TargetSegmentBytes: 2 << 20, Handles: 1}
 	s, err := openTestStore(t, t.TempDir(), cfg, fs)
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func protectedRecoveryFixture(t *testing.T, fs *IO) (*Store, *Checkpoint, Captur
 	}
 	t.Cleanup(c.Release)
 	src := c.Files[0]
-	if err := s.EnsureParity(t.Context(), c.Current.UUID, src, true, nil); err != nil {
+	if err := s.EnsureParitySidecar(t.Context(), c.Current.UUID, src, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(src.File.Path)
@@ -50,9 +50,9 @@ func TestRecoveredBlocksUseRawBytesOnlyFromIdentifiedOriginal(t *testing.T) {
 	uuid := checkpoint.capture.Current.UUID
 	uuid[0] ^= 1
 	copy(raw, format.EncodeSegmentHeader(format.SegmentHeader{UUID: uuid, ID: src.File.ID, Kind: src.Entry.Kind}))
-	stripe := format.ParityBlockBytes * format.ParityDataBlocks
+	stripe := format.DataBlockBytes * format.DataBlocksPerStripe
 	raw[stripe+8] ^= 1
-	raw[stripe+format.ParityBlockBytes+8] ^= 1
+	raw[stripe+format.DataBlockBytes+8] ^= 1
 	if err := os.WriteFile(src.File.Path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -80,7 +80,7 @@ func prepareScaleBackup(t *testing.T, n int) scaleBackup {
 	// Establish the expected complete report and warm the backup before rotating
 	// the order of measured calls. The same immutable backup serves every arm.
 	fixture.info, err = tarp.VerifyBackup(t.Context(), fixture.dir)
-	if err != nil || fixture.info.DatabaseID != meta.UUID || fixture.info.Sequence != uint64(n) || fixture.info.LiveKeys != uint64(n) {
+	if err != nil || fixture.info.DatabaseID != meta.UUID || fixture.info.LastUserSequence != uint64(n) || fixture.info.LiveKeys != uint64(n) {
 		t.Fatalf("fixture report %+v: %v", fixture.info, err)
 	}
 	return fixture

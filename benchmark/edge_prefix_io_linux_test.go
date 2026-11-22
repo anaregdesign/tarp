@@ -113,7 +113,7 @@ func TestEdgePrefixDataIO(t *testing.T) {
 							}
 							row := map[string]any{
 								"arm": arm, "layout": layout, "operation": op, "query": query.name, "trial": trial,
-								"database_id": fmt.Sprintf("%x", info.DatabaseID), "sequence": info.Sequence,
+								"database_id": fmt.Sprintf("%x", info.DatabaseID), "last_user_sequence": info.LastUserSequence,
 								"data_files": len(storage.files), "filesystem": storage.Filesystem, "device": storage.Device,
 								"matches": n, "yielded": counts.candidates, "yielded_value_bytes": counts.valueBytes,
 								"elapsed_ns": ns, "process_read_bytes": charged, "full_read_control_bytes": control,

@@ -67,8 +67,8 @@ func TestSalvageDataResumesAfterDamagedRecordHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Unrecoverable) != 2 || report.Unrecoverable[0] != (tarp.DataRange{Start: block, End: 2 * block}) || report.Unrecoverable[1] != (tarp.DataRange{Start: 3 * block, End: 4 * block}) {
-		t.Fatalf("unexpected missing ranges %v", report.Unrecoverable)
+	if len(report.UnrecoverableByteRanges) != 2 || report.UnrecoverableByteRanges[0] != (tarp.DataByteRange{Start: block, End: 2 * block}) || report.UnrecoverableByteRanges[1] != (tarp.DataByteRange{Start: 3 * block, End: 4 * block}) {
+		t.Fatalf("unexpected missing ranges %v", report.UnrecoverableByteRanges)
 	}
 	if len(got) != len(entries)-2 || report.Records != uint64(len(got)) {
 		t.Fatalf("recovered %d of %d, report %+v", len(got), len(entries), report)
@@ -141,7 +141,7 @@ func TestSalvageDataDistinguishesEmptyPutAndDelete(t *testing.T) {
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "PARITY-*"))
 	if err != nil || len(files) != 1 {
-		t.Fatalf("parity files %v, %v", files, err)
+		t.Fatalf("PARITY sidecars %v, %v", files, err)
 	}
 	name := filepath.Base(files[0])
 	id, err := strconv.ParseUint(name[strings.LastIndexByte(name, '-')+1:], 16, 64)
@@ -150,7 +150,7 @@ func TestSalvageDataDistinguishesEmptyPutAndDelete(t *testing.T) {
 	}
 	var got []tarp.SalvagedRecord
 	report, err := tarp.SalvageData(t.Context(), dir, id, 0, func(v tarp.SalvagedRecord) error { got = append(got, v); return nil })
-	if err != nil || report.Records != 3 || len(report.Unrecoverable) != 0 {
+	if err != nil || report.Records != 3 || len(report.UnrecoverableByteRanges) != 0 {
 		t.Fatalf("report: %+v, %v", report, err)
 	}
 	if string(got[0].Key) != "a" || got[0].Deleted || len(got[0].Value) != 0 || string(got[1].Key) != "a" || !got[1].Deleted || len(got[1].Value) != 0 {

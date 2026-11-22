@@ -111,7 +111,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	if err != nil {
 		return nil, err
 	}
-	cfg := storage.Config{IndexedOpen: opts.OpenValidation == Indexed, ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, RecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
+	cfg := storage.Config{IndexedOpen: opts.OpenValidation == Indexed, ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, MaxRecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
 	s, keys, err := storage.OpenIndexed(ctx, dir, cfg, existingOnly, fs, func(s *storage.Store) (index.Backend, error) {
 		return openIndex(s, opts.IndexMode, opts.BTreeMemoryBudgetBytes/2)
 	}, opts.importCheckpoint)
@@ -128,7 +128,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 			db.stats.LiveRecordBytes += uint64(live)
 		}
 	}
-	db.maxSeenValueBytes = s.MaxValueBytes
+	db.maxSeenValueBytes = s.LargestLiveValueBytes
 	db.stats.LiveKeys = uint64(keys.Count())
 	db.initDataStats()
 	// Finish opening a fresh, empty database once initialization has published
@@ -560,7 +560,7 @@ func publicCause(err error) error {
 	}
 	var incompatible *storage.CompatibilityError
 	if errors.As(err, &incompatible) {
-		return errors.Join(&CompatibilityError{RequiredValueCacheBudgetBytes: incompatible.ValueCacheBudgetBytes, RequiredRecordBytes: incompatible.RecordBytes}, err)
+		return errors.Join(&CompatibilityError{RequiredValueCacheBudgetBytes: incompatible.RequiredValueCacheBudgetBytes, RequiredMaxRecordBytes: incompatible.RequiredMaxRecordBytes}, err)
 	}
 	switch {
 	case errors.Is(err, format.ErrCorrupt):

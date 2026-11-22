@@ -779,7 +779,7 @@ func TestBackupRepairsMultipleSealedFilesAndRetainsOriginalCut(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := VerifyBackup(t.Context(), backup)
-	if err != nil || info.Sequence != second.LastSequence || info.LiveKeys != 2 {
+	if err != nil || info.LastUserSequence != second.LastSequence || info.LiveKeys != 2 {
 		t.Fatalf("backup after repair: %+v, %v", info, err)
 	}
 	if names, err := os.ReadDir(dir); err != nil || len(names) != 1 {
@@ -792,7 +792,7 @@ func TestBackupDoesNotRepairSealedDataForDestinationFault(t *testing.T) {
 	var verifies atomic.Int32
 	fs := &storage.IO{Hook: func(p string) error {
 		switch p {
-		case "repair.verify:before":
+		case "data-repair.verify:before":
 			verifies.Add(1)
 		case "backup.copy:before":
 			return syscall.EIO
@@ -813,7 +813,7 @@ func TestBackupSourceRepairUncertaintyPreservesDestinationAndForcesReopen(t *tes
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	ioHooks := &storage.IO{Hook: func(p string) error {
-		if p == "repair.rename:after" {
+		if p == "data-repair.rename:after" {
 			cancel()
 			return context.Canceled
 		}
@@ -893,7 +893,7 @@ func TestBackupRepairsCapturedActivePrefixAfterConcurrentSeal(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := VerifyBackup(t.Context(), dest)
-	if err != nil || info.Sequence != before.LastUserSequence || info.LiveKeys != 1 {
+	if err != nil || info.LastUserSequence != before.LastUserSequence || info.LiveKeys != 1 {
 		t.Fatalf("backup did not preserve captured prefix: %+v, %v", info, err)
 	}
 	wantValue(t, db, "first", "original")

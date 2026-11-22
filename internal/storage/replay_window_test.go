@@ -47,8 +47,8 @@ func TestReadOnlyReplayWindowsMatchFullValidation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if img.LiveKeys != full.LiveKeys || img.Required != full.Required || img.MaxValueBytes != full.MaxValueBytes {
-			t.Fatalf("budget %d: live=%d required=%+v maxValue=%d", budget, img.LiveKeys, img.Required, img.MaxValueBytes)
+		if img.LiveKeys != full.LiveKeys || img.LiveRecordSizes != full.LiveRecordSizes || img.LargestLiveValueBytes != full.LargestLiveValueBytes {
+			t.Fatalf("budget %d: live=%d required=%+v maxValue=%d", budget, img.LiveKeys, img.LiveRecordSizes, img.LargestLiveValueBytes)
 		}
 	}
 	// This tombstone sorts after every key retained by the first small window.

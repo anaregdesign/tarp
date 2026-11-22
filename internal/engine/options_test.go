@@ -84,7 +84,7 @@ func TestAdmissionCacheAndRecoveryUseSameEntrySizes(t *testing.T) {
 		if opened != nil {
 			opened.Close()
 		}
-		if !errors.As(err, &required) || required.RequiredRecordBytes != 51 || required.RequiredValueCacheBudgetBytes != 131 {
+		if !errors.As(err, &required) || required.RequiredMaxRecordBytes != 51 || required.RequiredValueCacheBudgetBytes != 131 {
 			t.Fatalf("reopen with %+v: required = %+v, err = %v", smaller, required, err)
 		}
 	}

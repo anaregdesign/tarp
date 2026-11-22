@@ -27,7 +27,7 @@ func TestGoldenVectors(t *testing.T) {
 		{"catalog-cleaned", EncodeCatalog(Catalog{UUID: uuid, CheckpointCutoffSequence: 6, PrunedThroughSequence: 15, ActiveID: 9, Entries: []CatalogEntry{{ID: 7, DataFileDigest: [32]byte{7}, Bytes: 115, Kind: SnapshotKind, FirstSequence: 0, LastSequence: 0}, {ID: 8, DataFileDigest: [32]byte{8}, Bytes: 128, Kind: RawLogKind, FirstSequence: 7, LastSequence: 7}, {ID: 10, DataFileDigest: [32]byte{10}, Bytes: 162, Kind: CleanedLogKind, FirstSequence: 8, LastSequence: 15}}}), "544152504d4e4654000000006801000000000000c9e1e57a7d6b6d22000000000102030000000000000000000000000006000000000000000f00000000000000090000000000000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000700000000000000730000000000000002000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000000800000000000000800000000000000001000000000000000700000000000000070000000000000008000000000000000000000000000000000000000000000000000000000000000a00000000000000a200000000000000030000000000000008000000000000000f000000000000000a00000000000000000000000000000000000000000000000000000000000000"},
 		{"catalog-recleaned", EncodeCatalog(Catalog{UUID: uuid, CheckpointCutoffSequence: 6, PrunedThroughSequence: 15, ActiveID: 9, Entries: []CatalogEntry{{ID: 7, DataFileDigest: [32]byte{7}, Bytes: 115, Kind: SnapshotKind, FirstSequence: 0, LastSequence: 0}, {ID: 8, DataFileDigest: [32]byte{8}, Bytes: 128, Kind: RawLogKind, FirstSequence: 7, LastSequence: 7}, {ID: 11, DataFileDigest: [32]byte{11}, Bytes: 113, Kind: CleanedLogKind, FirstSequence: 8, LastSequence: 15}}}), "544152504d4e465400000000680100000000000012dd2f1b7254ac0a000000000102030000000000000000000000000006000000000000000f00000000000000090000000000000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000700000000000000730000000000000002000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000000800000000000000800000000000000001000000000000000700000000000000070000000000000008000000000000000000000000000000000000000000000000000000000000000b000000000000007100000000000000030000000000000008000000000000000f000000000000000b00000000000000000000000000000000000000000000000000000000000000"},
 		{"catalog-empty", EncodeCatalog(Catalog{UUID: uuid, CheckpointCutoffSequence: 6, PrunedThroughSequence: 15, ActiveID: 9, Entries: []CatalogEntry{{ID: 7, DataFileDigest: [32]byte{7}, Bytes: 115, Kind: SnapshotKind, FirstSequence: 0, LastSequence: 0}, {ID: 8, DataFileDigest: [32]byte{8}, Bytes: 128, Kind: RawLogKind, FirstSequence: 7, LastSequence: 7}, {ID: 0, Bytes: 0, Kind: CleanedLogKind, FirstSequence: 8, LastSequence: 15}}}), "544152504d4e46540000000068010000000000002be2ebcbadc5f758000000000102030000000000000000000000000006000000000000000f000000000000000900000000000000030000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007000000000000007300000000000000020000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000008000000000000008000000000000000010000000000000007000000000000000700000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000008000000000000000f000000000000000000000000000000000000000000000000000000000000000000000000000000"},
-		{"backup", EncodeBackup(Backup{UUID: uuid, LastUserSequence: 6, CheckpointCutoffSequence: 3, SourceCacheBytes: 512, SourceRecordBytes: 128, Files: []BackupFile{{Name: "CURRENT", Bytes: 128}}}), "54415250424b55500000000069000000000000000bead0e50f04b3fa000000000102030000000000000000000000000006000000000000000300000000000000000200000000000080000000000000000100000000000000070043555252454e5480000000000000000000000000000000000000000000000000000000000000000000000000000000"},
+		{"backup", EncodeBackup(Backup{UUID: uuid, LastUserSequence: 6, CheckpointCutoffSequence: 3, SourceValueCacheBudgetBytes: 512, SourceMaxRecordBytes: 128, Files: []BackupFile{{Name: "CURRENT", Bytes: 128}}}), "54415250424b55500000000069000000000000000bead0e50f04b3fa000000000102030000000000000000000000000006000000000000000300000000000000000200000000000080000000000000000100000000000000070043555252454e5480000000000000000000000000000000000000000000000000000000000000000000000000000000"},
 	} {
 		expected, err := hex.DecodeString(tc.hex)
 		if err != nil || !bytes.Equal(tc.got, expected) {
@@ -72,7 +72,7 @@ func TestWireImages(t *testing.T) {
 	if got, err := DecodeCatalog(EncodeCatalog(catalog)); err != nil || !reflect.DeepEqual(got, catalog) {
 		t.Fatalf("catalog: %#v %v", got, err)
 	}
-	backup := Backup{UUID: uuid, LastUserSequence: 6, CheckpointCutoffSequence: 3, SourceCacheBytes: 512, Files: []BackupFile{{Name: "CURRENT", Bytes: 128}}}
+	backup := Backup{UUID: uuid, LastUserSequence: 6, CheckpointCutoffSequence: 3, SourceValueCacheBudgetBytes: 512, Files: []BackupFile{{Name: "CURRENT", Bytes: 128}}}
 	if got, err := DecodeBackup(EncodeBackup(backup)); err != nil || !reflect.DeepEqual(got, backup) {
 		t.Fatalf("backup: %#v %v", got, err)
 	}
@@ -175,7 +175,7 @@ func (f readerAtFunc) ReadAt(b []byte, off int64) (int, error) { return f(b, off
 
 func TestScanStopsDuringLargeRecord(t *testing.T) {
 	data := EncodeSegmentHeader(SegmentHeader{ID: 1, Kind: RawLogKind})
-	data = append(data, EncodeRecord(Put, 1, []byte("key"), make([]byte, streamChunk*8))...)
+	data = append(data, EncodeRecord(Put, 1, []byte("key"), make([]byte, streamChunkBytes*8))...)
 	source := bytes.NewReader(data)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -203,15 +203,15 @@ func TestScanBatchesOnlyCommittedBytes(t *testing.T) {
 	for i := range smallRecords {
 		data = append(data, EncodeRecord(Put, uint64(i+1), []byte("k"), []byte("v"))...)
 	}
-	largeKey := bytes.Repeat([]byte{0xff}, streamChunk+1)
-	largeValue := bytes.Repeat([]byte{0xee}, 2*streamChunk+1)
+	largeKey := bytes.Repeat([]byte{0xff}, streamChunkBytes+1)
+	largeValue := bytes.Repeat([]byte{0xee}, 2*streamChunkBytes+1)
 	data = append(data, EncodeRecord(Put, smallRecords+1, largeKey, largeValue)...)
 	end := int64(len(data))
 	data = append(data, 0xff) // An active log can have an uncommitted tail.
 	source := bytes.NewReader(data)
 	pos, calls := int64(SegmentHeaderBytes), 0
 	input := readerAtFunc(func(b []byte, off int64) (int, error) {
-		if off != pos || off+int64(len(b)) > end || len(b) > streamChunk {
+		if off != pos || off+int64(len(b)) > end || len(b) > streamChunkBytes {
 			t.Fatalf("out-of-range or repeated read at %d, length %d", off, len(b))
 		}
 		calls++
@@ -298,9 +298,9 @@ func FuzzDecoders(f *testing.F) {
 		_, _ = DecodeCatalog(b)
 		_, _ = DecodeBackup(b)
 		_, _ = DecodeIndexedValue(b, []byte("k"), 1)
-		_ = ValidateParity(t.Context(), bytes.NewReader(b), parityTestUUID, sealed)
+		_ = ValidateParitySidecar(t.Context(), bytes.NewReader(b), parityTestUUID, sealed)
 		if len(b) >= 8 && string(b[:8]) == "TARPPAR2" {
-			_ = RecoverParity(t.Context(), bytes.NewReader(nil), bytes.NewReader(b), io.Discard, parityTestUUID, sealed)
+			_ = RecoverDataFromParity(t.Context(), bytes.NewReader(nil), bytes.NewReader(b), io.Discard, parityTestUUID, sealed)
 		}
 		if len(b) >= RecordHeaderBytes {
 			_, _ = DecodeRecordHeader(b[:RecordHeaderBytes], int64(len(b)))

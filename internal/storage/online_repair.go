@@ -115,10 +115,10 @@ func (s *Store) RepairRead(ctx context.Context, f *File, cause error) error {
 		return cause
 	}
 	err := r.run(ctx, s.DamageChanged, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
-		if err := s.IO.Check("repair.verify:before"); err != nil {
+		if err := s.IO.Check("data-repair.verify:before"); err != nil {
 			return err
 		}
-		if _, err := s.repairSealed(ctx, r.uuid, r.entry, true); err != nil {
+		if _, err := s.repairSealedData(ctx, r.uuid, r.entry, true); err != nil {
 			return err
 		}
 		// Another completed publication may already have replaced the path.
@@ -220,8 +220,8 @@ func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot,
 		// A cached read failure cannot schedule the same expensive checkpoint
 		// again. Reconsider the work when loss is first observed or a formerly
 		// blocked file can be fully read again.
-		newGap := next != nil && errors.Is(next.Err, format.ErrParityGap) &&
-			(prior == nil || !errors.Is(prior.Err, format.ErrParityGap))
+		newGap := next != nil && errors.Is(next.Err, format.ErrUnrecoverableDataBlocks) &&
+			(prior == nil || !errors.Is(prior.Err, format.ErrUnrecoverableDataBlocks))
 		if damageChanged != nil && (newGap || prior != nil && next == nil) {
 			damageChanged()
 		}
