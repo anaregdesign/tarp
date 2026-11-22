@@ -91,11 +91,55 @@ func (c *DataCheckpoint) CopyByKey(ctx context.Context, live index.View, count i
 	})
 }
 
+// orderedInput applies the same byte allowance used for output and parity to
+// physical source reads. Keep the single ReadAt when pacing is disabled.
+func (c *DataCheckpoint) orderedInput(src io.ReaderAt) io.ReaderAt {
+	if c.orderedYield == nil {
+		return src
+	}
+	return orderedInput{c: c, src: src}
+}
+
+type orderedInput struct {
+	c   *DataCheckpoint
+	src io.ReaderAt
+}
+
+func (r orderedInput) ReadAt(p []byte, off int64) (int, error) {
+	var read int
+	for len(p) != 0 {
+		n := min(len(p), orderedPaceBytes)
+		if err := r.c.paceOrdered(n); err != nil {
+			// A scheduling failure occurred before reading authoritative bytes.
+			// Cancellation and errors already classed as private retain their cause.
+			var work *IndexWorkError
+			if errors.As(err, &work) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return read, err
+			}
+			return read, &IndexWorkError{Err: err}
+		}
+		got, err := r.src.ReadAt(p[:n], off)
+		read += got
+		if err != nil && !(err == io.EOF && got == n) {
+			return read, err
+		}
+		if got != n {
+			return read, io.ErrUnexpectedEOF
+		}
+		p, off = p[n:], off+int64(n)
+	}
+	return read, nil
+}
+
 // Input errors must identify authoritative DATA even when permission or
 // other non-repairable failures preclude a parity retry. Callers classify
 // visitor, index and private-output failures separately.
 func orderedSourceError(id uint64, err error) error {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var work *IndexWorkError
+	if errors.As(err, &work) {
 		return err
 	}
 	var source *SourceError
@@ -116,7 +160,7 @@ func (c *DataCheckpoint) scanByKey(ctx context.Context, src CapturedSegment, vis
 	defer func() { result = errors.Join(result, orderedSourceError(src.Entry.ID, fd.Close())) }()
 	var visitorErr error
 	err = c.store.IO.Do("compact.scan", func() error {
-		return scanSelectedRecords(ctx, fd, src.Entry, c.capture.Catalog.CheckpointCutoffSequence, func(off int64, r format.RecordHeader, key string) error {
+		return scanSelectedRecords(ctx, c.orderedInput(fd), src.Entry, c.capture.Catalog.CheckpointCutoffSequence, func(off int64, r format.RecordHeader, key string) error {
 			visitorErr = visit(off, r, key)
 			return visitorErr
 		})
@@ -227,7 +271,7 @@ func (w *orderedCopy) readOne(src CapturedSegment, row *orderedWinner, dst io.Wr
 
 func (w *orderedCopy) readRecord(fd *os.File, row *orderedWinner, dst io.Writer) error {
 	a := row.loc
-	rec, err := format.CopyRecord(w.ctx, fd, dst, a.RecordOffset, a.RecordBytes, &format.Identity{Key: row.key, Sequence: a.Sequence}, w.buf)
+	rec, err := format.CopyRecord(w.ctx, w.c.orderedInput(fd), dst, a.RecordOffset, a.RecordBytes, &format.Identity{Key: row.key, Sequence: a.Sequence}, w.buf)
 	if err == nil && (rec.EncodedRecordBytes() != a.RecordBytes || rec.ValueBytes != a.ValueBytes || rec.PayloadCRC != row.payloadCRC) {
 		err = fmt.Errorf("%w: ordered record changed after validation", ErrCorrupt)
 	}
@@ -255,6 +299,7 @@ func (w *orderedCopy) flush() (result error) {
 		return cmp.Compare(a.RecordOffset, b.RecordOffset)
 	})
 	var fd *os.File
+	var input io.ReaderAt
 	var fileID uint64
 	defer func() {
 		if fd != nil {
@@ -284,6 +329,7 @@ func (w *orderedCopy) flush() (result error) {
 			if err != nil {
 				return err
 			}
+			input = w.c.orderedInput(fd)
 			fileID = id
 		}
 		start := offset
@@ -299,7 +345,7 @@ func (w *orderedCopy) flush() (result error) {
 			i++
 		}
 		b := w.arena[start:offset]
-		n, err := fd.ReadAt(b, fileStart)
+		n, err := input.ReadAt(b, fileStart)
 		if err != nil && !(err == io.EOF && n == len(b)) {
 			return orderedSourceError(fileID, err)
 		}

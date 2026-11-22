@@ -2,7 +2,9 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"os"
 	"slices"
 	"syscall"
@@ -297,6 +299,89 @@ func TestCopyByKeySeparatesInputPermissionFailuresFromPrivateWorkspace(t *testin
 			}
 			if s.Current != capture.Current {
 				t.Fatal("failed staged copy replaced CURRENT")
+			}
+		})
+	}
+}
+
+// Exercise the first-pass digest, contiguous range read, and streamed-record
+// paths separately, so a yield during output cannot mask an unpaced input.
+func TestOrderedCheckpointInputPacesEachPassAndSeparatesSchedulingFailures(t *testing.T) {
+	const valueBytes = 3 * orderedPaceBytes
+	target := int64(valueBytes + 1024)
+	s, err := openTestStore(t, t.TempDir(), Config{MaxRecordBytes: target - 64, ValueCacheBudgetBytes: target, TargetSegmentBytes: target, Handles: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	value := bytes.Repeat([]byte("v"), valueBytes)
+	loc, err := s.Append(format.Put, []byte("k"), value, func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	cap, err := s.Capture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cap.Release()
+	src := cap.Segments[0]
+	record := format.EncodeRecord(format.Put, loc.Sequence, []byte("k"), value)
+	h, err := format.DecodeRecordHeader(record[:format.RecordHeaderBytes], int64(len(record)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []string{"scan", "window", "stream"} {
+		t.Run(phase, func(t *testing.T) {
+			for _, stop := range []error{nil, context.Canceled, syscall.EIO, &IndexWorkError{Err: syscall.EPERM}} {
+				cp := s.NewDataCheckpoint(cap)
+				yields := 0
+				cp.SetOrderedYield(func() error {
+					yields++
+					if yields == 2 {
+						return stop
+					}
+					return nil
+				})
+				done := false
+				w := orderedCopy{c: cp, ctx: t.Context(), sources: map[uint64]CapturedSegment{src.Entry.ID: src}, buf: make([]byte, 32<<10), emit: func(string, Location) (io.Writer, error) {
+					done = true
+					return io.Discard, nil
+				}}
+				row := orderedWinner{payloadCRC: h.PayloadCRC, key: "k", loc: loc}
+				var err error
+				switch phase {
+				case "scan":
+					err = cp.scanByKey(t.Context(), src, func(int64, format.RecordHeader, string) error { done = true; return nil })
+				case "window":
+					w.window = []orderedWinner{row}
+					w.payload = int(loc.RecordBytes)
+					err = w.flush()
+				case "stream":
+					var got bytes.Buffer
+					err = w.readOne(src, &row, &got)
+					done = bytes.Equal(got.Bytes(), record)
+				}
+				if stop == nil {
+					if err != nil || !done || yields != 3 {
+						t.Fatalf("%s completion: done %t yields %d error %v", phase, done, yields, err)
+					}
+					continue
+				}
+				var source *SourceError
+				var work *IndexWorkError
+				if !errors.Is(err, stop) || done || yields != 2 || errors.As(err, &source) || failedDataRead(err) != nil {
+					t.Fatalf("%s failure: done %t yields %d error %v", phase, done, yields, err)
+				}
+				if errors.Is(stop, context.Canceled) {
+					if errors.As(err, &work) {
+						t.Fatalf("cancellation became a private I/O error: %v", err)
+					}
+				} else if !errors.As(err, &work) || (errors.Is(stop, syscall.EPERM) && work != stop) {
+					t.Fatalf("scheduling error was reclassified: %v", err)
+				}
 			}
 		})
 	}

@@ -156,7 +156,7 @@ func (c *DataCheckpoint) certifyCapturedBase(ctx context.Context, live index.Vie
 		var lookupErr error
 		ordered := true
 		err = c.store.IO.Do("compact.key.certify", func() error {
-			return scanSelectedRecords(ctx, fd, src.Entry, c.capture.Catalog.CheckpointCutoffSequence, func(off int64, record format.RecordHeader, key string) error {
+			return scanSelectedRecords(ctx, c.orderedInput(fd), src.Entry, c.capture.Catalog.CheckpointCutoffSequence, func(off int64, record format.RecordHeader, key string) error {
 				if live != nil && c.capture.Catalog.CheckpointCutoffSequence == c.capture.Current.LastUserSequence {
 					addr, found, err := live.Lookup(key)
 					if err != nil {
