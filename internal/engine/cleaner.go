@@ -2,6 +2,7 @@
 package engine
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"math"
@@ -132,10 +133,12 @@ func (db *DB) cleanYield(ctx context.Context) error {
 
 // selectCleaningInputs inspects committed per-file accounting under the writer gate.
 // With source bytes S and estimated output bytes W, (S-W)/(S+W) >= 1/3
-// simplifies to W <= S/2. Ranking this ratio is equivalent to minimizing W/S.
+// simplifies to W <= S/2. Keep that eligibility test and rank single-file
+// candidates by estimated immediately reclaimable bytes per byte of work.
 func selectCleaningInputs(s *storage.Store, target int64) (inputs []format.CatalogEntry, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
 	metadata := uint64(len(s.Manifest)) + format.FrontierBytes
 	var best format.CatalogEntry
+	var bestGain, bestWork uint64
 	for i, entry := range s.Catalog.Entries {
 		if !entry.HasPhysicalFile() {
 			continue
@@ -162,18 +165,45 @@ func selectCleaningInputs(s *storage.Store, target int64) (inputs []format.Catal
 			}
 			continue
 		}
-		output += metadata
+		bytes := uint64(entry.Bytes)
+		stage := output + metadata
+		protectedStage := stage + format.ParitySidecarBytes(output)
+		// Scan the source, write DATA and metadata, and reread output DATA
+		// to build its sidecar. Retiring a sidecar does not read its bytes.
+		work := bytes + output
+		work += min(protectedStage, math.MaxUint64-work)
+		var gain uint64
+		if !f.HasRetentionPin() {
+			unlinkable := bytes
+			if f.ParityReady() {
+				unlinkable += format.ParitySidecarBytes(bytes)
+			}
+			gain = unlinkable - min(unlinkable, protectedStage)
+		}
 		if best.HasPhysicalFile() {
-			a, b := bits.Mul64(output, uint64(best.Bytes))
-			c, d := bits.Mul64(staging, uint64(entry.Bytes))
-			if a > c || a == c && (b > d || b == d && (entry.FirstSequence > best.FirstSequence || entry.FirstSequence == best.FirstSequence && entry.ID >= best.ID)) {
+			order := compareProducts(gain, bestWork, bestGain, work)
+			if order == 0 {
+				// Preserve progress even if every candidate has a long-lived
+				// pin or cannot yet be credited with its PARITY retirement.
+				order = compareProducts(staging, bytes, stage, uint64(best.Bytes))
+			}
+			if order < 0 || order == 0 && (entry.FirstSequence > best.FirstSequence || entry.FirstSequence == best.FirstSequence && entry.ID >= best.ID) {
 				continue
 			}
 		}
-		best, staging = entry, output
+		best, staging, bestGain, bestWork = entry, stage, gain, work
 		inputs = s.Catalog.Entries[i : i+1]
 	}
 	return inputs, staging, blocked
+}
+
+func compareProducts(a, b, c, d uint64) int {
+	ah, al := bits.Mul64(a, b)
+	bh, bl := bits.Mul64(c, d)
+	if ah != bh {
+		return cmp.Compare(ah, bh)
+	}
+	return cmp.Compare(al, bl)
 }
 
 func retainedRecordBytes(f *storage.DataSegment) uint64 {

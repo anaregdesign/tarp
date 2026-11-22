@@ -44,7 +44,8 @@ func (c *SegmentCleaning) ResetCopy(fs *IO) error {
 		return err
 	}
 	c.created = false
-	c.output.parityReady, c.output.parityNeedsSync = false, false
+	c.output.parityReady.Store(false)
+	c.output.parityNeedsSync = false
 	c.output.Size.Store(0)
 	c.output.DeleteBytes.Store(0)
 	c.digest = [sha256.Size]byte{}
@@ -283,7 +284,8 @@ func (s *Store) ProtectCleaned(ctx context.Context, c *SegmentCleaning, yield fu
 	if err := s.IO.SyncDir(s.Dir, "clean.parity.dirsync"); err != nil {
 		return err
 	}
-	c.output.parityReady, c.output.parityNeedsSync = true, false
+	c.output.parityNeedsSync = false
+	c.output.parityReady.Store(true)
 	return nil
 }
 
@@ -303,7 +305,7 @@ func (c *SegmentCleaning) Discard(fs *IO) error {
 // InstallCleaned splices the replacement into the latest catalog under the
 // writer gate. Every tail rotation and append since BeginClean survives.
 func (s *Store) InstallCleaned(c *SegmentCleaning, offGate func(func() error) error) error {
-	if c.created && !c.output.parityReady {
+	if c.created && !c.output.ParityReady() {
 		return errors.New("storage: cleaner replacement is not protected")
 	}
 	start, end := c.position, c.position+len(c.entries)

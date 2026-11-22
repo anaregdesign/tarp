@@ -17,7 +17,8 @@ const (
 func (db *DB) releaseBatchPins(reads []batchRead) {
 	for _, r := range reads {
 		if r.loc.Segment != nil {
-			db.releaseScanPin(r.loc.Segment)
+			r.loc.Segment.Unpin()
+			db.notifyCleanerIfUnpinned(r.loc.Segment)
 		}
 	}
 }

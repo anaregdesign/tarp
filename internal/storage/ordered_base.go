@@ -27,6 +27,31 @@ type snapshotBoundsBuilder struct {
 	rows, lastOffset int64
 }
 
+type scannedSnapshot struct {
+	snapshotBoundsBuilder
+	unordered bool
+}
+
+func (b *scannedSnapshot) add(key string, offset int64) {
+	b.unordered = b.unordered || b.last >= key
+	b.snapshotBoundsBuilder.add(key, offset)
+}
+
+type snapshotOrderCheck struct {
+	fences    *fenceCache
+	last      string
+	unordered bool
+}
+
+func (o *snapshotOrderCheck) accept(f *DataSegment, b *scannedSnapshot) {
+	if b.rows == 0 || b.unordered || o.last >= b.first {
+		o.unordered, o.last = true, ""
+		return
+	}
+	b.complete(f, o.fences)
+	o.last = b.last
+}
+
 func (b *snapshotBoundsBuilder) add(key string, offset int64) {
 	if b.rows == 0 {
 		b.first = key
@@ -156,7 +181,7 @@ func (c *DataCheckpoint) certifyCapturedBase(ctx context.Context, live index.Vie
 		var lookupErr error
 		ordered := true
 		err = c.store.IO.Do("compact.key.certify", func() error {
-			return scanSelectedRecords(ctx, c.orderedInput(fd), src.Entry, c.capture.Catalog.CheckpointCutoffSequence, func(off int64, record format.RecordHeader, key string) error {
+			return scanSelectedRecords(ctx, c.paceInput(fd), src.Entry, c.capture.Catalog.CheckpointCutoffSequence, func(off int64, record format.RecordHeader, key string) error {
 				if live != nil && c.capture.Catalog.CheckpointCutoffSequence == c.capture.Current.LastUserSequence {
 					addr, found, err := live.Lookup(key)
 					if err != nil {

@@ -61,7 +61,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	if values {
 		pinnedSegments = make(map[uint64]*storage.DataSegment, len(db.segments))
 		for id, f := range db.segments {
-			f.Pin()
+			f.PinRetained()
 			pinnedSegments[id] = f
 		}
 	}
@@ -70,7 +70,8 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	defer v.Close()
 	defer func() {
 		for _, f := range pinnedSegments {
-			db.releaseScanPin(f)
+			f.UnpinRetained()
+			db.notifyCleanerIfUnpinned(f)
 		}
 	}()
 
@@ -156,8 +157,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	return nil
 }
 
-func (db *DB) releaseScanPin(segment *storage.DataSegment) {
-	segment.Unpin()
+func (db *DB) notifyCleanerIfUnpinned(segment *storage.DataSegment) {
 	if segment.References() == 0 {
 		db.notifyCleaner()
 	}

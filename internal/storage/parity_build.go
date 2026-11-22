@@ -37,10 +37,10 @@ func (s *Store) EnsureParitySidecar(ctx context.Context, uuid [16]byte, source C
 			return err
 		}
 	}
-	if f.parityReady && !recheck {
+	if f.ParityReady() && !recheck {
 		return nil
 	}
-	f.parityReady = false
+	f.parityReady.Store(false)
 	path := filepath.Join(s.Dir, parityName(uuid, f.ID))
 	err := checkParity(ctx, path, uuid, source.Entry)
 	missing := errors.Is(err, os.ErrNotExist)
@@ -61,7 +61,7 @@ func (s *Store) EnsureParitySidecar(ctx context.Context, uuid [16]byte, source C
 		}
 		f.parityNeedsSync = false
 	}
-	f.parityReady = true
+	f.parityReady.Store(true)
 	return nil
 }
 
@@ -198,7 +198,7 @@ func (f *DataSegment) discardReplacement(fs *IO, uuid [16]byte, point string) er
 		return err
 	}
 	var parityErr error
-	if f.parityNeedsSync || f.parityReady {
+	if f.parityNeedsSync || f.ParityReady() {
 		parityErr = remove(filepath.Join(filepath.Dir(f.Path), parityName(uuid, f.ID)))
 	}
 	return errors.Join(parityErr, remove(f.Path))
