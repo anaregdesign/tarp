@@ -115,7 +115,7 @@ The optional `controls` mode boots a raw, unmounted 256 MiB data disk behind
 the standard-library NBD test backend. Ordinary block writes live only in its
 RAM overlay. A successful FLUSH syncs all earlier writes; a successful FUA
 syncs only its own range, without persisting unrelated dirty bytes even on the
-same 4096-byte cached page. A subsequent FLUSH cannot restore stale bytes over
+same 4096-byte NBD overlay page. A subsequent FLUSH cannot restore stale bytes over
 that FUA range. Unit controls independently read the backing file to cover
 these distinctions;
 page-cache accounting reports allocated overlay pages, not exact dirty-byte

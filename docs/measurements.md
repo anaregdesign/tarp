@@ -190,7 +190,7 @@ one `repack_concurrent` row. The drivers alternate which arm runs first.
 
 ## Scan workloads
 
-The primary VM profile runs an untimed traversal to warm the OS file cache,
+The primary VM profile runs an untimed traversal to warm the OS page cache,
 then measures `scan_full_warm` over all 4,096 live keys. Time to the first
 entry includes capturing the live index and loading the first record. Total
 traversal time includes the consumer checking every key and value. Reported

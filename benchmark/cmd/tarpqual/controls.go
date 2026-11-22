@@ -81,8 +81,8 @@ func blockControls(work, confirm string, output io.Writer) (result error) {
 	if err != nil {
 		return err
 	}
-	if !vm.Cut || vm.Before.Flushes == 0 || vm.Before.DirtyBytes == 0 || vm.After.DirtyBytes != 0 ||
-		vm.After.DiscardedBytes == 0 {
+	if !vm.Cut || vm.Before.Flushes == 0 || vm.Before.DirtyOverlayPageBytes == 0 || vm.After.DirtyOverlayPageBytes != 0 ||
+		vm.After.DiscardedOverlayPageBytes == 0 {
 		return fmt.Errorf("qualification: ineffective flush/volatile-cut controls: %+v", vm)
 	}
 	fd, err := os.Open(diskPath)

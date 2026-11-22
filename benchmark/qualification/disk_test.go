@@ -10,7 +10,7 @@ import (
 
 func TestVolatileWritesAndFlushedSurvival(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "disk.raw")
-	disk, err := CreateDisk(path, 3*pageBytes)
+	disk, err := CreateDisk(path, 3*overlayPageBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,36 +31,36 @@ func TestVolatileWritesAndFlushedSurvival(t *testing.T) {
 	if err := disk.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := disk.WriteAt(volatile, pageBytes-128, false); err != nil {
+	if err := disk.WriteAt(volatile, overlayPageBytes-128, false); err != nil {
 		t.Fatal(err)
 	}
 	read := make([]byte, len(volatile))
-	if err := disk.ReadAt(read, pageBytes-128); err != nil || !bytes.Equal(read, volatile) {
+	if err := disk.ReadAt(read, overlayPageBytes-128); err != nil || !bytes.Equal(read, volatile) {
 		t.Fatalf("volatile read coherence: %x %v", read, err)
 	}
 	cut := disk.PowerCut()
-	if cut.DiscardedBytes != 2*pageBytes || cut.DirtyBytes != 0 || cut.Flushes != 1 {
+	if cut.DiscardedOverlayPageBytes != 2*overlayPageBytes || cut.DirtyOverlayPageBytes != 0 || cut.Flushes != 1 {
 		t.Fatalf("cut statistics: %+v", cut)
 	}
 	persisted, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := make([]byte, 3*pageBytes)
+	expected := make([]byte, 3*overlayPageBytes)
 	copy(expected[1:], flushed)
 	if !bytes.Equal(persisted, expected) {
 		t.Fatal("flushed bytes did not survive exactly or unflushed bytes survived")
 	}
-	if err := disk.ReadAt(read, pageBytes-128); err != nil || !bytes.Equal(read, make([]byte, len(read))) {
+	if err := disk.ReadAt(read, overlayPageBytes-128); err != nil || !bytes.Equal(read, make([]byte, len(read))) {
 		t.Fatalf("cut failed to discard volatile bytes: %x %v", read, err)
 	}
 }
 
 func TestFUAPersistsOnlyItsRequest(t *testing.T) {
-	for _, offset := range []int64{1024, pageBytes + 512, pageBytes - 128} {
+	for _, offset := range []int64{1024, overlayPageBytes + 512, overlayPageBytes - 128} {
 		t.Run(fmt.Sprint(offset), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "disk.raw")
-			disk, err := CreateDisk(path, 3*pageBytes)
+			disk, err := CreateDisk(path, 3*overlayPageBytes)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -69,7 +69,7 @@ func TestFUAPersistsOnlyItsRequest(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			for _, at := range []int64{0, pageBytes + 2048} {
+			for _, at := range []int64{0, overlayPageBytes + 2048} {
 				if err := disk.WriteAt(bytes.Repeat([]byte{0xa3}, 512), at, false); err != nil {
 					t.Fatal(err)
 				}
@@ -78,7 +78,7 @@ func TestFUAPersistsOnlyItsRequest(t *testing.T) {
 			if err := disk.WriteAt(fua, offset, true); err != nil {
 				t.Fatal(err)
 			}
-			expected := make([]byte, 3*pageBytes)
+			expected := make([]byte, 3*overlayPageBytes)
 			copy(expected[offset:], fua)
 			for _, cut := range []bool{false, true} {
 				if cut {
@@ -98,7 +98,7 @@ func TestFUAPersistsOnlyItsRequest(t *testing.T) {
 
 func TestOverlappingFUAStaysCoherentThroughLaterFlush(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "disk.raw")
-	disk, err := CreateDisk(path, pageBytes)
+	disk, err := CreateDisk(path, overlayPageBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestOverlappingFUAStaysCoherentThroughLaterFlush(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	expected := bytes.Repeat([]byte{0xa3}, pageBytes)
+	expected := bytes.Repeat([]byte{0xa3}, overlayPageBytes)
 	if err := disk.WriteAt(expected, 0, false); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestOverlappingFUAStaysCoherentThroughLaterFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 	copy(expected[512:], fua)
-	read := make([]byte, pageBytes)
+	read := make([]byte, overlayPageBytes)
 	if err := disk.ReadAt(read, 0); err != nil || !bytes.Equal(read, expected) {
 		t.Fatalf("FUA left a stale overlay: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestOverlappingFUAStaysCoherentThroughLaterFlush(t *testing.T) {
 }
 
 func TestRejectedBlockRequestDoesNotMutate(t *testing.T) {
-	disk, err := CreateDisk(filepath.Join(t.TempDir(), "disk.raw"), pageBytes)
+	disk, err := CreateDisk(filepath.Join(t.TempDir(), "disk.raw"), overlayPageBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestRejectedBlockRequestDoesNotMutate(t *testing.T) {
 		}
 	}()
 	before := disk.Stats()
-	for _, offset := range []int64{-1, pageBytes - 1, pageBytes + 1} {
+	for _, offset := range []int64{-1, overlayPageBytes - 1, overlayPageBytes + 1} {
 		if err := disk.WriteAt([]byte("no"), offset, true); err == nil {
 			t.Fatalf("accepted out-of-bounds offset %d", offset)
 		}

@@ -109,7 +109,7 @@ else:
 edit('internal/storage/snapshot.go', [timed(replay, 'Replay')])
 checkpoint = (root / 'internal/storage/checkpoint.go').read_text()
 copy, = (line.removesuffix(' {') for line in checkpoint.splitlines()
-         if line.startswith('func (c *Checkpoint) Copy(') and line.endswith(' {'))
+         if line.startswith('func (') and ') Copy(' in line and line.endswith(' {'))
 edit('internal/storage/checkpoint.go', [
     timed(copy, 'Copy'),
     timed(copy_record, 'RecordCopy'),
