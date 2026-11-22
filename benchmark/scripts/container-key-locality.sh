@@ -30,7 +30,7 @@ trap 'exit 143' TERM
 mkdir "$tmp/experiment" "$tmp/reader"
 git -C "$repo" archive "$tip" | tar -x -C "$tmp/experiment"
 git -C "$repo" archive "$reader" | tar -x -C "$tmp/reader"
-for f in benchmark/{locality_policy_test.go,locality_foreground_test.go,locality_native_linux_test.go,testdata/locality/sorted_checkpoint.go}; do
+for f in benchmark/{locality_policy_test.go,locality_delta_policy_test.go,locality_foreground_test.go,locality_native_linux_test.go,testdata/locality/sorted_checkpoint.go}; do
     test -f "$tmp/experiment/$f" || { echo "missing from $tip: $f" >&2; exit 1; }
 done
 platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
@@ -150,8 +150,8 @@ coverage("policy", ((r["trace"], r["policy"], r["epoch"]) for r in policy),
          itertools.product(("first", "last", "hot", "uniform", "churn"),
                            ("append", "full", "bounded12p5", "bounded25", "bounded50", "heat25", "heat25budget"), range(1, 17)))
 delta = load_lines("delta.jsonl")
-if len(delta) != 80:
-    raise SystemExit("expected 80 supplemental delta observations")
+coverage("delta", ((r["trace"], r["policy"], r["epoch"]) for r in delta),
+         itertools.product(("first", "last", "hot", "uniform", "churn"), ("delta50budget",), range(1, 17)))
 for arm in ("physical", "staged", "sorted"):
     rows = load_lines(f"native-{arm}.jsonl")
     for trial in (1, 2, 3):
