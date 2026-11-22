@@ -10,12 +10,17 @@ type Address struct {
 	Sequence                  uint64
 }
 
-// View captures a single index state. The owner releases it after iteration.
-// Keys use exact binary equality. All does not promise an iteration order.
-type View interface {
-	Lookup(key string) (Address, bool, error)
+// Snapshot enumerates one captured index state in unspecified order.
+// Its owner releases it after iteration.
+type Snapshot interface {
 	All(yield func(string, Address) bool) error
 	Close()
+}
+
+// View also supports lookup of an encoded key by exact binary equality.
+type View interface {
+	Snapshot
+	Lookup(key string) (Address, bool, error)
 }
 
 // BatchView is implemented by views that can share page reads across keys.

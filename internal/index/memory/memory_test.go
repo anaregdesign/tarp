@@ -1,7 +1,9 @@
 package memory_test
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -101,11 +103,19 @@ func TestBoundedViewCopiesOnlyMatchingAddresses(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx.Commit()
-	for _, key := range []string{"a", "ab", "abc", "b", "c"} {
-		address, found, err := v.Lookup(key)
-		want := key == "ab" || key == "abc"
-		if err != nil || found != want || (found && address.Sequence != 1) {
-			t.Fatalf("captured %q = %+v, %t, %v", key, address, found, err)
-		}
+	got := make(map[string]uint64)
+	err = v.All(func(key string, address index.Address) bool {
+		got[key] += address.Sequence
+		return true
+	})
+	if err != nil || len(got) != 2 || got["ab"] != 1 || got["abc"] != 1 {
+		t.Fatalf("captured addresses = %v, %v", got, err)
+	}
+	err = v.All(func(string, index.Address) bool {
+		v.Close()
+		return true
+	})
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("closing view during iteration returned %v", err)
 	}
 }

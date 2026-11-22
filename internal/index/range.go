@@ -31,12 +31,12 @@ func (b Bounds) Contains(key string) bool {
 // BoundedView returns ctx.Err() on cancellation and otherwise succeeds.
 // A canceled capture retains no snapshot.
 type BoundedSnapshotter interface {
-	BoundedView(ctx context.Context, bounds Bounds) (View, error)
+	BoundedView(ctx context.Context, bounds Bounds) (Snapshot, error)
 }
 
 // ScanView pairs a snapshot with any bounds still to apply during iteration.
 type ScanView struct {
-	view   View
+	view   Snapshot
 	bounds Bounds
 }
 
