@@ -1,27 +1,49 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/index"
+	"github.com/anaregdesign/tarp/internal/platform"
 )
 
 // CopyRecovered runs only after the normal checkpoint encountered unavailable
 // sealed DATA. Healthy inputs still require strict file validation. A private
 // partial replay checks the pinned view against all readable history.
 func (c *DataCheckpoint) CopyRecovered(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error)) error {
+	return c.copyRecovered(ctx, history, live, moves, lost, reserve, cached, false)
+}
+
+// CopyRecoveredByKey stages recovered bytes while their verified source is
+// available. In particular a cached value can cease to be available as soon
+// as a concurrent writer publishes its next version.
+func (c *DataCheckpoint) CopyRecoveredByKey(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error)) error {
+	return c.copyRecovered(ctx, history, live, moves, lost, reserve, cached, true)
+}
+
+func (c *DataCheckpoint) copyRecovered(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error), ordered bool) error {
 	r := checkpointRecovery{c: c, ctx: ctx, live: live, lost: lost, cached: cached, buf: make([]byte, 32<<10)}
 	// A readable Delete may have its predecessor in an unreadable region.
 	r.history = newReplayBuilder(ctx, history, c.capture.Current.LastUserSequence)
 	defer r.history.abort()
-	err := c.writeSnapshot(ctx, moves, reserve, func(emit func(string, Location) (io.Writer, error)) error {
+	if ordered {
+		if err := c.prepareOrderedScratch(moves, lost); err != nil {
+			return err
+		}
+		if r.history.sort != nil {
+			r.history.sort.budget = c.scratch
+		}
+	}
+	scan := func(emit func(string, Location) (io.Writer, error)) error {
 		r.emit = emit
 		for _, src := range c.capture.Segments {
 			if err := ctx.Err(); err != nil {
@@ -36,7 +58,13 @@ func (c *DataCheckpoint) CopyRecovered(ctx context.Context, history index.Backen
 			}
 		}
 		return nil
-	})
+	}
+	var err error
+	if ordered {
+		err = c.writeRecoveredByKey(ctx, live, moves, reserve, scan)
+	} else {
+		err = c.writeSnapshot(ctx, moves, reserve, scan)
+	}
 	if err != nil {
 		return err
 	}
@@ -72,6 +100,134 @@ func (c *DataCheckpoint) CopyRecovered(ctx context.Context, history index.Backen
 		return fmt.Errorf("%w: recovered index count disagrees with capture", ErrCorrupt)
 	}
 	return nil
+}
+
+// Recovery can supply bytes from reconstructed blocks, the original DATA,
+// or the value cache. The scratch offset indexes that verified copy. The
+// captured view supplies the original DATA address for conditional relocation.
+func (c *DataCheckpoint) writeRecoveredByKey(ctx context.Context, live index.View, moves *Relocations, reserve func() (*DataSegment, error), scan func(func(string, Location) (io.Writer, error)) error) (result error) {
+	dir, err := c.store.WorkspaceDir()
+	if err != nil {
+		return &IndexWorkError{Err: err}
+	}
+	stage, err := platform.OpenScratch(dir, "tarp-checkpoint-recover-*")
+	if err != nil {
+		return &IndexWorkError{Err: err}
+	}
+	runs := sortedReplay{ctx: ctx, dir: dir, limit: verifyWindowBytes, budget: c.scratch}
+	var total int64
+	defer func() { c.scratch.release(uint64(total)) }()
+	defer func() {
+		result = errors.Join(result, replayWorkError(errors.Join(stage.Close(), runs.close())))
+	}()
+	w := bufio.NewWriterSize(stage, 32<<10)
+	row := recoveryScratchWriter{writer: w, runs: &runs}
+	err = scan(func(key string, old Location) (io.Writer, error) {
+		if row.left != 0 {
+			return nil, &IndexWorkError{Err: io.ErrUnexpectedEOF}
+		}
+		if old.RecordBytes > math.MaxInt64-total {
+			return nil, &IndexWorkError{Err: errors.New("recovery scratch exceeds file offset limit")}
+		}
+		if err := c.scratch.grow(uint64(old.RecordBytes)); err != nil {
+			return nil, &IndexWorkError{Err: err}
+		}
+		a := old.Address()
+		a.RecordOffset = total
+		total += old.RecordBytes
+		row.event = replayEvent{key: key, addr: a}
+		row.left = a.RecordBytes
+		row.headerBytes = 0
+		return &row, nil
+	})
+	if err != nil {
+		return err
+	}
+	if row.left != 0 {
+		return &IndexWorkError{Err: io.ErrUnexpectedEOF}
+	}
+	if err := w.Flush(); err != nil {
+		return &IndexWorkError{Err: err}
+	}
+	segments := make(map[uint64]*DataSegment, len(c.capture.Segments))
+	for _, src := range c.capture.Segments {
+		segments[src.Segment.ID] = src.Segment
+	}
+	return c.writeOrderedSnapshot(ctx, moves, reserve, func(emit func(string, Location) (io.Writer, error), _ func(format.CatalogEntry) error) error {
+		buf := make([]byte, 32<<10)
+		var previous string
+		var visitErr error
+		err := runs.each(func(e replayEvent) (err error) {
+			defer func() { visitErr = err }()
+			a, ok, err := live.Lookup(e.key)
+			if err != nil {
+				return &IndexWorkError{Err: err}
+			}
+			if !ok || e.key <= previous || a.FileID != e.addr.FileID || a.Sequence != e.addr.Sequence || a.RecordBytes != e.addr.RecordBytes || a.ValueBytes != e.addr.ValueBytes || segments[a.FileID] == nil {
+				return &IndexWorkError{Err: errors.New("recovery scratch disagrees with captured record")}
+			}
+			previous = e.key
+			dst, err := emit(e.key, At(segments[a.FileID], a))
+			if err != nil {
+				return err
+			}
+			rec, err := format.CopyRecord(ctx, stage, dst, e.addr.RecordOffset, a.RecordBytes, &format.Identity{Key: e.key, Sequence: a.Sequence}, buf)
+			if err != nil {
+				var output *destinationError
+				if errors.As(err, &output) {
+					return err
+				}
+				return replayWorkError(err)
+			}
+			if rec.EncodedRecordBytes() != a.RecordBytes || rec.ValueBytes != a.ValueBytes || rec.PayloadCRC != e.payloadCRC {
+				return &IndexWorkError{Err: errors.New("recovery scratch record differs from staged Put")}
+			}
+			return nil
+		})
+		if visitErr != nil {
+			return visitErr
+		}
+		return replayWorkError(err)
+	})
+}
+
+// Capture the original payload checksum from the staged header, independently
+// of the bytes later returned by the scratch file. Some recovered values are
+// supplied by the immutable cache instead of by CopyRecord.
+type recoveryScratchWriter struct {
+	writer      io.Writer
+	runs        *sortedReplay
+	event       replayEvent
+	header      [format.RecordHeaderBytes]byte
+	headerBytes int
+	left        int64
+}
+
+func (w *recoveryScratchWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if int64(len(p)) > w.left {
+		return 0, &IndexWorkError{Err: errors.New("recovery staging exceeds record length")}
+	}
+	n, err := w.writer.Write(p)
+	if err != nil {
+		return n, replayWorkError(err)
+	}
+	if n != len(p) {
+		return n, &IndexWorkError{Err: io.ErrShortWrite}
+	}
+	w.headerBytes += copy(w.header[w.headerBytes:], p)
+	w.left -= int64(n)
+	if w.left == 0 {
+		r, err := format.DecodeRecordHeader(w.header[:], w.event.addr.RecordBytes)
+		if err != nil {
+			return n, replayWorkError(err)
+		}
+		w.event.payloadCRC = r.PayloadCRC
+		return n, replayWorkError(w.runs.add(w.event))
+	}
+	return n, nil
 }
 
 type checkpointRecovery struct {
@@ -146,7 +302,7 @@ func (r *checkpointRecovery) file(src CapturedSegment) (result error) {
 		if err != nil || !ok {
 			return err
 		}
-		if err := r.copyRecord(fd, key, At(src.Segment, a)); err != nil {
+		if err := r.copyRecord(fd, key, At(src.Segment, a), rec.PayloadCRC); err != nil {
 			return err
 		}
 		r.keys++
@@ -169,14 +325,14 @@ func (r *checkpointRecovery) observe(src CapturedSegment, off int64, rec format.
 	return a, ok && a == want.Address(), r.history.apply(src.Segment, off, rec, key)
 }
 
-func (r *checkpointRecovery) copyRecord(rd io.ReaderAt, key string, loc Location) error {
+func (r *checkpointRecovery) copyRecord(rd io.ReaderAt, key string, loc Location, payloadCRC uint32) error {
 	w, err := r.emit(key, loc)
 	if err != nil {
 		return err
 	}
 	rec, err := format.CopyRecord(r.ctx, rd, w, loc.RecordOffset, loc.RecordBytes, &format.Identity{Key: key, Sequence: loc.Sequence}, r.buf)
-	if err == nil && (rec.EncodedRecordBytes() != loc.RecordBytes || rec.ValueBytes != loc.ValueBytes) {
-		return fmt.Errorf("%w: copied record length changed", ErrCorrupt)
+	if err == nil && (rec.EncodedRecordBytes() != loc.RecordBytes || rec.ValueBytes != loc.ValueBytes || rec.PayloadCRC != payloadCRC) {
+		return fmt.Errorf("%w: copied record changed during recovery", ErrCorrupt)
 	}
 	return err
 }
@@ -232,7 +388,7 @@ func (r *checkpointRecovery) scanDamaged(src CapturedSegment, b *recoveredBlocks
 				return err
 			}
 			if current {
-				if err := r.copyRecord(b, key, At(src.Segment, a)); err != nil {
+				if err := r.copyRecord(b, key, At(src.Segment, a), rec.PayloadCRC); err != nil {
 					return err
 				}
 				r.keys++
@@ -331,7 +487,7 @@ func (r *checkpointRecovery) recoverRecord(b *recoveredBlocks, key string, old L
 		if rec.Kind != format.Put || actual != key || rec.Sequence != old.Sequence || rec.EncodedRecordBytes() != old.RecordBytes || rec.ValueBytes != old.ValueBytes {
 			return fmt.Errorf("%w: recovery address disagrees with intact record", ErrCorrupt)
 		}
-		return r.copyRecord(b, key, old)
+		return r.copyRecord(b, key, old, rec.PayloadCRC)
 	}
 	if !errors.Is(err, ErrCorrupt) {
 		return err

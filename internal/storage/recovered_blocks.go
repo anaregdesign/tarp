@@ -25,6 +25,8 @@ import (
 type recoveredBlocks struct {
 	*os.File
 	end, rangesAt, ranges, unowned int64
+	budget                         *orderedScratchBudget
+	charge                         uint64
 }
 
 // An EIO is not authority to permanently discard a key. The parity codec
@@ -116,12 +118,15 @@ func (c *DataCheckpoint) stageBlocks(ctx context.Context, src CapturedSegment) (
 		return nil, err
 	}
 	// The caller owns stage even if a later DATA or sidecar operation fails.
-	stage := &recoveredBlocks{File: scratch, end: e.Bytes}
+	stage := &recoveredBlocks{File: scratch, end: e.Bytes, budget: c.scratch}
 	blocks := (e.Bytes-1)/format.DataBlockBytes + 1
 	if blocks > (math.MaxInt64-e.Bytes)/3 {
 		return stage, fmt.Errorf("storage: recovery image too large")
 	}
 	stage.rangesAt = e.Bytes + blocks*3
+	if err := stage.chargeGrowth(uint64(stage.rangesAt)); err != nil {
+		return stage, err
+	}
 	dataHash, descHash := sha256.New(), sha256.New()
 	var raw [format.DataBlockBytes]byte
 	var desc [3]byte
@@ -190,6 +195,20 @@ func (c *DataCheckpoint) stageBlocks(ctx context.Context, src CapturedSegment) (
 	return stage, nil
 }
 
+func (b *recoveredBlocks) chargeGrowth(n uint64) error {
+	if err := b.budget.grow(n); err != nil {
+		return &IndexWorkError{Err: err}
+	}
+	b.charge += n
+	return nil
+}
+
+func (b *recoveredBlocks) Close() error {
+	b.budget.release(b.charge)
+	b.budget = nil
+	return b.File.Close()
+}
+
 func (b *recoveredBlocks) descriptor(i int64) (uint16, bool, error) {
 	var d [3]byte
 	_, err := b.ReadAt(d[:], b.end+i*3)
@@ -245,6 +264,9 @@ func (b *recoveredBlocks) addRange(start, end int64, flags byte) error {
 	p[16] = flags
 	if b.ranges >= (math.MaxInt64-b.rangesAt)/recoveryRangeBytes {
 		return errors.New("storage: recovery range spool too large")
+	}
+	if err := b.chargeGrowth(recoveryRangeBytes); err != nil {
+		return err
 	}
 	if err := b.writeRange(b.ranges, &p); err != nil {
 		return err

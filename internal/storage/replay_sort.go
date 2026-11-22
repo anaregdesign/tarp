@@ -20,7 +20,8 @@ import (
 type replayEvent struct {
 	key        string
 	addr       index.Address
-	fileKind   uint32
+	payloadCRC uint32
+	fileKind   uint8
 	recordKind uint8
 }
 
@@ -30,6 +31,7 @@ type sortedReplay struct {
 	ctx         context.Context
 	dir         string
 	limit, used int64
+	budget      *orderedScratchBudget
 	chunk       []replayEvent
 	// Consecutive ordered replay chunks can share a single on-disk sort run.
 	// Sort runs merge in pairs. Each level holds at most one older run.
@@ -40,7 +42,7 @@ type sortedReplay struct {
 
 func (s *sortedReplay) apply(f *DataSegment, off int64, r format.RecordHeader, key string) error {
 	addr := index.Address{FileID: f.ID, RecordOffset: off, RecordBytes: r.EncodedRecordBytes(), ValueBytes: r.ValueBytes, Sequence: r.Sequence}
-	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: f.Kind, recordKind: r.Kind}))
+	return replayWorkError(s.add(replayEvent{key: key, addr: addr, fileKind: uint8(f.Kind), recordKind: r.Kind, payloadCRC: r.PayloadCRC}))
 }
 
 func (s *sortedReplay) add(e replayEvent) error {
@@ -69,7 +71,7 @@ func (s *sortedReplay) flushChunk() error {
 		}
 	}
 	if s.pending == nil {
-		run, err := newReplayRun(s.dir)
+		run, err := s.newRun()
 		if err != nil {
 			return err
 		}
@@ -109,18 +111,18 @@ func (s *sortedReplay) push(r *replayRun) error {
 		}
 		r = merged
 	}
-	return errors.Join(errors.New("too many replay runs"), r.fd.Close())
+	return errors.Join(errors.New("too many replay runs"), r.close())
 }
 
 func (s *sortedReplay) merge(old, newer *replayRun) (result *replayRun, err error) {
 	defer func() {
-		err = errors.Join(err, old.fd.Close(), newer.fd.Close())
+		err = errors.Join(err, old.close(), newer.close())
 		if err != nil && result != nil {
-			err = errors.Join(err, result.fd.Close())
+			err = errors.Join(err, result.close())
 			result = nil
 		}
 	}()
-	result, err = newReplayRun(s.dir)
+	result, err = s.newRun()
 	if err != nil {
 		return nil, err
 	}
@@ -134,12 +136,12 @@ func (s *sortedReplay) merge(old, newer *replayRun) (result *replayRun, err erro
 
 func (s *sortedReplay) close() (err error) {
 	if s.pending != nil {
-		err = s.pending.fd.Close()
+		err = s.pending.close()
 		s.pending = nil
 	}
 	for i, run := range s.levels {
 		if run != nil {
-			err = errors.Join(err, run.fd.Close())
+			err = errors.Join(err, run.close())
 			s.levels[i] = nil
 		}
 	}
@@ -200,28 +202,37 @@ func (s *sortedReplay) each(visit func(replayEvent) error) error {
 // reduce validates the same key transitions as chronological replay. The
 // record sequence is preserved as data; it need not equal traversal order.
 func (s *sortedReplay) reduce(pruned uint64, emit func(string, index.Address) error) error {
-	var key string
-	var addr index.Address
-	present := false
-	flush := func() error {
-		if !present || emit == nil {
+	return s.reduceEvents(pruned, func(e replayEvent) error {
+		if emit == nil {
 			return nil
 		}
-		return emit(key, addr)
+		return emit(e.key, e.addr)
+	})
+}
+
+// reduceEvents preserves the payload checksum validated during the source
+// scan so a subsequent record copy can check it against that same version.
+func (s *sortedReplay) reduceEvents(pruned uint64, emit func(replayEvent) error) error {
+	var last replayEvent
+	present := false
+	flush := func() error {
+		if !present {
+			return nil
+		}
+		return emit(last)
 	}
 	err := s.each(func(e replayEvent) error {
-		if key != e.key {
+		if last.key != e.key {
 			if err := flush(); err != nil {
 				return err
 			}
-			key = e.key
 			present = false
 		}
-		if err := validateKey(e.fileKind, format.RecordHeader{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
-			return &SourceError{Err: fmt.Errorf("DATA %d offset %d: %w", e.addr.FileID, e.addr.RecordOffset, err)}
+		if err := validateKey(uint32(e.fileKind), format.RecordHeader{Kind: e.recordKind, Sequence: e.addr.Sequence}, present, pruned); err != nil {
+			return selectedReadFailure(e.addr.FileID, &SourceError{Err: fmt.Errorf("DATA %d offset %d: %w", e.addr.FileID, e.addr.RecordOffset, err)})
 		}
 		present = e.recordKind != format.Delete
-		addr = e.addr
+		last = e
 		return nil
 	})
 	if err != nil {
@@ -235,6 +246,21 @@ type replayRun struct {
 	fd     *os.File
 	bytes  int64
 	maxKey int
+	budget *orderedScratchBudget
+}
+
+func (s *sortedReplay) newRun() (*replayRun, error) {
+	r, err := newReplayRun(s.dir)
+	if err == nil {
+		r.budget = s.budget
+	}
+	return r, err
+}
+
+func (r *replayRun) close() error {
+	r.budget.release(uint64(r.bytes))
+	r.budget = nil
+	return r.fd.Close()
 }
 
 func newReplayRun(dir string) (*replayRun, error) {
@@ -257,10 +283,15 @@ func (r *replayRun) write(w *bufio.Writer, e replayEvent) error {
 	put(h[16:], uint64(e.addr.RecordBytes))
 	put(h[24:], uint64(e.addr.ValueBytes))
 	put(h[32:], e.addr.Sequence)
-	binary.LittleEndian.PutUint32(h[40:], e.fileKind)
-	h[44] = e.recordKind
+	binary.LittleEndian.PutUint32(h[40:], e.payloadCRC)
+	h[44] = e.fileKind<<4 | e.recordKind
+	charge := uint64(len(e.key)) + replayHeaderBytes
+	if err := r.budget.grow(charge); err != nil {
+		return err
+	}
 	size, err := writeScratchRecord(w, h[:], e.key, r.bytes)
 	if err != nil {
+		r.budget.release(charge)
 		return err
 	}
 	r.bytes = size
@@ -291,7 +322,7 @@ func (r *runCursor) next() (replayEvent, error) {
 		return replayEvent{}, err
 	}
 	r.left -= int64(len(key))
-	return replayEvent{key: key, addr: a, fileKind: binary.LittleEndian.Uint32(h[40:]), recordKind: h[44]}, nil
+	return replayEvent{key: key, addr: a, payloadCRC: binary.LittleEndian.Uint32(h[40:]), fileKind: h[44] >> 4, recordKind: h[44] & 15}, nil
 }
 
 func mergeReplay(ctx context.Context, a, b *runCursor, visit func(replayEvent) error) error {

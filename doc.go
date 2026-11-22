@@ -33,7 +33,8 @@
 // new DB if needed. Both accept a context to cancel recovery during startup.
 // Open starts one incremental compaction worker on each new or reopened DB.
 // It reclaims obsolete records, repacks small files and yields for writers
-// and backup. Compact explicitly builds a full DATA checkpoint. Compaction uses
+// and backup. [DB.Compact] explicitly builds a full DATA checkpoint; pass
+// [WithKeyOrder] to order its snapshot records by encoded key. Compaction uses
 // PARITY to recover sealed DATA and can discard a proven irrecoverable live key.
 // CompactResult and AutoCompactionStatus report the number of dropped keys. Provide temporary
 // space for both maintenance and backup. Close joins the worker. Stats returns

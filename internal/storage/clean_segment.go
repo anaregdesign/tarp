@@ -25,6 +25,8 @@ type SegmentCleaning struct {
 	output   *DataSegment
 	uuid     [16]byte
 	cutoff   uint64
+	fences   *fenceCache
+	bounds   snapshotBoundsBuilder
 	created  bool
 	digest   [sha256.Size]byte
 }
@@ -46,6 +48,7 @@ func (c *SegmentCleaning) ResetCopy(fs *IO) error {
 	c.output.Size.Store(0)
 	c.output.DeleteBytes.Store(0)
 	c.digest = [sha256.Size]byte{}
+	c.bounds = snapshotBoundsBuilder{}
 	return nil
 }
 
@@ -68,6 +71,9 @@ func (s *Store) BeginClean(entries []format.CatalogEntry) (*SegmentCleaning, err
 		kind = format.SnapshotKind
 	}
 	c := &SegmentCleaning{entries: run, position: pos, uuid: s.Current.UUID, cutoff: s.Catalog.CheckpointCutoffSequence}
+	if kind == format.SnapshotKind && s.HasOrderedBase() {
+		c.fences = &s.fences
+	}
 	for _, entry := range run {
 		if (entry.Kind == format.SnapshotKind) != (kind == format.SnapshotKind) {
 			return nil, fmt.Errorf("%w: cleaner crossed checkpoint boundary", ErrCorrupt)
@@ -168,6 +174,12 @@ func (c *SegmentCleaning) Copy(ctx context.Context, fs *IO, moves *Relocations, 
 				return nil, err
 			}
 		}
+		if c.fences != nil {
+			if c.bounds.last >= key {
+				return nil, fmt.Errorf("%w: unordered clean snapshot output", ErrCorrupt)
+			}
+			c.bounds.add(key, writer.offset)
+		}
 		if r.Kind == format.Put {
 			next := old
 			next.Segment, next.RecordOffset = c.output, writer.offset
@@ -192,6 +204,9 @@ func (c *SegmentCleaning) Copy(ctx context.Context, fs *IO, moves *Relocations, 
 		}
 		c.output.Size.Store(writer.offset)
 		c.digest = [sha256.Size]byte(writer.hash.Sum(nil))
+		if c.fences != nil {
+			c.bounds.complete(c.output, c.fences)
+		}
 	}
 	return moves.seal()
 }

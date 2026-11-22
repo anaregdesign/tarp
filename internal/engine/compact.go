@@ -20,6 +20,24 @@ type CompactResult struct {
 // Compact builds a full DATA checkpoint through the captured user sequence.
 // It requires temporary space and does not impose a total disk quota.
 func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
+	return db.manualCompact(ctx, sourceOrder)
+}
+
+// CompactByKey clusters the captured live records in encoded-key order.
+func (db *DB) CompactByKey(ctx context.Context) (CompactResult, error) {
+	return db.manualCompact(ctx, keyOrder)
+}
+
+type checkpointMode uint8
+
+const (
+	sourceOrder checkpointMode = iota
+	sourceRecovery
+	keyOrder
+	keyRecovery
+)
+
+func (db *DB) manualCompact(ctx context.Context, mode checkpointMode) (CompactResult, error) {
 	var result CompactResult
 	if err := db.admit(); err != nil {
 		return result, err
@@ -30,6 +48,22 @@ func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	}
 	if err := ctx.Err(); err != nil {
 		return result, operationError("compact", "context", err)
+	}
+	// A read-only repeat linearizes here. Avoid waking a maintenance worker
+	// or constructing a snapshot just to discover there is no work.
+	if mode == keyOrder {
+		db.writer.Lock()
+		err := errors.Join(ctx.Err(), db.health())
+		done := err == nil && !db.manualCheckpoint.Load() && db.store.HasOrderedBase() &&
+			db.store.Current.LastUserSequence == db.store.Catalog.CheckpointCutoffSequence &&
+			!db.store.OrderedCleanupPending() && !db.store.HasUnavailableSource()
+		db.writer.Unlock()
+		if err != nil {
+			return result, operationError("compact", "wait", err)
+		}
+		if done {
+			return result, nil
+		}
 	}
 	if !db.manualCheckpoint.CompareAndSwap(false, true) {
 		return result, ErrBusy
@@ -46,24 +80,30 @@ func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
 	case <-ctx.Done():
 		return result, operationError("compact", "wait", ctx.Err())
 	}
-	return db.compactCheckpoint(ctx, false)
+	return db.compactCheckpoint(ctx, mode)
 }
+
+var errOrderedRecovery = errors.New("recapture the live index for ordered checkpoint recovery")
 
 var errCheckpointChanged = errors.New("a lost key changed during checkpoint recovery")
 
 // The caller owns the cleaner gate. If a lost key changed after capture, the
 // tail could start with its Delete. Capture again so replay always sees a valid
 // predecessor, including when a Delete was followed by a Put of the same key.
-func (db *DB) compactCheckpoint(ctx context.Context, force bool) (CompactResult, error) {
+func (db *DB) compactCheckpoint(ctx context.Context, mode checkpointMode) (CompactResult, error) {
 	for {
-		result, err := db.checkpointAttempt(ctx, force)
+		result, err := db.checkpointAttempt(ctx, mode)
+		if err == errOrderedRecovery {
+			mode = keyRecovery
+			continue
+		}
 		if err != errCheckpointChanged {
 			return result, err
 		}
 	}
 }
 
-func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result CompactResult, returned error) {
+func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (result CompactResult, returned error) {
 	db.writer.Lock()
 	if err := ctx.Err(); err != nil {
 		db.writer.Unlock()
@@ -73,8 +113,11 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		db.writer.Unlock()
 		return result, err
 	}
-	if !force && db.store.Current.LastUserSequence == db.store.Catalog.CheckpointCutoffSequence && !db.hasUnavailableSource() {
-		n, pinned, err := db.store.Cleanup()
+	ordered := mode == keyOrder || mode == keyRecovery
+	hasDamage := db.store.HasUnavailableSource()
+	if (mode == sourceOrder || mode == keyOrder && db.store.HasOrderedBase()) &&
+		db.store.Current.LastUserSequence == db.store.Catalog.CheckpointCutoffSequence && !hasDamage {
+		n, pinned, err := db.cleanupCheckpoint(ordered)
 		db.writer.Unlock()
 		return CompactResult{UnlinkedBytes: n, PinnedRetiredDataBytes: pinned}, compactCleanupError(err)
 	}
@@ -95,7 +138,14 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		db.writer.Unlock()
 		return result, operationError("compact", "capture", err)
 	}
-	live := db.indexView()
+	var liveCount int
+	if ordered {
+		liveCount = db.keys.Count()
+	}
+	var live index.View
+	if !ordered || mode == keyRecovery || hasDamage || !db.store.HasOrderedBase() {
+		live = db.indexView()
+	}
 	db.writer.Unlock()
 	released := false
 	defer func() {
@@ -103,10 +153,28 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 			capture.Release()
 		}
 	}()
-	checkpoint := db.store.NewDataCheckpoint(capture)
+	newCheckpoint := func() *storage.DataCheckpoint {
+		checkpoint := db.store.NewDataCheckpoint(capture)
+		if ordered {
+			checkpoint.SetOrderedYield(func() error {
+				return db.yieldToWriter(ctx, "compact.paced:after")
+			})
+		}
+		return checkpoint
+	}
+	checkpoint := newCheckpoint()
+	discard := func() error {
+		err := checkpoint.Discard()
+		if err != nil {
+			db.writer.Lock()
+			checkpoint.QueueFailedDiscard()
+			db.writer.Unlock()
+		}
+		return err
+	}
 	defer func() {
 		if returned != nil && db.health() == nil {
-			if err := checkpoint.Discard(); err != nil {
+			if err := discard(); err != nil {
 				returned = errors.Join(returned, err)
 			}
 		}
@@ -133,12 +201,15 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		}
 	}()
 	reset := func() error {
-		discardErr := errors.Join(checkpoint.Discard(), moves.Close())
-		checkpoint = db.store.NewDataCheckpoint(capture)
+		discardErr := errors.Join(discard(), moves.Close())
+		checkpoint = newCheckpoint()
 		moves = db.store.NewRelocations()
 		return discardErr
 	}
 	copyData := func(salvage bool) (err error) {
+		if ordered && !salvage {
+			return checkpoint.CopyByKey(ctx, live, liveCount, moves, reserve)
+		}
 		history, err := db.newIndex()
 		if err != nil {
 			return &storage.IndexWorkError{Err: err}
@@ -148,6 +219,9 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 				err = errors.Join(err, &storage.IndexWorkError{Err: closeErr})
 			}
 		}()
+		if salvage && ordered {
+			return checkpoint.CopyRecoveredByKey(ctx, history, live, moves, lost, reserve, db.cachedSource)
+		}
 		if salvage {
 			return checkpoint.CopyRecovered(ctx, history, live, moves, lost, reserve, db.cachedSource)
 		}
@@ -155,11 +229,16 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 	}
 	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error { return copyData(false) }, reset)
 	if storage.IsDataUnavailable(err) && !errors.Is(err, syscall.ENOSPC) && !errors.Is(err, syscall.EDQUOT) {
+		if live == nil {
+			return result, errOrderedRecovery
+		}
 		if err = reset(); err == nil {
 			err = copyData(true)
 		}
 	}
-	live.Close()
+	if live != nil {
+		live.Close()
+	}
 	if err != nil {
 		db.compactFailure(err)
 		return result, operationError("compact", "copy", err)
@@ -184,6 +263,14 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 		releaseLossGuard()
 		db.writer.Unlock()
 		return result, operationError("compact", "pre-publication", err)
+	}
+	if ordered && checkpoint.AdoptUnchangedOrdered() {
+		releaseLossGuard()
+		capture.Release()
+		released = true
+		result.UnlinkedBytes, result.PinnedRetiredDataBytes, err = db.cleanupCheckpoint(true)
+		db.writer.Unlock()
+		return result, compactCleanupError(err)
 	}
 	losses, err := db.prepareLosses(ctx, lost)
 	if err != nil {
@@ -220,7 +307,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 	if err != nil {
 		return result, operationError("compact", "publication", err)
 	}
-	db.relocate(moves, maxBatch, "compact.remap:after")
+	db.relocate(moves, maxBatch, "compact.remap:after", ordered && db.opts.IndexMode == IndexBTree)
 	capture.Release()
 	released = true
 	db.writer.Lock()
@@ -229,8 +316,17 @@ func (db *DB) checkpointAttempt(ctx context.Context, force bool) (result Compact
 	if err := db.health(); err != nil {
 		return result, &OpError{Operation: "compact", Phase: "post-publication", Outcome: Committed, Err: err}
 	}
-	result.UnlinkedBytes, result.PinnedRetiredDataBytes, err = db.store.Cleanup()
+	result.UnlinkedBytes, result.PinnedRetiredDataBytes, err = db.cleanupCheckpoint(ordered)
 	return result, compactCleanupError(err)
+}
+
+// The caller holds the writer gate. Ordered checkpoints queue the old files
+// explicitly so cleanup does not need to traverse the selected directory.
+func (db *DB) cleanupCheckpoint(ordered bool) (int64, int64, error) {
+	if !ordered {
+		return db.store.Cleanup()
+	}
+	return db.store.RetireAfterCheckpoint()
 }
 
 // cachedSource borrows immutable cache bytes only while the indexed version
@@ -328,20 +424,10 @@ func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations,
 	return dropped
 }
 
-// Only the selected catalog matters: a retired file may still be pinned.
-func (db *DB) hasUnavailableSource() bool {
-	for _, entry := range db.store.Catalog.Entries {
-		if entry.HasPhysicalFile() && db.store.Segments[entry.ID].UnavailableData() != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // The replacement layout is already committed. A partial remap fail-stops the
 // instance, leaving the authoritative DATA for a fresh indexed Open.
-func (db *DB) relocate(moves *storage.Relocations, maxBatch int, after string) {
-	err := moves.EachBatch(maxBatch, func(batch []storage.Relocation) error {
+func (db *DB) relocate(moves *storage.Relocations, maxBatch int, after string, paceWriterGate bool) {
+	apply := func(batch []storage.Relocation) error {
 		if err := db.relocateBatch(batch); err != nil {
 			return err
 		}
@@ -353,6 +439,25 @@ func (db *DB) relocate(moves *storage.Relocations, maxBatch int, after string) {
 			}
 		}
 		return nil
+	}
+	err := moves.EachBatch(maxBatch, func(batch []storage.Relocation) error {
+		for paceWriterGate && len(batch) > 0 && db.cleaner.writers.Load() > 0 {
+			// BTree stages copies of modified pages while holding the writer
+			// gate. Give durable writers a turn between small transactions.
+			// CURRENT has selected this checkpoint, so finish despite cancellation.
+			if err := db.yieldToWriter(context.Background(), "compact.remap.paced:after"); err != nil {
+				return err
+			}
+			n := min(8, len(batch))
+			if err := apply(batch[:n]); err != nil {
+				return err
+			}
+			batch = batch[n:]
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		return apply(batch)
 	})
 	if err != nil {
 		db.poison(err)

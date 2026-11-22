@@ -2,6 +2,12 @@
 # One immutable official Go image runs every arm on the same private volume.
 set -euo pipefail
 out=${1:?usage: container-index-checkpoint.sh RESULTS_DIRECTORY}
+mode=${2:-index-checkpoint}
+case "$mode" in
+    index-checkpoint) driver=TestIndexCheckpointMeasurement ;;
+    key-checkpoint) driver=TestKeyCheckpointMeasurement ;;
+    *) echo "unknown checkpoint measurement: $mode" >&2; exit 2 ;;
+esac
 mkdir -p "$out"
 out=$(cd "$out" && pwd -P)
 repo=$(git rev-parse --show-toplevel)
@@ -17,7 +23,7 @@ image=docker.io/library/golang@$digest
 docker run --rm --pull=never --platform "$platform" --cpus 2 --network none \
     --volume "$repo:/src:ro" --volume "$out:/out" --mount type=volume,dst=/data \
     --workdir /src -e GOTOOLCHAIN=local -e GOWORK=off -e GOPROXY=off -e GOMAXPROCS=2 \
-    -e TMPDIR=/data/tmp -e TARP_INDEX_CHECKPOINT_MEASURE=1 \
+    -e TMPDIR=/data/tmp -e "DRIVER=$driver" -e TARP_INDEX_CHECKPOINT_MEASURE=1 -e TARP_KEY_CHECKPOINT_MEASURE=1 \
     -e "VERSION=$version" -e "IMAGE=$image" -e "REVISION=$revision" "$image" bash -euc '
     set -o pipefail
     mkdir -p "$TMPDIR"
@@ -28,6 +34,6 @@ docker run --rm --pull=never --platform "$platform" --cpus 2 --network none \
         uname -smr
         findmnt -T /data
     } | tee /out/environment.txt
-    go test -buildvcs=false -count=1 -timeout=8m -v -run "^TestIndexCheckpointMeasurement$" ./benchmark | tee /out/results.txt
-    grep -q "^--- PASS: TestIndexCheckpointMeasurement" /out/results.txt
+    go test -buildvcs=false -count=1 -timeout=12m -v -run "^${DRIVER}$" ./benchmark | tee /out/results.txt
+    grep -q "^--- PASS: ${DRIVER} " /out/results.txt
 '

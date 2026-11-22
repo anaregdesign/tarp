@@ -67,7 +67,8 @@ type DataSegment struct {
 	sealed atomic.Pointer[sealedRepair]
 	// Only the serialized parity builder reads or writes these flags.
 	parityReady, parityNeedsSync bool
-	activeDigest                 hash.Hash // writer gate owns the committed active byte stream
+	snapshotRange                *snapshotRange // checked bounds for an immutable snapshot; maintained by the maintenance slot
+	activeDigest                 hash.Hash      // writer gate owns the committed active byte stream
 
 	ID                     uint64
 	Kind                   uint32
@@ -99,6 +100,7 @@ type Location struct {
 }
 
 type Store struct {
+	checkDamage atomic.Bool // Set by a read repair that discovers unavailable DATA.
 	// DamageChanged wakes maintenance when known repair eligibility changes.
 	// The owner sets it once before starting any workers or serving requests.
 	DamageChanged         func()
@@ -118,6 +120,8 @@ type Store struct {
 	retiredIndexes        map[uint64]struct{}
 	buildingIndex         atomic.Uint64
 	retireSyncPending     bool
+	orderedSnapshot       bool // current snapshot prefix is globally key ordered
+	fences                fenceCache
 	cleanWorkspaceOnClose bool
 	// Created reports that this Open published the initial CURRENT.
 	Created bool
@@ -425,8 +429,19 @@ func (f *DataSegment) create(uuid [16]byte, fs *IO, point string, initialRecords
 	if err != nil {
 		return nil, err
 	}
+	if err := f.initializeFile(fd, uuid, fs, point, initialRecords); err != nil {
+		closeErr := fd.Close()
+		removeErr := fs.Do("segment.discard", func() error { return os.Remove(f.Path) })
+		return nil, errors.Join(err, closeErr, removeErr)
+	}
+	return fd, nil
+}
+
+// initializeFile leaves ownership of the exclusively created file with the
+// caller even when the first write fails.
+func (f *DataSegment) initializeFile(fd *os.File, uuid [16]byte, fs *IO, point string, initialRecords appendData) error {
 	b := format.EncodeSegmentHeader(format.SegmentHeader{UUID: uuid, ID: f.ID, Kind: f.Kind})
-	err = fs.Write(fd, b, 0, point+".write")
+	err := fs.Write(fd, b, 0, point+".write")
 	if f.Kind == format.RawLogKind {
 		f.activeDigest = sha256.New()
 		f.activeDigest.Write(b)
@@ -438,13 +453,10 @@ func (f *DataSegment) create(uuid [16]byte, fs *IO, point string, initialRecords
 	if err == nil && f.Kind != format.SnapshotKind {
 		err = fs.Sync(fd, point+".sync")
 	}
-	if err != nil {
-		closeErr := fd.Close()
-		removeErr := fs.Do("segment.discard", func() error { return os.Remove(f.Path) })
-		return nil, errors.Join(err, closeErr, removeErr)
+	if err == nil {
+		f.Size.Store(format.SegmentHeaderBytes + initialRecords.size)
 	}
-	f.Size.Store(format.SegmentHeaderBytes + initialRecords.size)
-	return fd, nil
+	return err
 }
 
 func (s *Store) Rotate() error {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -453,5 +454,40 @@ func TestTypedPrefixDecodesOnlyMatchingKeysAndValues(t *testing.T) {
 				t.Fatalf("ScanPrefix yielded %d codec errors", count)
 			}
 		})
+	}
+}
+
+func TestTypedCompactWithKeyOrderUsesStoredKeyBytes(t *testing.T) {
+	dir := t.TempDir()
+	db, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.Int16Codec{}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, key := range []int16{-1, 17, -31, 0, 17} {
+		if err := db.Put(key, fmt.Sprint(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Compact(t.Context(), tarp.WithKeyOrder()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The encoded order of signed integers differs from their numeric order.
+	wantKeys := []string{"\x00\x00", "\x00\x11", "\xff\xe1", "\xff\xff"}
+	if keys := snapshotDataKeys(t, dir); !slices.Equal(keys, wantKeys) {
+		t.Fatalf("snapshot DATA keys = %q; want %q", keys, wantKeys)
+	}
+	raw := openPublicDB(t, dir, tarp.Options{})
+	for _, key := range []int16{0, 17, -31, -1} {
+		encoded, err := (tarp.Int16Codec{}).Encode(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := raw.Get(encoded); err != nil || string(got) != fmt.Sprint(key) {
+			t.Fatalf("Get(%x) = %q, %v; want %d", encoded, got, err, key)
+		}
 	}
 }

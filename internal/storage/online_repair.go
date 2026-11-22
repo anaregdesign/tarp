@@ -114,7 +114,7 @@ func (s *Store) RepairRead(ctx context.Context, f *DataSegment, cause error) err
 	if r == nil || r.entry.ID != f.ID || f.Path != filepath.Join(s.Dir, DataName(r.uuid, f.ID)) {
 		return cause
 	}
-	err := r.run(ctx, s.DamageChanged, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
+	err := s.runReadRepair(ctx, r, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
 		if err := s.IO.Check("data-repair.verify:before"); err != nil {
 			return err
 		}
@@ -162,7 +162,7 @@ func repairableRead(err error) bool {
 // of confirmed damage. An operator may later restore the recovery material.
 // A successful verification cannot be cached across distinct failures.
 // A directory publication with unknown durability can only be resolved by reopen.
-func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot, repair func() error) error {
+func (s *Store) runReadRepair(ctx context.Context, r *sealedRepair, checkRoot, repair func() error) error {
 	for {
 		r.mu.Lock()
 		if r.uncertain != nil {
@@ -212,6 +212,9 @@ func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot,
 		prior := r.unavailable.Load()
 		if local, ok := call.err.(*UnavailableDataError); ok {
 			r.unavailable.Store(local)
+			if prior == nil {
+				s.checkDamage.Store(true)
+			}
 			r.retryAfter = time.Now().Add(time.Second)
 		} else if call.err == nil || r.uncertain != nil {
 			r.unavailable.Store(nil)
@@ -222,12 +225,27 @@ func (r *sealedRepair) run(ctx context.Context, damageChanged func(), checkRoot,
 		// blocked file can be fully read again.
 		newGap := next != nil && errors.Is(next.Err, format.ErrUnrecoverableDataBlocks) &&
 			(prior == nil || !errors.Is(prior.Err, format.ErrUnrecoverableDataBlocks))
-		if damageChanged != nil && (newGap || prior != nil && next == nil) {
-			damageChanged()
+		if s.DamageChanged != nil && (newGap || prior != nil && next == nil) {
+			s.DamageChanged()
 		}
 		r.running = nil
 		close(call.done)
 		r.mu.Unlock()
 		return call.err
 	}
+}
+
+// HasUnavailableSource runs under the writer gate. A newly unavailable file
+// requests another scan even when a concurrent check only saw retiring files.
+func (s *Store) HasUnavailableSource() bool {
+	if !s.checkDamage.Swap(false) {
+		return false
+	}
+	for _, entry := range s.Catalog.Entries {
+		if entry.HasPhysicalFile() && s.Segments[entry.ID].UnavailableData() != nil {
+			s.checkDamage.Store(true)
+			return true
+		}
+	}
+	return false
 }

@@ -237,11 +237,35 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 // still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult
 
+// CompactOption configures one call to [DB.Compact] or [TypedDB.Compact].
+// Its zero value has no effect.
+type CompactOption struct {
+	keyOrder bool
+}
+
+// WithKeyOrder requests a DATA checkpoint with retained snapshot records in
+// lexicographic order by encoded key. Iterator order remains unspecified,
+// and automatic incremental compaction is unchanged.
+// Concurrent writes after the checkpoint cutoff form the next log suffix.
+// On the same handle, later ordered calls can reuse unchanged snapshot segments.
+// If that checkpoint is healthy and there are no later writes or pending cleanup,
+// the call is a no-op.
+func WithKeyOrder() CompactOption {
+	return CompactOption{keyOrder: true}
+}
+
 // Compact builds a full DATA checkpoint through the captured user sequence.
+// By default it copies live records in source order. Pass [WithKeyOrder] to
+// cluster the snapshot by encoded key.
 // It uses PARITY to recover damaged sealed DATA. A live key whose record is
 // proved irrecoverable is removed when the checkpoint commits. The operation
 // requires temporary disk space for recovery and protected snapshot files.
-func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
+func (db *DB) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error) {
+	for _, opt := range opts {
+		if opt.keyOrder {
+			return (*engine.DB)(db).CompactByKey(ctx)
+		}
+	}
 	return (*engine.DB)(db).Compact(ctx)
 }
 

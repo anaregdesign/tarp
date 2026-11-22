@@ -289,7 +289,7 @@ func (db *DB) recoverDamaged(ctx context.Context) error {
 		w.recoverCancel = nil
 		w.mu.Unlock()
 	}()
-	result, err := db.compactCheckpoint(ctx, true)
+	result, err := db.compactCheckpoint(ctx, sourceRecovery)
 	w.mu.Lock()
 	w.status.DroppedKeys += min(result.DroppedKeys, math.MaxUint64-w.status.DroppedKeys)
 	w.status.UnlinkedBytes += min(uint64(result.UnlinkedBytes), math.MaxUint64-w.status.UnlinkedBytes)

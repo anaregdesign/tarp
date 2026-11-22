@@ -24,10 +24,11 @@ type CapturedSegment struct {
 }
 
 type Capture struct {
-	Current  format.Frontier
-	Catalog  format.Catalog
-	Manifest []byte
-	Segments []CapturedSegment
+	Current         format.Frontier
+	Catalog         format.Catalog
+	Manifest        []byte
+	Segments        []CapturedSegment
+	orderedSnapshot bool
 }
 
 // Capture pins the selected DATA segments and captures the committed end
@@ -38,7 +39,7 @@ func (s *Store) Capture() (*Capture, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Capture{Current: s.Current, Catalog: s.Catalog, Manifest: bytes.Clone(s.Manifest)}
+	c := &Capture{Current: s.Current, Catalog: s.Catalog, Manifest: bytes.Clone(s.Manifest), orderedSnapshot: s.HasOrderedBase()}
 	c.Catalog.Entries = append([]format.CatalogEntry(nil), s.Catalog.Entries...)
 	for _, entry := range s.Catalog.Entries {
 		if entry.HasPhysicalFile() {
