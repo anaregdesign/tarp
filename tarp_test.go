@@ -9,12 +9,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anaregdesign/tarp"
+	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/storage"
+)
+
+type compactor interface {
+	Compact(context.Context, ...tarp.CompactOption) (tarp.CompactResult, error)
+}
+
+var (
+	_ compactor = (*tarp.DB)(nil)
+	_ compactor = (*tarp.TypedDB[int16, string])(nil)
 )
 
 func openPublicDB(t *testing.T, dir string, opts tarp.Options) *tarp.DB {
@@ -456,10 +468,10 @@ func TestPublicDBContextErrorsLeaveDatabaseUsable(t *testing.T) {
 			if result != (tarp.CompactResult{}) {
 				t.Fatalf("Compact returned %+v", result)
 			}
-			result, err = db.CompactByKey(tc.ctx)
+			result, err = db.Compact(tc.ctx, tarp.WithKeyOrder())
 			check("compact", err)
 			if result != (tarp.CompactResult{}) {
-				t.Fatalf("CompactByKey returned %+v", result)
+				t.Fatalf("Compact with key order returned %+v", result)
 			}
 			check("backup", db.Backup(tc.ctx, target))
 			info, err := tarp.VerifyBackup(tc.ctx, backup)
@@ -509,10 +521,10 @@ func TestPublicDBClosedTakesPrecedenceOverInvalidInput(t *testing.T) {
 	}
 	_, getErr := db.Get(nil)
 	_, compactErr := db.Compact(nil)
-	_, orderedErr := db.CompactByKey(nil)
+	_, orderedErr := db.Compact(nil, tarp.WithKeyOrder())
 	for name, err := range map[string]error{
 		"get": getErr, "put": db.Put(nil, nil), "delete": db.Delete(nil),
-		"backup": db.Backup(nil, ""), "compact": compactErr, "compact by key": orderedErr,
+		"backup": db.Backup(nil, ""), "compact": compactErr, "compact with key order": orderedErr,
 	} {
 		if !errors.Is(err, tarp.ErrClosed) {
 			t.Errorf("%s after Close = %v", name, err)
@@ -1327,7 +1339,68 @@ func TestScanPrefixTakesFreshSnapshotsAndReleasesOnBreak(t *testing.T) {
 	}
 }
 
-func TestCompactByKeyBackupAndReopenPreserveLatestValues(t *testing.T) {
+func TestCompactOptionsSelectSnapshotOrder(t *testing.T) {
+	source := []string{"z", "\x00", "a"}
+	ordered := []string{"\x00", "a", "z"}
+	for _, tc := range []struct {
+		name string
+		opts []tarp.CompactOption
+		want []string
+	}{
+		{"default", nil, source},
+		{"zero_option", []tarp.CompactOption{{}}, source},
+		{"key_order", []tarp.CompactOption{tarp.WithKeyOrder()}, ordered},
+		{"mixed_options", []tarp.CompactOption{{}, tarp.WithKeyOrder(), tarp.WithKeyOrder(), {}}, ordered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			db := openPublicDB(t, dir, tarp.Options{})
+			for _, key := range source {
+				if err := db.Put([]byte(key), []byte("value")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.Compact(t.Context(), tc.opts...); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if keys := snapshotDataKeys(t, dir); !slices.Equal(keys, tc.want) {
+				t.Fatalf("snapshot DATA keys = %q; want %q", keys, tc.want)
+			}
+		})
+	}
+}
+
+// Read the selected snapshot in catalog and file-offset order, not iterator order.
+func snapshotDataKeys(t *testing.T, dir string) []string {
+	t.Helper()
+	image, err := storage.Validate(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, entry := range image.Catalog.Entries {
+		if entry.Kind != format.SnapshotKind {
+			break
+		}
+		f, err := os.Open(image.Segments[entry.ID].Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = format.Scan(t.Context(), f, entry.Bytes, func(_ int64, _ format.RecordHeader, key string) error {
+			keys = append(keys, key)
+			return nil
+		})
+		if err := errors.Join(err, f.Close()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return keys
+}
+
+func TestCompactWithKeyOrderPreservesLatestValuesAcrossBackupAndReopen(t *testing.T) {
 	dir := t.TempDir()
 	db := openPublicDB(t, dir, tarp.Options{IndexMode: tarp.IndexBTree})
 	// Share a long binary prefix so the B+tree uses overflow keys.
@@ -1337,7 +1410,7 @@ func TestCompactByKeyBackupAndReopenPreserveLatestValues(t *testing.T) {
 	if err := db.BatchPut([]tarp.Entry{{Key: right, Value: []byte("right")}, {Key: left, Value: []byte("old")}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CompactByKey(t.Context()); err != nil {
+	if _, err := db.Compact(t.Context(), tarp.WithKeyOrder()); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Delete(right); err != nil {
@@ -1346,7 +1419,7 @@ func TestCompactByKeyBackupAndReopenPreserveLatestValues(t *testing.T) {
 	if err := db.Put(left, []byte("left")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CompactByKey(t.Context()); err != nil {
+	if _, err := db.Compact(t.Context(), tarp.WithKeyOrder()); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CheckpointIndex(t.Context()); err != nil {
@@ -1374,7 +1447,7 @@ func TestCompactByKeyBackupAndReopenPreserveLatestValues(t *testing.T) {
 		{restored, tarp.Options{IndexMode: tarp.IndexMemory, OpenValidation: tarp.Full}},
 	} {
 		image := openPublicDB(t, tc.dir, tc.opts)
-		if _, err := image.CompactByKey(t.Context()); err != nil {
+		if _, err := image.Compact(t.Context(), tarp.WithKeyOrder()); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := image.Get(left); string(got) != "left" || err != nil {
