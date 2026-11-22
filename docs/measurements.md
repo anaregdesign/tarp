@@ -190,6 +190,8 @@ one `repack_concurrent` row. The drivers alternate which arm runs first.
 
 ## Scan workloads
 
+The [physical key locality experiment](benchmarks/key-locality-150.md) measures prefix reads after a key-ordered checkpoint, including repeated updates to the smallest key. It compares bounded rewrites under different update patterns and measures interference with durable foreground Put calls.
+
 The primary VM profile runs an untimed traversal to warm the OS file cache,
 then measures `scan_full_warm` over all 4,096 live keys. Time to the first
 entry includes capturing the live index and loading the first record. Total
