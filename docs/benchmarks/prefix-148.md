@@ -1,6 +1,6 @@
 # Prefix iteration for Lantern adjacency reads
 
-[Draft PR #149](https://github.com/anaregdesign/tarp/pull/149) contains the experiment for [Issue #148](https://github.com/anaregdesign/tarp/issues/148). The decision comparison uses production source at `59ddf199` for the original API and `678dd2c9` for the prototype. Both versions read the same storage and key formats.
+[Issue #148](https://github.com/anaregdesign/tarp/issues/148) evaluated the `KeysPrefix` and `ScanPrefix` methods selected for adoption in [PR #149](https://github.com/anaregdesign/tarp/pull/149). The 2026-11-22 comparison uses production source at `59ddf199` for the original API and `678dd2c9` for the measured implementation. Both versions read the same storage and key formats.
 
 For an interleaved graph of 16,385 edges, decoding the 56 outgoing edges for a typical vertex took **95.27 ms** on the original typed B+tree scan and **0.324 ms** on the prototype. The prototype can return just the heads through the key index. Fetching the weights also requires reading DATA. After evicting DATA, a query that returned 2,048 edges scattered throughout the fixture read nearly all its pages.
 
@@ -131,9 +131,10 @@ V1 cloned the full hash table. The bounded map (`7a44bca`) copied only matching 
 
 The runner pins the multi-platform Go image digest `sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea`. The tested arm64 image ID is `sha256:4cfad6c86f5248fedf89ff52d3e120187779bf26bfeeb8265047464d3e6c226c`. Go 1.27.4 was the latest stable toolchain at campaign start. [Go releases](https://go.dev/dl/)
 
-From the experiment checkout, run the following with a fresh result directory. It builds the original production code with only the four benchmark drivers overlaid and builds the prototype from its commit. It alternates warm arm order across rounds and seeds each cold fixture once. Warm samples use Go's 100 ms calibration except for the 256-query rotating workload.
+From a checkout containing the runner, fetch the PR history to make the measured commit available and use a fresh result directory. It builds the original production code with only the four benchmark drivers overlaid and builds the prototype from its commit. It alternates warm arm order across rounds and seeds each cold fixture once. Warm samples use Go's 100 ms calibration except for the 256-query rotating workload.
 
 ```sh
+git fetch origin refs/pull/149/head
 benchmark/scripts/container-edge-prefix.sh /path/to/new-results 59ddf199 678dd2c9 3
 ```
 

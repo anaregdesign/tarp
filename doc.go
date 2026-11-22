@@ -18,10 +18,14 @@
 // One process owns a directory. Its DB supports concurrent goroutines and
 // linearizable single-key operations. BatchPut and BatchDelete commit atomically.
 // BatchGet reads the requested keys at one point in time and bounds their total
-// encoded value bytes. Keys iterates the live keys without reading values.
-// Successful writes sync the data and
-// commit frontier before acknowledgment. Inspect OpError for the outcome of
-// failed writes. See the durability contract for storage assumptions.
+// encoded value bytes. [DB.Keys] and [DB.KeysPrefix] enumerate the index
+// without reading DATA. [DB.ScanPrefix] also reads the matching values.
+// Raw and typed prefix methods take a prefix of the encoded key bytes.
+// A nil or empty prefix matches all keys. Each iteration captures a fresh
+// snapshot in unspecified order.
+// Successful writes sync the data and commit frontier before acknowledgment.
+// Inspect OpError for the outcome of failed writes. See the durability contract
+// for storage assumptions.
 //
 // OpenExisting requires an initialized directory. OpenContext also creates a
 // new DB if needed. Both accept a context to cancel recovery during startup.
