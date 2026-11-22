@@ -55,9 +55,9 @@ For a cold live A, `BatchGet([A, A, A])` adds one miss and two duplicate
 inputs. Three separate `Get(A)` calls add one miss and two hits if the first
 call caches A and it stays cached.
 
-An empty or invalid batch, a failure before snapshot capture, Scan, Backup
-and Compact contribute zero to these four counters. A subsequent DATA read
-or typed value decode error retains the captured counts. The duplicate
+An empty or invalid batch, a failure before snapshot capture, `Scan`, `ScanPrefix`,
+`Keys`, `KeysPrefix`, Backup and Compact contribute zero to these four counters.
+A subsequent DATA read or typed value decode error retains the captured counts. The duplicate
 counter also covers cached and absent keys, both of which require no DATA read.
 
 BatchPut counts one commit and every input record, including repeated keys.
