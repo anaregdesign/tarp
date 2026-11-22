@@ -553,3 +553,38 @@ func TestCancelDuringBoundedMemoryCaptureReleasesAdmission(t *testing.T) {
 		t.Fatalf("retry contents = %v", got)
 	}
 }
+
+func TestFullIterationEndsAfterCancelInLastCallback(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode IndexMode
+	}{{"memory", IndexMemory}, {"btree", IndexBTree}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t, Options{IndexMode: tc.mode}, nil)
+			mustPut(t, db, "only", "value")
+			for _, name := range []string{"Keys", "Scan"} {
+				t.Run(name, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					count := 0
+					visit := func(key []byte, err error) bool {
+						if err != nil || string(key) != "only" {
+							t.Fatalf("unexpected item %d: key %q, error %v", count, key, err)
+						}
+						count++
+						cancel()
+						return true
+					}
+					if name == "Keys" {
+						db.Keys(ctx)(visit)
+					} else {
+						db.Scan(ctx)(func(e Entry, err error) bool { return visit(e.Key, err) })
+					}
+					if count != 1 {
+						t.Fatalf("got %d keys, want 1", count)
+					}
+				})
+			}
+		})
+	}
+}

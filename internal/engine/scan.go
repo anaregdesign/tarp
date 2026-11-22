@@ -149,7 +149,8 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		db.poison(err)
 		return operationError(op, "index", err)
 	}
-	if !stopped {
+	// A bounded walk can reach its upper bound without another callback.
+	if !stopped && bounds.Lower != "" {
 		return check()
 	}
 	return nil
