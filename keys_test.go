@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"slices"
 	"testing"
@@ -49,6 +50,61 @@ func TestTypedKeysDecodeOnlyKeysAndStopOnError(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("yielded %d errors, want 1", count)
+	}
+}
+
+func TestTypedKeysKeepsItsDatabaseAndCodecAfterViewReplacement(t *testing.T) {
+	view, replacement := rebindableIteratorViews(t)
+	seq := view.Keys(t.Context())
+	for attempt := range 2 {
+		var keys []string
+		for key, err := range seq {
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, key)
+			*view = *replacement
+		}
+		slices.Sort(keys)
+		if !slices.Equal(keys, []string{"invalid1", "invalid2"}) {
+			t.Fatalf("Keys run %d returned %v", attempt, keys)
+		}
+	}
+}
+
+func TestIterationReportsCloseAfterLastKey(t *testing.T) {
+	for modeName, mode := range map[string]tarp.IndexMode{"memory": tarp.IndexMemory, "btree": tarp.IndexBTree} {
+		for _, method := range []string{"Keys", "Scan"} {
+			t.Run(modeName+"/"+method, func(t *testing.T) {
+				db := openPublicDB(t, t.TempDir(), tarp.Options{IndexMode: mode})
+				if err := db.Put([]byte("only"), []byte("value")); err != nil {
+					t.Fatal(err)
+				}
+				if method == "Keys" {
+					checkCloseAfterLastRow(t, db, db.Keys(t.Context()))
+				} else {
+					checkCloseAfterLastRow(t, db, db.Scan(t.Context()))
+				}
+			})
+		}
+	}
+}
+
+func checkCloseAfterLastRow[T any](t *testing.T, db *tarp.DB, seq iter.Seq2[T, error]) {
+	t.Helper()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+	if _, err, ok := next(); !ok || err != nil {
+		t.Fatalf("first row: error %v, ok %t", err, ok)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err, ok := next(); !ok || !errors.Is(err, tarp.ErrClosed) {
+		t.Fatalf("after Close: error %v, ok %t", err, ok)
+	}
+	if _, _, ok := next(); ok {
+		t.Fatal("iterator yielded after ErrClosed")
 	}
 }
 

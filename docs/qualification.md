@@ -169,11 +169,13 @@ deletes remain explicit absent states, so older values cannot resurrect.
 Definitive `not-applied` and `committed` error outcomes resolve the pending
 intent rather than incorrectly retaining an old/new window. A genuinely unknown
 mutation permits its old state at the acknowledged sequence or its whole new
-state at the next sequence, not an arbitrary independent combination. For a rotating
-Put, the witness requires the old sequence before the CURRENT rename and the new
-sequence after its directory sync. Either whole state may survive between those
-boundaries. Capture markers
-bind a backup's separate acknowledged prefix and sequence before later writes.
+state at the next sequence. For foreground inserts, overwrites, deletes,
+reinserts and rotating writes, the witness requires the old sequence through
+the before-rename barrier for CURRENT. It requires the new sequence after the
+directory sync completes, even if the API has yet to return. Either whole state
+may survive between those boundaries. Overlapping maintenance barriers can
+belong to a separate publication. Capture markers bind a backup's acknowledged
+prefix and sequence before later writes.
 Reboot verification calls Open using files alone **before reading the oracle**,
 then checks values, absence, exact sequence/content binding, complete live-index
 cardinality and any published backup or
@@ -279,6 +281,8 @@ this summary, for any subsequent release qualification record.
 
 The separate manual `runtime` mode builds every package's race test binary on
 the selected Go family and records a bounded package/binary/SHA-256 manifest.
+Both the controller and guest require the shared index, B+tree and memory index
+test packages in that manifest.
 The format package is additionally **compiled** with `-fuzz '^FuzzDecoders$'`;
 merely passing `-test.fuzz` to an ordinary binary is not coverage guidance.
 Inside the exact verified guest, all full suites run with temporary files on

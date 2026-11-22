@@ -49,7 +49,8 @@ func RuntimeManifest(input io.Reader) ([]RuntimePackage, error) {
 	}
 	for _, suite := range []string{
 		".", "benchmark", "benchmark/cmd/tarporacle", "benchmark/cmd/tarpqual", "benchmark/qualification",
-		"internal/cache", "internal/composite", "internal/engine", "internal/entrysize", "internal/format", "internal/platform", "internal/storage",
+		"internal/cache", "internal/composite", "internal/engine", "internal/entrysize", "internal/format",
+		"internal/index", "internal/index/btree", "internal/index/memory", "internal/platform", "internal/storage",
 	} {
 		pkg := path.Join(module, suite)
 		if !seen[pkg] {

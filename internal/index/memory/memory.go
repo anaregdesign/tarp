@@ -166,11 +166,11 @@ func (v *view) All(yield func(string, index.Address) bool) error {
 		return os.ErrClosed
 	}
 	for key, addr := range entries {
+		if !yield(key, addr) {
+			return nil
+		}
 		if v.owner.closed.Load() {
 			return os.ErrClosed
-		}
-		if !yield(key, addr) {
-			break
 		}
 	}
 	return nil

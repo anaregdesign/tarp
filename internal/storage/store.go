@@ -179,18 +179,27 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if err != nil {
 		return nil, err
 	}
-	// Restored databases and backups both have CURRENT but no LOCK. Reject a
-	// foreign format or backup before creating LOCK. Validate the DB under lock.
+	// A backup can have missing or damaged files. Reject its marker before
+	// creating LOCK, preserving the format error for a foreign CURRENT.
+	if _, err := os.Lstat(filepath.Join(absolute, "BACKUP")); err == nil {
+		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, ErrCorrupt) {
+			return nil, err
+		}
+		if errors.Is(format.CheckFrontierSignature(b), format.ErrUnsupported) {
+			return nil, fmt.Errorf("CURRENT: %w", format.ErrUnsupported)
+		}
+		return nil, ErrBackupDirectory
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	// Restored databases have CURRENT but no LOCK. Reject an unrecognized
+	// frontier before creating LOCK. Validate the selected DB under lock.
 	if _, err := os.Lstat(filepath.Join(absolute, "LOCK")); errors.Is(err, os.ErrNotExist) {
 		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
 		if err == nil {
 			if _, err := format.DecodeFrontier(b); err != nil {
 				return nil, fmt.Errorf("CURRENT: %w", err)
-			}
-			if _, err := os.Lstat(filepath.Join(absolute, "BACKUP")); err == nil {
-				return nil, ErrBackupDirectory
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return nil, err
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, err

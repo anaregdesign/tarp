@@ -231,6 +231,61 @@ func TestOpenDetectsBackupMarkerBeforeVerifyingItsContents(t *testing.T) {
 	}
 }
 
+func TestOpenPreservesIncompleteBackup(t *testing.T) {
+	ctx := t.Context()
+	source := openPublicDB(t, t.TempDir(), tarp.Options{})
+	for _, tc := range []struct {
+		damage string
+		want   error
+	}{
+		{"missing CURRENT", tarp.ErrBackupDirectory},
+		{"truncated CURRENT", tarp.ErrBackupDirectory},
+		{"foreign CURRENT", tarp.ErrUnsupportedFormat},
+	} {
+		t.Run(tc.damage, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "backup")
+			if err := source.Backup(ctx, dir); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "CURRENT")
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch tc.damage {
+			case "missing CURRENT":
+				err = os.Remove(path)
+			case "truncated CURRENT":
+				err = os.Truncate(path, 8)
+			case "foreign CURRENT":
+				err = os.WriteFile(path, []byte("FOREIGN!"), 0600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, open := range []func(context.Context, string, tarp.Options) (*tarp.DB, error){tarp.OpenContext, tarp.OpenExisting} {
+				db, err := open(ctx, dir, tarp.Options{})
+				if db != nil {
+					db.Close()
+					t.Fatal("opened an incomplete backup")
+				}
+				if !errors.Is(err, tc.want) {
+					t.Errorf("open returned %v, want %v", err, tc.want)
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(dir, "LOCK")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("LOCK after opening the backup: %v", err)
+			}
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tarp.VerifyBackup(ctx, dir); err != nil {
+				t.Fatalf("backup after restoring original CURRENT: %v", err)
+			}
+		})
+	}
+}
+
 func TestUnsupportedBackupSignaturePreventsVerificationAndRestore(t *testing.T) {
 	ctx := t.Context()
 	source := t.TempDir()

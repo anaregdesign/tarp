@@ -401,7 +401,7 @@ per-write sync protocol intact.
 | `tarp.Indexed` | Verify the INDEX and selected DATA headers, then read and validate only the records after the checkpoint. |
 
 `Indexed` can defer detection of disk damage. A value read verifies the record's
-identity and CRC. `Has` and `Keys` can complete without reading its value. Reopen
+identity and CRC. `Keys` and `KeysPrefix` enumerate keys without reading DATA. Reopen
 with `Full` to check the complete selected history, including obsolete values.
 Both modes rebuild from DATA when INDEX is missing or unusable. Compaction
 invalidates indexes tied to the superseded files. Backups omit INDEX and remain

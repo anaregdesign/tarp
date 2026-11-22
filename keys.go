@@ -25,12 +25,11 @@ func (db *DB) KeysPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[[]
 	return (*engine.DB)(db).KeysPrefix(ctx, encodedPrefix)
 }
 
-// Keys decodes each key in a DB.Keys snapshot with the key codec. A DB or key
-// codec error yields the zero value of K and ends iteration.
+// Keys decodes each key in a DB.Keys snapshot. The iterator retains the DB and
+// key codec from this call. A DB or key codec error yields the zero value of K
+// and ends iteration.
 func (db *View[K, V]) Keys(ctx context.Context) iter.Seq2[K, error] {
-	return func(yield func(K, error) bool) {
-		db.decodeKeys(db.core.Keys(ctx), yield)
-	}
+	return db.KeysPrefix(ctx, nil)
 }
 
 // KeysPrefix decodes the keys selected by [DB.KeysPrefix]. The prefix is a
