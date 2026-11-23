@@ -60,7 +60,8 @@ func runtimeSuite(work, confirm string, output io.Writer) (result error) {
 			return false, err
 		}
 		if len(verdict.Packages) != len(packages) || verdict.FuzzTarget != "FuzzDecoders" ||
-			verdict.FuzzSeconds != 15 || !verdict.FuzzCoverageGuide || verdict.FuzzExecutions == 0 {
+			verdict.FuzzIterations != qualification.RuntimeFuzzIterations || verdict.FuzzElapsedNS <= 0 ||
+			!verdict.FuzzCoverageGuide || verdict.FuzzExecutions < qualification.RuntimeFuzzIterations {
 			return false, errors.New("incomplete selected-target full-suite/fuzz verdict")
 		}
 		for i, entry := range verdict.Packages {
@@ -78,5 +79,7 @@ func runtimeSuite(work, confirm string, output io.Writer) (result error) {
 	if !environment || !passed || vm.Cut {
 		return errors.New("selected-target full runtime suite did not complete successfully")
 	}
-	return json.NewEncoder(output).Encode(map[string]any{"runtime_suite": "pass", "packages": len(packages), "fuzz_seconds": 15})
+	return json.NewEncoder(output).Encode(map[string]any{
+		"runtime_suite": "pass", "packages": len(packages), "fuzz_iterations": qualification.RuntimeFuzzIterations,
+	})
 }

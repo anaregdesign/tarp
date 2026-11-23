@@ -6,9 +6,14 @@ import (
 	"errors"
 	"io"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+const RuntimeFuzzIterations uint64 = 10000
+
+var runtimeFuzzCounts = regexp.MustCompile(`execs: ([0-9]+)`)
 
 type RuntimePackage struct {
 	Package   string `json:"package"`
@@ -20,9 +25,29 @@ type RuntimePackage struct {
 type RuntimeVerdict struct {
 	Packages          []RuntimePackage `json:"packages"`
 	FuzzTarget        string           `json:"fuzz_target"`
-	FuzzSeconds       int              `json:"fuzz_seconds"`
+	FuzzIterations    uint64           `json:"fuzz_iterations"`
+	FuzzElapsedNS     int64            `json:"fuzz_elapsed_ns"`
 	FuzzCoverageGuide bool             `json:"fuzz_coverage_guided"`
 	FuzzExecutions    uint64           `json:"fuzz_executions"`
+}
+
+func RuntimeFuzzExecutions(output string) (uint64, error) {
+	if !strings.Contains(output, "gathering baseline coverage") || !strings.Contains(output, "now fuzzing with") ||
+		strings.Contains(output, "without coverage guidance") || strings.Contains(output, "not built with coverage") {
+		return 0, errors.New("qualification: runtime fuzz did not demonstrate coverage guidance")
+	}
+	counts := runtimeFuzzCounts.FindAllStringSubmatch(output, -1)
+	if len(counts) == 0 {
+		return 0, errors.New("qualification: runtime fuzz has no execution count")
+	}
+	executions, err := strconv.ParseUint(counts[len(counts)-1][1], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if executions < RuntimeFuzzIterations {
+		return 0, errors.New("qualification: runtime fuzz did not complete its execution budget")
+	}
+	return executions, nil
 }
 
 func RuntimeManifest(input io.Reader) ([]RuntimePackage, error) {

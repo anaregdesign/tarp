@@ -37,11 +37,14 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
 go list -m all
-go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=15s -parallel=2
+go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=10000x -parallel=2
 ```
 
 The only module must be `github.com/anaregdesign/tarp`. Tests/tools use standard
 library imports only; the importable root remains package tarp.
+Count-bounded fuzzing avoids the Go 1.26 deadline-cancellation race tracked in
+[golang/go#75804](https://github.com/golang/go/issues/75804). It changes the
+termination budget, not the decoder assertions or treatment of errors.
 
 `TestProcessCrashRecoveryMatrix` runs bounded subprocess exits across writes,
 rotation, checkpoint output/publication/remapping/unlink, backup, and restore.
@@ -332,11 +335,19 @@ test packages in that manifest.
 The format package is additionally **compiled** with `-fuzz '^FuzzDecoders$'`;
 merely passing `-test.fuzz` to an ordinary binary is not coverage guidance.
 Inside the exact verified guest, all full suites run with temporary files on
-the disposable ext4 mount, followed by 15 seconds of coverage-guided fuzzing.
-Baseline completion and positive execution counts are required and retained.
+the disposable ext4 mount, followed by **10,000 coverage-guided fuzz executions**
+using `-test.fuzztime=10000x`. This avoids the Go 1.26 coordinator's known
+deadline-cancellation race without suppressing a failed child process.
+Baseline completion, coverage guidance, at least 10,000 reported executions
+and positive elapsed time are required and retained. The execution count
+includes the fuzzer's baseline and minimization work; it is not a claim of
+10,000 distinct inputs or a fixed-duration campaign. Older 15-second results
+remain historical records with their original outcomes.
 Opt-in helper environment variables are removed from child suites to prevent
-recursive VM/campaign execution. Child commands have three-minute bounds;
-the complete guest has a fifteen-minute bound. Host-side vet/module audits
+recursive VM/campaign execution. Each package/fuzz test process retains its
+150-second timeout and each child command its 180-second bound; the guest test
+has a fourteen-minute bound inside the controller's fifteen-minute bound.
+Timeouts and nonzero child exits remain failures. Host-side vet/module audits
 are recorded for the same selected family. This remains a manual qualification
 operation, not an older-Go or macOS normal-CI matrix.
 

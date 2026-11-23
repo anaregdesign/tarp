@@ -87,6 +87,7 @@ type pager struct {
 	capacity                  int
 	cache                     map[uint64]*list.Element
 	branches, ordinary        list.List
+	overflows                 list.List
 	root, maxKey              atomic.Uint64
 	top                       uint64
 	stats                     index.Metrics
@@ -116,10 +117,14 @@ func newPager(dir string, budget int64) (*pager, error) {
 	return s, nil
 }
 func (s *pager) queue(p *page) *list.List {
-	if p[4] == branch {
+	switch p[4] {
+	case branch:
 		return &s.branches
+	case overflow:
+		return &s.overflows
+	default:
+		return &s.ordinary
 	}
-	return &s.ordinary
 }
 
 // Dirty pages are the byte-bounded write buffer. Pinned root generations can
@@ -131,7 +136,11 @@ func (s *pager) cachePage(id uint64, p *page, owner uint64) error {
 		delete(s.cache, id)
 	}
 	for len(s.cache) >= s.capacity {
-		item := s.ordinary.Back()
+		// Streaming key payloads must not evict validated tree nodes.
+		item := s.overflows.Back()
+		if item == nil {
+			item = s.ordinary.Back()
+		}
 		if item == nil {
 			item = s.branches.Back()
 		}
@@ -327,6 +336,7 @@ func (s *pager) close() error {
 	s.cache = nil
 	s.branches.Init()
 	s.ordinary.Init()
+	s.overflows.Init()
 	return err
 }
 func (s *pager) metrics() index.Metrics {

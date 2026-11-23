@@ -382,9 +382,11 @@ pages, the index checkpoint, and temporary work during replay, compaction and on
 unlinks private pager files immediately after opening them. The OS releases its
 space when its final descriptor closes.
 
-The root and frequently used branch pages get priority in the cache. Value
-LRU hits bypass the index. On a value-cache miss, cold branch, leaf and overflow
-pages can add reads before loading DATA.
+The root and frequently used branch pages get priority in the cache.
+Streaming overflow-key pages are evicted before validated leaf pages, so
+long-key reads do not repeatedly displace and revalidate the same tree nodes.
+Value LRU hits bypass the index. On a value-cache miss, cold branch, leaf and
+overflow pages can add reads before loading DATA.
 
 The configured budget is split between the foreground index (one half),
 compaction and backup (one quarter each). It limits B+tree page-cache and index work
@@ -654,7 +656,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 go list -m all
-go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=15s -parallel=2
+go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=10000x -parallel=2
 ```
 
 The [CI workflow](.github/workflows/ci.yml) runs full tests, race detection, vet,
