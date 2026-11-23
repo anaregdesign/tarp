@@ -5,9 +5,10 @@
 Revision `d89f7b8` passed the extended whole-VM phase matrix:
 1,168 engine cuts and separate cold boots across Go 1.26.11 and 1.27.4,
 including dedicated batch, automatic-cleaner/repacking, ordered-checkpoint,
-INDEX, interrupted repair, and real DATA/checkpoint/private-pager ENOSPC cases. The
-[current-engine record](qualification-v1-candidate.md) binds those results
-to the source, raw archives and precisely tested virtual stack.
+INDEX, interrupted repair, and real DATA/checkpoint/private-pager ENOSPC cases.
+The [qualification record](qualification-v1-candidate.md) binds those results
+to the source, raw archives and precisely tested virtual stack. Merging this
+record does not transfer the results to the integrated `main` revision.
 All 15 guest package race suites and at least 10,000 guided decoder fuzz
 executions passed on each Go family. The durability gate passed for the
 recorded stack only; this does not authorize a release or qualify physical
@@ -207,9 +208,15 @@ uncertainty or supply the first durability barrier.
 On fresh Open and reopen, the worker first considers single-segment cleaning of selected sealed DATA segments.
 Per-file live Put and required Delete byte counts estimate replacement size.
 For a candidate with source bytes S and estimated bytes to write W (including
-metadata), the initial eligibility rule is `W <= S/2`. This gives estimated
-net savings of at least one third of read-plus-write bytes. The worker ranks
-eligible files by highest savings per I/O byte, with stable tie breaks.
+metadata), the initial eligibility rule is `W <= S/2`. Among eligible single
+segments, the worker ranks estimated bytes available to unlink, less staging
+bytes, against the cost to scan, stage DATA and metadata, and read back DATA to
+build PARITY. A verified existing sidecar counts toward retirement; an
+unverified or missing sidecar does not. A long-lived scan or backup pin
+withholds the retirement credit. Live index references can move with the
+replacement, and transient read and PARITY pins do not suppress the estimate.
+All references still prevent actual unlink. If no candidate offers an
+immediate gain, the worker can still clean an eligible segment.
 
 When no single segment qualifies, grouped log cleaning processes consecutive
 sealed logs in catalog order with one catalog publication. It considers up to eight catalog entries,
@@ -247,27 +254,36 @@ retains both layouts for validated reopen. After durable publication, remapping
 checks file, offset and sequence so later changes win. Reclamation waits for all
 pins. No incremental publication advances the user sequence.
 
-Manual `Compact(ctx)` durably captures the complete DATA history through checkpoint
-cutoff sequence C, validates segment headers and records, and rebuilds the
-captured state outside root locks. Without options, it groups live
-Put records by source file, reads them in offset order with one source descriptor
-open at a time, and writes snapshot files using the same size target as log appends,
-preserving record sequences. Tombstones can
-be dropped only because all earlier history is replaced. Publication combines the
-checkpoint with **all** current tail files after C. Each relocation checks the exact
-prior address and publishes the new address and its file accounting together.
+Manual `Compact(ctx)` builds a full DATA checkpoint. It durably captures the
+complete DATA history through the checkpoint cutoff sequence `C`, validates
+segment headers and records, and rebuilds the captured state outside root locks.
+Without options, it reads all captured records in catalog and file-offset
+order with one source descriptor open at a time. A whole snapshot segment can
+keep its DATA identity, offsets and PARITY if independent replay confirms that
+every record remains the winning Put at the cutoff. Only moved records are
+written to new snapshot segments, using the same size target as log segments
+and preserving their sequences. Reuse does not skip validation of any source,
+including records that do not survive the checkpoint.
+Tombstones can be dropped only because all earlier history is replaced.
+Publication combines the checkpoint with the **entire** committed DATA log
+suffix after `C`. Each relocation checks the exact prior address and publishes
+the new address and its file accounting together.
 For the in-memory index, a batch can move while a foreground write syncs if their
 keys are disjoint. A batch that overlaps a staged key waits for the writer to
 commit or abort, then checks the addresses again. The B+tree takes the writer gate
-for each relocation batch. Later Put/Delete wins.
+for each relocation batch. Later Put/Delete wins. Both manual modes can yield
+briefly to foreground writes during bounded DATA and PARITY I/O outside that gate.
 
-`db.Compact(ctx, tarp.WithKeyOrder())` shares the full DATA checkpoint cutoff, atomic publication,
-conditional relocation and loss-recovery protocol. It sorts encoded keys and
-can carry previously verified immutable snapshot segments and their PARITY
-forward under the same identities. It checks the new log suffix and changed
-base ranges. Values in reused files can still have latent damage until checked.
-Order certification is local to the open handle. Backup and restore use the
-existing DATA and catalog formats.
+`db.Compact(ctx, tarp.WithKeyOrder())` uses the same checkpoint cutoff sequence,
+atomic publication, conditional relocation and loss-recovery protocol. It writes
+DATA records in encoded-key order across snapshot segments and can carry forward
+previously verified immutable snapshot segments and their PARITY under the same
+identities. It checks the new DATA log suffix and changed base ranges. Values in
+reused files can still have latent damage until checked.
+Order certification is process-local. Full Open can derive it if it replays the
+selected snapshot records. Digest-only verification of the INDEX-covered
+prefix is not a proof of key order. Backup and restore use the existing DATA
+and catalog formats.
 
 Old paths remain until they are unselected, have no index references, and have
 no reader/backup/compaction pins. The compaction releases its own capture pins

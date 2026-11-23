@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -180,10 +181,10 @@ func measurementState(t testing.TB, db *engine.DB) (string, int) {
 }
 
 type measurementCapture struct {
-	parent           string
-	uuid             [16]byte
-	lastUserSequence uint64
-	reached          bool
+	parent   string
+	uuid     [16]byte
+	stage    string
+	frontier format.Frontier
 }
 
 func (c *measurementCapture) observe() error {
@@ -214,6 +215,37 @@ func (c *measurementCapture) observe() error {
 	if current.UUID != c.uuid {
 		return errors.New("measurement captured a different fixture UUID")
 	}
-	c.lastUserSequence, c.reached = current.LastUserSequence, true
+	c.stage, c.frontier = stage, current
 	return nil
+}
+
+// Only the pin witness needs the captured catalog. Read it while the backup
+// is still parked and its staging directory has not been renamed.
+func (c *measurementCapture) dataIDs() ([]uint64, error) {
+	if c.stage == "" {
+		return nil, errors.New("measurement missed the backup capture stage")
+	}
+	manifest := storage.ManifestName(c.frontier.UUID, c.frontier.ManifestID)
+	data, err := storage.ReadRegular(filepath.Join(c.stage, manifest))
+	if err != nil {
+		return nil, fmt.Errorf("read captured catalog: %w", err)
+	}
+	if sha256.Sum256(data) != c.frontier.ManifestDigest {
+		return nil, errors.New("captured catalog digest does not match staged CURRENT")
+	}
+	catalog, err := format.DecodeCatalog(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode captured catalog: %w", err)
+	}
+	active, err := catalog.ActiveEntry(c.frontier)
+	if err != nil {
+		return nil, fmt.Errorf("match captured catalog to staged CURRENT: %w", err)
+	}
+	ids := make([]uint64, 0, len(catalog.Entries)+1)
+	for _, entry := range catalog.Entries {
+		if entry.HasPhysicalFile() {
+			ids = append(ids, entry.ID)
+		}
+	}
+	return append(ids, active.ID), nil
 }

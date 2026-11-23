@@ -51,14 +51,14 @@ func (s *Store) Capture() (*Capture, error) {
 		captured := &c.Segments[i]
 		captured.liveKeys = captured.Segment.LiveKeys.Load()
 		captured.liveBytes = captured.Segment.LiveBytes.Load()
-		captured.Segment.Pin()
+		captured.Segment.PinRetained()
 	}
 	return c, nil
 }
 
 func (c *Capture) Release() {
 	for _, entry := range c.Segments {
-		entry.Segment.Unpin()
+		entry.Segment.UnpinRetained()
 	}
 }
 
@@ -101,28 +101,35 @@ func (w *outputWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// replayLive validates the captured record history and visits the live Puts in
-// source file/offset order. The index view was captured with this layout under
-// the writer gate. The private builder independently validates key semantics,
-// including historical records that are absent from the final view.
-func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend, live index.View, selectOutput func(string, Location) (io.Writer, error)) error {
-	replay := newReplayBuilder(ctx, history, c.Catalog.PrunedThroughSequence)
+// replayLive validates all captured DATA and selects output in source order.
+// The captured live index guides copying, but an independent replay must
+// confirm the winning records before any output is published.
+func (c *DataCheckpoint) replayLive(ctx context.Context, history index.Backend, live index.View, selectOutput func(string, Location) (io.Writer, error), reuse reuseSnapshot) error {
+	capture, fs := c.capture, c.store.IO
+	replay := newReplayBuilder(ctx, history, capture.Catalog.PrunedThroughSequence)
 	defer replay.abort()
 	buffer := make([]byte, 32<<10)
 	reader := bufio.NewReaderSize(nil, len(buffer))
-	for _, captured := range c.Segments {
+	for _, captured := range capture.Segments {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		fd, header, _, err := openSelected(captured.Segment.Path, c.Current.UUID, captured.Entry, captured.Segment.ID == c.Current.ActiveID)
+		fd, header, _, err := openSelected(captured.Segment.Path, capture.Current.UUID, captured.Entry, captured.Segment.ID == capture.Current.ActiveID)
 		if err != nil {
 			return selectedReadFailure(captured.Entry.ID, &SourceError{Err: err})
 		}
 		copying := false
+		// Captured byte accounting is only a hint to avoid staging a segment
+		// whose rows are likely to survive. Every address and replay winner
+		// still has to agree, even if the encoded lengths have not changed.
+		keep := captured.Entry.Kind == format.SnapshotKind &&
+			captured.liveBytes == captured.Entry.Bytes-format.SegmentHeaderBytes && captured.Segment.UnavailableData() == nil
+		var bounds scannedSnapshot
+		mismatch := false
 		err = fs.Do("compact.scan", func() error {
-			span := format.NewRecordSequenceValidator(captured.Entry, c.Catalog.CheckpointCutoffSequence)
+			span := format.NewRecordSequenceValidator(captured.Entry, capture.Catalog.CheckpointCutoffSequence)
 			const start = int64(format.SegmentHeaderBytes)
-			source := io.Reader(io.NewSectionReader(sourceReader{fd}, start, captured.Entry.Bytes-start))
+			source := io.Reader(io.NewSectionReader(c.paceInput(sourceReader{fd}), start, captured.Entry.Bytes-start))
 			var h hash.Hash
 			if captured.Entry.DataFileDigest != ([32]byte{}) {
 				h = sha256.New()
@@ -155,10 +162,15 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 						return nil, &SourceError{Err: err}
 					}
 					if !exists || loc.FileID != captured.Segment.ID || loc.RecordOffset != off {
+						mismatch = mismatch || keep
 						return nil, nil
 					}
 					if loc.RecordBytes != r.EncodedRecordBytes() || loc.Sequence != r.Sequence || loc.ValueBytes != r.ValueBytes {
 						return nil, fmt.Errorf("%w: index disagrees with captured DATA", ErrCorrupt)
+					}
+					if keep {
+						bounds.add(key, off)
+						return nil, nil
 					}
 					if !copying {
 						if err := fs.Check("compact.source.open:after"); err != nil {
@@ -171,7 +183,8 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 				})
 				if err != nil {
 					var destination *destinationError
-					if callbackErr != nil || errors.As(err, &destination) {
+					var work *IndexWorkError
+					if callbackErr != nil || errors.As(err, &destination) || errors.As(err, &work) {
 						return err
 					}
 					if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -200,9 +213,37 @@ func (c *Capture) replayLive(ctx context.Context, fs *IO, history index.Backend,
 		if err != nil {
 			return fmt.Errorf("%s: %w", filepath.Base(captured.Segment.Path), err)
 		}
+		if keep {
+			if mismatch {
+				return fmt.Errorf("%w: captured live byte count disagrees with snapshot %d", ErrCorrupt, captured.Entry.ID)
+			}
+			if err := reuse(captured.Entry, &bounds); err != nil {
+				return err
+			}
+		}
 	}
-	if err := replay.finish(); err != nil {
+	if len(c.reused) == 0 {
+		if err := replay.finish(); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
+	// Replay can produce only a subset of the validated original addresses
+	// in each snapshot. Equality of the per-file counts proves that every
+	// original row is still the winner, not merely that the total is right.
+	winners := make(map[uint64]int64, len(c.reused))
+	if err := replay.finishWith(func(_ string, addr index.Address) error {
+		if _, kept := c.reused[addr.FileID]; kept {
+			winners[addr.FileID]++
+		}
+		return ctx.Err()
+	}); err != nil {
 		return err
+	}
+	for id, rows := range c.reused {
+		if winners[id] != rows {
+			return fmt.Errorf("%w: snapshot %d winners disagree with replay", ErrCorrupt, id)
+		}
 	}
 	return ctx.Err()
 }

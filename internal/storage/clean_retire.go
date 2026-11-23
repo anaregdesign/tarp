@@ -114,7 +114,7 @@ func (s *Store) retireKnown(remaining int) (unlinked, pinned int64, pending bool
 		// entry until both names are gone so a partial retirement can retry.
 		// A staged output whose header failed may own only its DATA name.
 		// A separately existing sidecar never becomes ours on EEXIST.
-		if f.sealed.Load() != nil || f.parityNeedsSync || f.parityReady {
+		if f.sealed.Load() != nil || f.parityNeedsSync || f.ParityReady() {
 			removedParity, err := remove(filepath.Join(s.Dir, parityName(s.Current.UUID, id)))
 			if err != nil || !removedParity || remaining == 0 {
 				result = err

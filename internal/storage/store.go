@@ -65,16 +65,19 @@ type DataSegment struct {
 	// Published once the catalog selects this immutable DATA. Readers that
 	// already pinned the file can still use its binding after compaction.
 	sealed atomic.Pointer[sealedRepair]
-	// Only the serialized parity builder reads or writes these flags.
-	parityReady, parityNeedsSync bool
-	snapshotRange                *snapshotRange // checked bounds for an immutable snapshot; maintained by the maintenance slot
-	activeDigest                 hash.Hash      // writer gate owns the committed active byte stream
+	// The serialized parity builder owns readiness. Cleaner ranking can
+	// observe it without blocking that builder.
+	parityReady     atomic.Bool
+	parityNeedsSync bool
+	snapshotRange   *snapshotRange // checked bounds for an immutable snapshot; maintained by the maintenance slot
+	activeDigest    hash.Hash      // writer gate owns the committed active byte stream
 
 	ID                     uint64
 	Kind                   uint32
 	Path                   string
 	Size                   atomic.Int64
 	pins                   atomic.Int64
+	retainingPins          atomic.Int64
 	LiveBytes, DeleteBytes atomic.Int64
 	LiveKeys               atomic.Int64 // index ownership independent of transient read and capture pins
 }
@@ -89,6 +92,23 @@ func (f *DataSegment) Unpin() {
 		panic("storage: negative segment pin count")
 	}
 }
+
+// PinRetained is for captured DATA or value scans, which can outlive a clean
+// plan. All pins still prevent unlinks; only these affect ranking.
+func (f *DataSegment) PinRetained() {
+	f.Pin()
+	f.retainingPins.Add(1)
+}
+
+func (f *DataSegment) UnpinRetained() {
+	if f.retainingPins.Add(-1) < 0 {
+		panic("storage: negative retained segment pin count")
+	}
+	f.Unpin()
+}
+
+func (f *DataSegment) HasRetentionPin() bool { return f.retainingPins.Load() > 0 }
+func (f *DataSegment) ParityReady() bool     { return f.parityReady.Load() }
 
 // Location binds a DATA record address to the process-local segment used for I/O.
 type Location struct {
@@ -315,10 +335,14 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 
 func (s *Store) recover(ctx context.Context, image *Image, listing directoryListing, keys index.Backend) error {
 	var err error
+	var order *snapshotOrderCheck
 	if s.IndexCheckpointValidated {
 		err = image.replayAfterIndexCheckpoint(ctx, keys, s.Config.IndexedOpen)
 	} else {
-		err = image.rebuildIndexFromData(ctx, keys)
+		if !s.Config.IndexedOpen {
+			order = &snapshotOrderCheck{fences: &s.fences}
+		}
+		err = image.rebuildIndex(ctx, keys, order)
 	}
 	if err != nil {
 		return err
@@ -357,7 +381,13 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 	if _, _, err := s.cleanupValidated(ctx, listing.objects); err != nil {
 		return err
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Only the record replay path saw encoded keys in snapshot order. A
+	// digest-only verification of the INDEX-covered prefix is not a proof.
+	s.orderedSnapshot = order != nil && !order.unordered
+	return nil
 }
 
 // Neither LOCK nor CURRENT was observed before locking. Keep empty directories

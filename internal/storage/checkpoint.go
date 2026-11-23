@@ -20,15 +20,15 @@ import (
 // Copy runs outside the writer gate. ReserveSnapshotSegment and Install require it.
 type DataCheckpoint struct {
 	store          *Store
-	orderedYield   func() error
+	yield          func() error
 	bytesToYield   int
 	scratch        *orderedScratchBudget
 	capture        *Capture
 	segments       []*DataSegment
 	entries        []format.CatalogEntry // all selected outputs, including reused snapshots
 	privateEntries []format.CatalogEntry // completed outputs owned by this attempt
-	reused         map[uint64]struct{}
-	ordered        bool // globally ordered output, valid only after successful scan
+	reused         map[uint64]int64      // DATA IDs and record counts of unchanged snapshots
+	ordered        bool                  // globally ordered output, valid only after successful scan
 	certifiedBase  bool
 	ordinals       map[uint64]int
 	lossSources    []lossSource
@@ -39,34 +39,78 @@ func (s *Store) NewDataCheckpoint(capture *Capture) *DataCheckpoint {
 	return &DataCheckpoint{store: s, capture: capture}
 }
 
-// SetOrderedYield gives an active foreground writer a chance to run between
-// chunks of private DATA and parity I/O. The callback runs outside DB locks.
-func (c *DataCheckpoint) SetOrderedYield(yield func() error) {
-	c.orderedYield = yield
-	c.bytesToYield = orderedPaceBytes
+// SetYield schedules pauses between chunks of DATA and PARITY I/O outside the
+// writer gate.
+func (c *DataCheckpoint) SetYield(yield func() error) {
+	c.yield = yield
+	c.bytesToYield = checkpointPaceBytes
 }
 
-const orderedPaceBytes = 256 << 10
+const checkpointPaceBytes = 256 << 10
 
-func (c *DataCheckpoint) paceOrdered(n int) error {
+func (c *DataCheckpoint) pace(n int) error {
 	c.bytesToYield -= n
 	if c.bytesToYield > 0 {
 		return nil
 	}
-	c.bytesToYield += orderedPaceBytes
-	return c.orderedYield()
+	c.bytesToYield += checkpointPaceBytes
+	return c.yield()
 }
 
-type orderedOutput struct {
+func (c *DataCheckpoint) paceInput(src io.ReaderAt) io.ReaderAt {
+	if c.yield == nil {
+		return src
+	}
+	return pacedInput{c: c, src: src}
+}
+
+type pacedInput struct {
+	c   *DataCheckpoint
+	src io.ReaderAt
+}
+
+func (r pacedInput) ReadAt(p []byte, off int64) (int, error) {
+	var read int
+	for len(p) != 0 {
+		n := min(len(p), checkpointPaceBytes)
+		if err := r.c.pace(n); err != nil {
+			// A scheduling failure occurred before reading authoritative DATA.
+			var work *IndexWorkError
+			if errors.As(err, &work) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return read, err
+			}
+			return read, &IndexWorkError{Err: err}
+		}
+		got, err := r.src.ReadAt(p[:n], off)
+		read += got
+		if err != nil && !(err == io.EOF && got == n) {
+			return read, err
+		}
+		if got != n {
+			return read, io.ErrUnexpectedEOF
+		}
+		p, off = p[n:], off+int64(n)
+	}
+	return read, nil
+}
+
+func (c *DataCheckpoint) paceOutput(dst *outputWriter) io.Writer {
+	if c.yield == nil {
+		return dst
+	}
+	return checkpointOutput{dst, c}
+}
+
+type checkpointOutput struct {
 	dst *outputWriter
 	c   *DataCheckpoint
 }
 
-func (w orderedOutput) Write(b []byte) (int, error) {
+func (w checkpointOutput) Write(b []byte) (int, error) {
 	var written int
 	for len(b) != 0 {
-		n := min(len(b), orderedPaceBytes)
-		if err := w.c.paceOrdered(n); err != nil {
+		n := min(len(b), checkpointPaceBytes)
+		if err := w.c.pace(n); err != nil {
 			return written, &destinationError{err}
 		}
 		count, err := w.dst.Write(b[:n])
@@ -88,11 +132,12 @@ func (s *Store) ReserveSnapshotSegment() (*DataSegment, error) {
 // Entries describes completed snapshot files for checkpoint size accounting.
 func (c *DataCheckpoint) Entries() []format.CatalogEntry { return c.entries }
 
-// Copy validates the captured history, copies live records in physical order and
-// records their new addresses in moves. Only reserve takes the writer gate.
+// Copy validates the captured history and writes a snapshot in source order.
+// Whole unchanged snapshots keep their addresses; moves contains only copies.
+// Only reserve takes the writer gate.
 func (c *DataCheckpoint) Copy(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*DataSegment, error)) error {
-	err := c.writeSnapshot(ctx, moves, reserve, func(emit func(string, Location) (io.Writer, error)) error {
-		return c.capture.replayLive(ctx, c.store.IO, history, live, emit)
+	err := c.writeSnapshotLayout(ctx, moves, reserve, false, func(emit func(string, Location) (io.Writer, error), reuse reuseSnapshot) error {
+		return c.replayLive(ctx, history, live, emit, reuse)
 	})
 	if err != nil {
 		return err
@@ -100,7 +145,11 @@ func (c *DataCheckpoint) Copy(ctx context.Context, history index.Backend, live i
 	// Verify the complete set against independently replayed DATA before the
 	// new checkpoint is allowed to replace its sources. An inconsistent derived
 	// index must never suppress the only surviving authoritative copy of a Put.
-	if moves.count != history.Count() {
+	rows := int64(moves.count)
+	for _, kept := range c.reused {
+		rows += kept
+	}
+	if rows != int64(history.Count()) {
 		return fmt.Errorf("%w: checkpoint index live count disagrees with replay", ErrCorrupt)
 	}
 	tx := history.Begin()
@@ -113,7 +162,7 @@ func (c *DataCheckpoint) Copy(ctx context.Context, history index.Backend, live i
 		if err != nil {
 			return &IndexWorkError{Err: err}
 		}
-		if !exists || loc.FileID != old.Segment.ID || loc.RecordOffset != old.RecordOffset || loc.Sequence != old.Sequence {
+		if !exists || loc != old.Address() {
 			return fmt.Errorf("%w: checkpoint index location disagrees with replay", ErrCorrupt)
 		}
 		return nil
@@ -123,15 +172,20 @@ func (c *DataCheckpoint) Copy(ctx context.Context, history index.Backend, live i
 // writeSnapshot owns private outputs through the complete source scan. Both
 // normal replay and recovery use the same rollover, sync and relocation path.
 func (c *DataCheckpoint) writeSnapshot(ctx context.Context, moves *Relocations, reserve func() (*DataSegment, error), scan func(func(string, Location) (io.Writer, error)) error) error {
-	return c.writeSnapshotLayout(ctx, moves, reserve, false, func(emit func(string, Location) (io.Writer, error), _ func(format.CatalogEntry) error) error {
+	return c.writeSnapshotLayout(ctx, moves, reserve, false, func(emit func(string, Location) (io.Writer, error), _ reuseSnapshot) error {
 		return scan(emit)
 	})
 }
 
-type snapshotLayoutScan func(emit func(string, Location) (io.Writer, error), reuse func(format.CatalogEntry) error) error
+// A source-order caller supplies bounds from its verified scan. Key-ordered
+// delta reuse may instead use the existing ordered-base proof.
+type reuseSnapshot func(format.CatalogEntry, *scannedSnapshot) error
+type snapshotLayoutScan func(emit func(string, Location) (io.Writer, error), reuse reuseSnapshot) error
 
-func (c *DataCheckpoint) writeOrderedSnapshot(ctx context.Context, moves *Relocations, reserve func() (*DataSegment, error), scan snapshotLayoutScan) error {
-	return c.writeSnapshotLayout(ctx, moves, reserve, true, scan)
+func (c *DataCheckpoint) writeOrderedSnapshot(ctx context.Context, moves *Relocations, reserve func() (*DataSegment, error), scan func(func(string, Location) (io.Writer, error), func(format.CatalogEntry) error) error) error {
+	return c.writeSnapshotLayout(ctx, moves, reserve, true, func(emit func(string, Location) (io.Writer, error), reuse reuseSnapshot) error {
+		return scan(emit, func(entry format.CatalogEntry) error { return reuse(entry, nil) })
+	})
 }
 
 func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocations, reserve func() (*DataSegment, error), requireOrder bool, scan snapshotLayoutScan) (result error) {
@@ -220,10 +274,7 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 				// Ordered rows are emitted consecutively. Amortize small
 				// physical writes while retaining the exact record offsets.
 				disk := &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
-				var out io.Writer = disk
-				if c.orderedYield != nil {
-					out = orderedOutput{disk, c}
-				}
+				out := c.paceOutput(disk)
 				if buffered == nil {
 					buffered = bufio.NewWriterSize(out, 32<<10)
 				} else {
@@ -242,14 +293,14 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 		}
 		var writer io.Writer = buffered
 		if buffered == nil {
-			writer = &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
+			writer = c.paceOutput(&outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest})
 		}
 		next := old
 		next.Segment, next.RecordOffset = segment, offset
 		offset += old.RecordBytes
 		return writer, moves.append(key, old, next)
 	}
-	reuse := func(entry format.CatalogEntry) error {
+	reuse := func(entry format.CatalogEntry, checked *scannedSnapshot) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -257,13 +308,14 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 		if err != nil {
 			return err
 		}
-		if !requireOrder || !c.HasOrderedBase() || pos <= lastCarriedPos || src.Segment.snapshotRange == nil {
+		if pos <= lastCarriedPos || requireOrder && (checked != nil || !c.HasOrderedBase() || src.Segment.snapshotRange == nil) ||
+			!requireOrder && (checked == nil || checked.rows == 0) {
 			return fmt.Errorf("%w: invalid snapshot reuse", ErrCorrupt)
 		}
 		if damage := src.Segment.UnavailableData(); damage != nil {
 			return damage
 		}
-		if previousCarried.ID == 0 && previousKey != "" {
+		if requireOrder && previousCarried.ID == 0 && previousKey != "" {
 			first, _, err := c.snapshotBounds(ctx, entry)
 			if err != nil {
 				return err
@@ -275,13 +327,27 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 		if err := finish(); err != nil {
 			return err
 		}
-		if c.reused == nil {
-			c.reused = make(map[uint64]struct{})
+		var rows int64
+		if requireOrder {
+			rows = c.snapshotRows(src)
+			previousCarried, previousKey = entry, ""
+		} else {
+			rows = checked.rows
+			if ordered && !checked.unordered && previousKey < checked.first {
+				if src.Segment.snapshotRange == nil {
+					checked.complete(src.Segment, &c.store.fences)
+				}
+				previousKey = checked.last
+			} else {
+				ordered, previousKey = false, ""
+			}
 		}
-		c.reused[entry.ID] = struct{}{}
+		if c.reused == nil {
+			c.reused = make(map[uint64]int64)
+		}
+		c.reused[entry.ID] = rows
 		c.entries = append(c.entries, entry)
-		lastCarriedPos, previousCarried = pos, entry
-		previousKey = ""
+		lastCarriedPos = pos
 		return nil
 	}
 	if err := scan(emit, reuse); err != nil {
@@ -301,8 +367,8 @@ func (c *DataCheckpoint) Protect(ctx context.Context) error {
 		return nil
 	}
 	var yield func() error
-	if c.orderedYield != nil {
-		yield = func() error { return c.paceOrdered(format.DataBlocksPerStripe * format.DataBlockBytes) }
+	if c.yield != nil {
+		yield = func() error { return c.pace(format.DataBlocksPerStripe * format.DataBlockBytes) }
 	}
 	for i, entry := range c.privateEntries {
 		src := CapturedSegment{Segment: c.segments[i], Entry: entry}
@@ -314,7 +380,8 @@ func (c *DataCheckpoint) Protect(ctx context.Context) error {
 		return err
 	}
 	for _, f := range c.segments {
-		f.parityReady, f.parityNeedsSync = true, false
+		f.parityNeedsSync = false
+		f.parityReady.Store(true)
 	}
 	return nil
 }
@@ -340,7 +407,7 @@ func (c *DataCheckpoint) AdoptUnchangedOrdered() bool {
 func (c *DataCheckpoint) Install() error {
 	s := c.store
 	for _, f := range c.segments {
-		if !f.parityReady {
+		if !f.ParityReady() {
 			return errors.New("storage: checkpoint replacement is not protected")
 		}
 	}

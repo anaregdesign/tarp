@@ -51,7 +51,11 @@ func compactTrials(pair string) ([]compactTrial, error) {
 		return trials, nil
 	}
 	trials = append(trials, compactTrial{"base", "baseline", 0}, compactTrial{"next", "baseline", 0},
-		compactTrial{"next", "pinned", 0}, compactTrial{"base", "pinned", 0})
+		compactTrial{"next", "pinned", 0})
+	// The frozen candidate baseline cannot observe DATA retention pins.
+	if pair == "releases" {
+		trials = append(trials, compactTrial{"base", "pinned", 0})
+	}
 	for round := 1; round <= 4; round++ {
 		arms := [2]string{"base", "next"}
 		if round%2 == 0 {

@@ -528,7 +528,9 @@ must be outside the source. Backups must be immutable during restore.
 The background worker selects the first eligible maintenance policy in this order.
 
 1. **Single-segment cleaning** reclaims obsolete records when the estimated
-   replacement, including metadata, fits in half the source bytes.
+   replacement, including metadata, fits in half the source bytes. It ranks
+   eligible files by estimated reclaimable space relative to DATA and PARITY
+   work. Reader and backup pins can defer reclamation.
 2. **Grouped log cleaning** shares one publication across consecutive sealed
    logs in catalog order. It examines up to eight catalog entries, retains
    required tombstones and fits the combined DATA output in one segment target.
@@ -548,9 +550,13 @@ unlinked by this worker since `Open`. Filesystem allocation and staging writes
 also affect free space. Provision room for current data, temporary replacements,
 metadata, backups, pinned sources and concurrent growth.
 
-Call `Compact(ctx)` for a full DATA checkpoint through a captured sequence. It can
-discard tombstones covered by that checkpoint and preserves all concurrent
-tail writes. It serializes with the worker and can overlap one online backup.
+Call `Compact(ctx)` for a full DATA checkpoint through the captured checkpoint
+cutoff sequence. A source-order build validates the captured DATA history,
+including obsolete records. If replay confirms that every record in a snapshot
+segment still wins at its original address, the checkpoint can keep that DATA
+segment and its PARITY instead of rewriting them. It can discard covered
+tombstones and preserves all concurrent tail writes. It serializes with the
+worker and can overlap one online backup.
 Duplicate manual full DATA checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult.UnlinkedBytes` counts the logical lengths of files removed by
 that call. `PinnedRetiredDataBytes` reports the retired DATA file bytes still
@@ -561,18 +567,24 @@ If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
 
-Call `db.Compact(ctx, tarp.WithKeyOrder())` after an import or in an application-selected maintenance
-window to place related values together for `ScanPrefix`. It writes the retained
-snapshot records in encoded-key order across DATA segments. Later writes append
-to the log. On the same handle, the next call sorts the new log suffix and
-rewrites affected snapshot ranges. A healthy, unchanged checkpoint with no
-pending cleanup returns without reading DATA or writing a MANIFEST. On reopen
-the first call verifies the snapshot order before reusing it. A delta checkpoint
-can leave latent damage in a reused segment for its next checked read. The
-option is also available on `TypedDB`. Schedule it in a quiet window when
-foreground latency matters. In the measured workload, overlapping durable
-`Put` p99 ranged from 1.12× to 2.30× the foreground-only baseline.
-See [key-ordered compaction and measurements](docs/key-ordered-compaction.md).
+### Key-ordered compaction (unreleased)
+
+Call `db.Compact(ctx, tarp.WithKeyOrder())` on a raw or typed DB after an import
+or in a maintenance window to place related values together for `ScanPrefix`.
+It writes retained DATA records in encoded-key order across snapshot segments.
+Iterator order remains unspecified. Later writes append to the log. With a
+verified ordered base, the next ordered call sorts the new DATA log suffix and
+rewrites affected snapshot segments or writes new ones in gaps. A healthy,
+unchanged ordered checkpoint with no pending cleanup returns without reading
+DATA or writing a MANIFEST. Full Open can recover the order proof during record
+replay. If Open imports an INDEX covering the snapshot, the first ordered call
+must still check the snapshot order.
+A delta checkpoint can leave latent damage in a reused segment for its next
+checked read. Schedule this work in a quiet window when foreground latency
+matters. In the measured workload, overlapping
+durable `Put` p99 ranged from 1.12× to 2.30× the foreground-only baseline.
+See the [runnable example](doc_test.go) and
+[key-ordered compaction and measurements](docs/key-ordered-compaction.md).
 
 ### Recovering damaged DATA
 

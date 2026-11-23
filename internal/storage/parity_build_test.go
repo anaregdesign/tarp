@@ -65,8 +65,8 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 				t.Fatal(err)
 			}
 			var sourceErr *SourceError
-			if err := ensure(); !errors.Is(err, ErrCorrupt) || errors.As(err, &sourceErr) || source.Segment.parityReady {
-				t.Fatalf("unsafe sidecar misclassified: %v, ready %t", err, source.Segment.parityReady)
+			if err := ensure(); !errors.Is(err, ErrCorrupt) || errors.As(err, &sourceErr) || source.Segment.ParityReady() {
+				t.Fatalf("unsafe sidecar misclassified: %v, ready %t", err, source.Segment.ParityReady())
 			}
 			if target, err := os.Readlink(path); err != nil || target != unrelated {
 				t.Fatalf("changed symlink: %q, %v", target, err)
