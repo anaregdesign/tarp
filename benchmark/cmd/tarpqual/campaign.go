@@ -36,6 +36,9 @@ func campaign(work, confirm, group, selected string, output io.Writer) (result e
 		}
 		cases = matches
 	}
+	if len(cases) > 192 {
+		return errors.New("qualification: select a bounded group of at most 192 cases")
+	}
 	work, err = filepath.Abs(work)
 	if err != nil {
 		return err
@@ -109,7 +112,9 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 	var sequenceMin, sequenceMax uint64
 	var witnessed *qualification.Oracle
 	exhausted := false
+	pagerPassed := false
 	environment, phase, readerSeen := false, false, false
+	pinnedSeen, reusedSeen := false, false
 	observe := func(payload string) (bool, error) {
 		if payload == "TARP_ENVIRONMENT_PASS" {
 			if environment {
@@ -135,6 +140,20 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 			exhausted, cfg.RequireOutput = true, true
 			return false, log.record(map[string]any{"event": "exhaustion_verdict", "case": cfg.Name, "verdict": verdict})
 		}
+		if strings.HasPrefix(payload, "TARP_PAGER_PASS ") {
+			var verdict qualification.PagerVerdict
+			if cfg.Mode != "pager-exhaustion" || pagerPassed {
+				return false, errors.New("unexpected or repeated pager verdict")
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(payload, "TARP_PAGER_PASS ")), &verdict); err != nil {
+				return false, err
+			}
+			if err := verdict.Validate(); err != nil {
+				return false, err
+			}
+			pagerPassed = true
+			return false, log.record(map[string]any{"event": "pager_verdict", "case": cfg.Name, "verdict": verdict})
+		}
 		event, recognized, err := qualification.ParseOracle(payload)
 		if err != nil || !recognized {
 			return false, errors.Join(err, fmt.Errorf("unrecognized campaign payload %q", payload))
@@ -143,7 +162,7 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 			if event.Mode != cfg.Mode {
 				return false, errors.New("operation acknowledgment does not match the selected mode")
 			}
-			if cfg.Mode == "backup" || cfg.Mode == "restore" || cfg.Mode == "overlap" {
+			if cfg.Mode == "backup" || cfg.Mode == "restore" || cfg.Mode == "overlap" || strings.HasPrefix(cfg.Mode, "clean-") {
 				cfg.RequireOutput = true
 			}
 		}
@@ -153,6 +172,12 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 		}
 		if event.Type == "reads" {
 			readerSeen = event.Count > 0
+		}
+		if event.Type == "pinned" {
+			pinnedSeen = event.Count > 0
+		}
+		if event.Type == "reused" {
+			reusedSeen = event.Count > 0
 		}
 		if event.Type == "capture" {
 			if cfg.Captured {
@@ -179,8 +204,13 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 		if event.Type != "phase" {
 			return false, nil
 		}
-		if event.Phase != cfg.Phase || cfg.Mode == "overlap" && !readerSeen || cfg.Mode == "exhaustion" && !exhausted {
+		if event.Phase != cfg.Phase || cfg.Mode == "overlap" && !readerSeen || cfg.Mode == "exhaustion" && !exhausted ||
+			cfg.Mode == "pager-exhaustion" && !pagerPassed || strings.HasPrefix(cfg.Mode, "clean-") && !readerSeen {
 			return false, errors.New("phase or concurrent-reader coverage does not match the selected case")
+		}
+		if strings.HasPrefix(cfg.Mode, "clean-") && strings.HasPrefix(cfg.Phase, "clean.retire.") && !pinnedSeen ||
+			(cfg.Mode == "ordered-delta" || cfg.Mode == "ordered-reuse") && strings.HasPrefix(cfg.Phase, "operation.ack:") && !reusedSeen {
+			return false, errors.New("selected retirement or reuse case omitted its required ownership witness")
 		}
 		model, err := qualification.ReplayOracle(events, cfg.Mode == "init")
 		if err != nil {
@@ -262,6 +292,10 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 				verdict.Output != "validated_at_capture" && verdict.Output != "permitted_absent") ||
 			!cfg.Captured && verdict.Output != "not_applicable" {
 			return false, errors.New("snapshot output/capture verdict does not match the witnessed contract")
+		}
+		if cfg.IndexMode != "" && cfg.Mode != "pager-exhaustion" && !verdict.IndexedVerified ||
+			cfg.Mode == "repair-data" && !verdict.RepairRetried {
+			return false, errors.New("extended recovery omitted an independent validation or repair retry")
 		}
 		recovered = true
 		return false, log.record(map[string]any{"event": "recovery_verdict", "case": cfg, "verdict": verdict})

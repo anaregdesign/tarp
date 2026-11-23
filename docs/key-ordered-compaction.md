@@ -12,6 +12,9 @@ func (db *TypedDB[K, V]) Compact(ctx context.Context, opts ...CompactOption) (Co
 
 Call `db.Compact(ctx, tarp.WithKeyOrder())` to build a key-ordered full DATA checkpoint. Both the raw and typed calls are synchronous and accept cancellation through the caller's context. With no options, `db.Compact(ctx)` keeps source order and validates all captured DATA, even when it reuses whole snapshot segments. A zero-value `CompactOption` has no effect, and passing `WithKeyOrder()` more than once is equivalent to passing it once.
 
+The application chooses when to run an ordered checkpoint. Automatic cleaning
+continues to reclaim obsolete bytes and repack small segments.
+
 The checkpoint cutoff sequence `C` falls at a complete committed batch boundary. On success, the snapshot segments contain one Put record for every retained live key at `C`, in strict encoded-key order across the segments in catalog order. DATA records matching an encoded key prefix can span consecutive snapshot segments. Each retained Put keeps its original user sequence. The existing recovery contract for `CompactResult.DroppedKeys` applies. Typed keys use their encoded bytes, including composite field framing. The public scan order stays unspecified.
 
 Applications can keep writing during the build. New commits form a sequence-ordered DATA log suffix, so the layout guarantee applies through `C`. For example, overwriting the first key a thousand times leaves its latest value in the DATA log suffix and neighboring DATA records in their snapshot segments. Repeated reads of a single random key and key-only scans offer little reason to schedule this job. The target workload is a value-producing `ScanPrefix` over related records.

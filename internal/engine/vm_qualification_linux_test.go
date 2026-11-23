@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/anaregdesign/tarp/benchmark/guesttest"
 	"github.com/anaregdesign/tarp/benchmark/qualification"
+	"github.com/anaregdesign/tarp/internal/storage"
 )
 
 func TestVMBlockControls(t *testing.T) {
@@ -72,7 +74,7 @@ func TestVMCampaignGuest(t *testing.T) {
 	known := false
 	for _, candidate := range cases {
 		known = known || candidate.Name == cfg.Name && candidate.Mode == cfg.Mode &&
-			candidate.Phase == cfg.Phase && candidate.Occurrence == cfg.Occurrence
+			candidate.Phase == cfg.Phase && candidate.Occurrence == cfg.Occurrence && candidate.IndexMode == cfg.IndexMode
 	}
 	if !known || cfg.Action != "crash" && cfg.Action != "verify" {
 		t.Fatal("case is not in the bounded phase matrix")
@@ -83,6 +85,21 @@ func TestVMCampaignGuest(t *testing.T) {
 		if cfg.Mode == "exhaustion" {
 			vmExhaustion(t, dir, output, cfg.Seed)
 			t.Fatal("external exhaustion barrier returned")
+		}
+		if cfg.Mode == "pager-exhaustion" {
+			vmPagerExhaustion(t, dir)
+			t.Fatal("external pager barrier returned")
+		}
+		if cfg.IndexMode != "" {
+			runExtendedPowerCase(t, cfg, dir, output, func(point string) {
+				if point == cfg.Phase {
+					fmt.Printf("TARP_PHASE %s\n", point)
+					for {
+						time.Sleep(time.Hour)
+					}
+				}
+			})
+			t.Fatal("external extended phase barrier returned")
 		}
 		for key, value := range map[string]string{
 			"TARP_POWERCUT_CONFIRM": "disposable-vm-only", "TARP_POWERCUT_DIR": dir,
@@ -144,7 +161,31 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 		t.Fatalf("committed source frontier is absent: %v", currentErr)
 	}
 	// No oracle is read until recovery has returned; it cannot reconstruct data.
-	db, err := Open(dir, vmCaseOptions(cfg.Mode))
+	opts := vmCaseOptions(cfg.Mode)
+	extended := cfg.IndexMode != "" && cfg.Mode != "pager-exhaustion"
+	if extended {
+		opts = extendedCaseOptions(cfg)
+	}
+	repairRetried := false
+	if cfg.Mode == "repair-data" {
+		// The deliberate damage was durable before the interrupted online
+		// repair. Retry from selected DATA/PARITY only, without an oracle.
+		if err := storage.RepairDataFromParity(t.Context(), dir, nil); err != nil {
+			t.Fatalf("file-only repair retry after interrupted replacement: %v", err)
+		}
+		repairRetried = true
+	}
+	fullDir := dir
+	indexedVerified, indexedUsed := false, false
+	if extended {
+		// Preserve the exact cold-boot files before either Open or Close can
+		// repair, clean up, or replace INDEX. Validate both independent copies.
+		fullDir = dir + "-full"
+		if err := os.CopyFS(fullDir, os.DirFS(dir)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := OpenWithHooks(fullDir, opts, nil, parkedMaintenance())
 	if err != nil {
 		if cfg.Mode == "init" && !required && missingCurrent && errors.Is(err, ErrCorrupt) {
 			reportVMRecovery(t, qualification.RecoveryVerdict{Source: "explicit_uninitialized", Output: "not_applicable"})
@@ -162,11 +203,33 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if extended {
+		indexedOptions := opts
+		indexedOptions.OpenValidation = Indexed
+		indexed, err := OpenWithHooks(dir, indexedOptions, nil, parkedMaintenance())
+		if err != nil {
+			t.Fatalf("independent Indexed recovery: %v", err)
+		}
+		if seq := Observe(indexed).Frontier().LastUserSequence; seq != sequence {
+			t.Fatalf("Full/Indexed sequence mismatch: %d != %d", seq, sequence)
+		}
+		if got := verifyVMDatabase(t, indexed, oracle, cfg.Mode); got != digest {
+			t.Fatalf("Full/Indexed recovered different state: %s != %s", got, digest)
+		}
+		indexedUsed = indexed.store.IndexCheckpointValidated
+		if strings.HasPrefix(cfg.Mode, "index-") && cfg.Phase == "index.current.dirsync:after" && !indexedUsed {
+			t.Fatal("durably published INDEX was not validated on Indexed Open")
+		}
+		indexedVerified = true
+		if err := indexed.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	outputState := "not_applicable"
-	if cfg.Mode == "backup" || cfg.Mode == "restore" || cfg.Mode == "overlap" || cfg.Mode == "exhaustion" {
+	if cfg.Captured {
 		capture := guestOracle(t, "capture-oracle.jsonl", false)
 		check := func(path string) {
-			db, err := Open(path, vmCaseOptions(cfg.Mode))
+			db, err := OpenWithHooks(path, opts, nil, parkedMaintenance())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -201,7 +264,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 				if err := Restore(context.Background(), RestoreRequest{
 					Source:      output,
 					Destination: path,
-					Limits:      vmCaseOptions(cfg.Mode).RestoreLimits(),
+					Limits:      opts.RestoreLimits(),
 				}); err != nil {
 					t.Fatalf("published incomplete backup: %v", err)
 				}
@@ -213,6 +276,7 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 	reportVMRecovery(t, qualification.RecoveryVerdict{
 		Source: "file_only", SourceSequence: sequence, SourceLiveKeys: liveKeys, StateSHA256: digest,
 		Output: outputState, CaptureSequence: cfg.CaptureSequence,
+		IndexedVerified: indexedVerified, IndexedCheckpointUsed: indexedUsed, RepairRetried: repairRetried,
 	})
 }
 

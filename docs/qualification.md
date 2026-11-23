@@ -1,11 +1,20 @@
 # Safe qualification procedure
 
-**The full Linux/ext4 phase-cut matrix below covers the previous storage
-implementation.** That matrix used revision `347a1a1`,
+The [current-engine qualification record](qualification-v1-candidate.md)
+checks revision `d89f7b8` with 1,168 accepted engine cuts and cold boots, including
+dedicated batch, automatic-cleaner/repacking, ordered, INDEX, interrupted
+repair and actual private-pager ENOSPC scenarios. Both Go families passed
+all 15 guest package race suites and at least 10,000 coverage-guided decoder
+fuzz executions. All 26 runs passed independent reconciliation; the
+durability gate is satisfied for the recorded VM stack only. The record
+retains the original failed attempts as well as the fixed-revision archives.
+
+**The historical full Linux/ext4 phase-cut matrix below covers the previous
+storage implementation.** That matrix used revision `347a1a1`,
 the exact source fingerprint and virtual device described in the
 [execution matrix](#final-selected-target-execution-matrix). The unversioned
-format, incremental publication and default worker require their own evidence
-for any VM power-loss or real capacity claim. Ordinary process exits and
+format's current evidence must be read with the coverage limits in the
+new record. Ordinary process exits and
 deterministic error injection exercise recovery and concurrency on the local
 filesystem. Run privileged or disk-filling experiments only on a dedicated,
 disposable guest.
@@ -28,17 +37,32 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
 go list -m all
-go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=15s -parallel=2
+go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=10000x -parallel=2
 ```
 
 The only module must be `github.com/anaregdesign/tarp`. Tests/tools use standard
 library imports only; the importable root remains package tarp.
+Count-bounded fuzzing avoids the Go 1.26 deadline-cancellation race tracked in
+[golang/go#75804](https://github.com/golang/go/issues/75804). It changes the
+termination budget, not the decoder assertions or treatment of errors.
 
 `TestProcessCrashRecoveryMatrix` runs bounded subprocess exits across writes,
 rotation, checkpoint output/publication/remapping/unlink, backup, and restore.
 It checks the acknowledged seed, whole old/new permitted pending states, and
 every published artifact's recoverability. `-short` skips that subprocess sweep.
 These are process crashes, not power cuts.
+
+`TestExtendedQualificationPhaseReachability` checks representative new
+publication boundaries in ordinary tests. To check **every** extended phase
+without running a VM or filling a filesystem:
+
+```sh
+TARP_EXTENDED_PHASE_MATRIX=all go test -count=1 -timeout=5m \
+  ./internal/engine -run '^TestExtendedQualificationPhaseReachability$'
+```
+
+This exits only a child process on temporary test data. It proves fixture
+reachability and file-only recovery, not volatile-device durability.
 
 Other deterministic tests cover binary/empty values, copying, exact-fit
 admission and no-mutation rejection, strict smaller-limit reopen, exact global
@@ -142,7 +166,9 @@ Recorded controls:
 `tarpqual -list-cases all` prints the named matrix without starting a guest.
 The optional `campaign` mode first reruns the independent device controls,
 then executes a selected group (`smoke`, `initialize`, `mutate`, `checkpoint`,
-`snapshots`, `recovery`, `exhaustion`, or `all`). A single exact case name can be selected
+`snapshots`, `recovery`, `exhaustion`, `batches`, `cleaner`, `ordered`, `indexes`,
+`repair`, or `pager`). `all` enumerates the complete catalog, which exceeds the
+192-case execution limit; select a bounded group or an exact case. A single exact case name can be selected
 for reproduction. Each case has a disclosed seed and occurrence, a fresh
 256 MiB data disk, and separate cut/recovery guests. Initial formatting uses
 4 KiB ext4 blocks, an internal journal, zero reserved-block percentage, and
@@ -176,6 +202,29 @@ directory sync completes, even if the API has yet to return. Either whole state
 may survive between those boundaries. Overlapping maintenance barriers can
 belong to a separate publication. Capture markers bind a backup's acknowledged
 prefix and sequence before later writes.
+
+Extended batch witnesses record every input, including duplicate Puts and
+duplicate Deletes. Delete duplicates consume only one effective record per
+key. Only the two complete batch endpoints are accepted: no intermediate
+sequence or mixture of old/new key states is permitted. Batch protocol lines
+are bounded to 1 MiB, journals to 8 MiB and batches to 2,048 witnessed inputs.
+The private-pager fixture stages 1,536 long keys against real guest ENOSPC,
+requires a scratch-file write failure before any DATA write, checks healthy
+`NotApplied` rollback, frees space and retries before a final whole-VM cut.
+
+Dedicated cleaner fixtures assert the actual single/group/repack policy before
+starting the automatic worker. Captured backup pins retain source files across
+publication/remapping, a checked read and durable tail write overlap the scan,
+and retirement runs only after releasing the capture. Ordered fixtures check
+initial/delta physical key order and exact retained sequences; completed delta
+and reuse cases assert unchanged DATA identities. Extended recovery checks
+independent copies of the cold-boot files with both Full and Indexed Open,
+so a Close-generated replacement INDEX cannot mask an invalid original.
+An interrupted online DATA repair starts from deliberately durable damage:
+the recovery guest first retries offline repair from selected DATA/PARITY
+without reading any oracle, then validates both opens. This is repair
+retry evidence, not a claim that Full Open silently heals damaged DATA.
+
 Reboot verification calls Open using files alone **before reading the oracle**,
 then checks values, absence, exact sequence/content binding, complete live-index
 cardinality and any published backup or
@@ -286,11 +335,19 @@ test packages in that manifest.
 The format package is additionally **compiled** with `-fuzz '^FuzzDecoders$'`;
 merely passing `-test.fuzz` to an ordinary binary is not coverage guidance.
 Inside the exact verified guest, all full suites run with temporary files on
-the disposable ext4 mount, followed by 15 seconds of coverage-guided fuzzing.
-Baseline completion and positive execution counts are required and retained.
+the disposable ext4 mount, followed by **10,000 coverage-guided fuzz executions**
+using `-test.fuzztime=10000x`. This avoids the Go 1.26 coordinator's known
+deadline-cancellation race without suppressing a failed child process.
+Baseline completion, coverage guidance, at least 10,000 reported executions
+and positive elapsed time are required and retained. The execution count
+includes the fuzzer's baseline and minimization work; it is not a claim of
+10,000 distinct inputs or a fixed-duration campaign. Older 15-second results
+remain historical records with their original outcomes.
 Opt-in helper environment variables are removed from child suites to prevent
-recursive VM/campaign execution. Child commands have three-minute bounds;
-the complete guest has a fifteen-minute bound. Host-side vet/module audits
+recursive VM/campaign execution. Each package/fuzz test process retains its
+150-second timeout and each child command its 180-second bound; the guest test
+has a fourteen-minute bound inside the controller's fifteen-minute bound.
+Timeouts and nonzero child exits remain failures. Host-side vet/module audits
 are recorded for the same selected family. This remains a manual qualification
 operation, not an older-Go or macOS normal-CI matrix.
 

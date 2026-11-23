@@ -12,8 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,19 +92,17 @@ func TestVMRuntimeGuest(t *testing.T) {
 			formatBinary = binary
 		}
 	}
-	_, fuzzOutput := run(formatBinary, "-test.run=^$", "-test.fuzz=^FuzzDecoders$", "-test.fuzztime=15s",
+	// Count-bounded fuzzing avoids the Go 1.26 deadline-cancellation race (go.dev/issue/75804).
+	fuzzElapsed, fuzzOutput := run(formatBinary, "-test.run=^$", "-test.fuzz=^FuzzDecoders$",
+		fmt.Sprintf("-test.fuzztime=%dx", qualification.RuntimeFuzzIterations),
 		"-test.parallel=2", "-test.fuzzcachedir=/mnt/tarp-data/fuzzcache", "-test.timeout=150s")
-	counts := regexp.MustCompile(`execs: ([1-9][0-9]*)`).FindAllStringSubmatch(fuzzOutput, -1)
-	if !strings.Contains(fuzzOutput, "gathering baseline coverage") || !strings.Contains(fuzzOutput, "now fuzzing with") ||
-		strings.Contains(fuzzOutput, "without coverage guidance") || strings.Contains(fuzzOutput, "not built with coverage") || len(counts) == 0 {
-		t.Fatal("fuzz campaign did not demonstrate baseline completion and coverage-guided executions")
-	}
-	executions, err := strconv.ParseUint(counts[len(counts)-1][1], 10, 64)
+	executions, err := qualification.RuntimeFuzzExecutions(fuzzOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, err := json.Marshal(qualification.RuntimeVerdict{
-		Packages: packages, FuzzTarget: "FuzzDecoders", FuzzSeconds: 15,
+		Packages: packages, FuzzTarget: "FuzzDecoders",
+		FuzzIterations: qualification.RuntimeFuzzIterations, FuzzElapsedNS: fuzzElapsed.Nanoseconds(),
 		FuzzCoverageGuide: true, FuzzExecutions: executions,
 	})
 	if err != nil {

@@ -237,19 +237,16 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 // still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult
 
-// CompactOption configures one call to [DB.Compact] or [TypedDB.Compact].
-// Its zero value has no effect.
+// CompactOption configures one call to Compact. Its zero value keeps the
+// default behavior.
 type CompactOption struct {
 	keyOrder bool
 }
 
-// WithKeyOrder requests a DATA checkpoint with retained snapshot records in
-// lexicographic order by encoded key. Iterator order remains unspecified,
-// and automatic incremental compaction is unchanged.
+// WithKeyOrder writes the retained snapshot records in encoded-key order.
 // Concurrent writes after the checkpoint cutoff form the next log suffix.
-// On the same handle, later ordered calls can reuse unchanged snapshot segments.
-// If that checkpoint is healthy and there are no later writes or pending cleanup,
-// the call is a no-op.
+// On the same handle, later ordered calls reuse unchanged snapshot segments.
+// A healthy ordered checkpoint with no later writes or pending cleanup is a no-op.
 func WithKeyOrder() CompactOption {
 	return CompactOption{keyOrder: true}
 }

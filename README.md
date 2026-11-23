@@ -6,13 +6,13 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses [v0.13.0](https://github.com/anaregdesign/tarp/tree/v0.13.0).
+uses [v0.14.0](https://github.com/anaregdesign/tarp/tree/v0.14.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.13.0
+go get github.com/anaregdesign/tarp@v0.14.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -69,13 +69,12 @@ backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
 
-**Unreleased:** Key-ordered compaction does not change the v0.13.0 database or
-backup format. Existing calls to `db.Compact(ctx)` keep their source-order
-checkpoint behavior. Both `DB.Compact` and `TypedDB.Compact` now accept options.
-Update interfaces and their implementations to match the variadic signature:
-`Compact(context.Context, ...tarp.CompactOption) (tarp.CompactResult, error)`.
-A callback with the old function type can wrap the method as
-`func(ctx context.Context) (tarp.CompactResult, error) { return db.Compact(ctx) }`.
+v0.14.0 keeps the v0.13.0 database and backup formats. Existing calls to
+`db.Compact(ctx)` keep their source-order checkpoint behavior. Both `DB` and
+`TypedDB` now accept `...tarp.CompactOption`. If an interface declares
+`Compact(context.Context) (tarp.CompactResult, error)`, update it and its
+implementations to accept the variadic options. A callback with the old function
+signature can wrap the method as `func(ctx context.Context) (tarp.CompactResult, error) { return db.Compact(ctx) }`.
 
 v0.13.0 keeps the v0.12.0 database and backup formats. Update Go callers and
 consumers of batch-limit diagnostics when upgrading from v0.12.0.
@@ -383,9 +382,11 @@ pages, the index checkpoint, and temporary work during replay, compaction and on
 unlinks private pager files immediately after opening them. The OS releases its
 space when its final descriptor closes.
 
-The root and frequently used branch pages get priority in the cache. Value
-LRU hits bypass the index. On a value-cache miss, cold branch, leaf and overflow
-pages can add reads before loading DATA.
+The root and frequently used branch pages get priority in the cache.
+Streaming overflow-key pages are evicted before validated leaf pages, so
+long-key reads do not repeatedly displace and revalidate the same tree nodes.
+Value LRU hits bypass the index. On a value-cache miss, cold branch, leaf and
+overflow pages can add reads before loading DATA.
 
 The configured budget is split between the foreground index (one half),
 compaction and backup (one quarter each). It limits B+tree page-cache and index work
@@ -667,7 +668,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 go list -m all
-go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=15s -parallel=2
+go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=10000x -parallel=2
 ```
 
 The [CI workflow](.github/workflows/ci.yml) runs full tests, race detection, vet,

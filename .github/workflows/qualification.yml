@@ -35,11 +35,11 @@ on:
         default: candidate
         options: [candidate, candidate-fixed, releases]
       group:
-        description: Bounded phase group; all is limited to 192 cases and 50 minutes
+        description: Select a bounded group; complete all catalog exceeds the 192-case execution limit
         required: true
         default: smoke
         type: choice
-        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, all]
+        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, batches, cleaner, ordered, indexes, repair, pager, all]
       case:
         description: Optional exact case name for a focused reproduction
         required: false

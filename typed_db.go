@@ -194,8 +194,8 @@ func (db *TypedDB[K, V]) ProtectParity(ctx context.Context) error {
 	return db.core.ProtectParity(ctx)
 }
 
-// Compact builds a full DATA checkpoint with the same options as [DB.Compact].
-// [WithKeyOrder] orders the snapshot by stored key bytes, not decoded keys.
+// Compact builds a full DATA checkpoint of the underlying DB.
+// [WithKeyOrder] orders records by their encoded key bytes.
 func (db *TypedDB[K, V]) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error) {
 	return db.core.Compact(ctx, opts...)
 }

@@ -2,10 +2,22 @@
 
 ## Support boundary
 
-The current unversioned format and its automatic cleaner have a functional
-recovery test suite. Their whole-VM power-loss behavior and performance require
-fresh evidence. The historical qualification below belongs to the previous
-storage implementation. Its frozen source fingerprint and run links are in the
+Revision `d89f7b8` passed the extended whole-VM phase matrix:
+1,168 engine cuts and separate cold boots across Go 1.26.11 and 1.27.4,
+including dedicated batch, automatic-cleaner/repacking, ordered-checkpoint,
+INDEX, interrupted repair, and real DATA/checkpoint/private-pager ENOSPC cases.
+The [qualification record](qualification-v1-candidate.md) binds those results
+to the source, raw archives and precisely tested virtual stack. Merging this
+record does not transfer the results to the integrated `main` revision.
+All 15 guest package race suites and at least 10,000 guided decoder fuzz
+executions passed on each Go family. The durability gate passed for the
+recorded stack only; this does not authorize a release or qualify physical
+devices, other storage stacks, or automatic-maintenance ENOSPC.
+Interrupted DATA repair cases explicitly retry file-only repair before Open;
+they do not establish automatic healing by Full Open.
+
+The historical qualification below belongs to the previous storage
+implementation. Its frozen source fingerprint and run links are in the
 [execution matrix](qualification.md#final-selected-target-execution-matrix).
 
 That qualification passed on revision
@@ -23,7 +35,7 @@ The recorded image/kernel hashes, exact features/mounts, storage parameters,
 source fingerprint and raw witnesses define this experimental boundary.
 NBD here backs a guest block device; it is not a network filesystem.
 
-Qualification applies to that revision and that precisely tested virtual stack. A physical
+Each qualification applies to its revision and precisely tested virtual stack. A physical
 deployment must satisfy the same documented filesystem/sync and honest-flush
 assumptions; no firmware/cache certification is inferred from a VM result.
 Additional kernels/filesystems/storage configurations require separate evidence.
@@ -112,7 +124,10 @@ replacement CURRENT publishes its final sequence and offset, after the data
 and any new catalog are synced. Memory publication follows durable publication.
 An uncertain commit outcome applies to the entire batch. Reopen and backup
 select either frontier and can never select an intermediate record boundary.
-The prior whole-VM campaign described above predates the batch API.
+The historical whole-VM campaign predates the batch API. The current matrix
+uses an external batch-aware witness to verify whole-batch recovery across
+100 cuts per Go family; the guest race suites also exercise the batch
+functional and injected-failure tests.
 
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the

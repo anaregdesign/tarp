@@ -178,6 +178,7 @@ func TestCorruptPageAndCloseInIteration(t *testing.T) {
 	tr.p.cache = make(map[uint64]*list.Element)
 	tr.p.branches.Init()
 	tr.p.ordinary.Init()
+	tr.p.overflows.Init()
 	_, err := tr.p.file.WriteAt([]byte{0}, int64(root-1)*pageSize+4)
 	tr.p.mu.Unlock()
 	if err != nil {
