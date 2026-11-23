@@ -2,15 +2,18 @@
 
 ## Support boundary
 
-Revision `73d5cb8` passed the current existing whole-VM phase matrix:
-314 engine cut/reboots, real bounded-device ENOSPC, and both Go-family
-guest race suites and guided fuzz. The
+Revision `50b140a` passed the extended whole-VM phase matrix:
+1,168 engine cut/reboots across Go 1.26.11 and 1.27.4, including dedicated
+batch, automatic-cleaner/repacking, ordered-checkpoint, INDEX, interrupted
+repair, and real DATA/checkpoint/private-pager ENOSPC cases. The
 [current-engine record](qualification-v1-candidate.md) binds those results
 to the source, raw archives and precisely tested virtual stack.
-Dedicated batch, automatic-cleaner, ordered-checkpoint, INDEX and online-repair
-power-cut cases remain outside that matrix; full-suite functional or
-process-crash coverage is not a substitute. No complete v1 qualification
-is claimed.
+All 15 guest package race suites passed on both Go families, but the
+Go 1.26 guided-fuzz process failed twice with `context deadline exceeded`.
+Its cause remains unresolved; the aggregate v1 durability gate is incomplete.
+The Go 1.27 runtime/fuzz job passed. No complete v1 qualification is claimed.
+Interrupted DATA repair cases explicitly retry file-only repair before Open;
+they do not establish automatic healing by Full Open.
 
 The historical qualification below belongs to the previous storage
 implementation. Its frozen source fingerprint and run links are in the

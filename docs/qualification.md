@@ -1,18 +1,20 @@
 # Safe qualification procedure
 
 The [current-engine qualification record](qualification-v1-candidate.md)
-checks revision `73d5cb8` with 314 engine cut/reboots, real bounded-device
-ENOSPC, both-family guest race suites and guided fuzz. It retains the raw
-archive hashes and explicitly lists dedicated publication paths still
-missing from the whole-VM matrix. It is not a completed v1 release gate.
+checks revision `50b140a` with 1,168 accepted engine cut/reboots, including
+dedicated batch, automatic-cleaner/repacking, ordered, INDEX, interrupted
+repair and actual private-pager ENOSPC scenarios. Both families' 15 package
+race suites passed; the Go 1.27 guided-fuzz job passed, but Go 1.26 guided
+fuzz failed twice with `context deadline exceeded`. The cause is unresolved.
+The record retains original failed attempts as well as successful archives,
+hashes and independent reconciliation. The aggregate v1 gate is incomplete.
 
 **The historical full Linux/ext4 phase-cut matrix below covers the previous
 storage implementation.** That matrix used revision `347a1a1`,
 the exact source fingerprint and virtual device described in the
 [execution matrix](#final-selected-target-execution-matrix). The unversioned
-format's current evidence must be read with the coverage limits in the new
-record; incremental publication and default-worker paths still require
-dedicated whole-VM coverage. Ordinary process exits and
+format's current evidence must be read with the coverage limits and failed
+runtime result in the new record. Ordinary process exits and
 deterministic error injection exercise recovery and concurrency on the local
 filesystem. Run privileged or disk-filling experiments only on a dedicated,
 disposable guest.
