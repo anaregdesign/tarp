@@ -509,7 +509,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 			}
 			minimumAvailable = min(minimumAvailable, filesystem.Bavail*uint64(filesystem.Bsize))
 			probe.Store(func(s *storage.Store) {
-				peakPinned = max(peakPinned, retiredPinnedBytes(s, nil))
+				peakPinned = max(peakPinned, retiredPinnedBytes(s))
 			})
 			select {
 			case <-stop:
@@ -538,9 +538,14 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 		var err error
 		compact, err = db.Compact(t.Context())
 		compactEnd = time.Now()
-		if err == nil && mode == pinnedBackupMode {
-			pinnedFiles, err = witnessBackupPins(probe, compact.PinnedRetiredDataBytes)
+		if err != nil || mode != pinnedBackupMode {
+			return err
 		}
+		capturedIDs, err := captured.dataIDs()
+		if err != nil {
+			return err
+		}
+		pinnedFiles, err = witnessBackupPins(probe, capturedIDs)
 		return err
 	}
 	maintenanceErr := func() error {
@@ -614,7 +619,7 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 		"compact_records_copied":              hooks.manualRecords.Load() - recordsBefore,
 		"observed_maintenance_api_overlap_ns": overlapNS,
 		"copy_measurement_scope":              "bytes accepted by backup DATA writes and full DATA checkpoint writes, including segment headers. Metadata and foreground writes are excluded. Elapsed time and overlap cover complete API calls",
-		"overlap_coordination":                "backup-compact releases the first backup DATA write at the first checkpoint record write; pinned-backup-compact holds it through checkpoint return and retired source observation; API elapsed times include the hold",
+		"overlap_coordination":                "backup-compact releases the first backup DATA write at the first checkpoint record write; pinned-backup-compact holds it through checkpoint return and capture-scoped retired DATA observation; API elapsed times include the hold",
 		"get_file_reads":                      hooks.reads.Load() - readStart,
 		"writer_callers":                      1, "caller_value_bytes": len(value), "sample_reservoir_limit_per_worker": 2048,
 	}
@@ -665,12 +670,12 @@ func measureInterferenceFor(t *testing.T, db *engine.DB, hooks *measurementHooks
 		}()
 		digest, count := measurementState(t, restored)
 		restoredLastUserSequence := engine.Observe(restored).Frontier().LastUserSequence
-		if !captured.reached || restoredLastUserSequence != captured.lastUserSequence ||
+		if captured.stage == "" || restoredLastUserSequence != captured.frontier.LastUserSequence ||
 			digest != expectedDigest || count != expectedKeys {
 			t.Fatalf("produced backup did not reopen at its witnessed capture/state: capture=%d restored=%d keys=%d/%d digest=%s/%s",
-				captured.lastUserSequence, restoredLastUserSequence, count, expectedKeys, digest, expectedDigest)
+				captured.frontier.LastUserSequence, restoredLastUserSequence, count, expectedKeys, digest, expectedDigest)
 		}
-		output["backup_last_user_sequence"], output["restored_last_user_sequence"] = captured.lastUserSequence, restoredLastUserSequence
+		output["backup_last_user_sequence"], output["restored_last_user_sequence"] = captured.frontier.LastUserSequence, restoredLastUserSequence
 		output["restored_live_keys"], output["restored_state_sha256"], output["backup_reopen_verified"] = count, digest, true
 		if mode == pinnedBackupMode {
 			pins, err := verifyBackupReclamation(t.Context(), probe, hooks, target, pinnedFiles)

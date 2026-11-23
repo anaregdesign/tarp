@@ -316,12 +316,16 @@ The interference profiles add one separately identified writer key.
   The driver records the overlap between the two API calls.
   Both overlap modes park the first backup DATA write after capturing its frontier.
   `backup-compact` releases it at the first checkpoint record write.
-  `pinned-backup-compact` holds it until the checkpoint returns and records which
-  retired source files its backup still pins. The `pinned_backup` object reports
-  coordination time, retained logical bytes and file count. After the timed window
-  and restore, the fixture releases the automatic worker and verifies the exact
-  source files disappear at a successful retirement directory sync. It records
-  their unlinked byte and file counts and the worker's separate reclamation time.
+  `pinned-backup-compact` holds it through checkpoint return and checks the
+  retention pins on retired DATA IDs selected by staging CURRENT and its
+  catalog. The `pinned_backup` object reports coordination time, retained
+  logical bytes and file count for that captured set. The Compact result and
+  sampled peak retired bytes remain aggregate observations that can include
+  temporary PARITY pins. After the timed window and restore, the fixture
+  checks that the backup released its pins, then starts the automatic cleaner
+  and verifies those exact files disappear at a successful retirement
+  directory sync. It records their unlinked byte and file counts and the
+  worker's separate reclamation time.
   The diagnostic writer-lock row includes the same witness.
   Copy bytes divided by the respective API time give reproducible effective
   copy throughput, not a physical copy-engine utilization claim. Each produced
