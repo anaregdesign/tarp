@@ -131,20 +131,6 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 			if cfg.Mode != "exhaustion" || exhausted {
 				return false, errors.New("unexpected or repeated exhaustion verdict")
 			}
-			if strings.HasPrefix(payload, "TARP_PAGER_PASS ") {
-				var verdict qualification.PagerVerdict
-				if cfg.Mode != "pager-exhaustion" || pagerPassed {
-					return false, errors.New("unexpected or repeated pager verdict")
-				}
-				if err := json.Unmarshal([]byte(strings.TrimPrefix(payload, "TARP_PAGER_PASS ")), &verdict); err != nil {
-					return false, err
-				}
-				if err := verdict.Validate(); err != nil {
-					return false, err
-				}
-				pagerPassed = true
-				return false, log.record(map[string]any{"event": "pager_verdict", "case": cfg.Name, "verdict": verdict})
-			}
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(payload, "TARP_EXHAUSTION_PASS ")), &verdict); err != nil {
 				return false, err
 			}
@@ -153,6 +139,20 @@ func campaignCase(parent context.Context, work string, index int, cfg qualificat
 			}
 			exhausted, cfg.RequireOutput = true, true
 			return false, log.record(map[string]any{"event": "exhaustion_verdict", "case": cfg.Name, "verdict": verdict})
+		}
+		if strings.HasPrefix(payload, "TARP_PAGER_PASS ") {
+			var verdict qualification.PagerVerdict
+			if cfg.Mode != "pager-exhaustion" || pagerPassed {
+				return false, errors.New("unexpected or repeated pager verdict")
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(payload, "TARP_PAGER_PASS ")), &verdict); err != nil {
+				return false, err
+			}
+			if err := verdict.Validate(); err != nil {
+				return false, err
+			}
+			pagerPassed = true
+			return false, log.record(map[string]any{"event": "pager_verdict", "case": cfg.Name, "verdict": verdict})
 		}
 		event, recognized, err := qualification.ParseOracle(payload)
 		if err != nil || !recognized {
