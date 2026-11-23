@@ -152,7 +152,7 @@ fixture. Use a baseline with a database format that both revisions can open.
 
 | `compact-pair` | Revisions and windows |
 | --- | --- |
-| `candidate` (default) | Compare current-format commit `81242ac` with the selected ref. Alternate six paired rounds with foreground traffic and with workers parked. Run foreground-only and pinned-backup controls, then four diagnostic pairs. |
+| `candidate` (default) | Compare current-format commit `81242ac` with the selected ref. Alternate six paired rounds with foreground traffic and with workers parked. Run the foreground-only control in both arms and the pinned-backup control on `next`, then four diagnostic pairs. |
 | `candidate-fixed` | Compare the same revisions in six pairs of five-second foreground windows. Traffic continues after Compact returns. |
 | `releases` | Reproduce the historical v0.8.0 and v0.9.0 comparison on their shared format. |
 
@@ -161,6 +161,11 @@ rows use `tarpprofile` binaries and report writer, state and lifecycle lock
 hold times during the foreground window. Each `lock_holds` group includes the
 observation count, total and maximum nanoseconds, and a bounded sample. The
 historical release diagnostics report stage timings specific to those engines.
+
+The pinned-backup control checks correctness, not paired performance. It runs
+only on `next` for `candidate` because the frozen baseline cannot distinguish
+DATA retention pins from ordinary references. The historical `releases` driver
+keeps its original pinned-backup control in both arms.
 
 `BenchmarkCompaction` and the opt-in JSONL drivers compare two operations on private
 copies of the same closed database. The fixture has one eligible sealed log with a
