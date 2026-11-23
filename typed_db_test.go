@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestBoundViewSharesRecordsAndOwnerControlsLifetime(t *testing.T) {
 	if err := db.Put(nil, 1); !errors.Is(err, tarp.ErrEmptyKey) {
 		t.Fatalf("Put empty key = %v", err)
 	}
-	for _, method := range []string{"Close", "Backup", "Compact", "CompactByKey", "Stats", "AutoCompactionStatus"} {
+	for _, method := range []string{"Close", "Backup", "Compact", "Stats", "AutoCompactionStatus"} {
 		if _, present := reflect.TypeOf(db).MethodByName(method); present {
 			t.Fatalf("bound view exposes owner method %s", method)
 		}
@@ -456,7 +457,7 @@ func TestTypedPrefixDecodesOnlyMatchingKeysAndValues(t *testing.T) {
 	}
 }
 
-func TestTypedCompactByKeyUsesStoredKeyBytes(t *testing.T) {
+func TestTypedCompactWithKeyOrderUsesStoredKeyBytes(t *testing.T) {
 	dir := t.TempDir()
 	db, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.Int16Codec{}, tarp.StringCodec{})
 	if err != nil {
@@ -468,11 +469,16 @@ func TestTypedCompactByKeyUsesStoredKeyBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.CompactByKey(t.Context()); err != nil {
+	if _, err := db.Compact(t.Context(), tarp.WithKeyOrder()); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+	// The encoded order of signed integers differs from their numeric order.
+	wantKeys := []string{"\x00\x00", "\x00\x11", "\xff\xe1", "\xff\xff"}
+	if keys := snapshotDataKeys(t, dir); !slices.Equal(keys, wantKeys) {
+		t.Fatalf("snapshot DATA keys = %q; want %q", keys, wantKeys)
 	}
 	raw := openPublicDB(t, dir, tarp.Options{})
 	for _, key := range []int16{0, 17, -31, -1} {

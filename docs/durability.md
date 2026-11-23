@@ -245,7 +245,7 @@ pins. No incremental publication advances the user sequence.
 
 Manual `Compact(ctx)` durably captures the complete DATA history through checkpoint
 cutoff sequence C, validates segment headers and records, and rebuilds the
-captured state outside root locks. It groups live
+captured state outside root locks. Without options, it groups live
 Put records by source file, reads them in offset order with one source descriptor
 open at a time, and writes snapshot files using the same size target as log appends,
 preserving record sequences. Tombstones can

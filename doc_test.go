@@ -38,7 +38,7 @@ func roundTrip() (result error) {
 	if err := db.Put([]byte("key"), []byte("later")); err != nil {
 		return err
 	}
-	if _, err := db.Compact(context.Background()); err != nil {
+	if _, err := db.Compact(context.Background(), tarp.WithKeyOrder()); err != nil {
 		return err
 	}
 	restored := filepath.Join(parent, "restored")

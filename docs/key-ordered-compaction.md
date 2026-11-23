@@ -2,7 +2,7 @@
 
 The same-handle implementation of [Issue #150](https://github.com/anaregdesign/tarp/issues/150) uses the existing DATA and catalog formats. Persistent certification across opens is a proposed extension. A service that reads many values under one prefix can request a key-ordered full DATA checkpoint after a bulk import or during a maintenance window.
 
-## Public API
+## Public API (unreleased)
 
 ```go
 func WithKeyOrder() CompactOption
@@ -31,7 +31,7 @@ Let `B` be the cutoff of the last selected checkpoint whose snapshot segments ar
 | Global order is unknown | Establish it once from validated DATA. If the captured snapshot prefix is already ordered, adopt it and process the outstanding suffix. Otherwise build the initial sorted checkpoint. |
 | Known selected DATA damage, an inconsistent input, or uncertain publication | Use existing checked repair, recovery or fail-stop semantics as appropriate. A layout hint cannot justify dropping a record. |
 
-Keep the fast-path decision ahead of `Store.Capture`, `index.View`, `hasUnavailableSource` and `Store.Cleanup`. Today these operations can enumerate the catalog, clone the Memory index, or list the directory. Maintain selected-damage status and retirement work when their states change. If cleanup or a directory sync is due, retry it against the recorded objects, report its outcome and retain pinned files. The ordinary repeat with neither damage nor pending work takes constant work relative to database size. A writer admitted after that check belongs to the next call. If a write committed while the first call was building, the second call processes it. [Current checkpoint entry](../internal/engine/compact.go) and [cleanup](../internal/storage/store.go).
+Keep the fast-path decision ahead of `Store.Capture`, `index.View`, `hasUnavailableSource` and `Store.Cleanup`. Today these operations can enumerate the catalog, clone the Memory index, or list the directory. Maintain selected-damage status and retirement work when their states change. If cleanup or a directory sync is due, retry it against the recorded objects, report its outcome and retain pinned files. An unchanged ordered call with neither damage nor pending work takes constant work relative to database size. A writer admitted after that check belongs to the next call. If a write committed while the first call was building, the second call processes it. [Current checkpoint entry](../internal/engine/compact.go) and [cleanup](../internal/storage/store.go).
 
 ### Remembering what was sorted
 
