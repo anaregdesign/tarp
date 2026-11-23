@@ -15,15 +15,19 @@ type PowerCase struct {
 	Captured        bool   `json:"captured"`
 	CaptureSequence uint64 `json:"capture_sequence"`
 	RequireOutput   bool   `json:"require_output"`
+	IndexMode       string `json:"index_mode,omitempty"`
 }
 
 type RecoveryVerdict struct {
-	Source          string `json:"source"`
-	SourceSequence  uint64 `json:"source_sequence"`
-	SourceLiveKeys  int    `json:"source_live_keys"`
-	StateSHA256     string `json:"state_sha256"`
-	Output          string `json:"output"`
-	CaptureSequence uint64 `json:"capture_sequence"`
+	Source                string `json:"source"`
+	SourceSequence        uint64 `json:"source_sequence"`
+	SourceLiveKeys        int    `json:"source_live_keys"`
+	StateSHA256           string `json:"state_sha256"`
+	Output                string `json:"output"`
+	CaptureSequence       uint64 `json:"capture_sequence"`
+	IndexedVerified       bool   `json:"indexed_verified,omitempty"`
+	IndexedCheckpointUsed bool   `json:"indexed_checkpoint_used,omitempty"`
+	RepairRetried         bool   `json:"repair_retried,omitempty"`
 }
 
 func CampaignCases(group string) ([]PowerCase, error) {
@@ -75,6 +79,60 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	add("recovery", "overlap", "compact.remap:after", 1)
 	add("recovery", "overlap", "operation.ack:after", 1)
 	add("exhaustion", "exhaustion", "exhaustion.complete", 1)
+	extended := func(category, mode string, points ...string) {
+		for _, index := range []string{"btree", "memory"} {
+			if mode == "index-close" && index == "memory" {
+				continue // Memory Close deliberately does not publish an INDEX.
+			}
+			for _, point := range points {
+				phases := []string{point + ":before", point + ":after"}
+				if strings.Contains(point, ":") {
+					phases = []string{point}
+				}
+				for _, phase := range phases {
+					add(category, mode, phase, 1)
+					if group == "all" || group == category {
+						last := &all[len(all)-1]
+						last.Name += "-" + index
+						last.IndexMode = index
+					}
+				}
+			}
+		}
+	}
+	for _, mode := range []string{"batch-put", "batch-delete", "batch-rotate"} {
+		extended("batches", mode, "data.write", "current.write", "current.sync", "current.rename", "current.dirsync")
+		if mode != "batch-rotate" {
+			extended("batches", mode, "data.sync")
+		}
+		if mode == "batch-rotate" {
+			extended("batches", mode, "segment.write", "segment.sync", "catalog.write", "catalog.sync", "catalog.dirsync")
+		}
+		extended("batches", mode, "operation.ack")
+	}
+	for _, mode := range []string{"clean-single", "clean-group", "clean-repack"} {
+		extended("cleaner", mode, "clean.output.sync", "clean.parity.sync", "clean.parity.rename",
+			"clean.catalog.sync", "clean.catalog.dirsync", "clean.current.sync", "clean.current.rename",
+			"clean.current.dirsync", "clean.retire.unlink", "clean.retire.dirsync")
+		extended("cleaner", mode, "operation.ack")
+		extended("cleaner", mode, "clean.remap:after")
+	}
+	for _, mode := range []string{"ordered-initial", "ordered-delta", "ordered-reuse"} {
+		extended("ordered", mode, "compact.write", "compact.sync", "compact.parity.sync",
+			"catalog.sync", "current.rename", "current.dirsync", "clean.retire.unlink", "clean.retire.dirsync")
+		extended("ordered", mode, "operation.ack")
+		extended("ordered", mode, "compact.remap:after")
+	}
+	for _, mode := range []string{"index-explicit", "index-close"} {
+		extended("indexes", mode, "index.write", "index.sync", "index.rename", "index.dirsync",
+			"index.catalog.sync", "index.current.rename", "index.current.dirsync")
+	}
+	extended("repair", "repair-data", "data-repair.write", "data-repair.sync", "data-repair.rename", "data-repair.dirsync")
+	extended("repair", "repair-parity", "parity.write", "parity.sync", "parity.rename", "parity.dirsync")
+	add("pager", "pager-exhaustion", "pager.complete", 1)
+	if group == "all" || group == "pager" {
+		all[len(all)-1].IndexMode = "btree"
+	}
 	if group == "smoke" {
 		wanted := map[string]string{
 			"init": "current.rename:after", "put": "data.sync:after", "insert": "current.dirsync:after",
@@ -90,7 +148,7 @@ func CampaignCases(group string) ([]PowerCase, error) {
 		}
 		all = selected
 	}
-	if len(all) == 0 || len(all) > 192 {
+	if len(all) == 0 {
 		return nil, fmt.Errorf("qualification: unknown or oversized campaign group %q", group)
 	}
 	return all, nil

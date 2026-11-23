@@ -113,7 +113,7 @@ func RunVM(ctx context.Context, cfg VMConfig, disk *Disk, observe func(string) (
 	readDone := make(chan error, 1)
 	go func() {
 		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(make([]byte, 4096), 64<<10)
+		scanner.Buffer(make([]byte, 4096), 1<<20)
 		triggered := false
 		for scanner.Scan() {
 			if _, err := fmt.Fprintln(serial, scanner.Text()); err != nil {

@@ -1,9 +1,125 @@
 package qualification
 
 import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestBatchOracleRejectsPartialSequencesAndMixedStates(t *testing.T) {
+	for _, deleting := range []bool{false, true} {
+		mutations := []OracleMutation{
+			{Key: []byte("a"), Value: []byte("first"), Delete: deleting},
+			{Key: []byte("b"), Value: []byte("second"), Delete: deleting},
+			{Key: []byte("a"), Value: []byte("last"), Delete: deleting},
+		}
+		if deleting {
+			for i := range mutations {
+				mutations[i].Value = nil
+			}
+		}
+		data, err := json.Marshal(mutations)
+		if err != nil {
+			t.Fatal(err)
+		}
+		intent, recognized, err := ParseOracle("TARP_BATCH_INTENT " + hex.EncodeToString(data))
+		if err != nil || !recognized {
+			t.Fatalf("batch protocol: %v", err)
+		}
+		events := []OracleEvent{
+			{Type: "ack", Key: []byte("a"), Value: []byte("old")},
+			{Type: "ack", Key: []byte("b"), Value: []byte("old")},
+			intent, {Type: "phase", Phase: "current.rename:after"},
+		}
+		oracle, err := ReplayOracle(events, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lo, hi := oracle.SequenceRange()
+		want := uint64(5)
+		if deleting {
+			want = 4 // Duplicate deletes have one effective record per key.
+		}
+		if lo != 2 || hi != want {
+			t.Fatalf("wrong atomic batch endpoints [%d,%d]", lo, hi)
+		}
+		for seq := lo + 1; seq < hi; seq++ {
+			if _, err := oracle.StateAt(seq); err == nil {
+				t.Fatal("accepted a partial batch sequence")
+			}
+			for _, sequence := range []uint64{lo, hi} {
+				state, err := oracle.StateAt(sequence)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lookup := func(key []byte) ([]byte, bool, error) {
+					value, present := state[string(key)]
+					return value, present, nil
+				}
+				digest, err := oracle.VerifyAt(sequence, len(state), lookup)
+				want, count, digestErr := oracle.DigestAt(sequence)
+				if err != nil || digestErr != nil || digest != want || count != len(state) {
+					t.Fatalf("batch endpoint verification: %v %v", err, digestErr)
+				}
+			}
+		}
+		_, err = oracle.Verify(func(key []byte) ([]byte, bool, error) {
+			if bytes.Equal(key, []byte("b")) {
+				return []byte("old"), true, nil
+			}
+			return []byte("last"), !deleting, nil
+		})
+		if err == nil {
+			t.Fatal("accepted mixed pre/post batch state")
+		}
+		for _, kind := range []string{"batch_ack", "batch_not_applied"} {
+			outcome := OracleEvent{Type: kind, Mutations: mutations}
+			events = []OracleEvent{events[0], events[1], intent, outcome, {Type: "phase", Phase: "complete"}}
+			got, err := ReplayOracle(events, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := lo
+			if kind == "batch_ack" {
+				want = hi
+			}
+			if low, high := got.SequenceRange(); low != want || high != want {
+				t.Fatal("definitive batch outcome retained an uncertainty window")
+			}
+			outcome.Mutations = append([]OracleMutation(nil), mutations...)
+			outcome.Mutations[0].Key = []byte("different")
+			events[3] = outcome
+			if _, err := ReplayOracle(events, false); err == nil {
+				t.Fatal("accepted an outcome for a different batch")
+			}
+		}
+	}
+}
+
+func TestExtendedCampaignGroupsAreBoundedAndDisjoint(t *testing.T) {
+	seen := make(map[string]bool)
+	var count int
+	for _, group := range []string{"initialize", "mutate", "checkpoint", "snapshots", "recovery", "exhaustion",
+		"batches", "cleaner", "ordered", "indexes", "repair", "pager"} {
+		cases, err := CampaignCases(group)
+		if err != nil || len(cases) == 0 || len(cases) > 192 {
+			t.Fatalf("unbounded/empty campaign group %q: %d %v", group, len(cases), err)
+		}
+		for _, cfg := range cases {
+			if seen[cfg.Name] {
+				t.Fatalf("duplicate externally addressed case %q", cfg.Name)
+			}
+			seen[cfg.Name] = true
+			count++
+		}
+	}
+	all, err := CampaignCases("all")
+	if err != nil || len(all) != count {
+		t.Fatalf("catalog omitted cases: %d != %d, %v", len(all), count, err)
+	}
+}
 
 func TestDeleteAndReinsertOracleNeverAllowsResurrection(t *testing.T) {
 	cases := []struct {

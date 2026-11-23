@@ -2,6 +2,34 @@ package qualification
 
 import "errors"
 
+type PagerVerdict struct {
+	DeviceBytes          int64  `json:"device_bytes"`
+	FillerBytes          int64  `json:"filler_bytes"`
+	Errno                int    `json:"errno"`
+	Outcome              string `json:"outcome"`
+	Phase                string `json:"phase"`
+	DataWrites           int    `json:"data_writes"`
+	PrepareSteps         int    `json:"prepare_steps"`
+	ScratchWriteENOSPC   bool   `json:"scratch_write_enospc"`
+	Healthy              bool   `json:"healthy"`
+	SequenceBefore       uint64 `json:"sequence_before"`
+	SequenceAfterFailure uint64 `json:"sequence_after_failure"`
+	SequenceAfterRetry   uint64 `json:"sequence_after_retry"`
+	BatchRecords         int    `json:"batch_records"`
+	RetryPassed          bool   `json:"retry_passed"`
+}
+
+func (v PagerVerdict) Validate() error {
+	if v.DeviceBytes != MaxDisk || v.FillerBytes <= MaxDisk/2 || v.FillerBytes > MaxDisk ||
+		v.Errno != 28 || v.Outcome != "not-applied" || v.Phase != "commit" || v.DataWrites != 0 ||
+		v.PrepareSteps <= 0 || !v.ScratchWriteENOSPC ||
+		!v.Healthy || v.SequenceBefore == 0 || v.SequenceAfterFailure != v.SequenceBefore ||
+		v.BatchRecords != 1536 || v.SequenceAfterRetry != v.SequenceBefore+uint64(v.BatchRecords) || !v.RetryPassed {
+		return errors.New("qualification: incomplete private-pager exhaustion/retry verdict")
+	}
+	return nil
+}
+
 type ExhaustionVerdict struct {
 	DeviceBytes            int64  `json:"device_bytes"`
 	FirstFillerBytes       int64  `json:"first_filler_bytes"`

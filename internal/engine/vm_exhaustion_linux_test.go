@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -20,10 +21,115 @@ import (
 )
 
 func vmCaseOptions(mode string) Options {
+	if mode == "pager-exhaustion" {
+		return Options{IndexMode: IndexBTree, BTreeMemoryBudgetBytes: 1 << 20, ValueCacheBudgetBytes: 64 << 10,
+			MaxRecordBytes: 4096, TargetSegmentBytes: 1 << 20, ReadFileHandles: 4}
+	}
 	if mode == "exhaustion" {
 		return Options{ValueCacheBudgetBytes: 64 << 10, MaxRecordBytes: 8 << 10, TargetSegmentBytes: 1 << 20, ReadFileHandles: 4}
 	}
 	return testOptions()
+}
+
+func vmPagerExhaustion(t *testing.T, dir string) {
+	t.Helper()
+	guesttest.RequireDisposableGuest(t)
+	var writes, prepareSteps int
+	counting := false
+	fs := &storage.IO{Hook: func(point string) error {
+		if counting && point == "data.write:before" {
+			writes++
+		}
+		if counting && point == "index.prepare:before" {
+			prepareSteps++
+		}
+		return nil
+	}}
+	db, err := OpenWithHooks(dir, vmCaseOptions("pager-exhaustion"), fs, parkedMaintenance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("TARP_INTENT 62617365 6f6c64")
+	if err := db.Put([]byte("base"), []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("TARP_ACK 62617365 6f6c64")
+	fillerPath := filepath.Join(filepath.Dir(dir), "filler.bin")
+	filler, err := os.OpenFile(fillerPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled, _ := vmFill(t, filler)
+	mutations := make([]qualification.OracleMutation, 1536)
+	entries := make([]Entry, len(mutations))
+	for i := range mutations {
+		key := []byte(fmt.Sprintf("%0192d", i))
+		value := []byte{byte(i)}
+		mutations[i] = qualification.OracleMutation{Key: key, Value: value}
+		entries[i] = Entry{Key: key, Value: value}
+	}
+	before := Observe(db).Frontier()
+	emitBatch("INTENT", mutations)
+	counting = true
+	err = db.BatchPut(entries)
+	counting = false
+	var op *OpError
+	var pathErr *os.PathError
+	if !errors.Is(err, syscall.ENOSPC) || !errors.As(err, &op) || op.Outcome != NotApplied ||
+		op.Phase != "commit" || !errors.As(err, &pathErr) || pathErr.Op != "write" ||
+		!strings.HasPrefix(filepath.Base(pathErr.Path), "tarp-index-") ||
+		prepareSteps == 0 || writes != 0 || Observe(db).Frontier() != before || db.health() != nil {
+		t.Fatalf("private pager did not fail before DATA publication: %v, writes %d, health %v", err, writes, db.health())
+	}
+	emitBatch("NOT_APPLIED", mutations)
+	for _, entry := range entries {
+		if _, err := db.Get(entry.Key); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("failed batch exposed a staged key: %v", err)
+		}
+	}
+	vmReleaseFiller(t, filler, 8<<20)
+	emitBatch("INTENT", mutations)
+	if err := db.BatchPut(entries); err != nil {
+		t.Fatalf("retry after freeing filler: %v", err)
+	}
+	emitBatch("ACK", mutations)
+	if err := filler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fillerPath); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.Open(filepath.Dir(fillerPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(parent.Sync(), parent.Close()); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		value, err := db.Get(entry.Key)
+		if err != nil || !bytes.Equal(value, entry.Value) {
+			t.Fatalf("retry lost a batch value: %v", err)
+		}
+	}
+	verdict := qualification.PagerVerdict{
+		DeviceBytes: qualification.MaxDisk, FillerBytes: filled, Errno: int(syscall.ENOSPC),
+		Outcome: "not-applied", Phase: op.Phase, DataWrites: writes, Healthy: db.health() == nil,
+		PrepareSteps: prepareSteps, ScratchWriteENOSPC: true,
+		SequenceBefore: before.LastUserSequence, SequenceAfterFailure: before.LastUserSequence,
+		SequenceAfterRetry: Observe(db).Frontier().LastUserSequence, BatchRecords: len(entries), RetryPassed: true,
+	}
+	if err := verdict.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(verdict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("TARP_PAGER_PASS %s\nTARP_PHASE pager.complete\n", data)
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func vmFill(t *testing.T, fd *os.File) (int64, string) {

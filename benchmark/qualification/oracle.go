@@ -9,19 +9,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 )
 
 type OracleEvent struct {
-	Type     string `json:"type"`
-	Key      []byte `json:"key,omitempty"`
-	Value    []byte `json:"value,omitempty"`
-	Phase    string `json:"phase,omitempty"`
-	Sequence uint64 `json:"sequence,omitempty"`
-	Count    uint64 `json:"count,omitempty"`
-	Mode     string `json:"mode,omitempty"`
+	Type      string           `json:"type"`
+	Key       []byte           `json:"key,omitempty"`
+	Value     []byte           `json:"value,omitempty"`
+	Phase     string           `json:"phase,omitempty"`
+	Sequence  uint64           `json:"sequence,omitempty"`
+	Count     uint64           `json:"count,omitempty"`
+	Mode      string           `json:"mode,omitempty"`
+	Mutations []OracleMutation `json:"mutations,omitempty"`
+}
+
+type OracleMutation struct {
+	Key    []byte `json:"key"`
+	Value  []byte `json:"value,omitempty"`
+	Delete bool   `json:"delete,omitempty"`
 }
 
 func ParseOracle(line string) (OracleEvent, bool, error) {
@@ -30,12 +38,23 @@ func ParseOracle(line string) (OracleEvent, bool, error) {
 		return OracleEvent{}, false, nil
 	}
 	parts := strings.Fields(line)
+	if len(parts) == 2 && (parts[0] == "TARP_BATCH_INTENT" || parts[0] == "TARP_BATCH_ACK" || parts[0] == "TARP_BATCH_NOT_APPLIED") {
+		data, err := hex.DecodeString(parts[1])
+		if err != nil {
+			return OracleEvent{}, false, err
+		}
+		var mutations []OracleMutation
+		if err := json.Unmarshal(data, &mutations); err != nil {
+			return OracleEvent{}, false, err
+		}
+		return OracleEvent{Type: strings.ToLower(strings.TrimPrefix(parts[0], "TARP_")), Mutations: mutations}, true, nil
+	}
 	if len(parts) == 2 && parts[0] == "TARP_PHASE" {
 		return OracleEvent{Type: "phase", Phase: parts[1]}, true, nil
 	}
 	if len(parts) == 2 {
 		switch parts[0] {
-		case "TARP_CAPTURE", "TARP_READS", "TARP_PINNED":
+		case "TARP_CAPTURE", "TARP_READS", "TARP_PINNED", "TARP_REUSED":
 			value, err := strconv.ParseUint(parts[1], 10, 64)
 			if err != nil {
 				return OracleEvent{}, false, err
@@ -73,7 +92,7 @@ func ParseOracle(line string) (OracleEvent, bool, error) {
 }
 
 func ReadOracle(input io.Reader) ([]OracleEvent, error) {
-	reader := bufio.NewReaderSize(io.LimitReader(input, (8<<20)+1), 64<<10)
+	reader := bufio.NewReaderSize(io.LimitReader(input, (8<<20)+1), 1<<20)
 	var events []OracleEvent
 	total := 0
 	for {
@@ -117,6 +136,37 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 		}
 		deleting := event.Type == "ack_delete" || event.Type == "intent_delete"
 		switch event.Type {
+		case "batch_intent", "batch_ack", "batch_not_applied":
+			if _, err := batchMutations(event); err != nil {
+				return nil, err
+			}
+			if event.Type == "batch_intent" {
+				if oracle.pending != nil {
+					return nil, errors.New("batch overlaps another pending mutation")
+				}
+				pending := event
+				pending.Mutations = make([]OracleMutation, len(event.Mutations))
+				for i, m := range event.Mutations {
+					pending.Mutations[i] = OracleMutation{Key: bytes.Clone(m.Key), Value: bytes.Clone(m.Value), Delete: m.Delete}
+				}
+				oracle.pending = &pending
+				break
+			}
+			pending := oracle.pending
+			if pending == nil || pending.Type != "batch_intent" || !reflect.DeepEqual(pending.Mutations, event.Mutations) {
+				return nil, errors.New("batch outcome differs from pending batch")
+			}
+			mutations, _ := batchMutations(*pending)
+			for _, m := range mutations {
+				key := string(m.Key)
+				if event.Type == "batch_ack" {
+					oracle.values[key] = oracleValue{Key: m.Key, Value: m.Value, Present: !m.Delete}
+					oracle.acks++
+				} else if _, exists := oracle.values[key]; !exists {
+					oracle.values[key] = oracleValue{Key: m.Key}
+				}
+			}
+			oracle.pending = nil
 		case "ack", "ack_delete":
 			if len(event.Key) == 0 || deleting && len(event.Value) != 0 {
 				return nil, errors.New("invalid acknowledged mutation")
@@ -165,7 +215,7 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			if oracle.pending != nil || event.Sequence != oracle.acks {
 				return nil, errors.New("capture sequence does not match the complete acknowledged prefix")
 			}
-		case "reads", "pinned":
+		case "reads", "pinned", "reused":
 		case "operation_ack":
 			if event.Mode == "" || oracle.pending != nil {
 				return nil, errors.New("invalid operation acknowledgment")
@@ -180,11 +230,38 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 	return oracle, nil
 }
 
-func (o *Oracle) SequenceRange() (uint64, uint64) {
-	upper := o.acks
-	if o.pending != nil {
-		upper++
+func batchMutations(event OracleEvent) ([]OracleMutation, error) {
+	if len(event.Mutations) == 0 || len(event.Mutations) > 2048 || len(event.Key) != 0 || len(event.Value) != 0 {
+		return nil, errors.New("invalid bounded batch witness")
 	}
+	deleting := event.Mutations[0].Delete
+	seen := make(map[string]bool)
+	var effective []OracleMutation
+	for _, m := range event.Mutations {
+		if len(m.Key) == 0 || m.Delete != deleting || m.Delete && len(m.Value) != 0 {
+			return nil, errors.New("invalid or mixed batch mutation")
+		}
+		if !deleting || !seen[string(m.Key)] {
+			effective = append(effective, m)
+		}
+		seen[string(m.Key)] = true
+	}
+	return effective, nil
+}
+
+func (o *Oracle) pendingMutations() []OracleMutation {
+	if o.pending == nil {
+		return nil
+	}
+	if o.pending.Type == "batch_intent" {
+		mutations, _ := batchMutations(*o.pending)
+		return mutations
+	}
+	return []OracleMutation{{Key: o.pending.Key, Value: o.pending.Value, Delete: o.pending.Type == "intent_delete"}}
+}
+
+func (o *Oracle) SequenceRange() (uint64, uint64) {
+	upper := o.acks + uint64(len(o.pendingMutations()))
 	return o.acks, upper
 }
 
@@ -193,7 +270,7 @@ func (o *Oracle) SequenceRange() (uint64, uint64) {
 func (o *Oracle) PowerCutSequenceRange(mode string) (uint64, uint64) {
 	low, high := o.SequenceRange()
 	switch mode {
-	case "put", "delete", "insert", "reinsert", "rotate":
+	case "put", "delete", "insert", "reinsert", "rotate", "batch-put", "batch-delete", "batch-rotate", "pager-exhaustion":
 		switch o.Phase {
 		case "data.write:before", "data.write:after", "data.sync:before", "data.sync:after",
 			"segment.write:before", "segment.write:after",
@@ -213,7 +290,7 @@ func (o *Oracle) PowerCutSequenceRange(mode string) (uint64, uint64) {
 // The complete returned live set also makes unexpected index entries detectable.
 func (o *Oracle) StateAt(sequence uint64) (map[string][]byte, error) {
 	low, high := o.SequenceRange()
-	if sequence < low || sequence > high {
+	if sequence != low && sequence != high {
 		return nil, fmt.Errorf("recovered sequence %d outside [%d,%d]", sequence, low, high)
 	}
 	state := make(map[string][]byte, len(o.values)+1)
@@ -222,15 +299,17 @@ func (o *Oracle) StateAt(sequence uint64) (map[string][]byte, error) {
 			state[key] = bytes.Clone(value.Value)
 		}
 	}
-	if pending := o.pending; pending != nil && sequence == high {
-		key := string(pending.Key)
-		if pending.Type == "intent_delete" {
-			if _, present := state[key]; !present {
-				return nil, errors.New("an absent-key Delete cannot advance the committed sequence")
+	if sequence == high {
+		for _, pending := range o.pendingMutations() {
+			key := string(pending.Key)
+			if pending.Delete {
+				if _, present := state[key]; !present {
+					return nil, errors.New("an absent-key Delete cannot advance the committed sequence")
+				}
+				delete(state, key)
+			} else {
+				state[key] = bytes.Clone(pending.Value)
 			}
-			delete(state, key)
-		} else {
-			state[key] = bytes.Clone(pending.Value)
 		}
 	}
 	return state, nil
@@ -275,25 +354,38 @@ func (o *Oracle) Verify(lookup func([]byte) ([]byte, bool, error)) (string, erro
 	for key := range o.values {
 		keys = append(keys, key)
 	}
-	if o.pending != nil {
-		if _, exists := o.values[string(o.pending.Key)]; !exists {
-			keys = append(keys, string(o.pending.Key))
+	seen := make(map[string]bool)
+	for _, key := range keys {
+		seen[key] = true
+	}
+	for _, pending := range o.pendingMutations() {
+		if !seen[string(pending.Key)] {
+			keys = append(keys, string(pending.Key))
+			seen[string(pending.Key)] = true
 		}
 	}
 	sort.Strings(keys)
+	low, high := o.SequenceRange()
+	oldState, err := o.StateAt(low)
+	if err != nil {
+		return "", err
+	}
+	newState, err := o.StateAt(high)
+	if err != nil {
+		return "", err
+	}
+	oldAllowed, newAllowed := true, true
 	actual := make([]oracleValue, 0, len(keys))
 	for _, key := range keys {
 		value, present, err := lookup([]byte(key))
 		if err != nil {
 			return "", fmt.Errorf("oracle read %x: %w", key, err)
 		}
-		old := o.values[key]
-		allowed := present == old.Present && (!present || bytes.Equal(value, old.Value))
-		if pending := o.pending; pending != nil && key == string(pending.Key) {
-			newPresent := pending.Type == "intent"
-			allowed = allowed || present == newPresent && (!present || bytes.Equal(value, pending.Value))
-		}
-		if !allowed {
+		oldValue, oldPresent := oldState[key]
+		newValue, newPresent := newState[key]
+		oldAllowed = oldAllowed && present == oldPresent && (!present || bytes.Equal(value, oldValue))
+		newAllowed = newAllowed && present == newPresent && (!present || bytes.Equal(value, newValue))
+		if !oldAllowed && !newAllowed {
 			return "", fmt.Errorf("acknowledged/pending key %x has a forbidden recovered state: present=%t value=%x", key, present, value)
 		}
 		if !present {
