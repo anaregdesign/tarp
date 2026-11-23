@@ -5,11 +5,12 @@ The same-handle implementation of [Issue #150](https://github.com/anaregdesign/t
 ## Public API
 
 ```go
-func (db *DB) CompactByKey(ctx context.Context) (CompactResult, error)
-func (db *TypedDB[K, V]) CompactByKey(ctx context.Context) (CompactResult, error)
+func WithKeyOrder() CompactOption
+func (db *DB) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error)
+func (db *TypedDB[K, V]) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error)
 ```
 
-The call is synchronous. The application owns scheduling, including whether to run it in a goroutine and when to cancel its context. The initial implementation builds this layout only on an explicit call. Ordinary `Compact` keeps its source-order writer. Automatic cleaning continues to reclaim obsolete bytes and repack small segments.
+Call `db.Compact(ctx, tarp.WithKeyOrder())` to request a key-ordered snapshot. Both the raw and typed call are synchronous. The application chooses when to run the call and can cancel its context. With no options, `db.Compact(ctx)` uses the existing source-order writer. A zero-value `CompactOption` has no effect. Repeating `WithKeyOrder()` selects the same layout. Automatic cleaning continues to reclaim obsolete bytes and repack small segments.
 
 The operation captures a complete committed batch boundary `C`. On success, the snapshot segments for that checkpoint contain one Put for every retained live key at `C`, in strict encoded-byte order across the segments in catalog order. A prefix with many values can span consecutive files. The winning user sequence stays with each Put. The existing recovery contract for `CompactResult.DroppedKeys` applies. Typed keys use their encoded bytes, including composite field framing. The public scan order stays unspecified.
 
@@ -17,7 +18,7 @@ Applications can keep writing during the build. New commits form a sequence-orde
 
 During a concurrent durable write, the ordered checkpoint yields briefly between 256 KiB chunks of DATA validation, copy and parity work. BTree also yields between batches of at most eight address changes while a writer is active. An idle checkpoint skips those pauses. Choose a quiet window when foreground tail latency matters.
 
-Share the manual maintenance slot with `Compact` and `CheckpointIndex`. A competing manual request receives `ErrBusy`. While an automatic cleaner owns the slot, wait with the caller's context. Honor cancellation during validation, sorting and copy, and check again before publication. Once publication starts, finish the existing outcome protocol. An uncertain CURRENT switch requires validated reopen. A cleanup error after publication reports a committed checkpoint. A deadline therefore controls admission and staging and cannot guarantee an exact wall-clock stop. See the [durability contract](durability.md#failure-outcomes).
+Both layouts of `Compact` share the manual maintenance slot with `CheckpointIndex`. A competing manual request receives `ErrBusy`. While an automatic cleaner owns the slot, wait with the caller's context. Honor cancellation during validation, sorting and copy, and check again before publication. Once publication starts, finish the existing outcome protocol. An uncertain CURRENT switch requires validated reopen. A cleanup error after publication reports a committed checkpoint. A deadline therefore controls admission and staging and cannot guarantee an exact wall-clock stop. See the [durability contract](durability.md#failure-outcomes).
 
 ## Repeat calls and the ordered base
 
@@ -36,7 +37,7 @@ Keep the fast-path decision ahead of `Store.Capture`, `index.View`, `hasUnavaila
 
 The same-handle implementation uses an immutable in-memory directory of snapshot segments in catalog order. Collect each segment's identity, row count and checked key boundaries while writing or validating it. Store fixed-size boundary summaries and cache full key bytes under a byte budget, using the probe described below on eviction. Bind the directory to the database UUID, the selected snapshot prefix and `B`. Keep its identity in the selected in-memory layout so a repeat compares constant-size state. Rotation, INDEX publication and log-only cleaning can change MANIFEST ID or the pruning boundary without changing that base. Advance the directory only with successful layout publication. An uncertain CURRENT switch requires validated reopen.
 
-Snapshot cleaning can remove rows or concatenate consecutive segments. When it filters or joins certified inputs in order, update just their descriptors with the actual surviving fences and counts, including removal of an empty segment. An ordinary `Compact` that only cleans up keeps the base. If it produces new files, check order within and across outputs while it is already streaming them, and carry an ordered base forward only if the check succeeds. A source-order checkpoint with overlapping or unordered ranges consumes its input log history. The next `CompactByKey` must establish a new base. An empty database has a trivially ordered base.
+Snapshot cleaning can remove rows or concatenate consecutive segments. When it filters or joins certified inputs in order, update just their descriptors with the actual surviving fences and counts, including removal of an empty segment. An ordinary `Compact` that only cleans up keeps the base. If it produces new files, check order within and across outputs while it is already streaming them, and carry an ordered base forward only if the check succeeds. A source-order checkpoint with overlapping or unordered ranges consumes its input log history. The next checkpoint using `WithKeyOrder()` must establish a new base. An empty database has a trivially ordered base.
 
 For separate application runs, the proposed durable extension records an ordered-base flag and a fixed-size summary per snapshot entry in the CURRENT-selected MANIFEST. The summary stores the row count, the last record's header offset, and a digest of the two length-framed boundary keys. The first record starts after the segment header. The existing entry already binds the ID, length and DATA digest. Populate a bounded fence-key cache while producing a base. After reopen, the flag and cutoff answer the unchanged call directly. For a changed call with a cold cache, binary-search ranges by probing the two keys. Check segment identity, header CRCs, Put kinds, lengths and offsets, require the last record to end at the selected file length, and verify the pair digest before routing. This probe reads headers and key bytes. Payload CRC checks belong to the subsequent checked record reads. This can add boundary-key reads on otherwise reused files. It avoids a DATA-wide warmup and avoids copying arbitrarily long keys into each rotation's MANIFEST.
 
@@ -67,17 +68,17 @@ The work scales with the **retained suffix records and affected segment bytes**.
 
 The experimental 16,384-record graph reduced the mean number of distinct 4 KiB DATA file ranges per vertex from 70.89 to 9.00. The sorted average was 9.01 after 4,096 overwrites of the first key, and 24.82 after 4,096 distributed overwrites. Before updates, sampled cold prefix reads fell from 296 to 112 KiB and from 2.34 to 0.084 ms. Those bytes are Linux VM process I/O. The prototype staged up to 32 MiB and 65,536 records in RAM. [Experiment and sampling details](https://github.com/anaregdesign/tarp/blob/fedad012a6d88170f59741ddd1048bc37d54943b/docs/benchmarks/key-locality-150.md).
 
-Compare foreground alone, ordinary `Compact`, and `CompactByKey` on the same starting image. Use both index modes, variable-size edges, a database larger than the sort budget, and workloads with a repeatedly updated first key, hot ranges, and scattered updates. Include deletes and reinsertions. Measure cold prefix latency and process read bytes, distinct DATA ranges, checkpoint duration, validation and copy reads, DATA/PARITY and scratch writes, peak memory, scratch and pinned bytes. Record durable Put throughput and p99 during the overlapping window. Issue #150 proposes at least 1,000 overlapping Puts per pattern, throughput at least 95% of foreground alone, p99 at most 1.10× baseline and a measurable cold-read improvement. Report the ordinary-compaction comparison separately to isolate the cost of sorting.
+Compare foreground alone, source-order compaction, and key-ordered compaction on the same starting image. Use both index modes, variable-size edges, a database larger than the sort budget, and workloads with a repeatedly updated first key, hot ranges, and scattered updates. Include deletes and reinsertions. Measure cold prefix latency and process read bytes, distinct DATA ranges, checkpoint duration, validation and copy reads, DATA/PARITY and scratch writes, peak memory, scratch and pinned bytes. Record durable Put throughput and p99 during the overlapping window. Issue #150 proposes at least 1,000 overlapping Puts per pattern, throughput at least 95% of foreground alone, p99 at most 1.10× baseline and a measurable cold-read improvement. Report the ordinary-compaction comparison separately to isolate the cost of sorting.
 
 ### Hosted Linux qualification
 
-Revision `2af4ec7d562f` ran in a 2-CPU container on ext4 with `go version go1.27.4 linux/amd64`. Every arm used image `sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea`. [Qualification run](https://github.com/anaregdesign/tarp/actions/runs/44983593909) · [Raw per-trial measurements and environment](benchmarks/key-ordered-checkpoint.jsonl.gz).
+Revision `2af4ec7d562f` ran in a 2-CPU container on ext4 with `go version go1.27.4 linux/amd64`. In the raw data, `source` selects the source-order layout and `ordered` selects the key-ordered layout. Every arm used image `sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea`. [Qualification run](https://github.com/anaregdesign/tarp/actions/runs/44983593909) · [Raw per-trial measurements and environment](benchmarks/key-ordered-checkpoint.jsonl.gz).
 
 The fixture contained 16,385 variable-size records and 4,653,340 encoded key bytes, exceeding the 4 MiB sort allowance. Each writer trial checked all final values after a Full reopen.
 
 Median of three cold `ScanPrefix` calls after requesting eviction of fixture DATA pages. Reads are Linux process `read_bytes`. The full-read control registered I/O on each fixture.
 
-| Index | Prefix | Rows | Compact KiB | CompactByKey KiB | Compact ms | CompactByKey ms |
+| Index | Prefix | Rows | Source-order KiB | Key-order KiB | Source-order ms | Key-order ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | BTree | 0 | 56 | 244 | 64 | 8.24 | 0.68 |
 | BTree | 192 | 56 | 264 | 88 | 8.99 | 0.90 |
@@ -88,7 +89,7 @@ Median of three cold `ScanPrefix` calls after requesting eviction of fixture DAT
 
 Each writer trial issued four groups of 256 durable Puts with one simultaneous checkpoint per group. Ratios below compare the same foreground operation slots to a foreground-only trial, then take the median of three paired trial ratios. The joined rate divides Puts by total elapsed time including the wait for each checkpoint. The final column gives DATA and PARITY MiB written by four ordered checkpoints.
 
-| Index | Updates | Overlapping Puts | Compact rate / p99 | CompactByKey rate / p99 | Ordered joined rate | Ordered DATA / PARITY MiB |
+| Index | Updates | Overlapping Puts | Source-order rate / p99 | Key-order rate / p99 | Ordered joined rate | Ordered DATA / PARITY MiB |
 | --- | --- | ---: | --- | --- | ---: | --- |
 | BTree | first | 3072 | 73% / 2.62× | 97% / 1.66× | 75% | 16.00 / 1.03 |
 | BTree | hot | 3072 | 75% / 2.70× | 97% / 1.79× | 75% | 16.00 / 1.03 |

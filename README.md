@@ -6,13 +6,13 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses [v0.13.0](https://github.com/anaregdesign/tarp/tree/v0.13.0).
+uses [v0.14.0](https://github.com/anaregdesign/tarp/tree/v0.14.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.13.0
+go get github.com/anaregdesign/tarp@v0.14.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -68,6 +68,13 @@ During v0, each revision supports its current Go API, database format and
 backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
+
+v0.14.0 keeps the v0.13.0 database and backup formats. Existing calls to
+`db.Compact(ctx)` keep their source-order checkpoint behavior. Both `DB` and
+`TypedDB` now accept `...tarp.CompactOption`. If an interface declares
+`Compact(context.Context) (tarp.CompactResult, error)`, update it and its
+implementations to accept the variadic options. A callback with the old function
+signature can wrap the method as `func(ctx context.Context) (tarp.CompactResult, error) { return db.Compact(ctx) }`.
 
 v0.13.0 keeps the v0.12.0 database and backup formats. Update Go callers and
 consumers of batch-limit diagnostics when upgrading from v0.12.0.
@@ -315,7 +322,7 @@ See the [runnable batch example](typed_batch_test.go).
 ## Contract
 
 `DB` provides `Get`, `Scan`, `ScanPrefix`, `Keys`, `KeysPrefix`, upserting `Put`, `Delete`, `Close`, online `Backup`,
-`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact` and `CompactByKey`, and `AutoCompactionStatus`. Use `Open` to create or
+`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `AutoCompactionStatus`. Use `Open` to create or
 reopen a database and `Restore` to restore a backup offline.
 
 - Keys and values are `[]byte`. Empty keys are rejected; empty values are valid.
@@ -552,7 +559,7 @@ If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
 
-Call `CompactByKey(ctx)` after an import or in an application-selected maintenance
+Call `db.Compact(ctx, tarp.WithKeyOrder())` after an import or in an application-selected maintenance
 window to place related values together for `ScanPrefix`. It writes the retained
 snapshot records in encoded-key order across DATA segments. Later writes append
 to the log. On the same handle, the next call sorts the new log suffix and
@@ -560,7 +567,10 @@ rewrites affected snapshot ranges. A healthy, unchanged checkpoint with no
 pending cleanup returns without reading DATA or writing a MANIFEST. On reopen
 the first call verifies the snapshot order before reusing it. A delta checkpoint
 can leave latent damage in a reused segment for its next checked read. The
-method is also available on `TypedDB`. See [key-ordered compaction](docs/key-ordered-compaction.md).
+option is also available on `TypedDB`. Schedule it in a quiet window when
+foreground latency matters. In the measured workload, overlapping durable
+`Put` p99 ranged from 1.12× to 2.30× the foreground-only baseline.
+See [key-ordered compaction and measurements](docs/key-ordered-compaction.md).
 
 ### Recovering damaged DATA
 

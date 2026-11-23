@@ -2,10 +2,18 @@
 
 ## Support boundary
 
-The current unversioned format and its automatic cleaner have a functional
-recovery test suite. Their whole-VM power-loss behavior and performance require
-fresh evidence. The historical qualification below belongs to the previous
-storage implementation. Its frozen source fingerprint and run links are in the
+Revision `73d5cb8` passed the current existing whole-VM phase matrix:
+314 engine cut/reboots, real bounded-device ENOSPC, and both Go-family
+guest race suites and guided fuzz. The
+[current-engine record](qualification-v1-candidate.md) binds those results
+to the source, raw archives and precisely tested virtual stack.
+Dedicated batch, automatic-cleaner, ordered-checkpoint, INDEX and online-repair
+power-cut cases remain outside that matrix; full-suite functional or
+process-crash coverage is not a substitute. No complete v1 qualification
+is claimed.
+
+The historical qualification below belongs to the previous storage
+implementation. Its frozen source fingerprint and run links are in the
 [execution matrix](qualification.md#final-selected-target-execution-matrix).
 
 That qualification passed on revision
@@ -112,7 +120,9 @@ replacement CURRENT publishes its final sequence and offset, after the data
 and any new catalog are synced. Memory publication follows durable publication.
 An uncertain commit outcome applies to the entire batch. Reopen and backup
 select either frontier and can never select an intermediate record boundary.
-The prior whole-VM campaign described above predates the batch API.
+The historical whole-VM campaign predates the batch API. The current repeated
+matrix also lacks a batch-aware power-cut witness; its full guest race suite
+does exercise the batch functional and injected-failure tests.
 
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
@@ -247,7 +257,7 @@ keys are disjoint. A batch that overlaps a staged key waits for the writer to
 commit or abort, then checks the addresses again. The B+tree takes the writer gate
 for each relocation batch. Later Put/Delete wins.
 
-`CompactByKey(ctx)` shares the full DATA checkpoint cutoff, atomic publication,
+`db.Compact(ctx, tarp.WithKeyOrder())` shares the full DATA checkpoint cutoff, atomic publication,
 conditional relocation and loss-recovery protocol. It sorts encoded keys and
 can carry previously verified immutable snapshot segments and their PARITY
 forward under the same identities. It checks the new log suffix and changed

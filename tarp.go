@@ -237,21 +237,33 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 // still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult
 
+// CompactOption configures one call to Compact. Its zero value keeps the
+// default behavior.
+type CompactOption struct {
+	keyOrder bool
+}
+
+// WithKeyOrder writes the retained snapshot records in encoded-key order.
+// Concurrent writes after the checkpoint cutoff form the next log suffix.
+// On the same handle, later ordered calls reuse unchanged snapshot segments.
+// A healthy ordered checkpoint with no later writes or pending cleanup is a no-op.
+func WithKeyOrder() CompactOption {
+	return CompactOption{keyOrder: true}
+}
+
 // Compact builds a full DATA checkpoint through the captured user sequence.
+// By default it copies live records in source order. Pass [WithKeyOrder] to
+// cluster the snapshot by encoded key.
 // It uses PARITY to recover damaged sealed DATA. A live key whose record is
 // proved irrecoverable is removed when the checkpoint commits. The operation
 // requires temporary disk space for recovery and protected snapshot files.
-func (db *DB) Compact(ctx context.Context) (CompactResult, error) {
+func (db *DB) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error) {
+	for _, opt := range opts {
+		if opt.keyOrder {
+			return (*engine.DB)(db).CompactByKey(ctx)
+		}
+	}
 	return (*engine.DB)(db).Compact(ctx)
-}
-
-// CompactByKey builds a full DATA checkpoint in encoded-key order. Concurrent
-// writes after its cutoff form the next log suffix. On this handle, subsequent
-// calls can reuse unchanged snapshot segments without rereading their values.
-// A healthy ordered checkpoint with no later writes or pending cleanup is a no-op.
-// Repair, cancellation and publication outcomes follow Compact.
-func (db *DB) CompactByKey(ctx context.Context) (CompactResult, error) {
-	return (*engine.DB)(db).CompactByKey(ctx)
 }
 
 // AutoCompactionStatus reports the background compaction worker's activity since Open.

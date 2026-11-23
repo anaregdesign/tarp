@@ -65,7 +65,7 @@ func TestKeyCheckpointMeasurement(t *testing.T) {
 				if layout == "source" {
 					_, err = db.Compact(t.Context())
 				} else {
-					_, err = db.CompactByKey(t.Context())
+					_, err = db.Compact(t.Context(), tarp.WithKeyOrder())
 					orderedDir = dir
 				}
 				elapsed := time.Since(start)
@@ -250,7 +250,7 @@ func measureKeyCheckpointWrites(t *testing.T, source string, opts tarp.Options, 
 	defer db.Close()
 	// Re-establish the sorted base on every new handle, outside timing, so
 	// measured calls include updates to the certified base on all arms.
-	if _, err := db.CompactByKey(t.Context()); err != nil {
+	if _, err := db.Compact(t.Context(), tarp.WithKeyOrder()); err != nil {
 		t.Fatal(err)
 	}
 	trace := keyCheckpointTrace(edges, pattern, round, seedPuts+epochs*perEpoch)
@@ -373,7 +373,7 @@ func runKeyCheckpoint(ctx context.Context, db *tarp.DB, arm string) error {
 		_, err := db.Compact(ctx)
 		return err
 	case "ordered":
-		_, err := db.CompactByKey(ctx)
+		_, err := db.Compact(ctx, tarp.WithKeyOrder())
 		return err
 	default:
 		return fmt.Errorf("unknown checkpoint arm %q", arm)

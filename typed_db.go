@@ -195,13 +195,9 @@ func (db *TypedDB[K, V]) ProtectParity(ctx context.Context) error {
 }
 
 // Compact builds a full DATA checkpoint of the underlying DB.
-func (db *TypedDB[K, V]) Compact(ctx context.Context) (CompactResult, error) {
-	return db.core.Compact(ctx)
-}
-
-// CompactByKey clusters the underlying snapshot in encoded-key order.
-func (db *TypedDB[K, V]) CompactByKey(ctx context.Context) (CompactResult, error) {
-	return db.core.CompactByKey(ctx)
+// [WithKeyOrder] orders records by their encoded key bytes.
+func (db *TypedDB[K, V]) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error) {
+	return db.core.Compact(ctx, opts...)
 }
 
 // AutoCompactionStatus returns the underlying DB's automatic maintenance status.
