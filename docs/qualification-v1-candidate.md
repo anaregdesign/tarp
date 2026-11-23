@@ -2,10 +2,105 @@
 
 Tracking: [Issue #168](https://github.com/anaregdesign/tarp/issues/168).
 
-## Latest selected candidate: 50b140a
+## Latest selected candidate: d89f7b8
 
-Updated 2026-11-23. **Power-cut matrix passed; aggregate v1 durability gate
-remains incomplete because the Go 1.26 guided-fuzz job failed twice.**
+Updated 2026-11-23. **The durability gate passed for the recorded VM stack.**
+All 26 qualification runs passed independent reconciliation on
+[`d89f7b8b935cf9f5fd95da63728ab10533b9d711`](https://github.com/anaregdesign/tarp/commit/d89f7b8b935cf9f5fd95da63728ab10533b9d711):
+24 power-cut campaigns and two full runtime suites. The cache implementation
+changed, so the complete matrix was rerun on this source rather than carrying
+forward earlier passes. This record does not authorize a v1 release or freeze
+the public API or data compatibility policy.
+
+| Verification item | Cases/family | Go 1.27.4 | Go 1.26.11 | Comment |
+| --- | ---: | --- | --- | --- |
+| Initialization | 25 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133852920) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133962344) | Uninitialized only before the initial durable frontier. |
+| Single-key mutations and rotation | 57 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133861600) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133970905) | Acknowledged values/deletes and permitted pending endpoints. |
+| Source-order DATA checkpoint | 26 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133870472) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133979299) | Output/publication/remap/retirement. |
+| Backup/restore | 34 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133878903) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133987736) | Output verified at the external capture sequence. |
+| Recovery and read/write/backup overlap | 14 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133887784) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133996672) | Tail recovery and pinned concurrent activity. |
+| Actual DATA/checkpoint ENOSPC | 1 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133896507) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45134006605) | Real errno 28, healthy checkpoint retry and admitted-mutation fail-stop/reopen. |
+| BatchPut/BatchDelete | 100 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133905626) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45134015906) | Only whole-batch endpoints accepted; duplicates, deletes and rotation. |
+| Automatic cleaner/grouped cleaning/repacking | 138 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133913852) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45134025103) | Actual scheduler modes, concurrent tail/checked reads, backup pins and retirement. |
+| Ordered initial/delta/reused-range checkpoint | 114 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133921648) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45134034707) | Sorted output, original sequence identity and retained DATA ownership. |
+| INDEX publication and Indexed reopen | 42 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133929835) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45134043758) | Explicit CheckpointIndex and B+tree Close; independent Full/Indexed copies. |
+| Online DATA/PARITY repair interruption | 32 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133938664) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45134052345) | Controlled fsynced corruption; DATA cases explicitly retry file-only repair before Open. |
+| Actual B+tree private-pager ENOSPC | 1 | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133946406) | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45134060440) | Scratch-write errno 28, healthy NotApplied rollback, zero DATA writes, unchanged frontier, and 1,536-record retry. |
+| Full guest race suite, vet and module audit | - | [Passed: 15 packages](https://github.com/anaregdesign/tarp/actions/runs/45133843964) | [Passed: 15 packages](https://github.com/anaregdesign/tarp/actions/runs/45133954125) | Verified package/binary identities and raw race-suite results; only the tarp module. |
+| Count-bounded guided `FuzzDecoders` | - | [Passed: 10,024 executions, 20.46 s](https://github.com/anaregdesign/tarp/actions/runs/45133843964) | [Passed: 10,000 executions, 19.23 s](https://github.com/anaregdesign/tarp/actions/runs/45133954125) | `-test.fuzztime=10000x`; actual exec counters match serial output. Elapsed times measure the child process. |
+| Independent raw-device controls | - | Passed: 13 | Passed: 13 | Flushed A survived; unflushed B disappeared. Not engine cases. |
+| Ordinary Linux CI | - | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45133841443) | - | Exact tested revision, separate from power-loss evidence. |
+| Physical-device/firmware, other filesystem/kernel, quotas, generic macOS power loss and automatic-maintenance ENOSPC | - | Not run / out of scope | Not run / out of scope | The real DATA/checkpoint ENOSPC fixture parks automatic maintenance. |
+
+### Results and support boundary
+
+**584 engine cuts and separate cold boots per Go family, 1,168 total**,
+including four post-exhaustion cuts. The independent verifier checked each
+witnessed cut phase and recomputed the permitted sequence/state digest and
+live-key count. Extended cases recorded 84 recoveries that actually selected a
+validated INDEX and 32 offline DATA-repair retries. Those retries do not
+establish automatic healing by Full Open. New batch, cleaner, ordered, explicit
+INDEX and repair cases exercise Memory and B+tree; INDEX-on-Close and pager
+exhaustion use B+tree only. The original cases retain their default-index
+fixtures. This is not a full cross-product of all phases and index modes.
+
+The tested stack is Ubuntu 24.04.5 amd64, guest kernel 6.8.0-147-generic,
+QEMU 8.2.2 TCG, two vCPUs/1 GiB RAM, guarded 256 MiB ext4 `data=ordered`
+with normal barriers/journal and no DAX or quotas, backed by an honest-flush
+volatile NBD model. The image SHA-256 is
+`04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94`.
+Every cut loses all guest RAM/page cache after whole-QEMU SIGKILL. Fourteen
+engine cuts discarded 180,224 allocated overlay-page bytes; no guest FUA
+writes were observed. The backend terminated with EOF in 1,151 cases and an
+exact case-socket connection reset in 17; the controller joins the backend
+before dropping the overlay. No physical device/firmware certification or
+lying-flush tolerance is implied.
+
+### What changed after the failures
+
+Go 1.26.11 retains the old fuzz coordinator condition involved in
+[golang/go#75804](https://github.com/golang/go/issues/75804): the parent deadline
+can expire before cancellation reaches the child context, so the coordinator
+can return the expected deadline as an error. Both Go families now stop at a
+requested execution count rather than the fuzz-duration deadline. This is a
+new acceptance budget, not a pass of the historical 15-second trials.
+Baseline/minimization work counts toward reported executions; the runs do
+not prove 10,000 distinct inputs or a fixed duration. Nonzero exits still
+fail; the 150-second per-test, 180-second child-command, 14-minute guest and
+15-minute controller bounds are unchanged.
+
+The third historical runtime attempt failed before fuzzing: overflow-key
+reads evicted already-validated B+tree leaves and forced repeated validation.
+At the minimum cache budget, the new regression reproduced 128 unnecessary
+leaf reads in a second pass over 128 lookups. Evicting overflow payloads
+before leaves and branches eliminated those rereads without increasing the
+budget or changing the public API, on-disk format or publication protocol.
+The Go 1.26.11 guest's full B+tree package completed in 42.97 seconds; the
+previously active long-key test passed in 2.48 seconds.
+
+### Retained evidence
+
+The session Library bundle `raw-evidence-d89f7b8.zip` holds all 26 original
+run archives, logs and metadata, the exact source archive, independent
+verification scripts/results, per-file hashes, and the previous four failed
+originals (one preliminary pager run and three Go 1.26 runtime attempts).
+Historical failures are excluded from the accepted totals. Thirteen focused
+verifier tests passed. The bundle checksum is recorded in its sibling
+`.sha256` and [Issue #168](https://github.com/anaregdesign/tarp/issues/168).
+This preserves the originals beyond the 30-day Actions artifact window.
+
+Common library-source manifest fingerprint:
+`fbeff33385512c2935c18a63345b140be368400b1c51d7d277bbae2f9011ad51`.
+Checked-source tarball SHA-256:
+`13637ae35fc34784e489cea81171a95ad296063805f1bf1313098ee8723b8424`.
+From the bundle's extracted `durability-runtime-fix` directory, run
+`python3 -m unittest -v` and `python3 verify_extended.py .` to repeat the
+independent verification without rerunning the power cuts.
+
+## Historical extended candidate: 50b140a
+
+Recorded 2026-11-23. **The power-cut matrix passed, but the aggregate gate
+was incomplete for this revision because the Go 1.26 runtime job failed.**
 The six previously missing dedicated scenarios have now been executed.
 This is not a release authorization or a claim that every check passed.
 
@@ -17,7 +112,8 @@ and 1.26.11. All 24 bounded power-cut campaigns passed independent
 reconciliation: **584 engine cuts and separate cold reboots per family,
 1,168 total**, including four post-exhaustion cuts. The extension adds
 427 cases per family to the 157-case baseline. The 26 selected runs include
-two runtime jobs; 25 runs passed and one runtime job failed on both attempts.
+two runtime jobs; 25 runs passed and the Go 1.26 runtime job failed on its
+first two attempts. Its later third attempt also failed.
 
 | Verification item | Cases/family | Go 1.27.4 | Go 1.26.11 | Comment |
 | --- | ---: | --- | --- | --- |
@@ -37,7 +133,7 @@ two runtime jobs; 25 runs passed and one runtime job failed on both attempts.
 | Guided decoder fuzz, 15 seconds | - | Passed: 4,040 executions | **Failed twice**: 4,250 / 4,064 executions | Both 1.26 attempts reported `context deadline exceeded`; not accepted as runtime passes. |
 | Vet/module audit | - | Passed | Passed | Same-source runtime setup; standard library only. |
 | Ordinary Linux CI | - | [Passed](https://github.com/anaregdesign/tarp/actions/runs/45122036340) | - | Exact checked source, separate from power-loss evidence. |
-| Aggregate v1 durability gate | - | **Incomplete** | **Incomplete** | Resolve the repeatable 1.26 fuzz failure before claiming the complete gate. |
+| Aggregate v1 durability gate | - | **Incomplete** | **Incomplete** | Historical result; the fixed-revision qualification is recorded above. |
 
 ### Extended acceptance and experimental boundary
 
@@ -90,7 +186,7 @@ guarantee is implied. Automatic-maintenance ENOSPC is not established by the
 manual-checkpoint exhaustion fixture. These scope exclusions are not
 silently treated as passed tests.
 
-### Failed attempts and unresolved blocker
+### Failed attempts and then-unresolved blocker
 
 The preliminary [pager run at de0dd8c](https://github.com/anaregdesign/tarp/actions/runs/45121370098)
 failed because the controller nested its pager success-marker handler inside
@@ -106,11 +202,20 @@ failed guided fuzz after 17.45 and 17.14 seconds, respectively, with
 `context deadline exceeded`. Both reached coverage-guided fuzzing after all
 15 package race suites passed. No decoder panic or failing corpus input was
 reported. The source, assertions and time limits were unchanged on retry.
-**The root cause is unresolved; this record does not dismiss the error as
-an infrastructure flake or report an all-green runtime suite.**
-Further diagnosis of this repeatable failure remains a release blocker.
+These failures were not accepted as passes. The cause was unresolved when
+these attempts were first recorded; the later diagnosis and count-bounded
+rerun are recorded above.
 
-### Latest evidence retention
+[Identical-source attempt 3](https://github.com/anaregdesign/tarp/actions/runs/45121839197/attempts/3)
+failed earlier: 11 package suites passed before the B+tree package reached
+its 150-second test timeout while `TestBinaryOverflowKeysAndGroupLookup` was
+active (31 seconds into that test). `FuzzDecoders` was **not run** on that
+attempt. The original is retained
+in the separate `raw-evidence-50b140a-attempt3.zip` and the new bundle;
+the original attempt-3 archive SHA-256 is
+`22f93b98f596593259482f4284da90ab58c4cfdb4d26fc857f48c8aefec54914`.
+
+### Evidence retained for the historical candidate
 
 All downloaded archives were checked against GitHub artifact digests.
 Independent Python reconciliation accepts 25 selected runs, including all
