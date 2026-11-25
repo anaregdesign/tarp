@@ -24,7 +24,6 @@ func (db *DB) releaseBatchPins(reads []batchRead) {
 }
 
 func (db *DB) readBatchMisses(keys [][]byte, results []BatchResult, reads []batchRead) error {
-	defer db.releaseBatchPins(reads)
 	if err := db.readBatchData(keys, results, reads); err != nil {
 		return err
 	}

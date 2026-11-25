@@ -27,9 +27,8 @@ type Snapshot struct {
 	maxSeenValueBytes int64
 }
 
-// Snapshot captures an immutable point-in-time read view without blocking
-// foreground writes or compaction. Retained DATA segments remain pinned until
-// Snapshot.Close completes.
+// Snapshot captures the current index and pins its referenced DATA segments.
+// Writers and compaction can continue while the returned view is open.
 func (db *DB) Snapshot() (*Snapshot, error) {
 	if err := db.admit(); err != nil {
 		return nil, err
@@ -63,7 +62,7 @@ func (db *DB) Snapshot() (*Snapshot, error) {
 	return snap, nil
 }
 
-// Sequence returns the exact LastUserSequence published in this snapshot (0 when empty).
+// Sequence returns the last user sequence captured by the snapshot.
 func (s *Snapshot) Sequence() uint64 {
 	return s.seq
 }
@@ -112,8 +111,8 @@ func (s *Snapshot) freeResources(view index.View, segments map[uint64]*storage.D
 	}
 }
 
-// Close releases the snapshot's index view and retained DATA segment pins.
-// Calling Close more than once returns nil.
+// Close rejects new snapshot reads. The last active operation releases the
+// index view and segment pins if an operation is still using them.
 func (s *Snapshot) Close() error {
 	s.mu.Lock()
 	if s.closing {
@@ -121,18 +120,8 @@ func (s *Snapshot) Close() error {
 		return nil
 	}
 	s.closing = true
-	s.refs--
-	last := s.refs == 0
-	view := s.view
-	segments := s.segments
-	if last {
-		s.view = nil
-		s.segments = nil
-	}
 	s.mu.Unlock()
-	if last {
-		s.freeResources(view, segments)
-	}
+	s.release()
 	return nil
 }
 
@@ -203,7 +192,7 @@ func (s *Snapshot) Get(key []byte) ([]byte, error) {
 
 	segment := s.segments[addr.FileID]
 	if segment == nil {
-		err := missingIndexFile(addr.FileID)
+		err := missingDataSegment(addr.FileID)
 		db.poison(err)
 		return nil, operationError("get", "index", err)
 	}
@@ -272,7 +261,7 @@ func (s *Snapshot) readBatch(keys [][]byte) ([]BatchResult, error) {
 	db := s.db
 	results := make([]BatchResult, len(keys))
 	if len(keys) == 0 {
-		return results, db.health()
+		return db.finishBatchRead(keys, results, nil)
 	}
 
 	db.state.Lock()
@@ -295,157 +284,25 @@ func (s *Snapshot) readBatch(keys [][]byte) ([]BatchResult, error) {
 			if err != nil {
 				return nil, err
 			}
-			for i := range results {
-				if results[i].Value != nil {
-					results[i].Value = bytes.Clone(results[i].Value)
-				}
-			}
-			return results, nil
+			return db.finishBatchRead(keys, results, nil)
 		}
 	} else {
 		uncached = len(keys)
 	}
 	db.state.Unlock()
 
-	for i := range results {
-		if results[i].Value != nil {
-			results[i].Value = bytes.Clone(results[i].Value)
-		}
-	}
-
-	source := make([]uint16, len(keys))
-	addresses := make([]index.Address, len(keys))
-	var distinctKeys batchKeySet
-	var group []string
-	var positions []int
-	groupBytes := 0
-	flush := func() error {
-		if len(group) == 0 {
-			return nil
-		}
-		if many, ok := s.view.(index.BatchView); ok {
-			var invalid error
-			if err := many.LookupMany(group, func(i int, loc index.Address, found bool) {
-				if found {
-					if loc.FileID == 0 {
-						invalid = missingIndexFile(0)
-						return
-					}
-					addresses[positions[i]] = loc
-				}
-			}); err != nil {
-				return err
-			}
-			if invalid != nil {
-				return invalid
-			}
-		} else {
-			for i, k := range group {
-				a, ok, err := s.view.Lookup(k)
-				if err != nil {
-					return err
-				}
-				if ok {
-					if a.FileID == 0 {
-						return missingIndexFile(0)
-					}
-					addresses[positions[i]] = a
-				}
-			}
-		}
-		clear(group)
-		group = group[:0]
-		positions = positions[:0]
-		groupBytes = 0
-		return nil
-	}
-
-	var distinct int
-	for i, k := range keys {
-		if results[i].Found {
-			continue
-		}
-		first := distinctKeys.source(keys, i, uncached)
-		source[i] = uint16(first)
-		if first != i {
-			continue
-		}
-		distinct++
-		if int64(len(k)) > db.opts.MaxRecordBytes {
-			continue
-		}
-		if groupBytes > 0 && len(k) > 256<<10-groupBytes {
-			if err := flush(); err != nil {
-				db.poison(err)
-				return nil, operationError("batch-get", "index", err)
-			}
-		}
-		group = append(group, string(k))
-		positions = append(positions, i)
-		groupBytes += len(k)
-	}
-	if err := flush(); err != nil {
-		db.poison(err)
-		return nil, operationError("batch-get", "index", err)
-	}
-
-	err := checkBatchGetValueBytes(len(keys), db.opts.MaxBatchGetValueBytes, s.maxSeenValueBytes, func(i int) int64 {
-		if results[i].Found {
-			return int64(len(results[i].Value))
-		}
-		return addresses[source[i]].ValueBytes
-	})
+	plan, err := db.planIndexedBatch(s.view, s.segments, keys, results, uncached, s.maxSeenValueBytes)
 	if err != nil {
 		return nil, err
 	}
-
-	var reads []batchRead
-	var misses int
-	for i := range keys {
-		if results[i].Found {
-			continue
-		}
-		a := addresses[source[i]]
-		if a.FileID == 0 {
-			continue
-		}
-		results[i].Found = true
-		r := batchRead{slot: uint16(i), source: source[i]}
-		if int(source[i]) == i {
-			segment := s.segments[a.FileID]
-			if segment == nil {
-				err := missingIndexFile(a.FileID)
-				db.poison(err)
-				return nil, operationError("batch-get", "index", err)
-			}
-			r.loc = storage.At(segment, a)
-			misses++
-		}
-		reads = append(reads, r)
-	}
-
 	if sameRevision {
 		db.state.Lock()
 		if db.revision == s.revision {
-			db.batchCounts(hits, misses, distinct-misses, len(keys)-distinct-hits)
+			db.batchCounts(hits, plan.misses, plan.distinct-plan.misses, len(keys)-plan.distinct-hits)
 		}
 		db.state.Unlock()
 	}
-
-	if len(reads) > 0 {
-		if err := db.readBatchData(keys, results, reads); err != nil {
-			return nil, err
-		}
-		for _, r := range reads {
-			if r.loc.Segment == nil {
-				results[r.slot] = BatchResult{Value: bytes.Clone(results[r.source].Value), Found: true}
-			}
-		}
-	}
-	if err := db.health(); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return db.finishBatchRead(keys, results, plan.reads)
 }
 
 // Scan yields all entries in this snapshot.
@@ -574,7 +431,7 @@ func (s *Snapshot) walk(ctx context.Context, values bool, bounds index.Bounds, o
 		if values {
 			f := s.segments[a.FileID]
 			if f == nil {
-				err := missingIndexFile(a.FileID)
+				err := missingDataSegment(a.FileID)
 				db.poison(err)
 				result = operationError(op, "index", err)
 				return false

@@ -72,7 +72,7 @@ func TestFailedIndexPreparationDiscardsWholeBatchBeforeAppend(t *testing.T) {
 	}
 }
 
-func TestIndexedReadsRejectMissingDataFileAndReleasePins(t *testing.T) {
+func TestIndexedReadsRejectMissingDataSegmentAndReleasePins(t *testing.T) {
 	for _, backend := range []struct {
 		name string
 		mode IndexMode
@@ -85,7 +85,7 @@ func TestIndexedReadsRejectMissingDataFileAndReleasePins(t *testing.T) {
 				mustPut(t, db, "b", "v")
 				first, missing := testLoc(t, db, "a").Segment, testLoc(t, db, "b").Segment
 				if first == missing {
-					t.Fatal("test requires distinct DATA files")
+					t.Fatal("test requires distinct DATA segments")
 				}
 				Observe(db).ClearCache()
 				delete(db.segments, missing.ID)
@@ -112,7 +112,7 @@ func TestIndexedReadsRejectMissingDataFileAndReleasePins(t *testing.T) {
 	}
 }
 
-func TestIndexedWritesAbortIfPreviousFileIsMissing(t *testing.T) {
+func TestIndexedWritesAbortIfPreviousSegmentIsMissing(t *testing.T) {
 	for _, backend := range []struct {
 		name string
 		mode IndexMode
@@ -125,7 +125,7 @@ func TestIndexedWritesAbortIfPreviousFileIsMissing(t *testing.T) {
 				mustPut(t, db, "b", "v")
 				old := testLoc(t, db, "a")
 				if old.Segment == testLoc(t, db, "b").Segment {
-					t.Fatal("expected a sealed file holding a")
+					t.Fatal("expected a sealed segment holding a")
 				}
 				dir, frontier := db.store.Dir, db.store.Current
 				delete(db.segments, old.Segment.ID)

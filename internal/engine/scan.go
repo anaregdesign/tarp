@@ -129,7 +129,7 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		if values {
 			f := pinnedSegments[a.FileID]
 			if f == nil {
-				err := missingIndexFile(a.FileID)
+				err := missingDataSegment(a.FileID)
 				db.poison(err)
 				result = operationError(op, "index", err)
 				return false
