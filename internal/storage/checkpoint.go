@@ -145,11 +145,11 @@ func (c *DataCheckpoint) Copy(ctx context.Context, history index.Backend, live i
 	// Verify the complete set against independently replayed DATA before the
 	// new checkpoint is allowed to replace its sources. An inconsistent derived
 	// index must never suppress the only surviving authoritative copy of a Put.
-	rows := int64(moves.count)
+	recordCount := int64(moves.count)
 	for _, kept := range c.reused {
-		rows += kept
+		recordCount += kept
 	}
-	if rows != int64(history.Count()) {
+	if recordCount != int64(history.Count()) {
 		return fmt.Errorf("%w: checkpoint index live count disagrees with replay", ErrCorrupt)
 	}
 	tx := history.Begin()
@@ -271,7 +271,7 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 			digest.Reset()
 			digest.Write(format.EncodeSegmentHeader(format.SegmentHeader{UUID: c.capture.Current.UUID, ID: segment.ID, Kind: segment.Kind}))
 			if requireOrder {
-				// Ordered rows are emitted consecutively. Amortize small
+				// Key-ordered records are emitted consecutively. Amortize small
 				// physical writes while retaining the exact record offsets.
 				disk := &outputWriter{fs: fs, fd: fd, offset: offset, point: "compact.write", hash: digest}
 				out := c.paceOutput(disk)
@@ -309,7 +309,7 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 			return err
 		}
 		if pos <= lastCarriedPos || requireOrder && (checked != nil || !c.HasOrderedBase() || src.Segment.snapshotRange == nil) ||
-			!requireOrder && (checked == nil || checked.rows == 0) {
+			!requireOrder && (checked == nil || checked.recordCount == 0) {
 			return fmt.Errorf("%w: invalid snapshot reuse", ErrCorrupt)
 		}
 		if damage := src.Segment.UnavailableData(); damage != nil {
@@ -327,12 +327,12 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 		if err := finish(); err != nil {
 			return err
 		}
-		var rows int64
+		var recordCount int64
 		if requireOrder {
-			rows = c.snapshotRows(src)
+			recordCount = src.Segment.snapshotRange.recordCount
 			previousCarried, previousKey = entry, ""
 		} else {
-			rows = checked.rows
+			recordCount = checked.recordCount
 			if ordered && !checked.unordered && previousKey < checked.first {
 				if src.Segment.snapshotRange == nil {
 					checked.complete(src.Segment, &c.store.fences)
@@ -345,7 +345,7 @@ func (c *DataCheckpoint) writeSnapshotLayout(ctx context.Context, moves *Relocat
 		if c.reused == nil {
 			c.reused = make(map[uint64]int64)
 		}
-		c.reused[entry.ID] = rows
+		c.reused[entry.ID] = recordCount
 		c.entries = append(c.entries, entry)
 		lastCarriedPos = pos
 		return nil

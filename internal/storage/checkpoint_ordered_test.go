@@ -350,18 +350,18 @@ func TestOrderedCheckpointInputPacesEachPassAndSeparatesSchedulingFailures(t *te
 					done = true
 					return io.Discard, nil
 				}}
-				row := orderedWinner{payloadCRC: h.PayloadCRC, key: "k", loc: loc}
+				winner := orderedWinner{payloadCRC: h.PayloadCRC, key: "k", loc: loc}
 				var err error
 				switch phase {
 				case "scan":
 					err = cp.scanByKey(t.Context(), src, func(int64, format.RecordHeader, string) error { done = true; return nil })
 				case "window":
-					w.window = []orderedWinner{row}
+					w.window = []orderedWinner{winner}
 					w.payload = int(loc.RecordBytes)
 					err = w.flush()
 				case "stream":
 					var got bytes.Buffer
-					err = w.readOne(src, &row, &got)
+					err = w.readOne(src, &winner, &got)
 					done = bytes.Equal(got.Bytes(), record)
 				}
 				if stop == nil {

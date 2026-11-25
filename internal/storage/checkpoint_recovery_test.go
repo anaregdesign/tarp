@@ -132,9 +132,9 @@ func TestRecoverySpoolBindsOriginalPayloadChecksumAcrossFragmentedWrites(t *test
 	var staged bytes.Buffer
 	runs := sortedReplay{ctx: t.Context(), dir: t.TempDir(), limit: 1024}
 	defer runs.close()
-	row := recoveryScratchWriter{writer: &staged, runs: &runs, event: replayEvent{key: "k", addr: index.Address{RecordBytes: int64(len(input)), ValueBytes: h.ValueBytes, Sequence: h.Sequence}}, left: int64(len(input))}
+	recordWriter := recoveryScratchWriter{writer: &staged, runs: &runs, event: replayEvent{key: "k", addr: index.Address{RecordBytes: int64(len(input)), ValueBytes: h.ValueBytes, Sequence: h.Sequence}}, left: int64(len(input))}
 	for i := range input {
-		if _, err := row.Write(input[i : i+1]); err != nil {
+		if _, err := recordWriter.Write(input[i : i+1]); err != nil {
 			t.Fatal(err)
 		}
 		if i != len(input)-1 && len(runs.chunk) != 0 {
@@ -145,7 +145,7 @@ func TestRecoverySpoolBindsOriginalPayloadChecksumAcrossFragmentedWrites(t *test
 		t.Fatalf("staged input lost its checked checksum: %+v", runs.chunk)
 	}
 	var work *IndexWorkError
-	if _, err := row.Write([]byte("x")); !errors.As(err, &work) {
+	if _, err := recordWriter.Write([]byte("x")); !errors.As(err, &work) {
 		t.Fatalf("accepted staging beyond original record: %v", err)
 	}
 }

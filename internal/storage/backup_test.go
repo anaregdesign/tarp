@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"os"
@@ -9,6 +10,66 @@ import (
 
 	"github.com/anaregdesign/tarp/internal/format"
 )
+
+func TestRestoreRejectsStagedBytesThatDifferFromBackup(t *testing.T) {
+	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 1024, MaxRecordBytes: 256, TargetSegmentBytes: 1024}
+	store, err := openTestStore(t, t.TempDir(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Append(format.Put, []byte("key"), []byte("value"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	capture, err := store.Capture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Release()
+	backup := filepath.Join(t.TempDir(), "backup")
+	if err := Backup(t.Context(), capture, cfg, nil, backup, nil); err != nil {
+		t.Fatal(err)
+	}
+	active := DataName(capture.Current.UUID, capture.Current.ActiveID)
+	for _, tc := range []struct {
+		name, file string
+		change     func([]byte) []byte
+	}{
+		{"different valid record", active, func(b []byte) []byte {
+			copy(b[format.SegmentHeaderBytes:], format.EncodeRecord(format.Put, 1, []byte("key"), []byte("other")))
+			return b
+		}},
+		{"extra active suffix", active, func(b []byte) []byte { return append(b, 42) }},
+		{"different valid frontier", "CURRENT", func(_ []byte) []byte {
+			frontier := capture.Current
+			frontier.PublicationGeneration++
+			return format.EncodeFrontier(frontier)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := false
+			fs := &IO{WriteAt: func(fd *os.File, p []byte, off int64) (int, error) {
+				if filepath.Base(fd.Name()) != tc.file {
+					return fd.WriteAt(p, off)
+				}
+				changed = true
+				n, err := fd.WriteAt(tc.change(bytes.Clone(p)), off)
+				return min(n, len(p)), err
+			}}
+			target := filepath.Join(t.TempDir(), "restored")
+			err := Restore(t.Context(), backup, target, cfg, fs)
+			if !changed || !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("changed = %v, restore error = %v", changed, err)
+			}
+			if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination after failed restore: %v", err)
+			}
+			if err := Restore(t.Context(), backup, target, cfg, nil); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+		})
+	}
+}
 
 func TestDestinationPathDistinguishesDescendantsFromSiblings(t *testing.T) {
 	root := t.TempDir()
