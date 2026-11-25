@@ -208,7 +208,7 @@ func runExtendedPowerCase(t *testing.T, cfg qualification.PowerCase, dir, output
 		}
 		storageCfg := storage.Config{ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, MaxRecordBytes: opts.MaxRecordBytes,
 			TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
-		if err := storage.Backup(t.Context(), capture, storageCfg, fs, output, nil); err != nil {
+		if err := storage.Backup(t.Context(), capture, storageCfg, fs, output, nil, db.newIndex); err != nil {
 			t.Fatal(err)
 		}
 		fmt.Printf("TARP_CAPTURE %d\n", Observe(db).Frontier().LastUserSequence)

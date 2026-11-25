@@ -23,13 +23,7 @@ type compactTrial struct {
 // Check the schedule independently of the guest process. Each measured pair
 // uses the same control, and both control order and arm order rotate.
 func compactTrials(pair string) ([]compactTrial, error) {
-	var diagnostic string
-	switch pair {
-	case "candidate", "candidate-fixed":
-		diagnostic = "lock-profile"
-	case "releases":
-		diagnostic = "diagnostic"
-	default:
+	if pair != "candidate" && pair != "candidate-fixed" {
 		return nil, fmt.Errorf("unknown Compact comparison pair %q", pair)
 	}
 	trials := []compactTrial{{"base", "seed", 0}}
@@ -51,18 +45,14 @@ func compactTrials(pair string) ([]compactTrial, error) {
 		return trials, nil
 	}
 	trials = append(trials, compactTrial{"base", "baseline", 0}, compactTrial{"next", "baseline", 0},
-		compactTrial{"next", "pinned", 0})
-	// The frozen candidate baseline cannot observe DATA retention pins.
-	if pair == "releases" {
-		trials = append(trials, compactTrial{"base", "pinned", 0})
-	}
+		compactTrial{"base", "pinned", 0}, compactTrial{"next", "pinned", 0})
 	for round := 1; round <= 4; round++ {
 		arms := [2]string{"base", "next"}
 		if round%2 == 0 {
 			arms = [2]string{"next", "base"}
 		}
 		for _, arm := range arms {
-			trials = append(trials, compactTrial{arm, diagnostic, round})
+			trials = append(trials, compactTrial{arm, "lock-profile", round})
 		}
 	}
 	return trials, nil

@@ -31,7 +31,7 @@ type TypedBatchResult[V any] struct {
 // BatchGet reads keys at one point in time, preserving input order. A codec
 // or DB error discards the entire result. Only found values are decoded.
 // MaxBatchGetValueBytes applies to encoded value bytes before decoding.
-func (db *View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
+func (db View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 	return db.batchGet(keys, nil)
 }
 
@@ -85,7 +85,7 @@ func (db *View[K, V]) batchGet(keys []K, snapshot *Snapshot) ([]TypedBatchResult
 
 // BatchPut encodes the entire batch before its atomic commit. For repeated
 // encoded keys the last value wins. DB.BatchPut limits apply to encoded bytes.
-func (db *View[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
+func (db View[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
 	batch, err := (*engine.DB)(db.core).PreparePuts(len(entries), func(i int) (Entry, error) {
 		entry := entries[i]
 		key, err := db.encodeBatchKey("BatchPut", i, entry.Key)
@@ -106,7 +106,7 @@ func (db *View[K, V]) BatchPut(entries []TypedEntry[K, V]) error {
 
 // BatchDelete atomically removes the distinct encoded keys. A missing key
 // returns a BatchKeyError matching ErrNotFound before publication.
-func (db *View[K, V]) BatchDelete(keys []K) error {
+func (db View[K, V]) BatchDelete(keys []K) error {
 	batch, err := (*engine.DB)(db.core).PrepareDeletes(len(keys), func(i int) ([]byte, error) {
 		return db.encodeBatchKey("BatchDelete", i, keys[i])
 	})
@@ -127,6 +127,8 @@ type typedWriteOp[K, V any] struct {
 // Keys and values are encoded at Apply. Slices, maps, and pointers retain their
 // underlying data until Reset. Copy mutable inputs before queueing them if they
 // will be reused before Apply returns. Pass the batch by pointer after first use.
+// During Apply, keep the batch unchanged, including in codec callbacks. Call
+// Put, Delete, or Reset only after Apply returns.
 type TypedWriteBatch[K, V any] struct {
 	ops []typedWriteOp[K, V]
 }
@@ -160,7 +162,7 @@ func (b *TypedWriteBatch[K, V]) Reset() {
 
 // Apply encodes all queued operations and commits them atomically via [DB.Apply].
 // Codec errors return a *BatchCodecError with Operation "Apply" before modifying DB state.
-func (db *View[K, V]) Apply(batch *TypedWriteBatch[K, V]) error {
+func (db View[K, V]) Apply(batch *TypedWriteBatch[K, V]) error {
 	count := batch.Len()
 	prepared, err := (*engine.DB)(db.core).PrepareMixed(count, func(i int) (engine.MixedOp, error) {
 		op := batch.ops[i]

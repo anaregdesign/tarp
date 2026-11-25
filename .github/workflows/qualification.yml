@@ -30,10 +30,10 @@ on:
         type: string
         required: false
       compact-pair:
-        description: Compare the selected ref with the current-format baseline, use fixed 5s windows, or compare historical releases
+        description: Compare the selected ref with the pinned baseline using alternating controls or fixed five-second windows
         type: choice
         default: candidate
-        options: [candidate, candidate-fixed, releases]
+        options: [candidate, candidate-fixed]
       group:
         description: Select a bounded group; complete all catalog exceeds the 192-case execution limit
         required: true

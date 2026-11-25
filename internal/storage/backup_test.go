@@ -9,7 +9,11 @@ import (
 	"testing"
 
 	"github.com/anaregdesign/tarp/internal/format"
+	"github.com/anaregdesign/tarp/internal/index"
+	"github.com/anaregdesign/tarp/internal/index/memory"
 )
+
+func newBackupTestIndex() (index.Backend, error) { return memory.New(), nil }
 
 func TestRestoreRejectsStagedBytesThatDifferFromBackup(t *testing.T) {
 	cfg := Config{Handles: 1, ValueCacheBudgetBytes: 1024, MaxRecordBytes: 256, TargetSegmentBytes: 1024}
@@ -27,7 +31,7 @@ func TestRestoreRejectsStagedBytesThatDifferFromBackup(t *testing.T) {
 	}
 	defer capture.Release()
 	backup := filepath.Join(t.TempDir(), "backup")
-	if err := Backup(t.Context(), capture, cfg, nil, backup, nil); err != nil {
+	if err := Backup(t.Context(), capture, cfg, nil, backup, nil, newBackupTestIndex); err != nil {
 		t.Fatal(err)
 	}
 	active := DataName(capture.Current.UUID, capture.Current.ActiveID)
@@ -185,7 +189,7 @@ func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) 
 	}
 	defer c.Release()
 	dir := filepath.Join(t.TempDir(), "backup")
-	if err := Backup(t.Context(), c, cfg, store.IO, dir, nil); err != nil {
+	if err := Backup(t.Context(), c, cfg, store.IO, dir, nil, newBackupTestIndex); err != nil {
 		t.Fatal(err)
 	}
 	listPath := filepath.Join(dir, "BACKUP")

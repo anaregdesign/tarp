@@ -44,24 +44,11 @@ func retiredPinnedBytes(s *storage.Store) int64 {
 	return total
 }
 
-// The comparison overlay also builds against a frozen baseline whose DATA
-// segments expose ordinary references but not retention pins.
-func dataRetentionPinObserver() (func(*storage.DataSegment) bool, error) {
-	type observer interface{ HasRetentionPin() bool }
-	if _, ok := any((*storage.DataSegment)(nil)).(observer); !ok {
-		return nil, errors.New("backup pin witness requires DATA retention pin observation, which this revision does not support")
-	}
-	return func(f *storage.DataSegment) bool { return any(f).(observer).HasRetentionPin() }, nil
-}
-
 // The backup is still parked on its first DATA write. The checkpoint has already
 // returned and the cleaner is parked, so the backup owns the only retention
 // pins. Ordinary references (including PARITY pins) do not prove retention.
 func witnessBackupPins(probe engine.Observer, capturedIDs []uint64) (map[uint64]int64, error) {
-	hasRetentionPin, err := dataRetentionPinObserver()
-	if err != nil {
-		return nil, err
-	}
+	var err error
 	files := make(map[uint64]int64)
 	probe.Store(func(s *storage.Store) {
 		selected := selectedDataIDs(s)
@@ -74,7 +61,7 @@ func witnessBackupPins(probe engine.Observer, capturedIDs []uint64) (map[uint64]
 				err = fmt.Errorf("retired captured DATA %d vanished before backup release", id)
 				return
 			}
-			if !hasRetentionPin(f) {
+			if !f.HasRetentionPin() {
 				err = fmt.Errorf("retired captured DATA %d has no retention pin", id)
 				return
 			}
@@ -94,10 +81,6 @@ func witnessBackupPins(probe engine.Observer, capturedIDs []uint64) (map[uint64]
 // finished. Check the same retired file IDs on disk on either side of release
 // of the parked automatic cleaner, before reopening the source could remove them.
 func verifyBackupReclamation(ctx context.Context, probe engine.Observer, hooks *measurementHooks, backup string, files map[uint64]int64) (p pinnedBackupMeasurement, err error) {
-	hasRetentionPin, err := dataRetentionPinObserver()
-	if err != nil {
-		return p, err
-	}
 	probe.Store(func(s *storage.Store) {
 		for id := range files {
 			f := s.Segments[id]
@@ -105,7 +88,7 @@ func verifyBackupReclamation(ctx context.Context, probe engine.Observer, hooks *
 				err = fmt.Errorf("retired DATA %d vanished before cleaner release", id)
 				return
 			}
-			if hasRetentionPin(f) {
+			if f.HasRetentionPin() {
 				err = fmt.Errorf("completed backup left a retention pin on retired DATA %d", id)
 				return
 			}
@@ -175,10 +158,6 @@ func verifyBackupReclamation(ctx context.Context, probe engine.Observer, hooks *
 }
 
 func TestMeasurementBackupPinWitness(t *testing.T) {
-	hasRetentionPin, err := dataRetentionPinObserver()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, missing := range []bool{false, true} {
 		name, parkedScan := "released-unrelated-parity-pin", 2
 		if missing {
@@ -281,7 +260,7 @@ func TestMeasurementBackupPinWitness(t *testing.T) {
 			}
 			probe.Store(func(s *storage.Store) {
 				f := s.Segments[parityID]
-				if f == nil || f.References() != wantReferences || hasRetentionPin(f) {
+				if f == nil || f.References() != wantReferences || f.HasRetentionPin() {
 					t.Fatalf("DATA %d should have only %d ordinary PARITY references at witness time", parityID, wantReferences)
 				}
 			})

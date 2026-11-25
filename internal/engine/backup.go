@@ -51,7 +51,7 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 		return db.yieldToWriter(ctx, "backup.paced:after")
 	}
 	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error {
-		return storage.BackupWithIndex(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex)
+		return storage.Backup(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex)
 	}, nil)
 	if err != nil {
 		var source *storage.SourceError

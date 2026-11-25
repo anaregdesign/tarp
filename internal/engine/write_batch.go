@@ -1,10 +1,8 @@
 package engine
 
 import (
-	"bytes"
 	"errors"
-	"hash/maphash"
-	"math/bits"
+	"slices"
 
 	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
@@ -18,23 +16,23 @@ type MixedOp struct {
 	Delete bool
 }
 
-type coalescedMixedItem struct {
-	record      storage.MixedEntry
-	recordBytes uint64
-	inputIndex  int
-	superseded  bool
+type mixedBatchItem struct {
+	record     storage.MixedEntry
+	key        string // Owned once per distinct key, shared by the index and cache on commit.
+	inputIndex int
 }
 
 // A PreparedMixedBatch holds validated, intra-batch-coalesced Put and Delete
 // operations ready for atomic publication on one DB.
 type PreparedMixedBatch struct {
 	db      *DB
-	records []storage.MixedEntry
+	records []mixedBatchItem
+	order   []uint16 // One-based record slots in final input order, when reordering is needed.
 }
 
 // PrepareMixed validates input count, per-operation key/entry limits in input
 // order, folds duplicate encoded keys so the last operation per distinct key
-// wins, and checks the combined encoded record byte limit of the coalesced set.
+// wins. Commit checks the combined record bytes after resolving absent Deletes.
 // No database lock is held while calling opAt.
 func (db *DB) PrepareMixed(count int, opAt func(int) (MixedOp, error)) (PreparedMixedBatch, error) {
 	if err := CheckBatchCount(count); err != nil {
@@ -44,82 +42,42 @@ func (db *DB) PrepareMixed(count int, opAt func(int) (MixedOp, error)) (Prepared
 		return PreparedMixedBatch{db: db}, nil
 	}
 
-	const small = 16
-	var inline [2 * small]uint16
-	slots := inline[:]
-	items := make([]coalescedMixedItem, 0, min(count, small))
-	distinct := 0
+	positions := make(map[string]int)
+	items := make([]mixedBatchItem, 0, min(count, 16))
 
 	for i := range count {
 		op, err := opAt(i)
 		if err != nil {
 			return PreparedMixedBatch{}, err
 		}
-		kind := uint8(format.Put)
-		val := op.Value
+		record := storage.MixedEntry{Kind: format.Put, Key: op.Key, Value: op.Value}
 		if op.Delete {
-			kind = format.Delete
-			val = nil
+			record.Kind, record.Value = format.Delete, nil
 		}
-		keyBytes, valBytes := uint64(len(op.Key)), uint64(len(val))
-		if size := db.opts.checkEntryLimits(keyBytes, valBytes); size != nil {
+		if size := db.opts.checkEntryLimits(uint64(len(record.Key)), uint64(len(record.Value))); size != nil {
 			return PreparedMixedBatch{}, &BatchLimitError{Kind: BatchEntrySizeLimit, Index: i, Entry: size}
 		}
-		recBytes := entrysize.RecordBytes(keyBytes, valBytes)
 
-		slot := mixedKeySlot(slots, items, op.Key)
-		if prev := slots[slot]; prev != 0 {
-			items[prev-1].superseded = true
-			items = append(items, coalescedMixedItem{
-				record:      storage.MixedEntry{Kind: kind, Key: op.Key, Value: val},
-				recordBytes: recBytes,
-				inputIndex:  i,
-			})
-			slots[slot] = uint16(len(items))
+		if pos, found := positions[string(op.Key)]; found {
+			items[pos].record = record
+			items[pos].inputIndex = i
 			continue
 		}
-
-		distinct++
-		if distinct > len(slots)/2 {
-			slots = make([]uint16, 1<<bits.Len(uint(2*min(count, max(2*distinct, small))-1)))
-			for idx := range items {
-				if !items[idx].superseded {
-					slots[mixedKeySlot(slots, items, items[idx].record.Key)] = uint16(idx + 1)
-				}
-			}
-			slot = mixedKeySlot(slots, items, op.Key)
-		}
-		items = append(items, coalescedMixedItem{
-			record:      storage.MixedEntry{Kind: kind, Key: op.Key, Value: val},
-			recordBytes: recBytes,
-			inputIndex:  i,
-		})
-		slots[slot] = uint16(len(items))
+		key := string(op.Key)
+		positions[key] = len(items)
+		items = append(items, mixedBatchItem{record: record, key: key, inputIndex: i})
 	}
-
-	records := make([]storage.MixedEntry, 0, distinct)
-	var used uint64
-	for i := range items {
-		if items[i].superseded {
-			continue
+	batch := PreparedMixedBatch{db: db, records: items}
+	if len(items) > 1 && len(items) < count {
+		// Sequence assignment and limit errors follow the last input for each
+		// key. Compact the slot numbers without moving the records themselves.
+		slots := make([]uint16, count)
+		for pos := range items {
+			slots[items[pos].inputIndex] = uint16(pos + 1)
 		}
-		var err error
-		used, err = db.addBatchRecordBytes(items[i].inputIndex, used, items[i].recordBytes)
-		if err != nil {
-			return PreparedMixedBatch{}, err
-		}
-		records = append(records, items[i].record)
+		batch.order = slices.DeleteFunc(slots, func(slot uint16) bool { return slot == 0 })
 	}
-	return PreparedMixedBatch{db: db, records: records}, nil
-}
-
-func mixedKeySlot(slots []uint16, items []coalescedMixedItem, key []byte) int {
-	mask := len(slots) - 1
-	bucket := int(maphash.Bytes(batchKeySeed, key)) & mask
-	for slots[bucket] != 0 && !bytes.Equal(items[slots[bucket]-1].record.Key, key) {
-		bucket = (bucket + 1) & mask
-	}
-	return bucket
+	return batch, nil
 }
 
 // Commit admits a prepared mixed batch after all application codec calls return.
@@ -180,29 +138,41 @@ func (b PreparedMixedBatch) apply() error {
 	// Elide Delete operations on keys that are not currently live so recovery
 	// never encounters an unpruned tombstone without a preceding live key.
 	surviving := make([]storage.MixedEntry, 0, len(records))
-	owned := make([]ownedMutation, 0, len(records))
-	previous := make([]storage.Location, 0, len(records))
+	type change struct {
+		entry    ownedMutation
+		previous storage.Location
+	}
+	changes := make([]change, 0, len(records))
 	hasPut := false
 
-	for _, rec := range records {
-		keyStr := string(rec.Key)
+	var used uint64
+	for i := range records {
+		pos := i
+		if b.order != nil {
+			pos = int(b.order[i]) - 1
+		}
+		item := &records[pos]
+		rec := item.record
+		var old storage.Location
+		var err error
 		if rec.Kind == format.Delete {
-			old, err := db.stage(tx, format.Delete, keyStr, storage.Location{})
+			old, err = db.stage(tx, format.Delete, item.key, storage.Location{})
 			if err != nil {
 				if errors.Is(err, ErrNotFound) {
 					continue
 				}
 				return operationError(op, "index-prepare", err)
 			}
-			surviving = append(surviving, rec)
-			owned = append(owned, ownedMutation{key: keyStr})
-			previous = append(previous, old)
-			continue
+		} else {
+			hasPut = true
 		}
-		hasPut = true
+		recordBytes := entrysize.RecordBytes(uint64(len(rec.Key)), uint64(len(rec.Value)))
+		used, err = db.addBatchRecordBytes(item.inputIndex, used, recordBytes)
+		if err != nil {
+			return err
+		}
 		surviving = append(surviving, rec)
-		owned = append(owned, ownedMutation{key: keyStr})
-		previous = append(previous, storage.Location{})
+		changes = append(changes, change{entry: ownedMutation{key: item.key}, previous: old})
 	}
 
 	if len(surviving) == 0 {
@@ -215,8 +185,8 @@ func (b PreparedMixedBatch) apply() error {
 			if surviving[i].Kind == format.Delete {
 				return nil
 			}
-			old, err := db.stage(tx, format.Put, owned[i].key, loc)
-			previous[i] = old
+			old, err := db.stage(tx, format.Put, changes[i].entry.key, loc)
+			changes[i].previous = old
 			return err
 		}
 	}
@@ -228,7 +198,7 @@ func (b PreparedMixedBatch) apply() error {
 	}
 
 	for i, rec := range surviving {
-		db.copyPutValue(rec.Kind, &owned[i], rec.Value)
+		db.copyPutValue(rec.Kind, &changes[i].entry, rec.Value)
 	}
 
 	db.indexGate.Lock()
@@ -240,8 +210,8 @@ func (b PreparedMixedBatch) apply() error {
 	}
 	tx.Commit()
 	finished = true
-	for i, entry := range owned {
-		if db.applyMutation(surviving[i].Kind, entry, locations[i], previous[i]) {
+	for i, c := range changes {
+		if db.applyMutation(surviving[i].Kind, c.entry, locations[i], c.previous) {
 			invalidatedSealed = true
 		}
 	}

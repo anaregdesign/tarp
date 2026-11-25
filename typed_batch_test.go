@@ -276,6 +276,53 @@ func TestTypedBatchCodecCanCloseOwnerBeforeAdmission(t *testing.T) {
 	}
 }
 
+func TestTypedBatchesKeepOriginalBindingDuringCodecCalls(t *testing.T) {
+	source := openPublicDB(t, t.TempDir(), tarp.Options{})
+	other := openPublicDB(t, t.TempDir(), tarp.Options{})
+	reject := rejectingStringCodec{errors.New("replacement codec called")}
+	replacement, err := tarp.Bind(other, reject, reject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view tarp.View[string, string]
+	original, err := tarp.Bind(source, rebindOnEncode{rebind: func() { view = replacement }}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []tarp.TypedEntry[string, string]{{Key: "k", Value: "invalid first"}, {Key: "rejected", Value: "rejected"}}
+	for _, e := range entries {
+		if err := source.Put([]byte(e.Key), []byte(e.Value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := []string{"k", "rejected"}
+	view = original
+	got, err := view.BatchGet(keys)
+	if err != nil || len(got) != 2 || !got[0].Found || got[0].Value != entries[0].Value || !got[1].Found || got[1].Value != entries[1].Value {
+		t.Errorf("BatchGet = %+v, %v", got, err)
+	}
+	view = original
+	if err := view.BatchPut(entries); err != nil {
+		t.Errorf("BatchPut = %v", err)
+	}
+	var batch tarp.TypedWriteBatch[string, string]
+	batch.Put("k", "rejected")
+	view = original
+	if err := view.Apply(&batch); err != nil {
+		t.Errorf("Apply = %v", err)
+	}
+	if got, err := source.Get([]byte("k")); string(got) != "rejected" || err != nil {
+		t.Errorf("source after Apply = %q, %v", got, err)
+	}
+	view = original
+	if err := view.BatchDelete(keys); err != nil {
+		t.Errorf("BatchDelete = %v", err)
+	}
+	if _, err := source.Get([]byte("k")); !errors.Is(err, tarp.ErrNotFound) {
+		t.Errorf("source after BatchDelete = %v", err)
+	}
+}
+
 type failingIntCodec struct {
 	failOn int
 	err    error

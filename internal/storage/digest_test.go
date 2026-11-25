@@ -81,7 +81,7 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 		t.Fatal(err)
 	}
 	destination := filepath.Join(t.TempDir(), "backup")
-	if err := Backup(t.Context(), capture, cfg, store.IO, destination, nil); !errors.Is(err, ErrCorrupt) {
+	if err := Backup(t.Context(), capture, cfg, store.IO, destination, nil, newBackupTestIndex); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("backup: %v", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {

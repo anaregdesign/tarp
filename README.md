@@ -7,6 +7,9 @@ tests, and measurement tools use the Go standard library only.
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
 uses [v0.14.0](https://github.com/anaregdesign/tarp/tree/v0.14.0).
+Mixed `WriteBatch`, reusable read snapshots, ordered codecs and range scans
+were added on `main` after v0.14.0. To try those examples from a Go module
+before the next tag, run `go get github.com/anaregdesign/tarp@main`.
 
 ```sh
 mkdir tarp-example
@@ -68,6 +71,15 @@ During v0, each revision supports its current Go API, database format and
 backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
+
+On `main` after v0.14.0, `IndexMode` has two values, `IndexBTree` (zero)
+and `IndexMemory`. Omit `Options.IndexMode` or set it to `IndexBTree` wherever
+your code previously used `IndexDefault`. If your application stores the
+numeric mode in its own configuration, change the former B+tree value 2 to 0.
+
+`Bind` and `TypedDB.View` now return a `View[K,V]` value. Use that value
+type for borrowed handle parameters and fields. Check the error returned by
+`Bind` before using the view.
 
 v0.14.0 keeps the v0.13.0 database and backup formats. Existing calls to
 `db.Compact(ctx)` keep their source-order checkpoint behavior. Both `DB` and
@@ -141,7 +153,7 @@ func storeScore(dir string) (score int64, err error) {
 
 `OpenTyped` returns an owning `*TypedDB`, with the same backup, maintenance
 and close operations as `*DB`. To lend an open DB to another component, use
-`Bind`. The returned `*View[K,V]` can read, write, scan and batch the same
+`Bind`. The returned `View[K,V]` value can read, write, scan and batch the same
 records. The opener controls the shared database lifetime.
 An owner created with `OpenTyped` can lend its existing codecs with `db.View()`.
 
@@ -277,7 +289,7 @@ destination keys from a view using `NewCodec[EdgeKey]()` and `Float32Codec{}`.
 ```go
 type EdgeKey struct{ Tail, Head string }
 
-func printHeads(ctx context.Context, edges *tarp.View[EdgeKey, float32], tail string) error {
+func printHeads(ctx context.Context, edges tarp.View[EdgeKey, float32], tail string) error {
 	type tailField struct{ Tail string }
 	codec, err := tarp.NewCodec[tailField]()
 	if err != nil {
@@ -413,8 +425,8 @@ what gets written. The same rule applies to typed keys.
 `DB.Delete` and `DB.BatchDelete`
 retain their `ErrNotFound` semantics on missing keys, whereas `WriteBatch.Delete`
 is idempotent at commit time: deletes targeting non-live keys are elided without
-writing orphan tombstones. Duplicate keys within one `WriteBatch` coalesce in
-input order so the last operation per key wins before checking segment capacity
+writing orphan tombstones. The last operation per key wins. Only the remaining
+puts and deletes of live keys count toward the segment capacity
 (`BatchRecordBytesLimit`). A nil, empty, or fully elided batch checks database
 health and returns `nil` without writing DATA or advancing `WriteCommits`.
 
@@ -438,7 +450,8 @@ val, err := snap.Get([]byte("config/version"))
 Foreground writes and compaction can proceed while a `Snapshot` is open.
 `snap.Close()` is idempotent and rejects subsequent reads. The snapshot
 releases its DATA segment pins once it is closed and its last in-flight
-operation or iterator exits. After a later write publishes, reads through the
+operation or iterator exits. Closing the owning DB also ends read access
+through the snapshot. After a later write publishes, reads through the
 older snapshot bypass the live value cache.
 
 ## Contract
@@ -486,7 +499,7 @@ records, or total disk quota is provided.
 
 ## Choosing the key index
 
-`Options{}` and `IndexDefault` use a disk-backed B+tree with a 16 MiB
+`Options{}` uses a disk-backed B+tree with a 16 MiB
 working-memory budget. The index mode is selected on each Open, so an
 existing database can use either backend without migration.
 If random lookup latency is a priority and every key and its DATA address fit
@@ -690,7 +703,7 @@ If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
 
-### Key-ordered compaction (unreleased)
+### Key-ordered compaction
 
 Call `db.Compact(ctx, tarp.WithKeyOrder())` on a raw or typed DB after an import
 or in a maintenance window to place related values together for `ScanPrefix` and `ScanRange`.
@@ -796,7 +809,8 @@ go test ./internal/format -run '^$' -fuzz '^FuzzDecoders$' -fuzztime=10000x -par
 
 The [CI workflow](.github/workflows/ci.yml) runs full tests, race detection, vet,
 and module dependency isolation in one Linux amd64 job using the latest stable
-Go release. It runs for pull requests to `main`,
+Go release. It also checks the Compact comparison fixture and captured DATA
+retention on both the pinned baseline and the candidate. It runs for pull requests to `main`,
 pushes to `main`, and manual dispatch. Hosted-runner checks are functional
 evidence, not power-loss or bounded-device qualification.
 

@@ -89,7 +89,7 @@ func TestReplacingTypedViewKeepsOwnerOnOriginalDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	*borrowed = *replacement
+	borrowed = replacement
 	if err := borrowed.Put("k", "other"); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +107,57 @@ func TestReplacingTypedViewKeepsOwnerOnOriginalDatabase(t *testing.T) {
 	}
 }
 
+type rebindOnEncode struct {
+	tarp.StringCodec
+	rebind func()
+}
+
+func (c rebindOnEncode) Encode(key string) ([]byte, error) {
+	c.rebind()
+	return c.StringCodec.Encode(key)
+}
+
+func TestTypedPointCallsKeepOriginalBindingDuringCodecCalls(t *testing.T) {
+	source := openPublicDB(t, t.TempDir(), tarp.Options{})
+	other := openPublicDB(t, t.TempDir(), tarp.Options{})
+	replacement, err := tarp.Bind(other, tarp.StringCodec{}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Put([]byte("k"), []byte("source")); err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.Put("k", "other"); err != nil {
+		t.Fatal(err)
+	}
+	var view tarp.View[string, string]
+	original, err := tarp.Bind(source, rebindOnEncode{rebind: func() { view = replacement }}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view = original
+	if got, err := view.Get("k"); got != "source" || err != nil {
+		t.Errorf("Get = %q, %v", got, err)
+	}
+	view = original
+	if err := view.Put("k", "updated"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := source.Get([]byte("k")); string(got) != "updated" || err != nil {
+		t.Errorf("source after Put = %q, %v", got, err)
+	}
+	view = original
+	if err := view.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Get([]byte("k")); !errors.Is(err, tarp.ErrNotFound) {
+		t.Errorf("source after Delete = %v", err)
+	}
+	if got, err := replacement.Get("k"); got != "other" || err != nil {
+		t.Errorf("other database after Put and Delete = %q, %v", got, err)
+	}
+}
+
 func TestTypedScanKeepsItsDatabaseAndCodecsAfterViewReplacement(t *testing.T) {
 	view, replacement := rebindableIteratorViews(t)
 	seq := view.Scan(t.Context())
@@ -119,7 +170,7 @@ func TestTypedScanKeepsItsDatabaseAndCodecsAfterViewReplacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			seen[entry.Key] = entry.Value
-			*view = *replacement
+			view = replacement
 		}
 		if len(seen) != 2 || seen["invalid1"] != "invalid first" || seen["invalid2"] != "invalid second" {
 			t.Fatalf("Scan run %d returned %v", attempt, seen)
@@ -127,7 +178,7 @@ func TestTypedScanKeepsItsDatabaseAndCodecsAfterViewReplacement(t *testing.T) {
 	}
 }
 
-func rebindableIteratorViews(t *testing.T) (*tarp.View[string, string], *tarp.View[string, string]) {
+func rebindableIteratorViews(t *testing.T) (tarp.View[string, string], tarp.View[string, string]) {
 	t.Helper()
 	source := openPublicDB(t, t.TempDir(), tarp.Options{})
 	view, err := tarp.Bind(source, tarp.StringCodec{}, tarp.StringCodec{})
@@ -277,7 +328,7 @@ func TestTypedDBScanStopsOnCodecErrorOrBreak(t *testing.T) {
 }
 
 func TestTypedDBRequiresCoreAndCodecs(t *testing.T) {
-	if db, err := tarp.Bind(nil, tarp.StringCodec{}, tarp.StringCodec{}); db != nil || err == nil {
+	if db, err := tarp.Bind(nil, tarp.StringCodec{}, tarp.StringCodec{}); db != (tarp.View[string, string]{}) || err == nil {
 		t.Fatalf("Bind with nil core = %v, %v", db, err)
 	}
 	dir := filepath.Join(t.TempDir(), "db")
@@ -299,7 +350,7 @@ func TestTypedDBRequiresCoreAndCodecs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	if db, err := tarp.Bind(raw, tarp.StringCodec{}, (*tarp.StringCodec)(nil)); db != nil || err == nil {
+	if db, err := tarp.Bind(raw, tarp.StringCodec{}, (*tarp.StringCodec)(nil)); db != (tarp.View[string, string]{}) || err == nil {
 		t.Fatalf("Bind with nil value codec = %v, %v", db, err)
 	}
 }

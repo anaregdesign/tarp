@@ -19,8 +19,10 @@ type TypedDB[K, V any] struct {
 // Embed the view privately so the caller cannot replace an owner's DB.
 type boundView[K, V any] = View[K, V]
 
-// View provides live, typed access to the DB owned by its caller. Each read
-// sees the committed state at that operation. Closing the owner ends access.
+// View borrows typed access to a DB. Its zero value is unbound. Obtain a usable
+// View from [Bind] or [TypedDB.View]. Copies share the same live database.
+// Each call retains its DB and codecs while user codec methods run. Closing
+// the owner ends access.
 type View[K, V any] struct {
 	core       *DB
 	keyCodec   Codec[K]
@@ -42,23 +44,22 @@ func OpenTyped[K, V any](dir string, opts Options, keyCodec Codec[K], valueCodec
 	return &TypedDB[K, V]{View[K, V]{core, keyCodec, valueCodec}}, nil
 }
 
-// Bind associates non-nil codecs with an open DB. The typed view shares
-// the live key and value state with the owner. The DB does not store the codecs with its data.
-func Bind[K, V any](core *DB, keyCodec Codec[K], valueCodec Codec[V]) (*View[K, V], error) {
+// Bind returns a [View] of an open DB using the supplied non-nil codecs.
+// The DB does not store the codecs with its data.
+func Bind[K, V any](core *DB, keyCodec Codec[K], valueCodec Codec[V]) (View[K, V], error) {
 	if core == nil {
-		return nil, errors.New("tarp: nil DB")
+		return View[K, V]{}, errors.New("tarp: nil DB")
 	}
 	if err := checkCodecs(keyCodec, valueCodec); err != nil {
-		return nil, err
+		return View[K, V]{}, err
 	}
-	return &View[K, V]{core, keyCodec, valueCodec}, nil
+	return View[K, V]{core, keyCodec, valueCodec}, nil
 }
 
-// View returns a non-owning handle that shares this database and its codecs.
+// View returns a copy of the owner's typed binding.
 // Closing the owner also ends access through the view.
-func (db *TypedDB[K, V]) View() *View[K, V] {
-	view := db.boundView
-	return &view
+func (db *TypedDB[K, V]) View() View[K, V] {
+	return db.boundView
 }
 
 func checkCodecs[K, V any](keyCodec Codec[K], valueCodec Codec[V]) error {
@@ -92,8 +93,8 @@ func (db *View[K, V]) encodeKey(key K) ([]byte, error) {
 	return data, nil
 }
 
-func (db *View[K, V]) decodeValue(data []byte) (V, error) {
-	value, err := db.valueCodec.Decode(data)
+func decodeValue[V any](codec Codec[V], data []byte) (V, error) {
+	value, err := codec.Decode(data)
 	if err != nil {
 		var zero V
 		return zero, fmt.Errorf("tarp: decode value: %w", err)
@@ -102,7 +103,7 @@ func (db *View[K, V]) decodeValue(data []byte) (V, error) {
 }
 
 // Get returns the decoded value or the zero value of V and an error.
-func (db *View[K, V]) Get(key K) (V, error) {
+func (db View[K, V]) Get(key K) (V, error) {
 	var zero V
 	k, err := db.encodeKey(key)
 	if err != nil {
@@ -112,12 +113,12 @@ func (db *View[K, V]) Get(key K) (V, error) {
 	if err != nil {
 		return zero, err
 	}
-	return db.decodeValue(data)
+	return decodeValue(db.valueCodec, data)
 }
 
 // Put durably inserts or replaces a value. Both encodings must succeed before
 // the underlying DB receives the write.
-func (db *View[K, V]) Put(key K, value V) error {
+func (db View[K, V]) Put(key K, value V) error {
 	k, err := db.encodeKey(key)
 	if err != nil {
 		return err
@@ -130,7 +131,7 @@ func (db *View[K, V]) Put(key K, value V) error {
 }
 
 // Delete durably removes a key. A missing key returns ErrNotFound.
-func (db *View[K, V]) Delete(key K) error {
+func (db View[K, V]) Delete(key K) error {
 	k, err := db.encodeKey(key)
 	if err != nil {
 		return err
@@ -147,21 +148,20 @@ type TypedEntry[K, V any] struct {
 // Scan decodes each entry in a DB.Scan snapshot. The iterator retains the DB
 // and codecs from this call. A DB or codec error yields one zero TypedEntry and
 // ends iteration. Breaking early releases the snapshot.
-func (db *View[K, V]) Scan(ctx context.Context) iter.Seq2[TypedEntry[K, V], error] {
+func (db View[K, V]) Scan(ctx context.Context) iter.Seq2[TypedEntry[K, V], error] {
 	return db.ScanPrefix(ctx, nil)
 }
 
 // ScanPrefix decodes the entries selected by [DB.ScanPrefix]. The prefix is a
 // prefix of the stored key bytes and does not need to encode a complete K.
-func (db *View[K, V]) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[TypedEntry[K, V], error] {
-	view := *db
-	rows := view.core.ScanPrefix(ctx, encodedPrefix)
+func (db View[K, V]) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[TypedEntry[K, V], error] {
+	rows := db.core.ScanPrefix(ctx, encodedPrefix)
 	return func(yield func(TypedEntry[K, V], error) bool) {
-		view.decodeEntries(rows, yield)
+		db.decodeEntries(rows, yield)
 	}
 }
 
-func (db *View[K, V]) decodeEntries(seq iter.Seq2[Entry, error], yield func(TypedEntry[K, V], error) bool) {
+func (db View[K, V]) decodeEntries(seq iter.Seq2[Entry, error], yield func(TypedEntry[K, V], error) bool) {
 	for entry, err := range seq {
 		if err != nil {
 			yield(TypedEntry[K, V]{}, err)
@@ -172,7 +172,7 @@ func (db *View[K, V]) decodeEntries(seq iter.Seq2[Entry, error], yield func(Type
 			yield(TypedEntry[K, V]{}, fmt.Errorf("tarp: decode key: %w", err))
 			return
 		}
-		value, err := db.decodeValue(entry.Value)
+		value, err := decodeValue(db.valueCodec, entry.Value)
 		if err != nil {
 			yield(TypedEntry[K, V]{}, err)
 			return

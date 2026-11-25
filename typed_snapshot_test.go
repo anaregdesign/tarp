@@ -15,6 +15,45 @@ type snapshotCompositeKey struct {
 	Tag       string
 }
 
+func TestTypedSnapshotReadsKeepOriginalBindingDuringCodecCalls(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	if err := db.Put([]byte("k"), []byte("invalid first")); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot tarp.TypedSnapshot[string, string]
+	var replacement *tarp.TypedSnapshot[string, string]
+	view, err := tarp.Bind(db, rebindOnEncode{rebind: func() { snapshot = *replacement }}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := view.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	if err := db.Put([]byte("k"), []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	other, err := tarp.Bind(db, tarp.StringCodec{}, rejectingStringCodec{errors.New("replacement decoder called")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err = other.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	snapshot = *original
+	if got, err := snapshot.Get("k"); got != "invalid first" || err != nil {
+		t.Errorf("Get = %q, %v", got, err)
+	}
+	snapshot = *original
+	got, err := snapshot.BatchGet([]string{"k"})
+	if err != nil || len(got) != 1 || !got[0].Found || got[0].Value != "invalid first" {
+		t.Errorf("BatchGet = %+v, %v", got, err)
+	}
+}
+
 func TestTypedSnapshotOperations(t *testing.T) {
 	ctx := context.Background()
 	keyCodec, err := tarp.NewOrderedCodec[snapshotCompositeKey]()

@@ -1,7 +1,6 @@
 package benchmark
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -49,16 +48,6 @@ func TestEdgePrefixDataIO(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Both comparison arms read the last user sequence from the same
-			// verified, immutable backup in the 128-byte CURRENT format.
-			current, err := os.ReadFile(filepath.Join(source, "CURRENT"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(current) != 128 {
-				t.Fatalf("CURRENT size %d, want 128", len(current))
-			}
-			lastUserSequence := binary.LittleEndian.Uint64(current[96:104])
 			dir := filepath.Join(t.TempDir(), "restored")
 			if err := tarp.Restore(t.Context(), tarp.RestoreRequest{Source: source, Destination: dir, Limits: opts.RestoreLimits()}); err != nil {
 				t.Fatal(err)
@@ -72,11 +61,11 @@ func TestEdgePrefixDataIO(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			native := edgePrefixArm(t, db, arm == "prefix")
+			usePrefix := arm == "prefix"
 			// Warm and verify all logical rows once. Evictions below affect
 			// DATA files only. B+tree pages can stay in the pager and OS page cache.
 			all := edgePrefixQuery{}
-			all.verify(t, db, edges, true, nil)
+			all.verify(t, db, edges, true, false)
 			storage, err := openContainerBatchIO(dir)
 			if err != nil {
 				t.Fatal(err)
@@ -109,14 +98,14 @@ func TestEdgePrefixDataIO(t *testing.T) {
 					t.Run(op+"/"+query.name, func(t *testing.T) {
 						q := edgePrefixQuery{prefix: edgeTailPrefix(query.tail)}
 						values := op == "Scan"
-						n := q.verify(t, db, edges, values, native)
+						n := q.verify(t, db, edges, values, usePrefix)
 						for trial := 1; trial <= 3; trial++ {
 							if err := storage.Evict(); err != nil {
 								t.Fatal(err)
 							}
 							before := readPrefixIOBytes(t, storage)
 							start := time.Now()
-							counts, err := q.run(t.Context(), db, values, native, nil)
+							counts, err := q.run(t.Context(), db, values, usePrefix, nil)
 							ns := time.Since(start).Nanoseconds()
 							charged := prefixIOBytesSince(t, storage, before)
 							if err != nil || counts.matches != n {
@@ -124,7 +113,7 @@ func TestEdgePrefixDataIO(t *testing.T) {
 							}
 							row := map[string]any{
 								"arm": arm, "layout": layout, "operation": op, "query": query.name, "trial": trial,
-								"database_id": fmt.Sprintf("%x", info.DatabaseID), "last_user_sequence": lastUserSequence,
+								"database_id": fmt.Sprintf("%x", info.DatabaseID), "last_user_sequence": info.LastUserSequence,
 								"data_files": len(storage.files), "filesystem": storage.Filesystem, "device": storage.Device,
 								"matches": n, "yielded": counts.candidates, "yielded_value_bytes": counts.valueBytes,
 								"elapsed_ns": ns, "process_read_bytes": charged, "full_read_control_bytes": control,

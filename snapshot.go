@@ -15,7 +15,8 @@ import (
 //
 // Share the returned *Snapshot across goroutines. Copying the Snapshot value
 // duplicates its resource bookkeeping. Call Close when finished to release the
-// retained index and segment resources.
+// retained index and segment resources. Closing the owning DB also ends read
+// access through the Snapshot. The caller can still call [Snapshot.Close].
 type Snapshot engine.Snapshot
 
 // Snapshot captures one committed state across multiple calls, such as a key

@@ -167,7 +167,7 @@ func TestBatchWritesRotateAndAccountInInputOrder(t *testing.T) {
 }
 
 func TestBatchWritesRecoverWholeOutcome(t *testing.T) {
-	for _, op := range []string{"batch-put", "batch-delete"} {
+	for _, op := range []string{"batch-put", "batch-delete", "apply"} {
 		for _, tc := range []struct {
 			point   string
 			outcome Outcome
@@ -186,20 +186,23 @@ func TestBatchWritesRecoverWholeOutcome(t *testing.T) {
 					}
 					return nil
 				}}
-				engineHooks := &Hooks{CleanerStart: make(chan struct{})}
 				opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: 170} // Pairs fit; each batch rotates.
-				db := newTestDBWithHooks(t, opts, fs, engineHooks)
+				db := newTestDBWithHooks(t, opts, fs, parkedMaintenance())
 				entries := []Entry{{[]byte("a"), []byte("old")}, {[]byte("b"), []byte("old")}}
 				if err := db.BatchPut(entries); err != nil {
 					t.Fatal(err)
 				}
 				armed = true
 				var err error
-				if op == "batch-put" {
+				switch op {
+				case "batch-put":
 					entries[0].Value, entries[1].Value = []byte("new"), []byte("new")
 					err = db.BatchPut(entries)
-				} else {
+				case "batch-delete":
 					err = db.BatchDelete([][]byte{entries[0].Key, entries[1].Key})
+				case "apply":
+					ops := []MixedOp{{Key: entries[0].Key, Delete: true}, {Key: entries[1].Key, Value: []byte("new")}}
+					err = db.ApplyMixed(len(ops), func(i int) MixedOp { return ops[i] })
 				}
 				var opErr *OpError
 				if !errors.As(err, &opErr) || opErr.Operation != op || opErr.Outcome != tc.outcome || !errors.Is(err, syscall.EIO) ||
@@ -219,11 +222,15 @@ func TestBatchWritesRecoverWholeOutcome(t *testing.T) {
 				}
 				defer reopened.Close()
 				want := map[string]string{"a": "old", "b": "old"}
-				if tc.apply && op == "batch-put" {
-					want = map[string]string{"a": "new", "b": "new"}
-				}
-				if tc.apply && op == "batch-delete" {
-					want = nil
+				if tc.apply {
+					switch op {
+					case "batch-put":
+						want = map[string]string{"a": "new", "b": "new"}
+					case "batch-delete":
+						want = nil
+					case "apply":
+						want = map[string]string{"b": "new"}
+					}
 				}
 				if got := scanContents(t, reopened.Scan(t.Context())); !maps.Equal(got, want) {
 					t.Fatalf("after recovery: %v, want %v", got, want)

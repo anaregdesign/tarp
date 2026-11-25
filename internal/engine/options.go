@@ -12,9 +12,8 @@ import (
 type IndexMode uint8
 
 const (
-	IndexDefault IndexMode = iota
+	IndexBTree IndexMode = iota
 	IndexMemory
-	IndexBTree
 )
 
 const defaultBTreeMemoryBudgetBytes = 16 << 20
@@ -77,9 +76,6 @@ func (l RestoreLimits) normalized() (RestoreLimits, error) {
 func (o Options) normalized() (Options, error) {
 	if o.OpenValidation > Indexed {
 		return o, fmt.Errorf("%w: unknown open validation %d", ErrInvalidOptions, o.OpenValidation)
-	}
-	if o.IndexMode == IndexDefault {
-		o.IndexMode = IndexBTree
 	}
 	switch o.IndexMode {
 	case IndexMemory:

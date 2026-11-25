@@ -27,9 +27,9 @@ func BenchmarkEdgePrefixWorkingSet(b *testing.B) {
 			for _, op := range []string{"Keys", "Scan"} {
 				for _, arm := range []string{"filter", "prefix"} {
 					b.Run(op+"/"+arm, func(b *testing.B) {
-						reader := edgePrefixArm(b, db, arm == "prefix")
+						usePrefix := arm == "prefix"
 						for _, i := range []int{0, 73, 255} {
-							if n := queries[i].verify(b, db, edges, op == "Scan", reader); n != 56 {
+							if n := queries[i].verify(b, db, edges, op == "Scan", usePrefix); n != 56 {
 								b.Fatalf("ordinary tail yielded %d edges", n)
 							}
 						}
@@ -38,7 +38,7 @@ func BenchmarkEdgePrefixWorkingSet(b *testing.B) {
 						b.ReportAllocs()
 						before := observe.IndexMetrics()
 						for b.Loop() {
-							counts, err := queries[cursor].run(ctx, db, op == "Scan", reader, nil)
+							counts, err := queries[cursor].run(ctx, db, op == "Scan", usePrefix, nil)
 							if err != nil || counts.matches != 56 {
 								b.Fatalf("tail at %d: %d matches, %v", cursor, counts.matches, err)
 							}
