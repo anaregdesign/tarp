@@ -572,22 +572,11 @@ func verifyBackupFile(ctx context.Context, dir string, entry format.BackupFile, 
 	if st.Size() != entry.Bytes {
 		return fmt.Errorf("%w: backup file length", ErrCorrupt)
 	}
-	h := sha256.New()
-	for offset := int64(0); offset < entry.Bytes; {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n := min(int64(len(buffer)), entry.Bytes-offset)
-		b := buffer[:int(n)]
-		if _, err := fd.ReadAt(b, offset); err != nil {
-			return err
-		}
-		if _, err := h.Write(b); err != nil {
-			return err
-		}
-		offset += n
+	digest, err := streamBackupFile(ctx, fd, entry.Bytes, buffer, nil)
+	if err != nil {
+		return err
 	}
-	if actual := h.Sum(nil); string(actual) != string(entry.Digest[:]) {
+	if digest != entry.Digest {
 		return fmt.Errorf("%w: backup digest", ErrCorrupt)
 	}
 	return nil
@@ -604,24 +593,37 @@ func copyBackupFile(ctx context.Context, source, stage string, entry format.Back
 		return err
 	}
 	defer func() { returned = errors.Join(returned, dst.Close()) }()
-	h := sha256.New()
-	writer := &outputWriter{fs: fs, fd: dst, hash: h, point: "restore.copy"}
-	for offset := int64(0); offset < entry.Bytes; {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n := min(int64(len(buffer)), entry.Bytes-offset)
-		b := buffer[:int(n)]
-		if _, err := src.ReadAt(b, offset); err != nil {
-			return err
-		}
-		if _, err := writer.Write(b); err != nil {
-			return err
-		}
-		offset += n
+	writer := &outputWriter{fs: fs, fd: dst, point: "restore.copy"}
+	digest, err := streamBackupFile(ctx, src, entry.Bytes, buffer, writer)
+	if err != nil {
+		return err
 	}
-	if string(h.Sum(nil)) != string(entry.Digest[:]) {
+	if digest != entry.Digest {
 		return fmt.Errorf("%w: backup changed while restoring", ErrCorrupt)
 	}
 	return fs.Sync(dst, "restore.file.sync")
+}
+
+// Hash the exact length listed in BACKUP. Restore also writes each chunk to
+// its staging file before including it in the digest.
+func streamBackupFile(ctx context.Context, src *os.File, size int64, buffer []byte, dst *outputWriter) (digest [sha256.Size]byte, err error) {
+	h := sha256.New()
+	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return digest, err
+		}
+		chunk := buffer[:min(int64(len(buffer)), size-offset)]
+		if _, err := src.ReadAt(chunk, offset); err != nil {
+			return digest, err
+		}
+		if dst != nil {
+			if _, err := dst.Write(chunk); err != nil {
+				return digest, err
+			}
+		}
+		h.Write(chunk)
+		offset += int64(len(chunk))
+	}
+	h.Sum(digest[:0])
+	return digest, nil
 }

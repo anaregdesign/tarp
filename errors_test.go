@@ -1,6 +1,7 @@
 package tarp_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,22 @@ import (
 
 	"github.com/anaregdesign/tarp"
 )
+
+func ExampleOpError() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := tarp.Restore(ctx, tarp.RestoreRequest{Source: "backup", Destination: "restored"})
+
+	// Inspect both the publication outcome and the underlying cause.
+	var operation *tarp.OpError
+	if errors.As(err, &operation) {
+		fmt.Println(operation.Operation, operation.Outcome)
+	}
+	fmt.Println(errors.Is(err, context.Canceled))
+	// Output:
+	// restore not-applied
+	// true
+}
 
 func TestRequiredImageFilesDistinguishAccessFailureFromCorruption(t *testing.T) {
 	dir := t.TempDir()

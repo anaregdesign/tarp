@@ -8,7 +8,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-// DB owns its directory until Close finishes. Do not copy a DB.
+// DB stores byte keys and values. Share one *DB across goroutines and call
+// [DB.Close] to release its directory. Use [Bind] to lend typed access to an
+// existing DB. Do not copy a DB.
 type DB engine.DB
 
 // IndexMode selects the runtime key index.
@@ -72,7 +74,9 @@ func (o Options) RestoreLimits() RestoreLimits {
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
-// The parent directory must exist. Incompatible options leave existing data intact.
+// Use [OpenExisting] when a missing or empty directory should be an error and
+// [OpenContext] when startup must honor a deadline. The parent directory must
+// exist. Incompatible options leave existing data intact.
 // Opening a backup directory returns an error matching [ErrBackupDirectory].
 func Open(dir string, opts Options) (*DB, error) {
 	return OpenContext(context.Background(), dir, opts)
@@ -104,7 +108,9 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 // Entry pairs a key and value for BatchPut and Scan. Both slices belong to the caller.
 type Entry = engine.Entry
 
-// Scan yields every live entry once in unspecified order. Each iteration captures
+// Scan yields every live entry once in unspecified order. Use it to export
+// the current key-value state. [DB.Keys] enumerates just keys without reading
+// DATA, and [DB.ScanRange] yields entries in encoded-key order. Each iteration captures
 // a fresh snapshot when it starts. Writes and compaction can continue during the
 // scan. An error is yielded once with a zero Entry and ends iteration.
 // Breaking out of the loop releases the snapshot. With iter.Pull2, defer stop().
@@ -132,7 +138,8 @@ func (db *DB) Delete(key []byte) error {
 	return (*engine.DB)(db).Delete(key)
 }
 
-// Backup publishes a consistent point-in-time copy while writes continue.
+// Backup publishes a consistent file backup while writes continue. Use
+// [VerifyBackup] to check the backup and [Restore] to create a DB from it.
 // The destination must be new and its parent must already exist.
 // A destination collision matches fs.ErrExist and has outcome [NotApplied].
 func (db *DB) Backup(ctx context.Context, destination string) error {
@@ -140,8 +147,9 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 }
 
 // ProtectParity seals a nonempty active DATA segment, then verifies or builds
-// PARITY sidecars for the selected sealed DATA segments. Writers can continue
-// appending to the new active segment.
+// PARITY sidecars for the selected sealed DATA segments. Use it while the DB
+// is open to prepare coverage for later [RepairDataFromParity]. Writers can
+// continue appending to the new active segment.
 func (db *DB) ProtectParity(ctx context.Context) error {
 	return (*engine.DB)(db).ProtectParity(ctx)
 }
@@ -168,7 +176,8 @@ type RestoreRequest struct {
 }
 
 // Restore verifies a completed backup and publishes a new, closed database.
-// The source must remain immutable and the destination must be new.
+// The source must remain immutable and the destination must be new. Pass the
+// destination to [OpenExisting] after Restore succeeds.
 // After validating Limits, Restore checks for cancellation before resolving either path.
 // A destination collision matches fs.ErrExist and has outcome [NotApplied].
 func Restore(ctx context.Context, req RestoreRequest) error {
@@ -203,13 +212,15 @@ func (info BackupInfo) CheckLimits(limits RestoreLimits) error {
 
 // VerifyBackup checks an immutable backup's file set, checksums and committed
 // records, and reports the limits its live records require. It does not write
-// files. Any error returns a zero BackupInfo.
+// files. Use [BackupInfo.CheckLimits] with [Options.RestoreLimits] to check a
+// planned restore configuration. Any error returns a zero BackupInfo.
 func VerifyBackup(ctx context.Context, source string) (BackupInfo, error) {
 	return publicBackupInfo(engine.VerifyBackup(ctx, source))
 }
 
 // VerifyBackupWithScratch verifies an immutable backup using temporary sort
-// files in a caller-selected directory outside the backup.
+// files in an existing directory outside the backup. Use it for a large backup
+// when scratch space is available to avoid repeated DATA passes.
 func VerifyBackupWithScratch(ctx context.Context, source, scratch string) (BackupInfo, error) {
 	return publicBackupInfo(engine.VerifyBackupWithScratch(ctx, source, scratch))
 }
@@ -228,7 +239,9 @@ func publicBackupInfo(info storage.BackupInfo, err error) (BackupInfo, error) {
 }
 
 // CheckpointIndex persists an index checkpoint covering the captured catalog prefix
-// while normal writes continue.
+// while normal writes continue. Use it on a long-running DB to reduce the index
+// rebuilding needed on a later open. A healthy B+tree DB also checkpoints on
+// [DB.Close]. To reclaim obsolete DATA records, use [DB.Compact].
 func (db *DB) CheckpointIndex(ctx context.Context) error {
 	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
@@ -252,6 +265,7 @@ func WithKeyOrder() CompactOption {
 }
 
 // Compact builds a full DATA checkpoint through the captured user sequence.
+// Use it to reclaim obsolete DATA history in addition to automatic incremental cleaning.
 // By default it copies live records in source order. Pass [WithKeyOrder] to
 // cluster the snapshot by encoded key.
 // It uses PARITY to recover damaged sealed DATA. A live key whose record is

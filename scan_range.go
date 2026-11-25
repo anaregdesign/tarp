@@ -30,7 +30,8 @@ func isReverseScan(opts []ScanOption) bool {
 }
 
 // PrefixRange computes cloned half-open [lower, upper) bounds matching all
-// keys that satisfy bytes.HasPrefix(key, prefix). An empty prefix returns
+// keys that satisfy bytes.HasPrefix(key, prefix). Pass the bounds to
+// [DB.KeysRange] or [DB.ScanRange] for an ordered prefix scan. An empty prefix returns
 // (nil, nil). An all-0xff prefix returns (bytes.Clone(prefix), nil).
 func PrefixRange(prefix []byte) (lower, upper []byte) {
 	if len(prefix) == 0 {

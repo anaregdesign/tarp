@@ -123,7 +123,7 @@ type typedWriteOp[K, V any] struct {
 }
 
 // TypedWriteBatch queues typed Put and idempotent Delete operations for atomic
-// publication via [View.Apply] or [TypedDB.Apply]. Its zero value is ready to use.
+// publication via [View.Apply], including on a [TypedDB]. Its zero value is ready to use.
 // Keys and values are encoded at Apply. Slices, maps, and pointers retain their
 // underlying data until Reset. Copy mutable inputs before queueing them if they
 // will be reused before Apply returns. Pass the batch by pointer after first use.

@@ -327,35 +327,36 @@ func TestOpenTypedPreservesOpenErrors(t *testing.T) {
 	}
 }
 
-func Example_typedDB() {
-	if err := storeScore(); err != nil {
-		panic(err)
-	}
-	// Output: 42
-}
-
-func storeScore() (err error) {
+func ExampleOpenTyped() {
 	dir, err := os.MkdirTemp("", "tarp-scores-")
 	if err != nil {
-		return err
+		panic(err)
 	}
-	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			panic(err)
+		}
+	}()
 
 	db, err := tarp.OpenTyped(dir, tarp.Options{}, tarp.StringCodec{}, tarp.Int64Codec{})
 	if err != nil {
-		return err
+		panic(err)
 	}
-	defer func() { err = errors.Join(err, db.Close()) }()
+	defer func() {
+		if err := db.Close(); err != nil {
+			panic(err)
+		}
+	}()
 
 	if err := db.Put("alice", 42); err != nil {
-		return err
+		panic(err)
 	}
 	score, err := db.Get("alice")
 	if err != nil {
-		return err
+		panic(err)
 	}
 	fmt.Println(score)
-	return nil
+	// Output: 42
 }
 
 func TestTypedCheckpointIndexReopensEncodedKeys(t *testing.T) {

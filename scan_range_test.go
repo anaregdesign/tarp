@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +13,48 @@ import (
 
 	"github.com/anaregdesign/tarp"
 )
+
+func ExampleView_KeysRange() {
+	type jobKey struct {
+		Tenant string
+		ID     int64
+	}
+	codec, err := tarp.NewOrderedCodec[jobKey]()
+	if err != nil {
+		panic(err)
+	}
+	dir, err := os.MkdirTemp("", "tarp-jobs-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+	db, err := tarp.OpenTyped(dir, tarp.Options{}, codec, tarp.StringCodec{})
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	for _, key := range []jobKey{{"acme", 2}, {"acme-labs", 6}, {"acme", 10}} {
+		if err := db.Put(key, "queued"); err != nil {
+			panic(err)
+		}
+	}
+
+	// Match the complete tenant field, then list its largest job ID first.
+	prefix, err := tarp.EncodeOrderedTuplePrefix("acme")
+	if err != nil {
+		panic(err)
+	}
+	lower, upper := tarp.PrefixRange(prefix)
+	for key, err := range db.KeysRange(context.Background(), lower, upper, tarp.WithReverse()) {
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(key.Tenant, key.ID)
+	}
+	// Output:
+	// acme 10
+	// acme 2
+}
 
 func TestPrefixRangeBoundsAndOwnership(t *testing.T) {
 	if l, u := tarp.PrefixRange(nil); l != nil || u != nil {

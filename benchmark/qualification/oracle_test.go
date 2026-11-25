@@ -2,6 +2,7 @@ package qualification
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -315,5 +316,49 @@ func TestColdOracleBindsSequenceContentAndEntireLiveCardinality(t *testing.T) {
 				t.Fatal("accepted an unexpected live key outside the witnessed set")
 			}
 		}
+	}
+}
+
+// This is the JSON representation used by existing qualification evidence.
+// A deleted key remains witnessed, and repeated pending Puts yield one key.
+func TestOracleDigestPreservesWitnessedKeysAndReusedReadBuffers(t *testing.T) {
+	oracle, err := ReplayOracle([]OracleEvent{
+		{Type: "ack", Key: []byte{0xff}, Value: []byte("3")},
+		{Type: "ack", Key: []byte("z")},
+		{Type: "ack_delete", Key: []byte("z")},
+		{Type: "batch_intent", Mutations: []OracleMutation{
+			{Key: []byte("a"), Value: []byte("1")}, {Key: []byte("a"), Value: []byte("2")},
+		}},
+		{Type: "phase", Phase: "cut"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const jsonState = `[{"key":"YQ==","value":"Mg==","present":true},{"key":"eg==","present":false},{"key":"/w==","value":"Mw==","present":true}]`
+	sum := sha256.Sum256([]byte(jsonState))
+	want := hex.EncodeToString(sum[:])
+	digest, live, err := oracle.DigestAt(5)
+	if err != nil || live != 2 || digest != want {
+		t.Fatalf("DigestAt = %s, %d, %v, want %s with two live keys", digest, live, err, want)
+	}
+
+	// A lookup can reuse its buffer on the next call.
+	var scratch [1]byte
+	lookup := func(key []byte) ([]byte, bool, error) {
+		switch string(key) {
+		case "a":
+			scratch[0] = '2'
+		case "\xff":
+			scratch[0] = '3'
+		default:
+			return nil, false, nil
+		}
+		return scratch[:], true, nil
+	}
+	if got, err := oracle.VerifyAt(5, live, lookup); err != nil || got != want {
+		t.Fatalf("VerifyAt = %s, %v, want %s", got, err, want)
+	}
+	if got, err := oracle.Verify(lookup); err != nil || got != want {
+		t.Fatalf("Verify = %s, %v, want %s", got, err, want)
 	}
 }

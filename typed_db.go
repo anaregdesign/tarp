@@ -8,8 +8,10 @@ import (
 	"reflect"
 )
 
-// TypedDB owns a DB opened by [OpenTyped] and provides the key, value, scan
-// and batch operations of [View]. Call Close to release the database.
+// TypedDB owns a DB opened by [OpenTyped]. Call the methods of [View] directly
+// on the owner. For example, db.Get reads a single key ([View.Get]), db.Apply
+// commits a mixed write batch ([View.Apply]), and db.Snapshot captures a
+// reusable read view ([View.Snapshot]). Call [TypedDB.Close] to release the DB.
 type TypedDB[K, V any] struct {
 	boundView[K, V]
 }
@@ -25,8 +27,10 @@ type View[K, V any] struct {
 	valueCodec Codec[V]
 }
 
-// OpenTyped opens a DB with the given options and non-nil codecs. The encoded
-// bytes determine key identity. Use compatible codecs on reopen and after Restore.
+// OpenTyped creates or reopens a DB for callers working with Go keys and values.
+// The returned [TypedDB] owns the directory. To add typed access to a DB the
+// caller already owns, use [Bind]. Supply non-nil codecs and reuse compatible
+// codecs on reopen and after [Restore]. Encoded bytes determine key identity.
 func OpenTyped[K, V any](dir string, opts Options, keyCodec Codec[K], valueCodec Codec[V]) (*TypedDB[K, V], error) {
 	if err := checkCodecs(keyCodec, valueCodec); err != nil {
 		return nil, err

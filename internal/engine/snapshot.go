@@ -3,9 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
-	"errors"
 	"iter"
-	"os"
 	"sync"
 
 	"github.com/anaregdesign/tarp/internal/format"
@@ -43,16 +41,11 @@ func (db *DB) Snapshot() (*Snapshot, error) {
 		return nil, err
 	}
 	view := db.keys.View()
-	segments := make(map[uint64]*storage.DataSegment, len(db.segments))
-	for id, f := range db.segments {
-		f.PinRetained()
-		segments[id] = f
-	}
 	snap := &Snapshot{
 		db:                db,
 		refs:              1,
 		view:              view,
-		segments:          segments,
+		segments:          db.pinScanSegments(),
 		seq:               db.publishedSeq,
 		revision:          db.revision,
 		maxSeenValueBytes: db.maxSeenValueBytes,
@@ -105,10 +98,7 @@ func (s *Snapshot) freeResources(view index.View, segments map[uint64]*storage.D
 	if view != nil {
 		view.Close()
 	}
-	for _, f := range segments {
-		f.UnpinRetained()
-		s.db.notifyCleanerIfUnpinned(f)
-	}
+	s.db.unpinScanSegments(segments)
 }
 
 // Close rejects new snapshot reads. The last active operation releases the
@@ -312,29 +302,13 @@ func (s *Snapshot) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 
 // ScanPrefix yields entries in this snapshot whose encoded key starts with encodedPrefix.
 func (s *Snapshot) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[Entry, error] {
-	bounds := index.PrefixBounds(encodedPrefix)
-	return func(yield func(Entry, error) bool) {
-		err := s.walk(ctx, true, bounds, false, false, func(k, v []byte) bool {
-			return yield(Entry{Key: k, Value: v}, nil)
-		})
-		if err != nil {
-			yield(Entry{}, err)
-		}
-	}
+	return s.db.scanEntries(ctx, s, index.PrefixScan(encodedPrefix))
 }
 
 // ScanRange yields entries in [lower, upper) in strictly ascending or descending
 // bytewise lexicographic order from this snapshot.
 func (s *Snapshot) ScanRange(ctx context.Context, lower, upper []byte, reverse bool) iter.Seq2[Entry, error] {
-	bounds := index.Bounds{Lower: string(lower), Upper: string(upper)}
-	return func(yield func(Entry, error) bool) {
-		err := s.walk(ctx, true, bounds, true, reverse, func(k, v []byte) bool {
-			return yield(Entry{Key: k, Value: v}, nil)
-		})
-		if err != nil {
-			yield(Entry{}, err)
-		}
-	}
+	return s.db.scanEntries(ctx, s, index.OrderedScan(lower, upper, reverse))
 }
 
 // Keys yields all keys in this snapshot without reading DATA segments.
@@ -344,179 +318,11 @@ func (s *Snapshot) Keys(ctx context.Context) iter.Seq2[[]byte, error] {
 
 // KeysPrefix yields keys in this snapshot matching encodedPrefix without reading DATA segments.
 func (s *Snapshot) KeysPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[[]byte, error] {
-	bounds := index.PrefixBounds(encodedPrefix)
-	return func(yield func([]byte, error) bool) {
-		err := s.walk(ctx, false, bounds, false, false, func(k, _ []byte) bool {
-			return yield(k, nil)
-		})
-		if err != nil {
-			yield(nil, err)
-		}
-	}
+	return s.db.scanKeys(ctx, s, index.PrefixScan(encodedPrefix))
 }
 
 // KeysRange yields keys in [lower, upper) in strictly ascending or descending
 // bytewise lexicographic order from this snapshot without reading DATA segments.
 func (s *Snapshot) KeysRange(ctx context.Context, lower, upper []byte, reverse bool) iter.Seq2[[]byte, error] {
-	bounds := index.Bounds{Lower: string(lower), Upper: string(upper)}
-	return func(yield func([]byte, error) bool) {
-		err := s.walk(ctx, false, bounds, true, reverse, func(k, _ []byte) bool {
-			return yield(k, nil)
-		})
-		if err != nil {
-			yield(nil, err)
-		}
-	}
-}
-
-func (s *Snapshot) walk(ctx context.Context, values bool, bounds index.Bounds, ordered, reverse bool, yield func([]byte, []byte) bool) error {
-	op := "keys"
-	if values {
-		op = "scan"
-	}
-	if err := s.acquire(); err != nil {
-		return err
-	}
-	defer s.release()
-
-	db := s.db
-	if err := db.admit(); err != nil {
-		return err
-	}
-	if ctx == nil {
-		db.done()
-		return validContextError(op)
-	}
-	if err := ctx.Err(); err != nil {
-		db.done()
-		return operationError(op, "context", err)
-	}
-	if ordered && bounds.Upper != "" && bounds.Lower >= bounds.Upper {
-		err := db.health()
-		db.done()
-		return err
-	}
-	db.done()
-
-	check := func() error {
-		if s.isClosing() {
-			return ErrClosed
-		}
-		db.life.Lock()
-		closing := db.closing
-		db.life.Unlock()
-		if closing {
-			return ErrClosed
-		}
-		if err := ctx.Err(); err != nil {
-			return operationError(op, "context", err)
-		}
-		return db.health()
-	}
-	if err := check(); err != nil {
-		return err
-	}
-
-	var result error
-	var stopped bool
-	var copies *prefixKeyCopies
-	if bounds.Lower != "" || bounds.Upper != "" {
-		copies = new(prefixKeyCopies)
-	}
-	visit := func(k string, a index.Address) bool {
-		if result = check(); result != nil {
-			return false
-		}
-		var value []byte
-		if values {
-			f := s.segments[a.FileID]
-			if f == nil {
-				err := missingDataSegment(a.FileID)
-				db.poison(err)
-				result = operationError(op, "index", err)
-				return false
-			}
-			if result = db.admit(); result != nil {
-				return false
-			}
-			value, result = db.store.ReadContext(ctx, storage.At(f, a), k)
-			if result != nil {
-				if result == ctx.Err() {
-					db.done()
-					result = operationError(op, "context", result)
-					return false
-				}
-				db.readFailure(result)
-				db.done()
-				result = operationError(op, "read", result)
-				return false
-			}
-			db.done()
-			if result = check(); result != nil {
-				return false
-			}
-		}
-		var key []byte
-		if copies == nil {
-			key = []byte(k)
-		} else {
-			key = copies.copyKey(k)
-		}
-		stopped = !yield(key, value)
-		return !stopped
-	}
-
-	var err error
-	switch {
-	case ordered && reverse:
-		rv, ok := s.view.(index.ReverseRangeView)
-		if !ok {
-			err = errors.New("index: reverse range unsupported")
-		} else {
-			err = rv.RangeDesc(bounds.Lower, bounds.Upper, visit)
-		}
-	case ordered || bounds.Lower != "" || bounds.Upper != "":
-		rv, ok := s.view.(index.RangeView)
-		if !ok {
-			err = s.view.All(func(k string, a index.Address) bool {
-				if !bounds.Contains(k) {
-					return true
-				}
-				return visit(k, a)
-			})
-		} else {
-			err = rv.Range(bounds.Lower, bounds.Upper, visit)
-		}
-	default:
-		err = s.view.All(visit)
-	}
-
-	if result != nil {
-		return result
-	}
-	if err != nil {
-		if errors.Is(err, os.ErrClosed) || err == ctx.Err() {
-			if lifeErr := check(); lifeErr != nil {
-				return lifeErr
-			}
-		}
-		db.poison(err)
-		return operationError(op, "index", err)
-	}
-	if !stopped {
-		if s.isClosing() {
-			return ErrClosed
-		}
-		db.life.Lock()
-		closing := db.closing
-		db.life.Unlock()
-		if closing {
-			return ErrClosed
-		}
-		if ordered || bounds.Lower != "" || bounds.Upper != "" {
-			return check()
-		}
-		return db.health()
-	}
-	return nil
+	return s.db.scanKeys(ctx, s, index.OrderedScan(lower, upper, reverse))
 }

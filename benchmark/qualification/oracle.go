@@ -332,13 +332,13 @@ func (o *Oracle) VerifyAt(sequence uint64, liveKeys int, lookup func([]byte) ([]
 	if liveKeys != len(state) {
 		return "", fmt.Errorf("recovered live index cardinality %d != witnessed %d", liveKeys, len(state))
 	}
-	return o.Verify(func(key []byte) ([]byte, bool, error) {
-		actual, present, err := lookup(key)
-		expected, expectedPresent := state[string(key)]
+	return o.digest(func(key string) ([]byte, bool, error) {
+		actual, present, err := lookup([]byte(key))
+		expected, expectedPresent := state[key]
 		if err == nil && (present != expectedPresent || present && !bytes.Equal(actual, expected)) {
 			return nil, false, fmt.Errorf("key %x disagrees with reopened sequence %d", key, sequence)
 		}
-		return actual, present, err
+		return expected, expectedPresent, err
 	})
 }
 
@@ -349,8 +349,8 @@ func (o *Oracle) DigestAt(sequence uint64) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	digest, err := o.VerifyAt(sequence, len(state), func(key []byte) ([]byte, bool, error) {
-		value, present := state[string(key)]
+	digest, err := o.digest(func(key string) ([]byte, bool, error) {
+		value, present := state[key]
 		return value, present, nil
 	})
 	return digest, len(state), err
@@ -359,21 +359,6 @@ func (o *Oracle) DigestAt(sequence uint64) (string, int, error) {
 // Verify runs only after file-only recovery; the oracle never repairs files.
 // A pending mutation may be entirely absent or applied, never a partial value.
 func (o *Oracle) Verify(lookup func([]byte) ([]byte, bool, error)) (string, error) {
-	keys := make([]string, 0, len(o.values)+1)
-	for key := range o.values {
-		keys = append(keys, key)
-	}
-	seen := make(map[string]bool)
-	for _, key := range keys {
-		seen[key] = true
-	}
-	for _, pending := range o.pendingMutations() {
-		if !seen[string(pending.Key)] {
-			keys = append(keys, string(pending.Key))
-			seen[string(pending.Key)] = true
-		}
-	}
-	sort.Strings(keys)
 	low, high := o.SequenceRange()
 	oldState, err := o.StateAt(low)
 	if err != nil {
@@ -384,18 +369,47 @@ func (o *Oracle) Verify(lookup func([]byte) ([]byte, bool, error)) (string, erro
 		return "", err
 	}
 	oldAllowed, newAllowed := true, true
-	actual := make([]oracleValue, 0, len(keys))
-	for _, key := range keys {
+	return o.digest(func(key string) ([]byte, bool, error) {
 		value, present, err := lookup([]byte(key))
 		if err != nil {
-			return "", fmt.Errorf("oracle read %x: %w", key, err)
+			return nil, false, err
 		}
 		oldValue, oldPresent := oldState[key]
 		newValue, newPresent := newState[key]
 		oldAllowed = oldAllowed && present == oldPresent && (!present || bytes.Equal(value, oldValue))
 		newAllowed = newAllowed && present == newPresent && (!present || bytes.Equal(value, newValue))
 		if !oldAllowed && !newAllowed {
-			return "", fmt.Errorf("acknowledged/pending key %x has a forbidden recovered state: present=%t value=%x", key, present, value)
+			return nil, false, fmt.Errorf("acknowledged/pending key %x has a forbidden recovered state: present=%t value=%x", key, present, value)
+		}
+		// Keep the matching witness value. The next lookup can reuse its buffer.
+		if newAllowed {
+			return newValue, newPresent, nil
+		}
+		return oldValue, oldPresent, nil
+	})
+}
+
+// Include absent witnessed keys in the digest and use encoded-key order so a
+// controller and a guest compute the same bytes independently.
+func (o *Oracle) digest(lookup func(string) ([]byte, bool, error)) (string, error) {
+	keys := make([]string, 0, len(o.values)+1)
+	for key := range o.values {
+		keys = append(keys, key)
+	}
+	seenPending := make(map[string]bool)
+	for _, mutation := range o.pendingMutations() {
+		key := string(mutation.Key)
+		if _, witnessed := o.values[key]; !witnessed && !seenPending[key] {
+			keys = append(keys, key)
+			seenPending[key] = true
+		}
+	}
+	sort.Strings(keys)
+	actual := make([]oracleValue, 0, len(keys))
+	for _, key := range keys {
+		value, present, err := lookup(key)
+		if err != nil {
+			return "", fmt.Errorf("oracle read %x: %w", key, err)
 		}
 		if !present {
 			value = nil

@@ -5,11 +5,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/anaregdesign/tarp"
 )
+
+func ExampleDB_Apply() {
+	dir, err := os.MkdirTemp("", "tarp-queue-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+	db, err := tarp.Open(dir, tarp.Options{})
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	queued, active := []byte("queued/42"), []byte("active/42")
+	if err := db.Put(queued, []byte("ready")); err != nil {
+		panic(err)
+	}
+	var batch tarp.WriteBatch
+	batch.Delete(queued)
+	batch.Put(active, []byte("running"))
+	if err := db.Apply(&batch); err != nil {
+		panic(err)
+	}
+	results, err := db.BatchGet([][]byte{queued, active})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("queued %t, active %s\n", results[0].Found, results[1].Value)
+	// Output: queued false, active running
+}
 
 func TestWriteBatchMixedCoalescingAndScratchSafety(t *testing.T) {
 	for _, mode := range []tarp.IndexMode{tarp.IndexBTree, tarp.IndexMemory} {

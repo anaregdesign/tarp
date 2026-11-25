@@ -11,7 +11,8 @@ import (
 var ErrInvalidParity = format.ErrInvalidParity
 
 // RepairDataFromParity exclusively locks an existing database and repairs sealed DATA
-// using its PARITY sidecars. A successful call verifies the selected
+// using its PARITY sidecars. Close the DB before calling it to repair damaged
+// segments in place. A successful call verifies the selected
 // image, including the committed active log. Healthy files retain their inodes.
 // Each replacement must match the sealed DATA digest in MANIFEST and is
 // independently durable. Earlier repairs remain durable if a later file fails.

@@ -5,12 +5,49 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/anaregdesign/tarp"
 )
+
+func ExampleDB_Snapshot() {
+	dir, err := os.MkdirTemp("", "tarp-releases-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir)
+	db, err := tarp.Open(dir, tarp.Options{})
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	key := []byte("release/current")
+	if err := db.Put(key, []byte("v1")); err != nil {
+		panic(err)
+	}
+	snapshot, err := db.Snapshot()
+	if err != nil {
+		panic(err)
+	}
+	defer snapshot.Close()
+	if err := db.Put(key, []byte("v2")); err != nil {
+		panic(err)
+	}
+	previous, err := snapshot.Get(key)
+	if err != nil {
+		panic(err)
+	}
+	current, err := db.Get(key)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("snapshot %s, live %s\n", previous, current)
+	// Output: snapshot v1, live v2
+}
 
 func TestSnapshotPointInTimeIsolationCompactionAndCacheIsolation(t *testing.T) {
 	for _, mode := range []tarp.IndexMode{tarp.IndexBTree, tarp.IndexMemory} {

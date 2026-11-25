@@ -187,6 +187,34 @@ func TestStringAndBytesEscapingOrder(t *testing.T) {
 	assertOrderPreserved(t, bytesC, byteSamples, bytes.Equal)
 }
 
+func TestOrderedIntegerFieldsUseDeclaredWidths(t *testing.T) {
+	type sequence uint16
+	signed64 := []byte{0x80, 0, 0, 0, 0, 0, 0, 0}
+	unsigned64 := []byte{0, 0, 0, 0, 0, 0, 0, 1}
+	for _, field := range []struct {
+		value any
+		want  []byte
+	}{
+		{int8(0), []byte{0x80}},
+		{int16(0), []byte{0x80, 0}},
+		{int32(0), []byte{0x80, 0, 0, 0}},
+		{int64(0), signed64},
+		{int(0), signed64},
+		{time.Duration(0), signed64},
+		{uint8(1), []byte{1}},
+		{sequence(1), []byte{0, 1}},
+		{uint32(1), []byte{0, 0, 0, 1}},
+		{uint64(1), unsigned64},
+		{uint(1), unsigned64},
+		{uintptr(1), unsigned64},
+	} {
+		got, err := orderkey.EncodeTuplePrefix(field.value)
+		if err != nil || !bytes.Equal(got, field.want) {
+			t.Fatalf("encoded %T = %x, %v; want %x", field.value, got, err, field.want)
+		}
+	}
+}
+
 func TestCompositeStructOrderAndPrefixes(t *testing.T) {
 	type Inner struct {
 		Scope string

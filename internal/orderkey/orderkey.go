@@ -25,11 +25,6 @@ const (
 	signBit64 = uint64(1) << 63
 )
 
-var (
-	timeType     = reflect.TypeFor[time.Time]()
-	durationType = reflect.TypeFor[time.Duration]()
-)
-
 // AppendBool appends an order-preserving 1-byte boolean encoding.
 func AppendBool(dst []byte, v bool) []byte {
 	if v {
@@ -510,7 +505,7 @@ func (b builder) build(t reflect.Type) (valueCodec, error) {
 }
 
 func (b builder) buildType(t reflect.Type) (valueCodec, error) {
-	if t == timeType {
+	if t == reflect.TypeFor[time.Time]() {
 		return valueCodec{
 			appendVal: func(dst []byte, v reflect.Value) ([]byte, error) {
 				return AppendTime(dst, v.Interface().(time.Time)), nil
@@ -524,9 +519,6 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 				return rest, nil
 			},
 		}, nil
-	}
-	if t == durationType {
-		return int64ValueCodec(), nil
 	}
 
 	switch t.Kind() {
@@ -567,11 +559,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeInt(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetInt(int64(val))
-				return rest, nil
+				return setDecodedInt(dst, int64(val), rest, err)
 			},
 		}, nil
 
@@ -582,11 +570,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeInt8(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetInt(int64(val))
-				return rest, nil
+				return setDecodedInt(dst, int64(val), rest, err)
 			},
 		}, nil
 
@@ -597,11 +581,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeInt16(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetInt(int64(val))
-				return rest, nil
+				return setDecodedInt(dst, int64(val), rest, err)
 			},
 		}, nil
 
@@ -612,16 +592,20 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeInt32(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetInt(int64(val))
-				return rest, nil
+				return setDecodedInt(dst, int64(val), rest, err)
 			},
 		}, nil
 
 	case reflect.Int64:
-		return int64ValueCodec(), nil
+		return valueCodec{
+			appendVal: func(dst []byte, v reflect.Value) ([]byte, error) {
+				return AppendInt64(dst, v.Int()), nil
+			},
+			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
+				val, rest, err := ConsumeInt64(data)
+				return setDecodedInt(dst, val, rest, err)
+			},
+		}, nil
 
 	case reflect.Uint:
 		return valueCodec{
@@ -630,11 +614,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeUint(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetUint(uint64(val))
-				return rest, nil
+				return setDecodedUint(dst, uint64(val), rest, err)
 			},
 		}, nil
 
@@ -645,11 +625,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeUint8(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetUint(uint64(val))
-				return rest, nil
+				return setDecodedUint(dst, uint64(val), rest, err)
 			},
 		}, nil
 
@@ -660,11 +636,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeUint16(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetUint(uint64(val))
-				return rest, nil
+				return setDecodedUint(dst, uint64(val), rest, err)
 			},
 		}, nil
 
@@ -675,11 +647,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeUint32(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetUint(uint64(val))
-				return rest, nil
+				return setDecodedUint(dst, uint64(val), rest, err)
 			},
 		}, nil
 
@@ -690,11 +658,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeUint64(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetUint(val)
-				return rest, nil
+				return setDecodedUint(dst, val, rest, err)
 			},
 		}, nil
 
@@ -705,11 +669,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				val, rest, err := ConsumeUintptr(data)
-				if err != nil {
-					return nil, err
-				}
-				dst.SetUint(uint64(val))
-				return rest, nil
+				return setDecodedUint(dst, uint64(val), rest, err)
 			},
 		}, nil
 
@@ -793,20 +753,22 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 	}
 }
 
-func int64ValueCodec() valueCodec {
-	return valueCodec{
-		appendVal: func(dst []byte, v reflect.Value) ([]byte, error) {
-			return AppendInt64(dst, v.Int()), nil
-		},
-		consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
-			val, rest, err := ConsumeInt64(data)
-			if err != nil {
-				return nil, err
-			}
-			dst.SetInt(val)
-			return rest, nil
-		},
+// Keep the scalar decoder in each field's adapter so fixed-width calls can
+// inline. Only assign the reflected destination after successful decoding.
+func setDecodedInt(dst reflect.Value, value int64, rest []byte, err error) ([]byte, error) {
+	if err != nil {
+		return nil, err
 	}
+	dst.SetInt(value)
+	return rest, nil
+}
+
+func setDecodedUint(dst reflect.Value, value uint64, rest []byte, err error) ([]byte, error) {
+	if err != nil {
+		return nil, err
+	}
+	dst.SetUint(value)
+	return rest, nil
 }
 
 func (b builder) structCodec(t reflect.Type) (valueCodec, error) {

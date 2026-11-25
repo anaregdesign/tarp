@@ -65,6 +65,8 @@ func (b *WriteBatch) Reset() {
 }
 
 // Apply durably commits all operations in batch at one atomic commit frontier.
+// Use it for transitions that must publish a new key and remove an old key
+// together, or for deletes that should succeed when a key is already absent.
 // Duplicate keys within the batch are folded in input order so the last
 // operation per distinct key wins. Deleting a key that is absent at commit time
 // is a no-op and writes no tombstone record. A nil or empty batch checks

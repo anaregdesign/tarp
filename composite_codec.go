@@ -9,7 +9,9 @@ import (
 
 // NewCodec derives a codec from T's Go type. It supports the basic scalar
 // types, time.Time, time.Duration, slices, arrays, maps, and structs of
-// exported fields. Nested types must be supported and non-recursive.
+// exported fields. Nested types must be supported and non-recursive. Use it to
+// store structured values or keys looked up by equality. For typed keys that
+// must sort by field values during a range scan, use [NewOrderedCodec].
 //
 // Struct fields are positional, in declaration order. Map entries are ordered
 // by their encoded keys. Distinct map keys must have distinct encodings.
