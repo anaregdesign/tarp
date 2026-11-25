@@ -305,6 +305,51 @@ func TestSnapshotConcurrencyAndLifecycleSafety(t *testing.T) {
 				t.Fatalf("seen = %d before ErrClosed stop, want 1", seen)
 			}
 
+			// 2b. Closing Snapshot on the FINAL entry of a 1-key Scan/Keys must still yield ErrClosed.
+			singleDB, err := tarp.Open(t.TempDir(), tarp.Options{IndexMode: mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := singleDB.Put([]byte("only"), []byte("one")); err != nil {
+				_ = singleDB.Close()
+				t.Fatal(err)
+			}
+			for _, kind := range []string{"scan", "keys"} {
+				oneSnap, err := singleDB.Snapshot()
+				if err != nil {
+					_ = singleDB.Close()
+					t.Fatal(err)
+				}
+				var closeErr error
+				var entries int
+				if kind == "scan" {
+					for _, err := range oneSnap.Scan(ctx) {
+						if err != nil {
+							closeErr = err
+							break
+						}
+						entries++
+						_ = oneSnap.Close()
+					}
+				} else {
+					for _, err := range oneSnap.Keys(ctx) {
+						if err != nil {
+							closeErr = err
+							break
+						}
+						entries++
+						_ = oneSnap.Close()
+					}
+				}
+				if entries != 1 || !errors.Is(closeErr, tarp.ErrClosed) {
+					_ = singleDB.Close()
+					t.Fatalf("1-key %s close on final entry: entries=%d err=%v, want 1 and ErrClosed", kind, entries, closeErr)
+				}
+			}
+			if err := singleDB.Close(); err != nil {
+				t.Fatal(err)
+			}
+
 			// 3. Closing DB while an idle Snapshot remains open must NOT deadlock,
 			// subsequent Snapshot reads must return ErrClosed, and Snapshot.Close after DB.Close succeeds.
 			lingeringSnap, err := db.Snapshot()

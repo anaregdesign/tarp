@@ -646,8 +646,20 @@ func (s *Snapshot) walk(ctx context.Context, values bool, bounds index.Bounds, o
 		db.poison(err)
 		return operationError(op, "index", err)
 	}
-	if !stopped && (ordered || bounds.Lower != "" || bounds.Upper != "") {
-		return check()
+	if !stopped {
+		if s.isClosing() {
+			return ErrClosed
+		}
+		db.life.Lock()
+		closing := db.closing
+		db.life.Unlock()
+		if closing {
+			return ErrClosed
+		}
+		if ordered || bounds.Lower != "" || bounds.Upper != "" {
+			return check()
+		}
+		return db.health()
 	}
 	return nil
 }
