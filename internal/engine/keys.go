@@ -14,21 +14,18 @@ func (db *DB) Keys(ctx context.Context) iter.Seq2[[]byte, error] {
 
 // KeysPrefix streams matching encoded keys without reading DATA.
 func (db *DB) KeysPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[[]byte, error] {
-	bounds := index.PrefixBounds(encodedPrefix)
-	return func(yield func([]byte, error) bool) {
-		err := db.walkSnapshot(ctx, false, bounds, false, false, func(k, _ []byte) bool { return yield(k, nil) })
-		if err != nil {
-			yield(nil, err)
-		}
-	}
+	return db.scanKeys(ctx, nil, index.PrefixScan(encodedPrefix))
 }
 
 // KeysRange streams encoded keys in [lower, upper) in strictly ascending or
 // descending bytewise lexicographic order without reading DATA.
 func (db *DB) KeysRange(ctx context.Context, lower, upper []byte, reverse bool) iter.Seq2[[]byte, error] {
-	bounds := index.Bounds{Lower: string(lower), Upper: string(upper)}
+	return db.scanKeys(ctx, nil, index.OrderedScan(lower, upper, reverse))
+}
+
+func (db *DB) scanKeys(ctx context.Context, snapshot *Snapshot, query index.Scan) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
-		err := db.walkSnapshot(ctx, false, bounds, true, reverse, func(k, _ []byte) bool { return yield(k, nil) })
+		err := db.walkSnapshot(ctx, snapshot, query, "keys", func(k, _ []byte) bool { return yield(k, nil) })
 		if err != nil {
 			yield(nil, err)
 		}

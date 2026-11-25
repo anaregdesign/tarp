@@ -34,86 +34,60 @@ type BoundedSnapshotter interface {
 	BoundedView(ctx context.Context, bounds Bounds) (Snapshot, error)
 }
 
-// ScanView pairs a snapshot with any bounds still to apply during iteration.
-type ScanView struct {
-	view   Snapshot
-	bounds Bounds
+// Scan selects a key range and its traversal order. Its zero value visits all
+// keys in unspecified order.
+type Scan struct {
+	Bounds
+	order scanOrder
 }
 
-func (b Bounds) Capture(ctx context.Context, backend Backend) (ScanView, error) {
-	if b != (Bounds{}) {
-		if snapshot, ok := backend.(BoundedSnapshotter); ok {
-			v, err := snapshot.BoundedView(ctx, b)
-			return ScanView{view: v}, err
-		}
-	}
-	return ScanView{view: backend.View(), bounds: b}, nil
-}
+type scanOrder uint8
 
-func (s ScanView) Close() { s.view.Close() }
+const (
+	unordered scanOrder = iota
+	ascending
+	descending
+)
 
-// RangeView can seek directly to the first entry at or above lower and visit
-// [lower, upper) in strictly ascending key order.
-type RangeView interface {
-	Range(lower, upper string, yield func(string, Address) bool) error
-}
+// PrefixScan visits only keys that start with prefix, in unspecified order.
+func PrefixScan(prefix []byte) Scan { return Scan{Bounds: PrefixBounds(prefix)} }
 
-// ReverseRangeView visits [lower, upper) in strictly descending key order.
-type ReverseRangeView interface {
-	RangeDesc(lower, upper string, yield func(string, Address) bool) error
-}
-
-// CaptureOrdered captures a snapshot prepared for ordered [lower, upper)
-// traversal in ascending or descending key order.
-func (b Bounds) CaptureOrdered(ctx context.Context, backend Backend) (ScanView, error) {
-	if snapshot, ok := backend.(BoundedSnapshotter); ok {
-		v, err := snapshot.BoundedView(ctx, b)
-		return ScanView{view: v, bounds: b}, err
-	}
-	return ScanView{view: backend.View(), bounds: b}, nil
-}
-
-// WalkOrdered visits matching addresses in strictly ascending or descending
-// encoded-key order.
-func (s ScanView) WalkOrdered(reverse bool, yield func(string, Address) bool) error {
-	b, v := s.bounds, s.view
-	if b.Upper != "" && b.Lower >= b.Upper {
-		return nil
-	}
+// OrderedScan copies the encoded bounds before returning.
+func OrderedScan(lower, upper []byte, reverse bool) Scan {
+	order := ascending
 	if reverse {
-		if ordered, ok := v.(ReverseRangeView); ok {
-			return ordered.RangeDesc(b.Lower, b.Upper, yield)
-		}
-		panic("tarp: index view does not implement ReverseRangeView")
+		order = descending
 	}
-	if ordered, ok := v.(RangeView); ok {
-		return ordered.Range(b.Lower, b.Upper, yield)
-	}
-	panic("tarp: index view does not implement RangeView")
+	return Scan{Bounds: Bounds{Lower: string(lower), Upper: string(upper)}, order: order}
 }
 
-// Walk visits only matching addresses. An unordered view filters its snapshot
-// before the caller reads DATA, so it needs no secondary ordered index.
-func (s ScanView) Walk(ctx context.Context, yield func(string, Address) bool) error {
-	b, v := s.bounds, s.view
-	if b == (Bounds{}) {
+// ScanView pairs a captured index state with the selection still to apply.
+type ScanView struct {
+	Snapshot
+	Scan
+}
+
+// Capture uses a bounded index view when available. The captured entries
+// already match the bounds, so an unordered scan can visit them directly.
+func (s Scan) Capture(ctx context.Context, backend Backend) (ScanView, error) {
+	if s != (Scan{}) {
+		if bounded, ok := backend.(BoundedSnapshotter); ok {
+			view, err := bounded.BoundedView(ctx, s.Bounds)
+			return ScanView{Snapshot: view, Scan: Scan{order: s.order}}, err
+		}
+	}
+	return ScanView{Snapshot: backend.View(), Scan: s}, nil
+}
+
+// Walk visits the captured entries in the requested order. For a prefix on
+// an unfiltered view, Range seeks to its first match.
+func (v ScanView) Walk(yield func(string, Address) bool) error {
+	switch {
+	case v.order == descending:
+		return v.RangeDesc(v.Lower, v.Upper, yield)
+	case v.order == ascending || v.Bounds != (Bounds{}):
+		return v.Range(v.Lower, v.Upper, yield)
+	default:
 		return v.All(yield)
 	}
-	if ordered, ok := v.(RangeView); ok {
-		return ordered.Range(b.Lower, b.Upper, yield)
-	}
-	var canceled error
-	err := v.All(func(k string, a Address) bool {
-		if canceled = ctx.Err(); canceled != nil {
-			return false
-		}
-		if !b.Contains(k) {
-			return true
-		}
-		return yield(k, a)
-	})
-	if canceled != nil {
-		return canceled
-	}
-	return err
 }

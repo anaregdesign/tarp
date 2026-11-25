@@ -23,134 +23,96 @@ func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 
 // ScanPrefix reads matching records from the same index and DATA snapshot.
 func (db *DB) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[Entry, error] {
-	bounds := index.PrefixBounds(encodedPrefix)
-	return func(yield func(Entry, error) bool) {
-		err := db.walkSnapshot(ctx, true, bounds, false, false, func(k, value []byte) bool { return yield(Entry{Key: k, Value: value}, nil) })
-		if err != nil {
-			yield(Entry{}, err)
-		}
-	}
+	return db.scanEntries(ctx, nil, index.PrefixScan(encodedPrefix))
 }
 
 // ScanRange reads records in [lower, upper) in strictly ascending or descending
 // bytewise lexicographic key order from a single index and DATA snapshot.
 func (db *DB) ScanRange(ctx context.Context, lower, upper []byte, reverse bool) iter.Seq2[Entry, error] {
-	bounds := index.Bounds{Lower: string(lower), Upper: string(upper)}
+	return db.scanEntries(ctx, nil, index.OrderedScan(lower, upper, reverse))
+}
+
+func (db *DB) scanEntries(ctx context.Context, snapshot *Snapshot, query index.Scan) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
-		err := db.walkSnapshot(ctx, true, bounds, true, reverse, func(k, value []byte) bool { return yield(Entry{Key: k, Value: value}, nil) })
+		err := db.walkSnapshot(ctx, snapshot, query, "scan", func(k, value []byte) bool {
+			return yield(Entry{Key: k, Value: value}, nil)
+		})
 		if err != nil {
 			yield(Entry{}, err)
 		}
 	}
 }
 
-// walkSnapshot pins the selected DATA segments for a value scan. Index cursors never
-// hold a DB lock or admission across user code, which may close or mutate it.
-func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds, ordered, reverse bool, yield func([]byte, []byte) bool) error {
-	op := "keys"
-	if values {
-		op = "scan"
-	}
+// The index and the DATA segment pins must describe the same point in time.
+func (db *DB) captureScan(ctx context.Context, snapshot *Snapshot, query index.Scan, op string) (index.ScanView, map[uint64]*storage.DataSegment, error) {
 	if err := db.admit(); err != nil {
-		return err
+		return index.ScanView{}, nil, err
 	}
+	defer db.done()
 	if ctx == nil {
-		db.done()
-		return validContextError(op)
+		return index.ScanView{}, nil, validContextError(op)
 	}
 	if err := ctx.Err(); err != nil {
-		db.done()
-		return operationError(op, "context", err)
+		return index.ScanView{}, nil, operationError(op, "context", err)
 	}
-	if ordered && bounds.Upper != "" && bounds.Lower >= bounds.Upper {
-		err := db.health()
-		db.done()
-		return err
+	if query.Upper != "" && query.Lower >= query.Upper {
+		return index.ScanView{}, nil, db.health()
+	}
+	if snapshot != nil {
+		return index.ScanView{Snapshot: snapshot.view, Scan: query}, snapshot.segments, nil
 	}
 	db.indexGate.RLock()
-	var (
-		v   index.ScanView
-		err error
-	)
-	if ordered {
-		v, err = bounds.CaptureOrdered(ctx, db.keys)
-	} else {
-		v, err = bounds.Capture(ctx, db.keys)
-	}
+	defer db.indexGate.RUnlock()
+	view, err := query.Capture(ctx, db.keys)
 	if err != nil {
-		db.indexGate.RUnlock()
-		db.done()
-		return operationError(op, "context", err)
+		return index.ScanView{}, nil, operationError(op, "context", err)
 	}
-	var pinnedSegments map[uint64]*storage.DataSegment
-	if values {
-		pinnedSegments = make(map[uint64]*storage.DataSegment, len(db.segments))
-		for id, f := range db.segments {
-			f.PinRetained()
-			pinnedSegments[id] = f
-		}
+	var segments map[uint64]*storage.DataSegment
+	if op == "scan" {
+		segments = db.pinScanSegments()
 	}
-	db.indexGate.RUnlock()
-	db.done()
-	defer v.Close()
-	defer func() {
-		for _, f := range pinnedSegments {
-			f.UnpinRetained()
-			db.notifyCleanerIfUnpinned(f)
-		}
-	}()
+	return view, segments, nil
+}
 
-	check := func() error {
-		db.life.Lock()
-		closing := db.closing
-		db.life.Unlock()
-		if closing {
-			return ErrClosed
+// walkSnapshot uses an existing snapshot or captures a fresh view for the
+// iteration. No DB lock or admission is held while yielding to the caller.
+func (db *DB) walkSnapshot(ctx context.Context, snapshot *Snapshot, query index.Scan, op string, yield func([]byte, []byte) bool) error {
+	if snapshot != nil {
+		if err := snapshot.acquire(); err != nil {
+			return err
 		}
-		if err := ctx.Err(); err != nil {
-			return operationError(op, "context", err)
-		}
-		return db.health()
+		defer snapshot.release()
 	}
-	if err := check(); err != nil {
+	view, segments, err := db.captureScan(ctx, snapshot, query, op)
+	if err != nil || view.Snapshot == nil {
 		return err
 	}
+	if snapshot == nil {
+		defer view.Close()
+		defer db.unpinScanSegments(segments)
+	}
+
+	if err := db.scanStatus(ctx, snapshot, op); err != nil {
+		return err
+	}
+	readValues := op == "scan"
 	var result error
 	var stopped bool
 	var copies *prefixKeyCopies
-	if bounds.Lower != "" || bounds.Upper != "" {
+	if query.Bounds != (index.Bounds{}) {
 		copies = new(prefixKeyCopies)
 	}
 	visit := func(k string, a index.Address) bool {
-		if result = check(); result != nil {
+		if result = db.scanStatus(ctx, snapshot, op); result != nil {
 			return false
 		}
 		var value []byte
-		if values {
-			f := pinnedSegments[a.FileID]
-			if f == nil {
-				err := missingDataSegment(a.FileID)
-				db.poison(err)
-				result = operationError(op, "index", err)
-				return false
-			}
-			if result = db.admit(); result != nil {
-				return false
-			}
-			value, result = db.store.ReadContext(ctx, storage.At(f, a), k)
+		if readValues {
+			value, result = db.readScanValue(ctx, segments[a.FileID], a, k)
 			if result != nil {
-				if result == ctx.Err() {
-					db.done()
-					result = operationError(op, "context", result)
-					return false
-				}
-				db.readFailure(result)
-				db.done()
-				result = operationError(op, "read", result)
 				return false
 			}
-			db.done()
-			if result = check(); result != nil {
+			if result = db.scanStatus(ctx, snapshot, op); result != nil {
 				return false
 			}
 		}
@@ -163,28 +125,93 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		stopped = !yield(key, value)
 		return !stopped
 	}
-	if ordered {
-		err = v.WalkOrdered(reverse, visit)
-	} else {
-		err = v.Walk(ctx, visit)
-	}
+	err = view.Walk(visit)
 	if result != nil {
 		return result
 	}
 	if err != nil {
 		if errors.Is(err, os.ErrClosed) || err == ctx.Err() {
-			if lifeErr := check(); lifeErr != nil {
+			if lifeErr := db.scanStatus(ctx, snapshot, op); lifeErr != nil {
 				return lifeErr
 			}
 		}
 		db.poison(err)
 		return operationError(op, "index", err)
 	}
-	// A bounded or ordered walk can reach its end without another callback.
-	if !stopped && (ordered || bounds.Lower != "" || bounds.Upper != "") {
-		return check()
+	if stopped {
+		return nil
+	}
+	// Bounded and ordered scans report cancellation at the end of the range.
+	// A full scan has already delivered its final entry, but a retained
+	// snapshot still reports Close from that entry's callback.
+	if query != (index.Scan{}) {
+		return db.scanStatus(ctx, snapshot, op)
+	}
+	if snapshot != nil {
+		if db.scanClosed(snapshot) {
+			return ErrClosed
+		}
+		return db.health()
 	}
 	return nil
+}
+
+func (db *DB) scanClosed(snapshot *Snapshot) bool {
+	if snapshot != nil && snapshot.isClosing() {
+		return true
+	}
+	db.life.Lock()
+	closing := db.closing
+	db.life.Unlock()
+	return closing
+}
+
+func (db *DB) scanStatus(ctx context.Context, snapshot *Snapshot, op string) error {
+	if db.scanClosed(snapshot) {
+		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return operationError(op, "context", err)
+	}
+	return db.health()
+}
+
+func (db *DB) readScanValue(ctx context.Context, segment *storage.DataSegment, address index.Address, key string) ([]byte, error) {
+	if segment == nil {
+		err := missingDataSegment(address.FileID)
+		db.poison(err)
+		return nil, operationError("scan", "index", err)
+	}
+	if err := db.admit(); err != nil {
+		return nil, err
+	}
+	defer db.done()
+	value, err := db.store.ReadContext(ctx, storage.At(segment, address), key)
+	if err != nil {
+		if err == ctx.Err() {
+			return nil, operationError("scan", "context", err)
+		}
+		db.readFailure(err)
+		return nil, operationError("scan", "read", err)
+	}
+	return value, nil
+}
+
+// pinScanSegments runs under indexGate while the reader captures its view.
+func (db *DB) pinScanSegments() map[uint64]*storage.DataSegment {
+	segments := make(map[uint64]*storage.DataSegment, len(db.segments))
+	for id, segment := range db.segments {
+		segment.PinRetained()
+		segments[id] = segment
+	}
+	return segments
+}
+
+func (db *DB) unpinScanSegments(segments map[uint64]*storage.DataSegment) {
+	for _, segment := range segments {
+		segment.UnpinRetained()
+		db.notifyCleanerIfUnpinned(segment)
+	}
 }
 
 func (db *DB) notifyCleanerIfUnpinned(segment *storage.DataSegment) {

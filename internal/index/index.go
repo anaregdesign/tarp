@@ -10,10 +10,13 @@ type Address struct {
 	Sequence                              uint64
 }
 
-// Snapshot enumerates one captured index state in unspecified order.
-// Its owner releases it after iteration.
+// Snapshot enumerates one captured index state. All uses unspecified order,
+// Range uses ascending order, and RangeDesc uses descending order. Both ranges
+// are half-open with an empty upper bound denoting the end of the index.
 type Snapshot interface {
 	All(yield func(string, Address) bool) error
+	Range(lower, upper string, yield func(string, Address) bool) error
+	RangeDesc(lower, upper string, yield func(string, Address) bool) error
 	Close()
 }
 

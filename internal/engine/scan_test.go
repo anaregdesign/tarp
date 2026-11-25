@@ -562,28 +562,42 @@ func TestFullIterationEndsAfterCancelInLastCallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestDB(t, Options{IndexMode: tc.mode}, nil)
 			mustPut(t, db, "only", "value")
-			for _, name := range []string{"Keys", "Scan"} {
-				t.Run(name, func(t *testing.T) {
-					ctx, cancel := context.WithCancel(t.Context())
-					defer cancel()
-					count := 0
-					visit := func(key []byte, err error) bool {
-						if err != nil || string(key) != "only" {
-							t.Fatalf("unexpected item %d: key %q, error %v", count, key, err)
+			snapshot, err := db.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer snapshot.Close()
+			for _, tc := range []struct {
+				name string
+				keys func(context.Context) iter.Seq2[[]byte, error]
+				scan func(context.Context) iter.Seq2[Entry, error]
+			}{
+				{"DB", db.Keys, db.Scan},
+				{"Snapshot", snapshot.Keys, snapshot.Scan},
+			} {
+				for _, name := range []string{"Keys", "Scan"} {
+					t.Run(tc.name+"/"+name, func(t *testing.T) {
+						ctx, cancel := context.WithCancel(t.Context())
+						defer cancel()
+						count := 0
+						visit := func(key []byte, err error) bool {
+							if err != nil || string(key) != "only" {
+								t.Fatalf("unexpected item %d: key %q, error %v", count, key, err)
+							}
+							count++
+							cancel()
+							return true
 						}
-						count++
-						cancel()
-						return true
-					}
-					if name == "Keys" {
-						db.Keys(ctx)(visit)
-					} else {
-						db.Scan(ctx)(func(e Entry, err error) bool { return visit(e.Key, err) })
-					}
-					if count != 1 {
-						t.Fatalf("got %d keys, want 1", count)
-					}
-				})
+						if name == "Keys" {
+							tc.keys(ctx)(visit)
+						} else {
+							tc.scan(ctx)(func(e Entry, err error) bool { return visit(e.Key, err) })
+						}
+						if count != 1 {
+							t.Fatalf("got %d keys, want 1", count)
+						}
+					})
+				}
 			}
 		})
 	}
