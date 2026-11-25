@@ -224,7 +224,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 			if ok {
 				segment := db.segments[addr.FileID]
 				if segment == nil {
-					err := missingIndexFile(addr.FileID)
+					err := missingDataSegment(addr.FileID)
 					db.poison(err)
 					db.state.Unlock()
 					return nil, operationError("get", "index", err)

@@ -53,6 +53,15 @@ func (db *DB) readBatch(keys [][]byte) ([]BatchResult, error) {
 		return nil, err
 	}
 
+	if len(reads) != 0 {
+		defer db.releaseBatchPins(reads)
+	}
+	return db.finishBatchRead(keys, results, reads)
+}
+
+// finishBatchRead materializes values only after the entire request has passed
+// its result byte limit. The caller keeps all required DATA segments pinned.
+func (db *DB) finishBatchRead(keys [][]byte, results []BatchResult, reads []batchRead) ([]BatchResult, error) {
 	// Cached values are immutable. Clone after releasing state so each slot
 	// owns its result. Batches served entirely here need no pin bookkeeping.
 	for i := range results {
@@ -153,6 +162,30 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 	maximum := db.maxSeenValueBytes
 	db.state.Unlock()
 
+	plan, err := db.planIndexedBatch(db.keys, db.segments, keys, results, uncached, maximum)
+	if err != nil {
+		return nil, err
+	}
+	for _, read := range plan.reads {
+		if read.loc.Segment != nil {
+			read.loc.Segment.Pin()
+		}
+	}
+	db.state.Lock()
+	db.batchCounts(hits, plan.misses, plan.distinct-plan.misses, len(keys)-plan.distinct-hits)
+	db.state.Unlock()
+	return plan.reads, nil
+}
+
+type indexedBatchPlan struct {
+	reads    []batchRead
+	distinct int // Distinct keys absent from the cache.
+	misses   int // Distinct uncached keys present in the index.
+}
+
+// The caller holds the index publication gate or supplies a retained snapshot.
+// Resolve and bound the full batch before pinning segments or copying values.
+func (db *DB) planIndexedBatch(lookup index.KeyLookup, segments map[uint64]*storage.DataSegment, keys [][]byte, results []BatchResult, uncached int, maximum int64) (indexedBatchPlan, error) {
 	// Use the caller's stable key slices for deduplication. Only copy keys
 	// that can represent live records, in bounded chunks for grouped lookup.
 	source := make([]uint16, len(keys))
@@ -165,35 +198,21 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		if len(group) == 0 {
 			return nil
 		}
-		if many, ok := db.keys.(index.BatchView); ok {
-			var invalid error
-			if err := many.LookupMany(group, func(i int, loc index.Address, found bool) {
-				if found {
-					if loc.FileID == 0 {
-						invalid = missingIndexFile(0)
-						return
-					}
-					addresses[positions[i]] = loc
+		var invalid error
+		err := index.LookupMany(lookup, group, func(i int, addr index.Address, found bool) {
+			if found {
+				if addr.FileID == 0 {
+					invalid = missingDataSegment(0)
+					return
 				}
-			}); err != nil {
-				return err
+				addresses[positions[i]] = addr
 			}
-			if invalid != nil {
-				return invalid
-			}
-		} else {
-			for i, k := range group {
-				a, ok, err := db.keys.Lookup(k)
-				if err != nil {
-					return err
-				}
-				if ok {
-					if a.FileID == 0 {
-						return missingIndexFile(0)
-					}
-					addresses[positions[i]] = a
-				}
-			}
+		})
+		if err != nil {
+			return err
+		}
+		if invalid != nil {
+			return invalid
 		}
 		clear(group)
 		group = group[:0]
@@ -201,7 +220,7 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		groupBytes = 0
 		return nil
 	}
-	var distinct int
+	var plan indexedBatchPlan
 	for i, k := range keys {
 		if results[i].Found {
 			continue
@@ -211,14 +230,14 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		if first != i {
 			continue
 		}
-		distinct++
+		plan.distinct++
 		if int64(len(k)) > db.opts.MaxRecordBytes {
 			continue
 		}
 		if groupBytes > 0 && len(k) > 256<<10-groupBytes {
 			if err := flush(); err != nil {
 				db.poison(err)
-				return nil, operationError("batch-get", "index", err)
+				return indexedBatchPlan{}, operationError("batch-get", "index", err)
 			}
 		}
 		group = append(group, string(k))
@@ -227,7 +246,7 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 	}
 	if err := flush(); err != nil {
 		db.poison(err)
-		return nil, operationError("batch-get", "index", err)
+		return indexedBatchPlan{}, operationError("batch-get", "index", err)
 	}
 	err := checkBatchGetValueBytes(len(keys), db.opts.MaxBatchGetValueBytes, maximum, func(i int) int64 {
 		if results[i].Found {
@@ -236,10 +255,8 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		return addresses[source[i]].ValueBytes
 	})
 	if err != nil {
-		return nil, err
+		return indexedBatchPlan{}, err
 	}
-	var reads []batchRead
-	var misses int
 	for i := range keys {
 		if results[i].Found {
 			continue
@@ -251,27 +268,18 @@ func (db *DB) captureBatch(keys [][]byte, results []BatchResult) ([]batchRead, e
 		results[i].Found = true
 		r := batchRead{slot: uint16(i), source: source[i]}
 		if int(source[i]) == i {
-			segment := db.segments[a.FileID]
+			segment := segments[a.FileID]
 			if segment == nil {
-				return nil, db.rejectBatchFile(reads, a.FileID)
+				err := missingDataSegment(a.FileID)
+				db.poison(err)
+				return indexedBatchPlan{}, operationError("batch-get", "index", err)
 			}
-			segment.Pin()
 			r.loc = storage.At(segment, a)
-			misses++
+			plan.misses++
 		}
-		reads = append(reads, r)
+		plan.reads = append(plan.reads, r)
 	}
-	db.state.Lock()
-	db.batchCounts(hits, misses, distinct-misses, len(keys)-distinct-hits)
-	db.state.Unlock()
-	return reads, nil
-}
-
-func (db *DB) rejectBatchFile(reads []batchRead, id uint64) error {
-	db.releaseBatchPins(reads)
-	err := missingIndexFile(id)
-	db.poison(err)
-	return operationError("batch-get", "index", err)
+	return plan, nil
 }
 
 // captureResidentMisses runs entirely under state. A missing first key favors
@@ -325,7 +333,10 @@ func (db *DB) captureResidentMisses(keys [][]byte, results []BatchResult) ([]bat
 		misses++
 		segment := db.segments[addr.FileID]
 		if segment == nil {
-			return nil, db.rejectBatchFile(reads, addr.FileID)
+			db.releaseBatchPins(reads)
+			err := missingDataSegment(addr.FileID)
+			db.poison(err)
+			return nil, operationError("batch-get", "index", err)
 		}
 		segment.Pin()
 		results[i] = BatchResult{Found: true}

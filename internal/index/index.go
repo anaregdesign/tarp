@@ -17,10 +17,15 @@ type Snapshot interface {
 	Close()
 }
 
-// View also supports lookup of an encoded key by exact binary equality.
+// KeyLookup resolves an encoded key by exact binary equality.
+type KeyLookup interface {
+	Lookup(key string) (Address, bool, error)
+}
+
+// View supports point lookups and enumeration at the same captured state.
 type View interface {
 	Snapshot
-	Lookup(key string) (Address, bool, error)
+	KeyLookup
 }
 
 // BatchView is implemented by views that can share page reads across keys.
@@ -30,7 +35,7 @@ type BatchView interface {
 
 // LookupMany preserves each input index even when the backend processes keys
 // in a different order. Callers discard partial results after an error.
-func LookupMany(v View, keys []string, set func(int, Address, bool)) error {
+func LookupMany(v KeyLookup, keys []string, set func(int, Address, bool)) error {
 	if grouped, ok := v.(BatchView); ok {
 		return grouped.LookupMany(keys, set)
 	}
@@ -85,7 +90,7 @@ type ResidentRelocator interface {
 // Backend has one writer and permits concurrent readers. Lookup reads the
 // current state without constructing a full enumeration view.
 type Backend interface {
-	Lookup(key string) (Address, bool, error)
+	KeyLookup
 	View() View
 	Begin() Tx
 	Count() int

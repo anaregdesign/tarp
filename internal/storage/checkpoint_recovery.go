@@ -121,9 +121,9 @@ func (c *DataCheckpoint) writeRecoveredByKey(ctx context.Context, live index.Vie
 		result = errors.Join(result, replayWorkError(errors.Join(stage.Close(), runs.close())))
 	}()
 	w := bufio.NewWriterSize(stage, 32<<10)
-	row := recoveryScratchWriter{writer: w, runs: &runs}
+	recordWriter := recoveryScratchWriter{writer: w, runs: &runs}
 	err = scan(func(key string, old Location) (io.Writer, error) {
-		if row.left != 0 {
+		if recordWriter.left != 0 {
 			return nil, &IndexWorkError{Err: io.ErrUnexpectedEOF}
 		}
 		if old.RecordBytes > math.MaxInt64-total {
@@ -135,15 +135,15 @@ func (c *DataCheckpoint) writeRecoveredByKey(ctx context.Context, live index.Vie
 		a := old.Address()
 		a.RecordOffset = total
 		total += old.RecordBytes
-		row.event = replayEvent{key: key, addr: a}
-		row.left = a.RecordBytes
-		row.headerBytes = 0
-		return &row, nil
+		recordWriter.event = replayEvent{key: key, addr: a}
+		recordWriter.left = a.RecordBytes
+		recordWriter.headerBytes = 0
+		return &recordWriter, nil
 	})
 	if err != nil {
 		return err
 	}
-	if row.left != 0 {
+	if recordWriter.left != 0 {
 		return &IndexWorkError{Err: io.ErrUnexpectedEOF}
 	}
 	if err := w.Flush(); err != nil {

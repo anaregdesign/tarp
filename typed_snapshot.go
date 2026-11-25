@@ -3,8 +3,6 @@ package tarp
 import (
 	"context"
 	"iter"
-
-	"github.com/anaregdesign/tarp/internal/engine"
 )
 
 // TypedSnapshot provides an immutable, typed point-in-time read view of a
@@ -26,7 +24,7 @@ func (db *View[K, V]) Snapshot() (*TypedSnapshot[K, V], error) {
 	}, nil
 }
 
-// Sequence returns the exact LastUserSequence published in this snapshot (0 when empty).
+// Sequence returns the last committed user sequence at capture, or zero before the first write.
 func (s *TypedSnapshot[K, V]) Sequence() uint64 {
 	return s.snap.Sequence()
 }
@@ -47,43 +45,7 @@ func (s *TypedSnapshot[K, V]) Get(key K) (V, error) {
 
 // BatchGet reads and decodes keys from this snapshot in input order.
 func (s *TypedSnapshot[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
-	if err := engine.CheckBatchCount(len(keys)); err != nil {
-		return nil, err
-	}
-	var encoded [][]byte
-	const smallBatch = 32
-	switch {
-	case len(keys) <= 1:
-		var one [1][]byte
-		encoded = one[:len(keys)]
-	case len(keys) <= smallBatch:
-		var small [smallBatch][]byte
-		encoded = small[:len(keys)]
-	default:
-		encoded = make([][]byte, len(keys))
-	}
-	for i, key := range keys {
-		k, err := s.codecs.encodeBatchKey("BatchGet", i, key)
-		if err != nil {
-			return nil, err
-		}
-		encoded[i] = k
-	}
-	raw, err := (*engine.Snapshot)(s.snap).BatchGetPrepared(encoded)
-	if err != nil {
-		return nil, err
-	}
-	results := make([]TypedBatchResult[V], len(raw))
-	for i, r := range raw {
-		if r.Found {
-			value, err := s.codecs.valueCodec.Decode(r.Value)
-			if err != nil {
-				return nil, &BatchCodecError{Operation: "BatchGet", Index: i, Field: "value", Err: err}
-			}
-			results[i] = TypedBatchResult[V]{Value: value, Found: true}
-		}
-	}
-	return results, nil
+	return s.codecs.batchGet(keys, s.snap)
 }
 
 // Scan decodes all entries in this snapshot.

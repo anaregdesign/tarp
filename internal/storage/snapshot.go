@@ -120,7 +120,7 @@ func (c *DataCheckpoint) replayLive(ctx context.Context, history index.Backend, 
 		}
 		copying := false
 		// Captured byte accounting is only a hint to avoid staging a segment
-		// whose rows are likely to survive. Every address and replay winner
+		// whose records are likely to survive. Every address and replay winner
 		// still has to agree, even if the encoded lengths have not changed.
 		keep := captured.Entry.Kind == format.SnapshotKind &&
 			captured.liveBytes == captured.Entry.Bytes-format.SegmentHeaderBytes && captured.Segment.UnavailableData() == nil
@@ -230,7 +230,7 @@ func (c *DataCheckpoint) replayLive(ctx context.Context, history index.Backend, 
 	}
 	// Replay can produce only a subset of the validated original addresses
 	// in each snapshot. Equality of the per-file counts proves that every
-	// original row is still the winner, not merely that the total is right.
+	// original record still describes a live key.
 	winners := make(map[uint64]int64, len(c.reused))
 	if err := replay.finishWith(func(_ string, addr index.Address) error {
 		if _, kept := c.reused[addr.FileID]; kept {
@@ -240,8 +240,8 @@ func (c *DataCheckpoint) replayLive(ctx context.Context, history index.Backend, 
 	}); err != nil {
 		return err
 	}
-	for id, rows := range c.reused {
-		if winners[id] != rows {
+	for id, recordCount := range c.reused {
+		if winners[id] != recordCount {
 			return fmt.Errorf("%w: snapshot %d winners disagree with replay", ErrCorrupt, id)
 		}
 	}

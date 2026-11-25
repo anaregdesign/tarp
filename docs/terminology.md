@@ -37,8 +37,10 @@ Larger records can also cross stripe boundaries.
   removed. The **last user sequence** includes the active committed prefix.
 - A **key range** uses encoded-key order and a half-open upper bound when one
   exists. An **encoded key prefix** selects keys for a prefix scan. A **shared
-  key prefix** compresses keys within a B+tree page. Public scan order is
-  unspecified. Keys matching the same prefix can occupy distant DATA offsets.
+  key prefix** compresses keys within a B+tree page. `ScanRange` and
+  `KeysRange` yield encoded keys in ascending bytewise order by default, or
+  descending order with `WithReverse`. Full and prefix scans have unspecified
+  order. Keys matching the same prefix can occupy distant DATA offsets.
 - A **covered catalog prefix** comprises the consecutive catalog entries
   described by an index checkpoint. Recovery imports the index and replays the
   subsequent **DATA log suffix**. A cleaner selects consecutive segments in

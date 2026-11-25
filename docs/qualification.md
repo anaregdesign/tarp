@@ -424,9 +424,9 @@ verification location outside the engine directory, then run in the guest:
 
 The verifier opens an existing, initialized database and runs file-only recovery.
 A missing or uninitialized directory fails verification even if the oracle
-expects zero live keys. The oracle then checks the live key count and every
-observed acknowledgment, allowing the prior state or the whole result of one
-pending Put or Delete. It is test evidence, never recovery input. The supplied
+expects zero live keys. The oracle checks the last user sequence, live key
+count, and witnessed values. If a mutation was pending at the cut, the
+recovered sequence determines whether its whole effect must be present. It is test evidence, never recovery input. The supplied
 protocol is deliberately phase-controlled: it is not a general distributed workload
 controller and does not claim arbitrary random-cut intent handshakes.
 

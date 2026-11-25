@@ -84,8 +84,8 @@ func (c *DataCheckpoint) CopyByKey(ctx context.Context, live index.View, count i
 				return replayWorkError(err)
 			}
 		}
-		if copy.rows != int64(count) {
-			return fmt.Errorf("%w: key-ordered checkpoint has %d keys, captured index has %d", ErrCorrupt, copy.rows, count)
+		if copy.recordCount != int64(count) {
+			return fmt.Errorf("%w: key-ordered checkpoint has %d keys, captured index has %d", ErrCorrupt, copy.recordCount, count)
 		}
 		return copy.flush()
 	})
@@ -145,7 +145,7 @@ type orderedCopy struct {
 	live          index.View
 	emit          func(string, Location) (io.Writer, error)
 	reuse         func(format.CatalogEntry) error
-	rows          int64
+	recordCount   int64
 	window        []orderedWinner
 	used, payload int
 	buf, arena    []byte
@@ -177,23 +177,23 @@ func (w *orderedCopy) add(e replayEvent) error {
 		addr.RecordBytes-format.RecordHeaderBytes-addr.ValueBytes != int64(len(key)) {
 		return &IndexWorkError{Err: errors.New("invalid winning address in checkpoint workspace")}
 	}
-	row := orderedWinner{key: key, loc: At(src.Segment, addr), payloadCRC: e.payloadCRC}
+	winner := orderedWinner{key: key, loc: At(src.Segment, addr), payloadCRC: e.payloadCRC}
 	const descriptorCharge = 128
 	if addr.RecordBytes > int64(orderedWindowBytes-descriptorCharge)-int64(len(key)) {
 		if err := w.flush(); err != nil {
 			return err
 		}
-		dest, err := w.emit(key, row.loc)
+		dest, err := w.emit(key, winner.loc)
 		if err != nil {
 			return err
 		}
-		if err := w.readOne(src, &row, dest); err != nil {
+		if err := w.readOne(src, &winner, dest); err != nil {
 			return err
 		}
 		if err := w.c.store.IO.Check("compact.record:after"); err != nil {
 			return err
 		}
-		w.rows++
+		w.recordCount++
 		return nil
 	}
 	charge := int(addr.RecordBytes) + len(key) + descriptorCharge
@@ -202,10 +202,10 @@ func (w *orderedCopy) add(e replayEvent) error {
 			return err
 		}
 	}
-	w.window = append(w.window, row)
+	w.window = append(w.window, winner)
 	w.payload += int(addr.RecordBytes)
 	w.used += charge
-	w.rows++
+	w.recordCount++
 	return nil
 }
 
@@ -220,19 +220,19 @@ func (w *orderedCopy) openSource(src CapturedSegment) (*os.File, error) {
 	return nil, orderedSourceError(src.Entry.ID, err)
 }
 
-func (w *orderedCopy) readOne(src CapturedSegment, row *orderedWinner, dst io.Writer) (result error) {
+func (w *orderedCopy) readOne(src CapturedSegment, winner *orderedWinner, dst io.Writer) (result error) {
 	fd, err := w.openSource(src)
 	if err != nil {
 		return err
 	}
 	defer func() { result = errors.Join(result, orderedSourceError(src.Entry.ID, fd.Close())) }()
-	return w.readRecord(fd, row, dst)
+	return w.readRecord(fd, winner, dst)
 }
 
-func (w *orderedCopy) readRecord(fd *os.File, row *orderedWinner, dst io.Writer) error {
-	a := row.loc
-	rec, err := format.CopyRecord(w.ctx, w.c.paceInput(fd), dst, a.RecordOffset, a.RecordBytes, &format.Identity{Key: row.key, Sequence: a.Sequence}, w.buf)
-	if err == nil && (rec.EncodedRecordBytes() != a.RecordBytes || rec.ValueBytes != a.ValueBytes || rec.PayloadCRC != row.payloadCRC) {
+func (w *orderedCopy) readRecord(fd *os.File, winner *orderedWinner, dst io.Writer) error {
+	a := winner.loc
+	rec, err := format.CopyRecord(w.ctx, w.c.paceInput(fd), dst, a.RecordOffset, a.RecordBytes, &format.Identity{Key: winner.key, Sequence: a.Sequence}, w.buf)
+	if err == nil && (rec.EncodedRecordBytes() != a.RecordBytes || rec.ValueBytes != a.ValueBytes || rec.PayloadCRC != winner.payloadCRC) {
 		err = fmt.Errorf("%w: ordered record changed after validation", ErrCorrupt)
 	}
 	var destination *destinationError
@@ -267,15 +267,15 @@ func (w *orderedCopy) flush() (result error) {
 		}
 	}()
 	// Consecutive addresses share one file read into the window. The arena
-	// follows physical read order; each row's slice follows that row when
-	// emitting the key-ordered output.
+	// follows segment offset order. Each winning record retains its slice
+	// for emission in key order.
 	offset := 0
 	for i := 0; i < len(w.order); {
 		if err := w.ctx.Err(); err != nil {
 			return err
 		}
-		row := &w.window[w.order[i]]
-		if id := row.loc.Segment.ID; fileID != id {
+		winner := &w.window[w.order[i]]
+		if id := winner.loc.Segment.ID; fileID != id {
 			if fd != nil {
 				err := orderedSourceError(fileID, fd.Close())
 				fd = nil
@@ -293,7 +293,7 @@ func (w *orderedCopy) flush() (result error) {
 			fileID = id
 		}
 		start := offset
-		fileStart := row.loc.RecordOffset
+		fileStart := winner.loc.RecordOffset
 		for i < len(w.order) {
 			r := &w.window[w.order[i]]
 			if r.loc.Segment.ID != fileID || r.loc.RecordOffset-fileStart != int64(offset-start) {
@@ -313,19 +313,19 @@ func (w *orderedCopy) flush() (result error) {
 			return orderedSourceError(fileID, io.ErrUnexpectedEOF)
 		}
 	}
-	for _, row := range w.window {
-		sum, err := format.ValidateIndexedRecord(row.data, []byte(row.key), row.loc.Sequence)
-		if err == nil && sum != row.payloadCRC {
+	for _, winner := range w.window {
+		sum, err := format.ValidateIndexedRecord(winner.data, []byte(winner.key), winner.loc.Sequence)
+		if err == nil && sum != winner.payloadCRC {
 			err = fmt.Errorf("%w: ordered record changed after validation", ErrCorrupt)
 		}
 		if err != nil {
-			return orderedSourceError(row.loc.Segment.ID, err)
+			return orderedSourceError(winner.loc.Segment.ID, err)
 		}
-		dst, err := w.emit(row.key, row.loc)
+		dst, err := w.emit(winner.key, winner.loc)
 		if err != nil {
 			return err
 		}
-		if _, err = dst.Write(row.data); err != nil {
+		if _, err = dst.Write(winner.data); err != nil {
 			return err
 		}
 		if err = w.c.store.IO.Check("compact.record:after"); err != nil {
@@ -487,12 +487,12 @@ func (w *orderedCopy) carry(base []CapturedSegment) error {
 		if err := w.reuse(src.Entry); err != nil {
 			return err
 		}
-		w.rows += w.c.snapshotRows(src)
+		w.recordCount += src.Segment.snapshotRange.recordCount
 	}
 	return nil
 }
 
-// Delay copying the unmodified leading rows until the first actual difference.
+// Delay copying the unmodified leading records until the first actual difference.
 // A checked, spillable address prefix makes an insert-then-delete inside a
 // file eligible for reuse, without copying its values into private DATA.
 func (w *orderedCopy) mergeFile(dir string, src CapturedSegment, first, last string, r *changeCursor) (result error) {
@@ -517,13 +517,13 @@ func (w *orderedCopy) mergeFile(dir string, src CapturedSegment, first, last str
 		return replayWorkError(err)
 	}
 	var previous string
-	var rows int64
+	var recordCount int64
 	err := w.c.scanByKey(w.ctx, src, func(off int64, h format.RecordHeader, key string) error {
-		if key <= previous || rows == 0 && key != first || key > last {
+		if key <= previous || recordCount == 0 && key != first || key > last {
 			return selectedReadFailure(src.Entry.ID, fmt.Errorf("%w: unordered certified snapshot", ErrCorrupt))
 		}
 		previous = key
-		rows++
+		recordCount++
 		for k := r.change.key; k != "" && k < key; k = r.change.key {
 			a, put, err := r.take(false)
 			if err != nil {
@@ -552,19 +552,19 @@ func (w *orderedCopy) mergeFile(dir string, src CapturedSegment, first, last str
 			return nil
 		}
 		loc := Location{Segment: src.Segment, RecordOffset: off, RecordBytes: h.EncodedRecordBytes(), ValueBytes: h.ValueBytes, Sequence: h.Sequence}
-		row := replayEvent{key: key, addr: loc.Address(), payloadCRC: h.PayloadCRC, fileKind: format.SnapshotKind, recordKind: format.Put}
+		event := replayEvent{key: key, addr: loc.Address(), payloadCRC: h.PayloadCRC, fileKind: format.SnapshotKind, recordKind: format.Put}
 		if changed {
-			return w.add(row)
+			return w.add(event)
 		}
 		if err := w.verify(key, loc.Address()); err != nil {
 			return err
 		}
-		return replayWorkError(prefix.add(row))
+		return replayWorkError(prefix.add(event))
 	})
 	if err != nil {
 		return err
 	}
-	if previous != last || rows != w.c.snapshotRows(src) {
+	if previous != last || recordCount != src.Segment.snapshotRange.recordCount {
 		return selectedReadFailure(src.Entry.ID, fmt.Errorf("%w: certified snapshot bounds or count", ErrCorrupt))
 	}
 	if changed {
@@ -573,6 +573,6 @@ func (w *orderedCopy) mergeFile(dir string, src CapturedSegment, first, last str
 	if err := w.flush(); err != nil {
 		return err
 	}
-	w.rows += rows
+	w.recordCount += recordCount
 	return w.reuse(src.Entry)
 }

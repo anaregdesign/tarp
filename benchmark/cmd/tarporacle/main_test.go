@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/anaregdesign/tarp"
+	"github.com/anaregdesign/tarp/benchmark/qualification"
 )
 
 func TestVerifyRequiresAnInitializedRecoveredDatabase(t *testing.T) {
@@ -94,55 +95,66 @@ func TestExternalOracleAllowsOnlyWholePendingPut(t *testing.T) {
 }
 
 func TestOracleRejectsTruncationAndMalformedProtocol(t *testing.T) {
-	if _, err := readOracle(strings.NewReader(`{"type":"ack"}`)); err == nil {
+	if _, err := qualification.ReadOracle(strings.NewReader(`{"type":"ack"}`)); err == nil {
 		t.Fatal("truncated final line accepted")
 	}
 	for _, input := range []string{"TARP_ACK 00", "TARP_ACK zz 01", "TARP_UNKNOWN 00 01"} {
-		if _, _, err := protocol(input); err == nil {
+		if _, _, err := qualification.ParseOracle(input); err == nil {
 			t.Fatalf("malformed protocol accepted: %s", input)
 		}
 	}
 }
 
-func TestExternalOracleChecksEntireLiveSet(t *testing.T) {
-	dir := t.TempDir()
-	db, err := tarp.Open(dir, tarp.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = db.BatchPut([]tarp.Entry{{Key: []byte("k"), Value: []byte("v")}, {Key: []byte("extra")}})
-	if closeErr := db.Close(); err != nil || closeErr != nil {
-		t.Fatalf("prepare database: %v, close: %v", err, closeErr)
-	}
-
-	base := entry{Type: "ack", Key: []byte("k"), Value: []byte("v")}
-	extra := entry{Type: "ack", Key: []byte("extra")}
-	pendingInsert := entry{Type: "intent", Key: []byte("new")}
-	pendingDelete := entry{Type: "intent_delete", Key: []byte("removed")}
-	removed := entry{Type: "ack", Key: pendingDelete.Key}
+func TestExternalOracleChecksRecoveredSequenceAndLiveSet(t *testing.T) {
+	type history []qualification.OracleEvent
+	k, extra := []byte("k"), []byte("extra")
+	base := qualification.OracleEvent{Type: "ack", Key: k, Value: []byte("v")}
+	added := qualification.OracleEvent{Type: "ack", Key: extra}
+	pending := qualification.OracleEvent{Type: "intent", Key: extra}
+	removed := qualification.OracleEvent{Type: "intent_delete", Key: extra}
+	old := qualification.OracleEvent{Type: "ack", Key: extra, Value: []byte("old")}
 	for _, tc := range []struct {
-		name    string
-		history []entry
-		wantErr bool
+		name      string
+		witness   history
+		writes    history
+		wantError bool
 	}{
-		{"acknowledged only", []entry{base}, true},
-		{"pending insert absent", []entry{base, pendingInsert}, true},
-		{"pending insert present", []entry{base, {Type: "intent", Key: extra.Key}}, false},
-		{"pending update applied", []entry{base, {Type: "ack", Key: extra.Key, Value: []byte("old")}, {Type: "intent", Key: extra.Key}}, false},
-		{"pending update unapplied", []entry{base, extra, {Type: "intent", Key: extra.Key, Value: []byte("new")}}, false},
-		{"pending delete applied with extra key", []entry{base, removed, pendingDelete}, true},
-		{"pending delete applied", []entry{base, extra, removed, pendingDelete}, false},
-		{"pending delete unapplied", []entry{base, extra, {Type: "intent_delete", Key: extra.Key}}, false},
+		{"acknowledged only", history{base}, history{base}, false},
+		{"unwitnessed identical write", history{base}, history{base, base}, true},
+		{"unwitnessed key at expected sequence", history{base, base}, history{base, added}, true},
+		{"pending insert unapplied", history{base, pending}, history{base}, false},
+		{"pending insert applied", history{base, pending}, history{base, added}, false},
+		{"pending update applied", history{base, old, pending}, history{base, old, added}, false},
+		{"pending update unapplied", history{base, old, pending}, history{base, old}, false},
+		{"pending value at prior sequence", history{base, old, pending}, history{base, added}, true},
+		{"prior value at pending sequence", history{base, old, pending}, history{base, old, old}, true},
+		{"pending delete applied", history{base, added, removed}, history{base, added, {Type: "ack_delete", Key: extra}}, false},
+		{"absent delete unapplied", history{base, removed}, history{base}, false},
+		{"pending delete unapplied", history{base, added, removed}, history{base, added}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			events := append(tc.history, entry{Type: "phase", Phase: "cut"})
-			err := verifyDatabase(dir, events)
-			if tc.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "live index cardinality") {
-					t.Fatalf("expected a live key count mismatch, got %v", err)
-				}
-			} else if err != nil {
+			dir := t.TempDir()
+			db, err := tarp.Open(dir, tarp.Options{})
+			if err != nil {
 				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, write := range tc.writes {
+				if write.Type == "ack_delete" {
+					err = db.Delete(write.Key)
+				} else {
+					err = db.Put(write.Key, write.Value)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			events := append(tc.witness, qualification.OracleEvent{Type: "phase", Phase: "cut"})
+			if err := verifyDatabase(dir, events); (err != nil) != tc.wantError {
+				t.Fatalf("verifyDatabase() = %v, want error %t", err, tc.wantError)
 			}
 		})
 	}

@@ -201,3 +201,56 @@ func TestPrefixScansReturnIndependentMutableKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestKeysRangeReadsOnlyTheIndex(t *testing.T) {
+	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
+		t.Run(fmt.Sprintf("mode=%d", mode), func(t *testing.T) {
+			var reads atomic.Int64
+			opts := testOptions()
+			opts.IndexMode = mode
+			db := newTestDBWithHooks(t, opts, &storage.IO{Hook: func(point string) error {
+				if point == "read:before" {
+					reads.Add(1)
+				}
+				return nil
+			}}, parkedMaintenance())
+			for i := range 40 {
+				mustPut(t, db, fmt.Sprintf("k/%02d", i), "value")
+			}
+			snap, err := db.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer snap.Close()
+
+			lower, upper := []byte("k/05"), []byte("k/25")
+			reads.Store(0)
+			for _, err := range db.ScanRange(t.Context(), lower, upper, false) {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := reads.Swap(0); got != 20 {
+				t.Fatalf("ScanRange made %d DATA reads, want 20", got)
+			}
+
+			for _, reverse := range []bool{false, true} {
+				for _, keys := range []iter.Seq2[[]byte, error]{
+					db.KeysRange(t.Context(), lower, upper, reverse),
+					snap.KeysRange(t.Context(), lower, upper, reverse),
+				} {
+					count := 0
+					for _, err := range keys {
+						if err != nil {
+							t.Fatal(err)
+						}
+						count++
+					}
+					if got := reads.Swap(0); got != 0 || count != 20 {
+						t.Fatalf("KeysRange(reverse=%t) yielded %d keys with %d DATA reads", reverse, count, got)
+					}
+				}
+			}
+		})
+	}
+}

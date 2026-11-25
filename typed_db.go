@@ -157,17 +157,6 @@ func (db *View[K, V]) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter
 	}
 }
 
-// ScanRange decodes the entries selected by [DB.ScanRange] in ascending or
-// [WithReverse] descending encoded-key order. The lower and upper bounds are
-// raw encoded-key bounds and do not need to encode complete K values.
-func (db *View[K, V]) ScanRange(ctx context.Context, lower, upper []byte, opts ...ScanOption) iter.Seq2[TypedEntry[K, V], error] {
-	view := *db
-	rows := view.core.ScanRange(ctx, lower, upper, opts...)
-	return func(yield func(TypedEntry[K, V], error) bool) {
-		view.decodeEntries(rows, yield)
-	}
-}
-
 func (db *View[K, V]) decodeEntries(seq iter.Seq2[Entry, error], yield func(TypedEntry[K, V], error) bool) {
 	for entry, err := range seq {
 		if err != nil {

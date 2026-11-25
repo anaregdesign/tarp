@@ -17,14 +17,14 @@ import (
 // Immutable once the snapshot has been certified. Boundaries can be much
 // larger than a typical record. Keep only a fixed-size summary per file.
 type snapshotRange struct {
-	rows, lastOffset      int64
-	firstBytes, lastBytes int
-	digest                [sha256.Size]byte
+	recordCount, lastOffset int64
+	firstBytes, lastBytes   int
+	digest                  [sha256.Size]byte
 }
 
 type snapshotBoundsBuilder struct {
-	first, last      string
-	rows, lastOffset int64
+	first, last             string
+	recordCount, lastOffset int64
 }
 
 type scannedSnapshot struct {
@@ -44,7 +44,7 @@ type snapshotOrderCheck struct {
 }
 
 func (o *snapshotOrderCheck) accept(f *DataSegment, b *scannedSnapshot) {
-	if b.rows == 0 || b.unordered || o.last >= b.first {
+	if b.recordCount == 0 || b.unordered || o.last >= b.first {
 		o.unordered, o.last = true, ""
 		return
 	}
@@ -53,10 +53,10 @@ func (o *snapshotOrderCheck) accept(f *DataSegment, b *scannedSnapshot) {
 }
 
 func (b *snapshotBoundsBuilder) add(key string, offset int64) {
-	if b.rows == 0 {
+	if b.recordCount == 0 {
 		b.first = key
 	}
-	b.rows++
+	b.recordCount++
 	b.last, b.lastOffset = key, offset
 }
 
@@ -80,7 +80,7 @@ func boundsDigest(first, last string) [sha256.Size]byte {
 
 func (b *snapshotBoundsBuilder) complete(f *DataSegment, fences *fenceCache) {
 	f.snapshotRange = &snapshotRange{
-		rows: b.rows, lastOffset: b.lastOffset,
+		recordCount: b.recordCount, lastOffset: b.lastOffset,
 		firstBytes: len(b.first), lastBytes: len(b.last), digest: boundsDigest(b.first, b.last),
 	}
 	fences.put(f.ID, b.first, b.last)
@@ -137,9 +137,6 @@ func (s *Store) OrderedCleanupPending() bool {
 }
 
 func (c *DataCheckpoint) HasOrderedBase() bool { return c.capture.orderedSnapshot || c.certifiedBase }
-func (c *DataCheckpoint) snapshotRows(src CapturedSegment) int64 {
-	return src.Segment.snapshotRange.rows
-}
 
 func (c *DataCheckpoint) findSnapshot(entry format.CatalogEntry) (CapturedSegment, int, error) {
 	if c.ordinals == nil {
@@ -213,7 +210,7 @@ func (c *DataCheckpoint) certifyCapturedBase(ctx context.Context, live index.Vie
 		if !ordered {
 			return false, nil
 		}
-		if bounds.rows == 0 {
+		if bounds.recordCount == 0 {
 			return false, fmt.Errorf("%w: empty physical snapshot", ErrCorrupt)
 		}
 		bounds.complete(src.Segment, &c.store.fences)
@@ -233,7 +230,7 @@ func (c *DataCheckpoint) snapshotBounds(ctx context.Context, entry format.Catalo
 		return "", "", err
 	}
 	r := src.Segment.snapshotRange
-	if r == nil || r.rows < 1 {
+	if r == nil || r.recordCount < 1 {
 		return "", "", fmt.Errorf("%w: missing snapshot range", ErrCorrupt)
 	}
 	if first, last, ok := c.store.fences.get(entry.ID, r.firstBytes); ok {
@@ -275,12 +272,12 @@ func (c *DataCheckpoint) snapshotBounds(ctx context.Context, entry format.Catalo
 		return key.String(), nil
 	}
 	err = c.store.IO.Do("compact.key.fence", func() error {
-		first, err = read(format.SegmentHeaderBytes, r.firstBytes, r.rows == 1)
+		first, err = read(format.SegmentHeaderBytes, r.firstBytes, r.recordCount == 1)
 		if err != nil {
 			return err
 		}
 		last = first
-		if r.rows > 1 {
+		if r.recordCount > 1 {
 			last, err = read(r.lastOffset, r.lastBytes, true)
 			if err != nil {
 				return err

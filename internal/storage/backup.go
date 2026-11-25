@@ -341,6 +341,16 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err != nil {
 		return err
 	}
+	// Matching CURRENT binds the staged MANIFEST and all sealed DATA digests.
+	// The active prefix has no catalog digest, and ordinary replay permits a
+	// physical suffix. Compare its replayed digest and exact length separately.
+	if image.Current != backup.current {
+		return fmt.Errorf("CURRENT: %w: restored frontier differs from backup", ErrCorrupt)
+	}
+	active := image.Segments[image.Current.ActiveID]
+	if active.Size.Load() != image.Current.ActiveCommittedEndOffset || [sha256.Size]byte(active.activeDigest.Sum(nil)) != backup.activeDigest {
+		return fmt.Errorf("%s: %w: restored active DATA differs from backup", filepath.Base(active.Path), ErrCorrupt)
+	}
 	if err := cfg.CheckLimits(image.LiveRecordSizes); err != nil {
 		return err
 	}
@@ -357,8 +367,10 @@ type BackupInfo struct {
 }
 
 type verifiedBackup struct {
-	files []format.BackupFile
-	info  BackupInfo
+	files        []format.BackupFile
+	info         BackupInfo
+	current      format.Frontier
+	activeDigest [sha256.Size]byte
 }
 
 // VerifyBackup checks an immutable backup without creating a destination or acquiring a lock.
@@ -500,7 +512,8 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 	if image.Current.UUID != meta.UUID || image.Current.LastUserSequence != meta.LastUserSequence || image.Catalog.CheckpointCutoffSequence != meta.CheckpointCutoffSequence {
 		return verifiedBackup{}, fmt.Errorf("BACKUP: %w: identity, sequence or cutoff differs from the selected image", ErrCorrupt)
 	}
-	if image.Segments[image.Current.ActiveID].Size.Load() != image.Current.ActiveCommittedEndOffset {
+	active := image.Segments[image.Current.ActiveID]
+	if active.Size.Load() != image.Current.ActiveCommittedEndOffset {
 		return verifiedBackup{}, fmt.Errorf("%s: %w: length differs from committed end", DataName(meta.UUID, image.Current.ActiveID), ErrCorrupt)
 	}
 	if len(files) != len(image.Segments)+2 {
@@ -520,7 +533,9 @@ func verifyBackup(ctx context.Context, source string, buffer []byte, verify imag
 		}
 	}
 	return verifiedBackup{
-		files: meta.Files,
+		files:        meta.Files,
+		current:      image.Current,
+		activeDigest: [sha256.Size]byte(active.activeDigest.Sum(nil)),
 		info: BackupInfo{
 			DatabaseID: image.Current.UUID, LastUserSequence: image.Current.LastUserSequence, LiveKeys: image.LiveKeys,
 			LiveRecordSizes: image.LiveRecordSizes,

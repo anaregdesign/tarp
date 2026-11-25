@@ -17,8 +17,6 @@ import (
 	"github.com/anaregdesign/tarp/benchmark/qualification"
 )
 
-type entry = qualification.OracleEvent
-
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -56,7 +54,7 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	events, err := readOracle(fd)
+	events, err := qualification.ReadOracle(fd)
 	if err = errors.Join(err, fd.Close()); err != nil {
 		return err
 	}
@@ -67,16 +65,12 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	return err
 }
 
-func protocol(line string) (entry, bool, error) {
-	return qualification.ParseOracle(line)
-}
-
 func recordOracle(input io.Reader, output io.Writer, fd *os.File) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 64<<10)
 	encoder := json.NewEncoder(fd)
 	for scanner.Scan() {
-		event, recognized, err := protocol(scanner.Text())
+		event, recognized, err := qualification.ParseOracle(scanner.Text())
 		if err != nil {
 			return err
 		}
@@ -96,11 +90,7 @@ func recordOracle(input io.Reader, output io.Writer, fd *os.File) error {
 	return scanner.Err()
 }
 
-func readOracle(input io.Reader) ([]entry, error) {
-	return qualification.ReadOracle(input)
-}
-
-func verifyDatabase(dir string, events []entry) (result error) {
+func verifyDatabase(dir string, events []qualification.OracleEvent) (result error) {
 	oracle, err := qualification.ReplayOracle(events, false)
 	if err != nil {
 		return err
@@ -110,25 +100,17 @@ func verifyDatabase(dir string, events []entry) (result error) {
 		return fmt.Errorf("file-only recovery failed: %w", err)
 	}
 	defer func() { result = errors.Join(result, db.Close()) }()
-	// Verify visits each witnessed key once and accepts either permitted
-	// outcome for the pending mutation. Count the outcome that actually exists.
-	var witnessedLive uint64
-	_, err = oracle.Verify(func(key []byte) ([]byte, bool, error) {
-		value, err := db.Get(key)
-		if errors.Is(err, tarp.ErrNotFound) {
-			return nil, false, nil
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		witnessedLive++
-		return value, true, nil
-	})
+	snapshot, err := db.Snapshot()
 	if err != nil {
 		return err
 	}
-	if live := db.Stats().LiveKeys; live != witnessedLive {
-		return fmt.Errorf("recovered live index cardinality %d != witnessed %d", live, witnessedLive)
-	}
-	return nil
+	defer func() { result = errors.Join(result, snapshot.Close()) }()
+	_, err = oracle.VerifyAt(snapshot.Sequence(), int(db.Stats().LiveKeys), func(key []byte) ([]byte, bool, error) {
+		value, err := snapshot.Get(key)
+		if errors.Is(err, tarp.ErrNotFound) {
+			return nil, false, nil
+		}
+		return value, err == nil, err
+	})
+	return err
 }

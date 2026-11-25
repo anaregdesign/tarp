@@ -401,7 +401,7 @@ func TestOrderedCheckpointCoalescesWritesAndRetriesFailedSegmentFlush(t *testing
 	if err = cp.Install(); err != nil {
 		t.Fatal(err)
 	}
-	rowCount, maxCalls := 0, 0
+	recordCount, maxCalls := 0, 0
 	for _, e := range cp.Entries() {
 		data, err := os.ReadFile(s.Segments[e.ID].Path)
 		if err != nil {
@@ -410,16 +410,16 @@ func TestOrderedCheckpointCoalescesWritesAndRetriesFailedSegmentFlush(t *testing
 		payload := data[format.SegmentHeaderBytes:]
 		maxCalls += (len(payload) + (32 << 10) - 1) / (32 << 10)
 		for len(payload) > 0 {
-			key := keyAt(rowCount)
-			row := format.EncodeRecord(format.Put, uint64(count-rowCount), []byte(key), []byte(strings.Repeat(key, 64)))
-			if !bytes.HasPrefix(payload, row) {
-				t.Fatalf("snapshot %d differs at row %d", e.ID, rowCount)
+			key := keyAt(recordCount)
+			record := format.EncodeRecord(format.Put, uint64(count-recordCount), []byte(key), []byte(strings.Repeat(key, 64)))
+			if !bytes.HasPrefix(payload, record) {
+				t.Fatalf("snapshot %d differs at record %d", e.ID, recordCount)
 			}
-			payload = payload[len(row):]
-			rowCount++
+			payload = payload[len(record):]
+			recordCount++
 		}
 	}
-	if rowCount != count || len(cp.Entries()) < 3 || calls < 1 || calls > maxCalls {
-		t.Fatalf("rows %d, files %d, compact.write calls %d (limit %d)", rowCount, len(cp.Entries()), calls, maxCalls)
+	if recordCount != count || len(cp.Entries()) < 3 || calls < 1 || calls > maxCalls {
+		t.Fatalf("records %d, files %d, compact.write calls %d (limit %d)", recordCount, len(cp.Entries()), calls, maxCalls)
 	}
 }
