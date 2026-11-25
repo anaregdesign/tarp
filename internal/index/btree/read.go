@@ -245,6 +245,186 @@ func (v *view) Range(lower, upper string, yield func(string, index.Address) bool
 	}
 }
 
+type reverseFrame struct {
+	id         uint64
+	pos        int
+	positioned bool
+}
+
+type reverseCursor struct {
+	stack        []reverseFrame
+	seekingUpper bool
+}
+
+func (c *reverseCursor) leaf(s *pager, upper string) (*page, error) {
+	for len(c.stack) > 0 {
+		f := &c.stack[len(c.stack)-1]
+		p, err := s.read(f.id)
+		if err != nil {
+			return nil, err
+		}
+		switch p[4] {
+		case leaf:
+			if !f.positioned {
+				end := p.count()
+				if c.seekingUpper {
+					c.seekingUpper = false
+					end, _, err = p.search(s, upper)
+					if err != nil {
+						return nil, err
+					}
+				}
+				f.pos = end - 1
+				f.positioned = true
+			}
+			if f.pos >= 0 {
+				return p, nil
+			}
+		case branch:
+			if !f.positioned {
+				childIdx := p.count()
+				if c.seekingUpper {
+					at, found, err := p.search(s, upper)
+					if err != nil {
+						return nil, err
+					}
+					if found {
+						childIdx = at - 1
+						c.seekingUpper = false
+					} else {
+						childIdx = at
+					}
+				}
+				f.pos = childIdx
+				f.positioned = true
+			}
+			if f.pos >= 0 {
+				if len(c.stack) >= maxDepth {
+					return nil, errPage
+				}
+				id := p.child(f.pos)
+				f.pos--
+				c.stack = append(c.stack, reverseFrame{id: id})
+				continue
+			}
+			c.seekingUpper = false
+		default:
+			return nil, errPage
+		}
+		c.stack = c.stack[:len(c.stack)-1]
+	}
+	return nil, nil
+}
+
+func (c *reverseCursor) readGroup(s *pager, lower, upper string, out []rangeEntry) (int, error) {
+	p, err := c.leaf(s, upper)
+	if err != nil || p == nil {
+		return 0, err
+	}
+	f := &c.stack[len(c.stack)-1]
+	n, reachedLower, err := p.rangeEntriesDesc(s, f.pos, lower, out)
+	f.pos -= n
+	if reachedLower {
+		c.stack = nil
+	} else if f.pos < 0 {
+		c.stack = c.stack[:len(c.stack)-1]
+	}
+	return n, err
+}
+
+func (p *page) rangeEntriesDesc(s *pager, start int, lower string, out []rangeEntry) (n int, reachedLower bool, err error) {
+	stop := max(0, start-len(out)+1)
+	if lower != "" && start-stop+1 > 1 {
+		first, e := p.raw(stop)
+		if e == nil && first.tail == 0 {
+			if cmp, _ := first.compare(s, lower); cmp >= 0 {
+				lower = ""
+			}
+		}
+	}
+	var suffixes [rangeGroupSize][]byte
+	sharedKeyPrefix := p[header : header+int(p[5])]
+	total := 0
+	for start-n >= stop {
+		var raw rawCell
+		raw, err = p.raw(start - n)
+		if err != nil || raw.tail != 0 && n != 0 {
+			break
+		}
+		if lower != "" {
+			var cmp int
+			cmp, err = raw.compare(s, lower)
+			if err != nil {
+				break
+			}
+			if cmp < 0 {
+				reachedLower = true
+				break
+			}
+		}
+		if len(out) == 1 || raw.tail != 0 {
+			key, err := raw.key().string(s)
+			if err != nil {
+				return 0, false, err
+			}
+			out[0] = rangeEntry{key, raw.address}
+			return 1, false, nil
+		}
+		suffixes[n] = raw.suffix
+		total += len(sharedKeyPrefix) + len(raw.suffix)
+		out[n].addr = raw.address
+		n++
+	}
+	var keys strings.Builder
+	keys.Grow(total)
+	for i, suffix := range suffixes[:n] {
+		offset := keys.Len()
+		keys.Write(sharedKeyPrefix)
+		keys.Write(suffix)
+		out[i].key = keys.String()[offset:]
+	}
+	return n, reachedLower, err
+}
+
+// RangeDesc visits keys in [lower, upper) in strictly descending order at
+// this view's root. An empty upper bound starts at the greatest key.
+func (v *view) RangeDesc(lower, upper string, yield func(string, index.Address) bool) error {
+	if v.root == 0 || upper != "" && lower >= upper {
+		if !v.valid() {
+			return os.ErrClosed
+		}
+		return nil
+	}
+	c := reverseCursor{
+		stack:        []reverseFrame{{id: v.root}},
+		seekingUpper: upper != "",
+	}
+	var group [rangeGroupSize]rangeEntry
+	limit := 1
+	for {
+		if err := v.beginRead(); err != nil {
+			return err
+		}
+		n, err := c.readGroup(v.tree.p, lower, upper, group[:limit])
+		v.tree.reads.release()
+		for i, entry := range group[:n] {
+			if i > 0 && !v.valid() {
+				return os.ErrClosed
+			}
+			if !yield(entry.key, entry.addr) {
+				return nil
+			}
+		}
+		if err != nil || len(c.stack) == 0 {
+			if n != 0 && !v.valid() {
+				return os.ErrClosed
+			}
+			return err
+		}
+		limit = len(group)
+	}
+}
+
 type lookupResult struct {
 	addr  index.Address
 	found bool

@@ -9,7 +9,7 @@ import (
 // BatchCodecError identifies a failed codec call in a typed batch. Index is
 // the zero-based position in the original input, including duplicate keys.
 type BatchCodecError struct {
-	Operation string // BatchGet, BatchPut or BatchDelete.
+	Operation string // BatchGet, BatchPut, BatchDelete or Apply.
 	Index     int
 	Field     string // "key" or "value".
 	Err       error
@@ -104,6 +104,70 @@ func (db *View[K, V]) BatchDelete(keys []K) error {
 		return err
 	}
 	return batch.Commit()
+}
+
+type typedWriteOp[K, V any] struct {
+	key K
+	val V
+	del bool
+}
+
+// TypedWriteBatch queues typed Put and idempotent Delete operations for atomic
+// publication via [View.Apply] or [TypedDB.Apply]. Its zero value is ready to use.
+type TypedWriteBatch[K, V any] struct {
+	ops []typedWriteOp[K, V]
+}
+
+// Put queues a typed key-value upsert.
+func (b *TypedWriteBatch[K, V]) Put(key K, value V) {
+	b.ops = append(b.ops, typedWriteOp[K, V]{key: key, val: value})
+}
+
+// Delete queues an idempotent removal of key.
+func (b *TypedWriteBatch[K, V]) Delete(key K) {
+	b.ops = append(b.ops, typedWriteOp[K, V]{key: key, del: true})
+}
+
+// Len returns the number of queued operations before intra-batch coalescing.
+func (b *TypedWriteBatch[K, V]) Len() int {
+	if b == nil {
+		return 0
+	}
+	return len(b.ops)
+}
+
+// Reset clears queued operations while retaining backing slice capacity for reuse.
+func (b *TypedWriteBatch[K, V]) Reset() {
+	if b == nil {
+		return
+	}
+	clear(b.ops)
+	b.ops = b.ops[:0]
+}
+
+// Apply encodes all queued operations and commits them atomically via [DB.Apply].
+// Codec errors return a *BatchCodecError with Operation "Apply" before modifying DB state.
+func (db *View[K, V]) Apply(batch *TypedWriteBatch[K, V]) error {
+	count := batch.Len()
+	prepared, err := (*engine.DB)(db.core).PrepareMixed(count, func(i int) (engine.MixedOp, error) {
+		op := batch.ops[i]
+		key, err := db.encodeBatchKey("Apply", i, op.key)
+		if err != nil {
+			return engine.MixedOp{}, err
+		}
+		if op.del {
+			return engine.MixedOp{Key: key, Delete: true}, nil
+		}
+		val, err := db.valueCodec.Encode(op.val)
+		if err != nil {
+			return engine.MixedOp{}, &BatchCodecError{Operation: "Apply", Index: i, Field: "value", Err: err}
+		}
+		return engine.MixedOp{Key: key, Value: val}, nil
+	})
+	if err != nil {
+		return err
+	}
+	return prepared.Commit()
 }
 
 func (db *View[K, V]) encodeBatchKey(operation string, i int, key K) ([]byte, error) {

@@ -547,6 +547,12 @@ type Entry struct {
 	Key, Value []byte
 }
 
+// MixedEntry holds caller-owned bytes and the record kind for a mixed batch append.
+type MixedEntry struct {
+	Kind       uint8
+	Key, Value []byte
+}
+
 func (s *Store) checkSequence(count int) error {
 	if s.Current.LastUserSequence > math.MaxUint64-uint64(count) || s.Current.PublicationGeneration == math.MaxUint64 {
 		return fault("commit.sequence", publication.NotApplied, false, errors.New("storage: sequence or publication generation exhausted"))
@@ -614,6 +620,75 @@ func (s *Store) AppendBatchPrepared(kind uint8, entries []Entry, healthy func() 
 		for i, e := range entries {
 			format.EncodeRecordHeader(&header, kind, locations[i].Sequence, e.Key, e.Value)
 			for _, part := range [3][]byte{header[:], e.Key, e.Value} {
+				if _, err := w.Write(part); err != nil {
+					return err
+				}
+			}
+		}
+		return w.Flush()
+	}}
+	if prepare != nil {
+		data.prepare = func(f *DataSegment, off int64) error {
+			for i, loc := range locations {
+				loc.Segment, loc.RecordOffset = f, off+loc.RecordOffset
+				if err := prepare(i, loc); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	segment, offset, err := s.appendRecords(data, locations[len(locations)-1].Sequence, healthy)
+	if err != nil {
+		return nil, err
+	}
+	for i := range locations {
+		locations[i].Segment = segment
+		locations[i].RecordOffset += offset
+	}
+	return locations, nil
+}
+
+// AppendMixedBatch publishes mixed Put and Delete records at one frontier.
+func (s *Store) AppendMixedBatch(entries []MixedEntry, healthy func() error) ([]Location, error) {
+	return s.AppendMixedBatchPrepared(entries, healthy, nil)
+}
+
+// AppendMixedBatchPrepared stages index changes at the locations used by a mixed append.
+func (s *Store) AppendMixedBatchPrepared(entries []MixedEntry, healthy func() error, prepare func(int, Location) error) ([]Location, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	if err := s.checkSequence(len(entries)); err != nil {
+		return nil, err
+	}
+	locations := make([]Location, len(entries))
+	var size int64
+	for i, e := range entries {
+		val := e.Value
+		if e.Kind == format.Delete {
+			val = nil
+		}
+		n := entrysize.RecordBytes(int64(len(e.Key)), int64(len(val)))
+		locations[i] = Location{
+			RecordOffset: size,
+			RecordBytes:  n,
+			ValueBytes:   int64(len(val)),
+			Sequence:     s.Current.LastUserSequence + uint64(i) + 1,
+		}
+		size += n
+	}
+	data := appendData{size: size, writeAt: func(fd *os.File, off int64, digest hash.Hash) error {
+		dst := &outputWriter{fs: s.IO, fd: fd, offset: off, point: "data.write", hash: digest}
+		w := bufio.NewWriterSize(dst, int(min(size, 32<<10)))
+		var header [format.RecordHeaderBytes]byte
+		for i, e := range entries {
+			val := e.Value
+			if e.Kind == format.Delete {
+				val = nil
+			}
+			format.EncodeRecordHeader(&header, e.Kind, locations[i].Sequence, e.Key, val)
+			for _, part := range [3][]byte{header[:], e.Key, val} {
 				if _, err := w.Write(part); err != nil {
 					return err
 				}

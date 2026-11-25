@@ -52,9 +52,44 @@ func (b Bounds) Capture(ctx context.Context, backend Backend) (ScanView, error) 
 
 func (s ScanView) Close() { s.view.Close() }
 
-// RangeView can seek directly to the first entry at or above lower.
+// RangeView can seek directly to the first entry at or above lower and visit
+// [lower, upper) in strictly ascending key order.
 type RangeView interface {
 	Range(lower, upper string, yield func(string, Address) bool) error
+}
+
+// ReverseRangeView visits [lower, upper) in strictly descending key order.
+type ReverseRangeView interface {
+	RangeDesc(lower, upper string, yield func(string, Address) bool) error
+}
+
+// CaptureOrdered captures a snapshot prepared for ordered [lower, upper)
+// traversal in ascending or descending key order.
+func (b Bounds) CaptureOrdered(ctx context.Context, backend Backend) (ScanView, error) {
+	if snapshot, ok := backend.(BoundedSnapshotter); ok {
+		v, err := snapshot.BoundedView(ctx, b)
+		return ScanView{view: v, bounds: b}, err
+	}
+	return ScanView{view: backend.View(), bounds: b}, nil
+}
+
+// WalkOrdered visits matching addresses in strictly ascending or descending
+// encoded-key order.
+func (s ScanView) WalkOrdered(reverse bool, yield func(string, Address) bool) error {
+	b, v := s.bounds, s.view
+	if b.Upper != "" && b.Lower >= b.Upper {
+		return nil
+	}
+	if reverse {
+		if ordered, ok := v.(ReverseRangeView); ok {
+			return ordered.RangeDesc(b.Lower, b.Upper, yield)
+		}
+		panic("tarp: index view does not implement ReverseRangeView")
+	}
+	if ordered, ok := v.(RangeView); ok {
+		return ordered.Range(b.Lower, b.Upper, yield)
+	}
+	panic("tarp: index view does not implement RangeView")
 }
 
 // Walk visits only matching addresses. An unordered view filters its snapshot

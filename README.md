@@ -205,6 +205,55 @@ and `Decode([]byte) (T, error)`. Use compatible codecs on reopen and after
 `Restore`. See the runnable [TypedDB example](typed_db_test.go) and
 [composite codec example](composite_codec_test.go).
 
+### Order-preserving key codecs
+
+`NewCodec` uses length-prefixed framing, which is compact for arbitrary values
+but does not sort lexicographically by field value. When key order matters for
+`ScanRange` or `KeysRange`, use the built-in `Ordered*Codec` types
+(`OrderedStringCodec`, `OrderedBytesCodec`, `OrderedIntCodec`, `OrderedInt8Codec`,
+`OrderedInt16Codec`, `OrderedInt32Codec`, `OrderedInt64Codec`,
+`OrderedFloat32Codec`, `OrderedFloat64Codec`, `OrderedDurationCodec`,
+`OrderedTimeCodec`) or derive a composite codec with `NewOrderedCodec[T]()`.
+
+`NewOrderedCodec[T]()` supports `bool`, `string`, `[]byte`, `[N]byte`, signed
+and unsigned integers (`int*`, `uint*`, `uintptr`), `float32`, `float64`,
+`time.Duration`, `time.Time`, and structs (including nested structs) of exported
+orderable fields in declaration order. Encoded byte order under `bytes.Compare`
+matches Go's natural `<` order:
+
+- Unsigned integers, `bool`, and `[N]byte` use big-endian / verbatim fixed-width bytes.
+- Signed integers and `time.Duration` use big-endian bytes with the sign bit flipped.
+- `time.Time` uses 8-byte sign-flipped Unix seconds followed by 4-byte unsigned nanoseconds (`0..999_999_999`), decoded in UTC.
+- `float32` and `float64` canonicalize `-0.0` to `+0.0`, order `-Inf < negative < 0.0 < positive < +Inf`, and reject `NaN` on encode and decode.
+- `string` and `[]byte` escape `0x00` bytes as `0x00 0xFF` and end with a `0x00 0x00` terminator.
+
+Use `EncodeOrderedStringPrefix` or `EncodeOrderedBytesPrefix` to escape a raw
+prefix without appending the `0x00 0x00` terminator, or
+`EncodeOrderedTuplePrefix(fields...)` to encode one or more complete leading
+struct fields (including string/bytes terminators) for `PrefixRange` bounds.
+
+```go
+type EventKey struct {
+	Tenant string
+	Seq    int64
+}
+
+func scanTenantEvents(ctx context.Context, db *tarp.TypedDB[EventKey, string], tenant string) error {
+	prefix, err := tarp.EncodeOrderedTuplePrefix(tenant)
+	if err != nil {
+		return err
+	}
+	lower, upper := tarp.PrefixRange(prefix)
+	for entry, err := range db.ScanRange(ctx, lower, upper, tarp.WithReverse()) {
+		if err != nil {
+			return err
+		}
+		fmt.Println(entry.Key.Seq, entry.Value)
+	}
+	return nil
+}
+```
+
 ## Prefix iteration
 
 `KeysPrefix(ctx, prefix)` yields matching keys using the index alone.
@@ -247,6 +296,26 @@ func printHeads(ctx context.Context, edges *tarp.View[EdgeKey, float32], tail st
 	return nil
 }
 ```
+
+## Ordered range iteration
+
+`KeysRange(ctx, lower, upper, opts...)` yields matching keys using the index
+alone (zero DATA reads), and `ScanRange(ctx, lower, upper, opts...)` yields
+matching key/value entries. Both methods are available on `DB`, `TypedDB`,
+`View`, `Snapshot`, and `TypedSnapshot`, and produce strictly ordered results in
+both `IndexBTree` and `IndexMemory`:
+
+- Bounds are half-open `[lower, upper)` over encoded key bytes. A nil or empty
+  `lower` is unbounded below; a nil or empty `upper` is unbounded above. If
+  `len(upper) > 0 && bytes.Compare(lower, upper) >= 0`, iteration yields zero
+  items.
+- Default order is strictly ascending bytewise lexicographic order
+  (`bytes.Compare(a, b) < 0`).
+- Pass `tarp.WithReverse()` to iterate `[lower, upper)` in strictly descending
+  bytewise lexicographic order (`bytes.Compare(a, b) > 0`).
+- `tarp.PrefixRange(prefix)` returns cloned `(lower, upper)` bounds matching
+  `bytes.HasPrefix(key, prefix)`, returning `(nil, nil)` for an empty prefix and
+  `(bytes.Clone(prefix), nil)` when `prefix` consists solely of `0xff` bytes.
 
 ## Batch operations
 
@@ -319,10 +388,60 @@ stop as soon as one encodes to zero bytes. `BatchPut` checks each encoded key
 before calling the value codec for that entry.
 See the [runnable batch example](typed_batch_test.go).
 
+### Mixed atomic `WriteBatch`
+
+When one atomic commit needs both puts and deletes, or idempotent deletes that
+succeed when a key is already absent, build a `tarp.WriteBatch` (or
+`tarp.TypedWriteBatch[K, V]`) and commit it with `db.Apply(&batch)`:
+
+```go
+var batch tarp.WriteBatch
+batch.Put([]byte("active/42"), []byte("running"))
+batch.Delete([]byte("queued/42")) // idempotent: no error if already absent
+if err := db.Apply(&batch); err != nil {
+	return err
+}
+batch.Reset() // retains backing capacity for reuse
+```
+
+`WriteBatch.Put` and `WriteBatch.Delete` copy their byte slices immediately so
+callers can reuse scratch buffers across calls. `DB.Delete` and `DB.BatchDelete`
+retain their `ErrNotFound` semantics on missing keys, whereas `WriteBatch.Delete`
+is idempotent at commit time: deletes targeting non-live keys are elided without
+writing orphan tombstones. Duplicate keys within one `WriteBatch` coalesce in
+input order so the last operation per key wins before checking segment capacity
+(`BatchRecordBytesLimit`). A nil, empty, or fully elided batch checks database
+health and returns `nil` without writing DATA or advancing `WriteCommits`.
+
+## Consistent read snapshots
+
+Call `db.Snapshot()` on a `DB`, `TypedDB`, or `View` to capture a consistent
+point-in-time read view across multiple operations (`Sequence()`, `Get`,
+`BatchGet`, `Scan`, `ScanPrefix`, `ScanRange`, `Keys`, `KeysPrefix`, `KeysRange`):
+
+```go
+snap, err := db.Snapshot()
+if err != nil {
+	return err
+}
+defer snap.Close()
+
+seq := snap.Sequence()
+val, err := snap.Get([]byte("config/version"))
+```
+
+Holding an open `Snapshot` never blocks foreground writes (`Put`, `Delete`,
+`BatchPut`, `BatchDelete`, `Apply`) or manual/automatic compaction; segments
+referenced by the snapshot remain pinned until `snap.Close()` (which is
+idempotent). Reads through an older snapshot bypass and never mutate the live
+value cache once any later write has published, preventing stale or future value
+leakage.
+
 ## Contract
 
-`DB` provides `Get`, `Scan`, `ScanPrefix`, `Keys`, `KeysPrefix`, upserting `Put`, `Delete`, `Close`, online `Backup`,
-`BatchGet`, `BatchPut`, `BatchDelete`, explicit online `Compact`, and `AutoCompactionStatus`. Use `Open` to create or
+`DB` provides `Get`, `Scan`, `ScanPrefix`, `ScanRange`, `Keys`, `KeysPrefix`, `KeysRange`, `Snapshot`,
+upserting `Put`, `Delete`, `Apply`, `Close`, online `Backup`, `BatchGet`, `BatchPut`, `BatchDelete`,
+explicit online `Compact`, and `AutoCompactionStatus`. Use `Open` to create or
 reopen a database and `Restore` to restore a backup offline.
 
 - Keys and values are `[]byte`. Empty keys are rejected; empty values are valid.
@@ -331,7 +450,7 @@ reopen a database and `Restore` to restore a backup offline.
   arrays until every call using them has returned, including failed writes.
 - `Get` uses an exact global LRU first. Misses read a checked indexed file record
   and cache it; updates/deletes cannot race a stale miss into visibility.
-- If `Get`, `BatchGet`, `Scan` or `ScanPrefix` encounters a DATA read error, the error
+- If `Get`, `BatchGet`, `Scan`, `ScanPrefix` or `ScanRange` encounters a DATA read error, the error
   identifies the segment filename and the record's starting byte offset.
   Use `errors.Is` or `errors.As` to inspect the underlying cause.
 - Successful writes include data, commit-frontier, and directory syncs before
@@ -358,7 +477,7 @@ Break to release the snapshot early. When using `iter.Pull2`, defer `stop()`.
 After an error, prior entries remain valid. Calling `Close` in the loop is
 supported. A subsequent read yields `ErrClosed`.
 
-No ordered scans, TTL, general read/write transactions, cross-file
+No TTL, general read/write transactions, cross-file
 records, or total disk quota is provided.
 
 ## Choosing the key index
@@ -570,9 +689,9 @@ the lock, before starting checkpoint or backup work.
 ### Key-ordered compaction (unreleased)
 
 Call `db.Compact(ctx, tarp.WithKeyOrder())` on a raw or typed DB after an import
-or in a maintenance window to place related values together for `ScanPrefix`.
+or in a maintenance window to place related values together for `ScanPrefix` and `ScanRange`.
 It writes retained DATA records in encoded-key order across snapshot segments.
-Iterator order remains unspecified. Later writes append to the log. With a
+`Scan` and `ScanPrefix` order remains unspecified. Later writes append to the log. With a
 verified ordered base, the next ordered call sorts the new DATA log suffix and
 rewrites affected snapshot segments or writes new ones in gaps. A healthy,
 unchanged ordered checkpoint with no pending cleanup returns without reading

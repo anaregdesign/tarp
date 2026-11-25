@@ -99,7 +99,7 @@ func (e *SizeError) Unwrap() error { return ErrTooLarge }
 
 // BatchKeyError identifies an empty input key or a missing BatchDelete key.
 type BatchKeyError struct {
-	Operation string // BatchGet, BatchPut or BatchDelete.
+	Operation string // BatchGet, BatchPut, BatchDelete or Apply.
 	Index     int    // Zero-based position in the original request.
 	Err       error  // ErrEmptyKey or ErrNotFound.
 }
