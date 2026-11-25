@@ -52,7 +52,9 @@ func RuntimeFuzzExecutions(output string) (uint64, error) {
 
 func RuntimeManifest(input io.Reader) ([]RuntimePackage, error) {
 	const module = "github.com/anaregdesign/tarp"
-	scanner := bufio.NewScanner(io.LimitReader(input, 65537))
+	const maxManifestBytes = 64 << 10
+	reader := &io.LimitedReader{R: input, N: maxManifestBytes + 1}
+	scanner := bufio.NewScanner(reader)
 	var packages []RuntimePackage
 	seen := map[string]bool{}
 	for scanner.Scan() {
@@ -72,10 +74,13 @@ func RuntimeManifest(input io.Reader) ([]RuntimePackage, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+	if reader.N == 0 {
+		return nil, errors.New("qualification: runtime manifest exceeds 64 KiB")
+	}
 	for _, suite := range []string{
 		".", "benchmark", "benchmark/cmd/tarporacle", "benchmark/cmd/tarpqual", "benchmark/qualification",
 		"internal/cache", "internal/composite", "internal/engine", "internal/entrysize", "internal/format",
-		"internal/index", "internal/index/btree", "internal/index/memory", "internal/platform", "internal/storage",
+		"internal/index", "internal/index/btree", "internal/index/memory", "internal/orderkey", "internal/platform", "internal/storage",
 	} {
 		pkg := path.Join(module, suite)
 		if !seen[pkg] {

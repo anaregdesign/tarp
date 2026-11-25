@@ -122,10 +122,10 @@ type oracleValue struct {
 }
 
 type Oracle struct {
-	values  map[string]oracleValue
-	pending *OracleEvent
-	Phase   string
-	acks    uint64
+	values           map[string]oracleValue
+	pending          *OracleEvent
+	Phase            string
+	lastUserSequence uint64
 }
 
 func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle, error) {
@@ -160,15 +160,18 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			for _, m := range mutations {
 				key := string(m.Key)
 				if event.Type == "batch_ack" {
+					if m.Delete && !oracle.values[key].Present {
+						return nil, errors.New("acknowledged batch Delete of an absent key")
+					}
 					oracle.values[key] = oracleValue{Key: m.Key, Value: m.Value, Present: !m.Delete}
-					oracle.acks++
+					oracle.lastUserSequence++
 				} else if _, exists := oracle.values[key]; !exists {
 					oracle.values[key] = oracleValue{Key: m.Key}
 				}
 			}
 			oracle.pending = nil
 		case "ack", "ack_delete":
-			if len(event.Key) == 0 || deleting && len(event.Value) != 0 {
+			if len(event.Key) == 0 || deleting && (len(event.Value) != 0 || !oracle.values[string(event.Key)].Present) {
 				return nil, errors.New("invalid acknowledged mutation")
 			}
 			if pending := oracle.pending; pending != nil {
@@ -184,7 +187,7 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			oracle.values[string(event.Key)] = oracleValue{
 				Key: bytes.Clone(event.Key), Value: bytes.Clone(event.Value), Present: !deleting,
 			}
-			oracle.acks++
+			oracle.lastUserSequence++
 		case "intent", "intent_delete":
 			if oracle.pending != nil || len(event.Key) == 0 || deleting && len(event.Value) != 0 {
 				return nil, errors.New("one nonempty-key pending mutation at a time is required")
@@ -194,14 +197,17 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			oracle.pending = &pending
 		case "not_applied", "error_committed":
 			pending := oracle.pending
-			if pending == nil || !bytes.Equal(pending.Key, event.Key) || len(event.Value) != 0 {
+			if pending == nil || pending.Type == "batch_intent" || !bytes.Equal(pending.Key, event.Key) || len(event.Value) != 0 {
 				return nil, errors.New("definitive outcome does not match a pending mutation")
 			}
 			if event.Type == "error_committed" {
+				if pending.Type == "intent_delete" && !oracle.values[string(event.Key)].Present {
+					return nil, errors.New("committed Delete of an absent key")
+				}
 				oracle.values[string(event.Key)] = oracleValue{
 					Key: pending.Key, Value: pending.Value, Present: pending.Type == "intent",
 				}
-				oracle.acks++
+				oracle.lastUserSequence++
 			} else if _, exists := oracle.values[string(event.Key)]; !exists {
 				oracle.values[string(event.Key)] = oracleValue{Key: pending.Key}
 			}
@@ -212,7 +218,7 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			}
 			oracle.Phase = event.Phase
 		case "capture":
-			if oracle.pending != nil || event.Sequence != oracle.acks {
+			if oracle.pending != nil || event.Sequence != oracle.lastUserSequence {
 				return nil, errors.New("capture sequence does not match the complete acknowledged prefix")
 			}
 		case "reads", "pinned", "reused":
@@ -224,7 +230,7 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			return nil, fmt.Errorf("unknown oracle event: %q", event.Type)
 		}
 	}
-	if oracle.Phase == "" || !allowEmptyInitialization && oracle.acks == 0 {
+	if oracle.Phase == "" || !allowEmptyInitialization && oracle.lastUserSequence == 0 {
 		return nil, errors.New("a durably observed acknowledgment and terminal phase barrier are required")
 	}
 	return oracle, nil
@@ -261,8 +267,14 @@ func (o *Oracle) pendingMutations() []OracleMutation {
 }
 
 func (o *Oracle) SequenceRange() (uint64, uint64) {
-	upper := o.acks + uint64(len(o.pendingMutations()))
-	return o.acks, upper
+	pending := o.pendingMutations()
+	for _, mutation := range pending {
+		if mutation.Delete && !o.values[string(mutation.Key)].Present {
+			// Delete and BatchDelete reject absent keys before publication.
+			return o.lastUserSequence, o.lastUserSequence
+		}
+	}
+	return o.lastUserSequence, o.lastUserSequence + uint64(len(pending))
 }
 
 // PowerCutSequenceRange constrains a pending mutation at its own publication
@@ -299,13 +311,10 @@ func (o *Oracle) StateAt(sequence uint64) (map[string][]byte, error) {
 			state[key] = bytes.Clone(value.Value)
 		}
 	}
-	if sequence == high {
+	if sequence != low {
 		for _, pending := range o.pendingMutations() {
 			key := string(pending.Key)
 			if pending.Delete {
-				if _, present := state[key]; !present {
-					return nil, errors.New("an absent-key Delete cannot advance the committed sequence")
-				}
 				delete(state, key)
 			} else {
 				state[key] = bytes.Clone(pending.Value)

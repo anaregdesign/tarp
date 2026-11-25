@@ -253,6 +253,31 @@ func TestMutationPowerCutSequenceRange(t *testing.T) {
 	}
 }
 
+func TestOracleRejectsAppliedDeletesOfAbsentKeys(t *testing.T) {
+	live, missing := []byte("live"), []byte("missing")
+	batch := []OracleMutation{{Key: live, Delete: true}, {Key: missing, Delete: true}}
+	for _, events := range [][]OracleEvent{
+		{{Type: "ack_delete", Key: missing}},
+		{{Type: "intent_delete", Key: missing}, {Type: "error_committed", Key: missing}},
+		{{Type: "batch_intent", Mutations: batch}, {Type: "batch_ack", Mutations: batch}},
+		{{Type: "batch_intent", Mutations: batch}, {Type: "not_applied"}},
+	} {
+		history := append([]OracleEvent{{Type: "ack", Key: live}}, events...)
+		if _, err := ReplayOracle(append(history, OracleEvent{Type: "phase", Phase: "cut"}), false); err == nil {
+			t.Fatalf("accepted invalid outcome for history %+v", history)
+		}
+	}
+	oracle, err := ReplayOracle([]OracleEvent{
+		{Type: "ack", Key: live}, {Type: "batch_intent", Mutations: batch}, {Type: "phase", Phase: "cut"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if low, high := oracle.SequenceRange(); low != 1 || high != 1 {
+		t.Fatalf("pending BatchDelete of an absent key advanced sequence to [%d,%d]", low, high)
+	}
+}
+
 func TestColdOracleBindsSequenceContentAndEntireLiveCardinality(t *testing.T) {
 	for _, pending := range []OracleEvent{
 		{Type: "intent", Key: []byte("k"), Value: []byte("new")},
