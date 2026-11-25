@@ -18,7 +18,10 @@ import (
 // retained index and segment resources.
 type Snapshot engine.Snapshot
 
-// Snapshot captures a consistent point-in-time read view of db.
+// Snapshot captures one committed state across multiple calls, such as a key
+// scan followed by point lookups while writers continue. Close the returned
+// [Snapshot] after the last read. For one known set of keys, [DB.BatchGet]
+// reads them together and releases the read resources before returning.
 func (db *DB) Snapshot() (*Snapshot, error) {
 	snap, err := (*engine.DB)(db).Snapshot()
 	return (*Snapshot)(snap), err

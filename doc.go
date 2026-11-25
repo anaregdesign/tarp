@@ -1,58 +1,69 @@
-// Package tarp implements a file-backed key-value store with selectable key indexes.
+// Package tarp implements a file-backed key-value store. One process owns the
+// database directory, and goroutines can share the open [DB]. Single-key
+// operations are linearizable. A call that publishes new records syncs the
+// DATA and commit frontier before returning success.
 //
-// Keys and values are bytes. Empty keys are invalid and empty values are valid.
-// Retained inputs and returned values are copied. Keep input backing arrays
-// stable until all calls using them have returned.
+// # Opening a database and choosing codecs
 //
-// The default key index is a paged copy-on-write B+tree with a 16 MiB
-// working-memory budget. Set Options.IndexMode to IndexMemory for an in-memory
-// hash index. Both can reuse a persistent index checkpoint and replay
-// the DATA log suffix after the checkpoint. Full (default) verifies all
-// committed DATA during Open. Indexed validates the covered segment headers
-// and lengths during Open and verifies individual DATA records on read.
-// Both modes use the same value cache.
+// Use [Open] with Options{} to create or reopen a database with the defaults.
+// Use [OpenContext] to bound startup recovery or [OpenExisting] when a missing
+// database should fail startup. The owner calls [DB.Close] to release the
+// directory. The default index is a paged B+tree with a 16 MiB working-memory
+// budget. [IndexMemory] keeps all key locations in an in-memory hash index.
+// Both modes use the value cache.
 //
-// Use OpenTyped with a Codec for each of the key and value types to work with
-// Go values. NewCodec derives a codec for scalar types and their combinations
-// in structs, slices, arrays, and maps. NewOrderedCodec and the Ordered*Codec
-// types produce byte-comparable key encodings that preserve Go's natural order
-// under bytes.Compare, with EncodeOrderedStringPrefix, EncodeOrderedBytesPrefix,
-// and EncodeOrderedTuplePrefix for prefix bounds. Bind lends typed access to an
-// open DB. The owner closes the DB. Use compatible codecs across reopens and
-// restores.
+// The byte API accepts nonempty keys and arbitrary values, including empty
+// values. Callers own the returned slices and keep input slices stable until
+// each call returns. For Go values, [OpenTyped] returns an owning handle.
+// [Bind] lends a typed view of a DB that is already open. Use [NewCodec] to
+// store supported Go values such as structs, slices and maps. Use [NewOrderedCodec] for keys
+// whose field order should determine range scan order, such as jobs ordered
+// by queue and priority. Use the same encodings across reopens and restores.
 //
-// One process owns a directory. Its DB supports concurrent goroutines and
-// linearizable single-key operations. BatchPut, BatchDelete, and Apply (taking
-// a mixed WriteBatch or TypedWriteBatch of Put and idempotent Delete
-// operations) commit atomically. BatchGet reads the requested keys at one point
-// in time and bounds their total encoded value bytes. [DB.Snapshot] and
-// [View.Snapshot] capture a multi-operation consistent read point with
-// Sequence, Get, BatchGet, Scan*, Keys*, and Close without blocking concurrent
-// writers or compaction. [DB.Keys], [DB.KeysPrefix], and [DB.KeysRange]
-// enumerate the index without reading DATA. [DB.Scan], [DB.ScanPrefix], and
-// [DB.ScanRange] also read the matching values. [DB.ScanRange] and
-// [DB.KeysRange] iterate half-open [lower, upper) key bounds in ascending
-// bytewise lexicographic order (or descending with [WithReverse]) across both
-// index modes; [PrefixRange] converts a byte prefix into [lower, upper) bounds.
-// [DB.Scan], [DB.ScanPrefix], [DB.Keys], and [DB.KeysPrefix] capture a fresh
-// snapshot in unspecified order. Successful writes sync the data and commit
-// frontier before acknowledgment. Inspect OpError for the outcome of failed
-// writes. See the durability contract for storage assumptions.
+// # Reading consistent data
 //
-// OpenExisting requires an initialized directory. OpenContext also creates a
-// new DB if needed. Both accept a context to cancel recovery during startup.
-// Open starts one incremental compaction worker on each new or reopened DB.
-// It reclaims obsolete records, repacks small files and yields for writers
-// and backup. [DB.Compact] explicitly builds a full DATA checkpoint; pass
-// [WithKeyOrder] to order its snapshot records by encoded key. Compaction uses
-// PARITY to recover sealed DATA and can discard a proven irrecoverable live key.
-// CompactResult and AutoCompactionStatus report the number of dropped keys. Provide temporary
-// space for both maintenance and backup. Close joins the worker. Stats returns
-// a constant-time snapshot of storage, cache and foreground activity.
+// For one key, use [DB.Get] and check for [ErrNotFound] with [errors.Is].
+// For a known list of keys, [DB.BatchGet] returns one result per input at one
+// point in time. Check each result's Found field. For a report that combines
+// several lookups or scans while writes continue, capture one [DB.Snapshot],
+// use it for every read, and close it when finished to release its segment pins.
 //
-// During v0 the public API and the database and backup formats may change
-// between releases. Each revision reads and writes its current formats.
-// Backup captures a consistent image. VerifyBackup verifies that image and
-// returns its metadata. Restore publishes a new closed DB. See README.md
-// and docs/ for limits, recovery and qualification evidence.
+// To enumerate keys, use [DB.Keys] or [DB.KeysPrefix]. These read the index
+// alone. To export values as well, use [DB.Scan] or [DB.ScanPrefix]. For
+// sorted results, [DB.KeysRange] and [DB.ScanRange] traverse half-open bounds
+// in encoded-key order. Use [PrefixRange] to restrict an ordered scan to a
+// prefix and [WithReverse] for descending order. Each iteration on a DB
+// captures a fresh view. Check the error yielded by the iterator.
+//
+// # Writing related changes
+//
+// [DB.Put] upserts one key and [DB.Delete] removes one existing key. To commit
+// several upserts together, use [DB.BatchPut]. [DB.BatchDelete] removes a set
+// of keys atomically and fails if any key is missing. To publish a result and
+// remove its pending job in one commit, queue both operations in a [WriteBatch]
+// and call [DB.Apply]. A delete in this batch succeeds even if the key is absent.
+//
+// If a write fails, use [errors.As] to inspect the [OpError] when present.
+// An [Unknown] database commit requires closing the handle, reopening the
+// database and checking its state before deciding whether to retry.
+//
+// # Backup and maintenance
+//
+// Use [DB.Backup] to capture a consistent copy while an application keeps
+// writing. [VerifyBackup] checks the backup and reports its size requirements.
+// [Restore] publishes a new, closed database at a fresh destination. During
+// v0 each revision reads and writes its current database and backup formats.
+//
+// Open starts an incremental compaction worker. [DB.Stats] reports storage
+// and cache activity, and [DB.AutoCompactionStatus] reports the worker's
+// progress. For a full DATA checkpoint, call [DB.Compact]. [WithKeyOrder]
+// clusters retained records by encoded key. Compaction uses PARITY to recover
+// sealed DATA and reports the number of proven irrecoverable live keys it drops.
+// Allow temporary space for compaction and backups.
+//
+// To reduce index rebuilding on restart, [DB.CheckpointIndex] persists an
+// index checkpoint. The default [Full] validation still checks all committed
+// DATA during Open. [Indexed] checks the headers and lengths of covered DATA
+// segments, replays the log suffix, and verifies covered records when read.
+// See the repository's durability contract for storage assumptions.
 package tarp

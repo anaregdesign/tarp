@@ -363,7 +363,7 @@ func TestTypedWriteBatchApplyAndCodecErrors(t *testing.T) {
 	}
 }
 
-func ExampleTypedDB_BatchGet() {
+func ExampleView_BatchGet() {
 	dir, err := os.MkdirTemp("", "tarp-batch-")
 	if err != nil {
 		panic(err)

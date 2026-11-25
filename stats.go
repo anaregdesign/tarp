@@ -33,7 +33,9 @@ type Stats struct {
 }
 
 // Stats returns an independent snapshot in constant time without file I/O.
-// It is safe during concurrent operations and retains the final snapshot after Close.
+// A metrics collector can call Stats once per scrape to read coherent gauges
+// and counters for all users of the handle. Counters start at Open, and the
+// final statistics remain available after Close.
 func (db *DB) Stats() (s Stats) {
 	var snapshot engine.Stats
 	(*engine.DB)(db).ReadStats(&snapshot)

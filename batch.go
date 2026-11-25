@@ -29,7 +29,8 @@ func (db *DB) BatchPut(entries []Entry) error {
 // BatchDelete durably removes the requested keys in one atomic commit.
 // Repeated keys are removed once. A missing key returns a BatchKeyError matching
 // ErrNotFound before publication. The distinct Delete records must fit
-// in one DATA segment after its header.
+// in one DATA segment after its header. For idempotent deletes, queue them in
+// a [WriteBatch] and call [DB.Apply].
 func (db *DB) BatchDelete(keys [][]byte) error {
 	return (*engine.DB)(db).BatchDelete(keys)
 }

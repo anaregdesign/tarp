@@ -196,13 +196,16 @@ func (OrderedTimeCodec) Decode(data []byte) (time.Time, error) {
 	return tm, err
 }
 
-// NewOrderedCodec derives a byte-comparable Codec from T's Go type so that
-// bytes.Compare(enc(a), enc(b)) matches T's natural order.
+// NewOrderedCodec derives a key codec for ordered scans. Numeric keys sort by
+// value and struct keys sort field by field in declaration order. For example,
+// a key with tenant and timestamp fields groups each tenant's events by time.
+// Use [EncodeOrderedTuplePrefix] with [PrefixRange] to select one tenant.
 //
 // Supported types are bool, string, []byte, [N]byte, int, int8, int16, int32,
 // int64, uint, uint8, uint16, uint32, uint64, uintptr, float32, float64,
 // time.Duration, time.Time, and non-recursive structs (including nested
-// structs) of exported orderable fields in declaration order.
+// structs) of exported orderable fields in declaration order. Floating-point
+// keys reject NaN and encode both signed zeros identically.
 func NewOrderedCodec[T any]() (Codec[T], error) {
 	return orderkey.New[T]()
 }

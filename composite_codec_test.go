@@ -252,7 +252,7 @@ func FuzzCompositeCodec(f *testing.F) {
 	})
 }
 
-func Example_compositeCodec() {
+func ExampleNewCodec() {
 	type Run struct {
 		Started  time.Time
 		Attempts []time.Duration
