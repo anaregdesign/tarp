@@ -10,12 +10,12 @@ import (
 // Snapshot is an immutable point-in-time read view of a [DB].
 //
 // All point reads, batch reads, key scans, and value scans on a Snapshot
-// observe the exact database state at [Snapshot.Sequence]. Holding a Snapshot
-// does not block foreground writes or compaction; DATA segments referenced by
-// the Snapshot remain retained on disk until [Snapshot.Close] is called.
+// observe the database state at [Snapshot.Sequence]. Foreground writes and
+// compaction can proceed while the Snapshot pins its DATA segments.
 //
-// Snapshot is safe for concurrent use by multiple goroutines. Always call Close
-// when finished to release retained index and segment resources.
+// Share the returned *Snapshot across goroutines. Copying the Snapshot value
+// duplicates its resource bookkeeping. Call Close when finished to release the
+// retained index and segment resources.
 type Snapshot engine.Snapshot
 
 // Snapshot captures a consistent point-in-time read view of db.
@@ -24,7 +24,7 @@ func (db *DB) Snapshot() (*Snapshot, error) {
 	return (*Snapshot)(snap), err
 }
 
-// Sequence returns the exact LastUserSequence published in this snapshot (0 when empty).
+// Sequence returns the last committed user sequence at capture, or zero before the first write.
 func (s *Snapshot) Sequence() uint64 {
 	return (*engine.Snapshot)(s).Sequence()
 }
@@ -74,8 +74,9 @@ func (s *Snapshot) KeysRange(ctx context.Context, lower, upper []byte, opts ...S
 	return (*engine.Snapshot)(s).KeysRange(ctx, lower, upper, isReverseScan(opts))
 }
 
-// Close releases the snapshot's index view and unpins retained DATA segments.
-// Close is idempotent; subsequent reads or scans on s return [ErrClosed].
+// Close rejects subsequent reads and scans with [ErrClosed]. It releases the
+// index view and DATA segment pins once the last in-flight operation or iterator
+// has returned. Calling Close more than once returns nil.
 func (s *Snapshot) Close() error {
 	return (*engine.Snapshot)(s).Close()
 }

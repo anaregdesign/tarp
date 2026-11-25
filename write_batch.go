@@ -12,7 +12,8 @@ type writeBatchOp struct {
 
 // WriteBatch queues Put and idempotent Delete operations for atomic publication
 // via [DB.Apply]. Its zero value is ready to use. WriteBatch is not safe for
-// concurrent mutation without external synchronization.
+// concurrent mutation without external synchronization. Pass the batch by pointer
+// after first use.
 type WriteBatch struct {
 	ops   []writeBatchOp
 	arena []byte

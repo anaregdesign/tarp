@@ -405,7 +405,12 @@ batch.Reset() // retains backing capacity for reuse
 ```
 
 `WriteBatch.Put` and `WriteBatch.Delete` copy their byte slices immediately so
-callers can reuse scratch buffers across calls. `DB.Delete` and `DB.BatchDelete`
+callers can reuse scratch buffers across calls. `TypedWriteBatch` stores the Go
+keys and values until `Apply` encodes them. When a queued value contains a
+slice, map, or pointer, changes to the referenced data before `Apply` affect
+what gets written. The same rule applies to typed keys.
+
+`DB.Delete` and `DB.BatchDelete`
 retain their `ErrNotFound` semantics on missing keys, whereas `WriteBatch.Delete`
 is idempotent at commit time: deletes targeting non-live keys are elided without
 writing orphan tombstones. Duplicate keys within one `WriteBatch` coalesce in
@@ -430,12 +435,11 @@ seq := snap.Sequence()
 val, err := snap.Get([]byte("config/version"))
 ```
 
-Holding an open `Snapshot` never blocks foreground writes (`Put`, `Delete`,
-`BatchPut`, `BatchDelete`, `Apply`) or manual/automatic compaction; segments
-referenced by the snapshot remain pinned until `snap.Close()` (which is
-idempotent). Reads through an older snapshot bypass and never mutate the live
-value cache once any later write has published, preventing stale or future value
-leakage.
+Foreground writes and compaction can proceed while a `Snapshot` is open.
+`snap.Close()` is idempotent and rejects subsequent reads. The snapshot
+releases its DATA segment pins once it is closed and its last in-flight
+operation or iterator exits. After a later write publishes, reads through the
+older snapshot bypass the live value cache.
 
 ## Contract
 

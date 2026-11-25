@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -27,7 +28,6 @@ const (
 var (
 	timeType     = reflect.TypeFor[time.Time]()
 	durationType = reflect.TypeFor[time.Duration]()
-	byteType     = reflect.TypeFor[byte]()
 )
 
 // AppendBool appends an order-preserving 1-byte boolean encoding.
@@ -338,36 +338,24 @@ func AppendBytes(dst, src []byte) []byte {
 // ConsumeBytes decodes one escaped, 0x00 0x00-terminated byte sequence and
 // returns a newly allocated slice alongside the unconsumed tail.
 func ConsumeBytes(data []byte) ([]byte, []byte, error) {
-	if len(data) < 2 {
+	end := bytes.Index(data, []byte{0, 0})
+	if end < 0 {
 		return nil, nil, fmt.Errorf("tarp: unterminated ordered byte sequence")
 	}
-	// Fast path when no escape sequence precedes the terminator.
-	if idx := bytes.IndexByte(data, 0x00); idx >= 0 && idx+1 < len(data) && data[idx+1] == 0x00 {
-		out := make([]byte, idx)
-		copy(out, data[:idx])
-		return out, data[idx+2:], nil
+	field := data[:end]
+	out := make([]byte, 0, len(field))
+	for {
+		i := bytes.IndexByte(field, 0)
+		if i < 0 {
+			return append(out, field...), data[end+2:], nil
+		}
+		// A zero at the end of field would have started the terminator.
+		if field[i+1] != 0xff {
+			return nil, nil, fmt.Errorf("tarp: invalid ordered escape sequence 0x00 %#02x", field[i+1])
+		}
+		out = append(out, field[:i+1]...)
+		field = field[i+2:]
 	}
-	out := make([]byte, 0, len(data)-2)
-	for i := 0; i < len(data); i++ {
-		b := data[i]
-		if b != 0x00 {
-			out = append(out, b)
-			continue
-		}
-		if i+1 >= len(data) {
-			return nil, nil, fmt.Errorf("tarp: truncated ordered escape sequence")
-		}
-		switch data[i+1] {
-		case 0x00:
-			return out, data[i+2:], nil
-		case 0xff:
-			out = append(out, 0x00)
-			i++
-		default:
-			return nil, nil, fmt.Errorf("tarp: invalid ordered escape sequence 0x00 %#02x", data[i+1])
-		}
-	}
-	return nil, nil, fmt.Errorf("tarp: unterminated ordered byte sequence")
 }
 
 // ConsumeString decodes one escaped, 0x00 0x00-terminated string and returns
@@ -759,44 +747,16 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 		if t.Elem().Kind() != reflect.Uint8 {
 			return valueCodec{}, fmt.Errorf("tarp: unsupported ordered codec type %s", t)
 		}
-		if t.Elem() == byteType {
-			return valueCodec{
-				appendVal: func(dst []byte, v reflect.Value) ([]byte, error) {
-					return AppendBytes(dst, v.Bytes()), nil
-				},
-				consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
-					raw, rest, err := ConsumeBytes(data)
-					if err != nil {
-						return nil, err
-					}
-					dst.SetBytes(raw)
-					return rest, nil
-				},
-			}, nil
-		}
 		return valueCodec{
 			appendVal: func(dst []byte, v reflect.Value) ([]byte, error) {
-				n := v.Len()
-				for i := range n {
-					b := byte(v.Index(i).Uint())
-					if b == 0 {
-						dst = append(dst, 0x00, 0xff)
-					} else {
-						dst = append(dst, b)
-					}
-				}
-				return append(dst, 0x00, 0x00), nil
+				return AppendBytes(dst, v.Bytes()), nil
 			},
 			consumeVal: func(data []byte, dst reflect.Value) ([]byte, error) {
 				raw, rest, err := ConsumeBytes(data)
 				if err != nil {
 					return nil, err
 				}
-				out := reflect.MakeSlice(t, len(raw), len(raw))
-				for i, b := range raw {
-					out.Index(i).SetUint(uint64(b))
-				}
-				dst.Set(out)
+				dst.SetBytes(raw)
 				return rest, nil
 			},
 		}, nil
@@ -808,7 +768,7 @@ func (b builder) buildType(t reflect.Type) (valueCodec, error) {
 		n := t.Len()
 		return valueCodec{
 			appendVal: func(dst []byte, v reflect.Value) ([]byte, error) {
-				dst = slicesGrow(dst, n)
+				dst = slices.Grow(dst, n)
 				for i := range n {
 					dst = append(dst, byte(v.Index(i).Uint()))
 				}
@@ -884,13 +844,4 @@ func (b builder) structCodec(t reflect.Type) (valueCodec, error) {
 			return data, nil
 		},
 	}, nil
-}
-
-func slicesGrow(dst []byte, n int) []byte {
-	if cap(dst)-len(dst) >= n {
-		return dst
-	}
-	grown := make([]byte, len(dst), len(dst)+n)
-	copy(grown, dst)
-	return grown
 }

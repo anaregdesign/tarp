@@ -274,6 +274,40 @@ func TestCompositeStructOrderAndPrefixes(t *testing.T) {
 	}
 }
 
+func TestConsumeBytesBoundsAllocationToTheEncodedField(t *testing.T) {
+	field := []byte{0, 0xff, 'a', 0, 0}
+	tail := bytes.Repeat([]byte{'b'}, 64<<10)
+	encoded := append(bytes.Clone(field), tail...)
+	alone, _, err := orderkey.ConsumeBytes(field)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, rest, err := orderkey.ConsumeBytes(encoded)
+	if err != nil || !bytes.Equal(value, []byte{0, 'a'}) || !bytes.Equal(rest, tail) {
+		t.Fatalf("ConsumeBytes = %x, %d trailing bytes, %v", value, len(rest), err)
+	}
+	if cap(value) > cap(alone) {
+		t.Fatalf("adding a tuple field increased the preceding field's capacity from %d to %d", cap(alone), cap(value))
+	}
+}
+
+func TestOrderedNamedByteSlice(t *testing.T) {
+	type octet byte
+	type octets []octet
+	c, err := orderkey.New[octets]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := c.Encode(octets{0x00, 0xff})
+	if err != nil || !bytes.Equal(wire, []byte{0, 0xff, 0xff, 0, 0}) {
+		t.Fatalf("Encode = %x, %v", wire, err)
+	}
+	got, err := c.Decode(wire)
+	if err != nil || len(got) != 2 || got[0] != 0 || got[1] != 0xff {
+		t.Fatalf("Decode = %x, %v", got, err)
+	}
+}
+
 func TestFloatCanonicalZeroAndMalformedRejections(t *testing.T) {
 	f64C, _ := orderkey.New[float64]()
 	negZero := math.Copysign(0, -1)

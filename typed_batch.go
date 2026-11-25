@@ -32,6 +32,10 @@ type TypedBatchResult[V any] struct {
 // or DB error discards the entire result. Only found values are decoded.
 // MaxBatchGetValueBytes applies to encoded value bytes before decoding.
 func (db *View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
+	return db.batchGet(keys, nil)
+}
+
+func (db *View[K, V]) batchGet(keys []K, snapshot *Snapshot) ([]TypedBatchResult[V], error) {
 	if err := engine.CheckBatchCount(len(keys)); err != nil {
 		return nil, err
 	}
@@ -56,7 +60,13 @@ func (db *View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 		}
 		encoded[i] = k
 	}
-	raw, err := (*engine.DB)(db.core).BatchGetPrepared(encoded)
+	var raw []BatchResult
+	var err error
+	if snapshot != nil {
+		raw, err = (*engine.Snapshot)(snapshot).BatchGetPrepared(encoded)
+	} else {
+		raw, err = (*engine.DB)(db.core).BatchGetPrepared(encoded)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +124,9 @@ type typedWriteOp[K, V any] struct {
 
 // TypedWriteBatch queues typed Put and idempotent Delete operations for atomic
 // publication via [View.Apply] or [TypedDB.Apply]. Its zero value is ready to use.
+// Keys and values are encoded at Apply. Slices, maps, and pointers retain their
+// underlying data until Reset. Copy mutable inputs before queueing them if they
+// will be reused before Apply returns. Pass the batch by pointer after first use.
 type TypedWriteBatch[K, V any] struct {
 	ops []typedWriteOp[K, V]
 }
