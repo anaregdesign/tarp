@@ -387,9 +387,10 @@ limit of at least 10,001 and enough segment capacity for all encoded records.
 An empty batch succeeds on a healthy open DB. Write batches
 must fit a single segment. The sum of encoded record sizes must fit the
 effective `TargetSegmentBytes` minus the 64-byte segment header.
-All put entries count, including repeated keys. For deletes, only distinct
-keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
-before publication. Each nonempty write batch has one commit outcome.
+`BatchPut` charges each encoded record, including repeated keys. `BatchDelete`
+charges each distinct key once. `Apply` charges the final operation for each key
+after eliding deletes of absent keys. Exceeding a limit returns `ErrTooLarge`
+before publication. All surviving records share one commit outcome.
 Use `errors.As` with `*tarp.BatchLimitError` to distinguish input count,
 per-entry size, total encoded record bytes written and total encoded value bytes returned
 by `BatchGet`. Its `Index` is the original input position, or -1 for a
