@@ -1,19 +1,23 @@
 package tarp
 
-import "github.com/anaregdesign/tarp/internal/engine"
+import (
+	"slices"
+
+	"github.com/anaregdesign/tarp/internal/engine"
+)
 
 type writeBatchOp struct {
-	keyOff int
-	keyLen int
-	valOff int
-	valLen int
-	del    bool
+	keyStart   int
+	valueStart int
+	end        int
+	isDelete   bool
 }
 
 // WriteBatch queues Put and idempotent Delete operations for atomic publication
 // via [DB.Apply]. Its zero value is ready to use. WriteBatch is not safe for
 // concurrent mutation without external synchronization. Pass the batch by pointer
-// after first use.
+// after first use. During Apply, keep the batch unchanged. Call Put, Delete,
+// or Reset only after Apply returns.
 type WriteBatch struct {
 	ops   []writeBatchOp
 	arena []byte
@@ -22,28 +26,27 @@ type WriteBatch struct {
 // Put queues an upsert of key and value. Both slices are copied into internal
 // contiguous storage immediately, so callers can reuse scratch buffers across calls.
 func (b *WriteBatch) Put(key, value []byte) {
-	keyOff := len(b.arena)
-	b.arena = append(b.arena, key...)
-	valOff := len(b.arena)
-	b.arena = append(b.arena, value...)
-	b.ops = append(b.ops, writeBatchOp{
-		keyOff: keyOff,
-		keyLen: len(key),
-		valOff: valOff,
-		valLen: len(value),
-	})
+	b.appendOp(key, value, false)
 }
 
 // Delete queues an idempotent removal of key. Key is copied into internal
 // storage immediately. Unlike [DB.Delete] and [DB.BatchDelete], deleting an
 // absent key inside a WriteBatch succeeds as a no-op at commit time.
 func (b *WriteBatch) Delete(key []byte) {
-	keyOff := len(b.arena)
+	b.appendOp(key, nil, true)
+}
+
+func (b *WriteBatch) appendOp(key, value []byte, isDelete bool) {
+	keyStart := len(b.arena)
+	b.arena = slices.Grow(b.arena, len(key)+len(value))
 	b.arena = append(b.arena, key...)
+	valueStart := len(b.arena)
+	b.arena = append(b.arena, value...)
 	b.ops = append(b.ops, writeBatchOp{
-		keyOff: keyOff,
-		keyLen: len(key),
-		del:    true,
+		keyStart:   keyStart,
+		valueStart: valueStart,
+		end:        len(b.arena),
+		isDelete:   isDelete,
 	})
 }
 
@@ -69,18 +72,17 @@ func (b *WriteBatch) Reset() {
 // together, or for deletes that should succeed when a key is already absent.
 // Duplicate keys within the batch are folded in input order so the last
 // operation per distinct key wins. Deleting a key that is absent at commit time
-// is a no-op and writes no tombstone record. A nil or empty batch checks
-// database admission and health without writing to DATA. The coalesced records
-// must collectively fit in one DATA segment after its header.
+// is a no-op and consumes no segment space. The remaining records must fit
+// in one DATA segment after its header. If no records remain, Apply checks
+// database health and succeeds without writing, as it does for a nil batch.
 func (db *DB) Apply(batch *WriteBatch) error {
 	count := batch.Len()
 	return (*engine.DB)(db).ApplyMixed(count, func(i int) engine.MixedOp {
 		op := batch.ops[i]
-		key := batch.arena[op.keyOff : op.keyOff+op.keyLen]
-		if op.del {
-			return engine.MixedOp{Key: key, Delete: true}
+		return engine.MixedOp{
+			Key:    batch.arena[op.keyStart:op.valueStart],
+			Value:  batch.arena[op.valueStart:op.end],
+			Delete: op.isDelete,
 		}
-		val := batch.arena[op.valOff : op.valOff+op.valLen]
-		return engine.MixedOp{Key: key, Value: val}
 	})
 }

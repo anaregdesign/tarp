@@ -65,7 +65,7 @@ jobs:
           git archive "$baseline" | tar -x -C "$baseline_dir"
           for source in "$baseline_dir" "$GITHUB_WORKSPACE"; do
             bash benchmark/scripts/compact-compare-overlay.sh "$source"
-            (cd "$source" && go test -count=1 -tags=tarpprofile -run '^TestCompactComparisonLockProfile$' ./benchmark/compactcomparison)
+            (cd "$source" && go test -count=1 -tags=tarpprofile -run '^(TestCompactComparisonLockProfile|TestMeasurementBackupPinWitness)$' ./benchmark/compactcomparison)
           done
           export TARP_COMPACT_TEST_FIXTURE="$RUNNER_TEMP/compact-shared-fixture"
           (cd "$baseline_dir" && go test -count=1 -run '^TestCompactComparisonFixture$/(seed|base)$' ./benchmark/compactcomparison)

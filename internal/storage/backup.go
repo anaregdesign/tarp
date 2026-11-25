@@ -98,11 +98,7 @@ func cleanStage(fs *IO, stage, point string) error {
 	return fs.Do(point+".cleanup", func() error { return os.RemoveAll(stage) })
 }
 
-func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error) error {
-	return BackupWithIndex(ctx, capture, cfg, fs, destination, yield, nil)
-}
-
-func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error, newIndex func() (index.Backend, error)) (returned error) {
+func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error, newIndex func() (index.Backend, error)) (returned error) {
 	target, err := destinationPath(filepath.Dir(capture.Segments[0].Segment.Path), destination)
 	if err != nil {
 		return err
@@ -135,56 +131,35 @@ func BackupWithIndex(ctx context.Context, capture *Capture, cfg Config, fs *IO, 
 	buffer := make([]byte, 32<<10)
 	stream := &backupStream{reader: bufio.NewReaderSize(nil, len(buffer)), source: backupReaderAt{fs: fs, yield: yield}}
 	// Validate key transitions while streaming the captured records into the staged copy.
-	var visit recordVisitor
-	var backend index.Backend
-	var builder replayBuilder
-	var window *keyWindow
-	if newIndex != nil {
-		backend, err = newIndex()
-		if err != nil {
-			return &IndexWorkError{Err: err}
-		}
-		builder = newReplayBuilder(ctx, backend, capture.Catalog.PrunedThroughSequence)
-		defer func() {
-			if backend != nil {
-				builder.abort()
-				returned = errors.Join(returned, backend.Close())
-			}
-		}()
-		visit = builder.apply
-	} else {
-		window = newKeyWindow("", verifyWindowBytes)
-		visit = func(f *DataSegment, _ int64, r format.RecordHeader, key string) error {
-			if err := window.apply(f.Kind, capture.Catalog.PrunedThroughSequence, r, key); err != nil {
-				return &SourceError{Err: err}
-			}
-			return nil
-		}
+	backend, err := newIndex()
+	if err != nil {
+		return &IndexWorkError{Err: err}
 	}
+	builder := newReplayBuilder(ctx, backend, capture.Catalog.PrunedThroughSequence)
+	defer func() {
+		if backend != nil {
+			builder.abort()
+			returned = errors.Join(returned, backend.Close())
+		}
+	}()
 	for _, captured := range capture.Segments {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		entry, err := copySegment(ctx, capture, captured, visit, stage, fs, stream, buffer)
+		entry, err := copySegment(ctx, capture, captured, builder.apply, stage, fs, stream, buffer)
 		if err != nil {
 			return err
 		}
 		meta.Files = append(meta.Files, entry)
 	}
-	if backend != nil {
-		if err := builder.finishValidation(); err != nil {
-			return err
-		}
-		builder.abort()
-		err = backend.Close()
-		backend = nil
-		if err != nil {
-			return &IndexWorkError{Err: err}
-		}
-	} else if window.more {
-		if _, err := validateReadOnly(ctx, stage, verifyWindowBytes); err != nil {
-			return err
-		}
+	if err := builder.finishValidation(); err != nil {
+		return err
+	}
+	builder.abort()
+	err = backend.Close()
+	backend = nil
+	if err != nil {
+		return &IndexWorkError{Err: err}
 	}
 	if err := fs.NewFile(filepath.Join(stage, "BACKUP"), format.EncodeBackup(meta), "backup.manifest"); err != nil {
 		return err

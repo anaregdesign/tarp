@@ -83,7 +83,7 @@ func TestCleanerRanksParityWorkAndLongLivedPins(t *testing.T) {
 	want(2)
 	small.PinRetained()
 	defer small.UnpinRetained()
-	want(2) // No immediate reclaim: retain the legacy progress fallback.
+	want(2) // Both candidates are pinned, so the smaller rewrite ratio wins.
 }
 
 func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {

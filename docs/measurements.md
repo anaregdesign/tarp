@@ -39,8 +39,10 @@ The runner builds a measurement-only Go source overlay with counters for directo
 
 For a new edge-prefix comparison, run
 `benchmark/scripts/container-edge-prefix.sh /path/to/new-results`. The filter
-arm defaults to the v0.12.0 source and the prefix arm to the current commit.
-The runner records both revisions, resolves the latest stable Go at campaign
+and prefix arms both default to the current commit. To compare revisions,
+pass the filter and prefix refs as the second and third arguments. Both refs
+must support the prefix APIs and the shared fixture format. The runner builds
+the same candidate drivers in both arms, records both revisions, resolves the latest stable Go at campaign
 start and uses one Bookworm image digest for both arms. See the
 [prefix iteration measurements](benchmarks/prefix-148.md) for the workload.
 
@@ -148,24 +150,22 @@ include the latency and throughput comparison and sample-level data.
 For a same-host comparison of two revisions, select `compact-compare` in the
 VM qualification workflow, set `value-bytes=64` and enter
 `confirmation=disposable-vm-only`. Both arms open clones of the same closed
-fixture. Use a baseline with a database format that both revisions can open.
+fixture seeded by the baseline. The baseline is the v0.14.0 commit
+`5f21d8c`, pinned in [compact-compare-baseline](../benchmark/testdata/compact-compare-baseline).
+CI checks that both revisions can open the fixture, witness captured DATA
+retention and verify reclamation.
 
 | `compact-pair` | Revisions and windows |
 | --- | --- |
-| `candidate` (default) | Compare current-format commit `81242ac` with the selected ref. Alternate six paired rounds with foreground traffic and with workers parked. Run the foreground-only control in both arms and the pinned-backup control on `next`, then four diagnostic pairs. |
+| `candidate` (default) | Alternate six paired rounds with foreground traffic and with workers parked. Run the foreground-only and pinned-backup controls in both arms, then four diagnostic pairs. |
 | `candidate-fixed` | Compare the same revisions in six pairs of five-second foreground windows. Traffic continues after Compact returns. |
-| `releases` | Reproduce the historical v0.8.0 and v0.9.0 comparison on their shared format. |
 
 The candidate latency windows use ordinary builds. The separate `lock-profile`
 rows use `tarpprofile` binaries and report writer, state and lifecycle lock
 hold times during the foreground window. Each `lock_holds` group includes the
 observation count, total and maximum nanoseconds, and a bounded sample. The
-historical release diagnostics report stage timings specific to those engines.
-
-The pinned-backup control checks correctness, not paired performance. It runs
-only on `next` for `candidate` because the frozen baseline cannot distinguish
-DATA retention pins from ordinary references. The historical `releases` driver
-keeps its original pinned-backup control in both arms.
+pinned-backup control witnesses retention pins on captured DATA while the backup
+is parked, verifies the restored backup and checks reclamation after release.
 
 `BenchmarkCompaction` and the opt-in JSONL drivers compare two operations on private
 copies of the same closed database. The fixture has one eligible sealed log with a

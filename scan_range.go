@@ -72,20 +72,18 @@ func (db *DB) KeysRange(ctx context.Context, lower, upper []byte, opts ...ScanOp
 // ScanRange decodes the entries selected by [DB.ScanRange] in ascending or
 // [WithReverse] descending encoded-key order. The lower and upper bounds are
 // raw encoded-key bounds and do not need to encode complete K values.
-func (db *View[K, V]) ScanRange(ctx context.Context, lower, upper []byte, opts ...ScanOption) iter.Seq2[TypedEntry[K, V], error] {
-	view := *db
-	rows := view.core.ScanRange(ctx, lower, upper, opts...)
+func (db View[K, V]) ScanRange(ctx context.Context, lower, upper []byte, opts ...ScanOption) iter.Seq2[TypedEntry[K, V], error] {
+	rows := db.core.ScanRange(ctx, lower, upper, opts...)
 	return func(yield func(TypedEntry[K, V], error) bool) {
-		view.decodeEntries(rows, yield)
+		db.decodeEntries(rows, yield)
 	}
 }
 
 // KeysRange decodes the keys selected by [DB.KeysRange] in ascending or
 // [WithReverse] descending encoded-key order without reading DATA segments.
-func (db *View[K, V]) KeysRange(ctx context.Context, lower, upper []byte, opts ...ScanOption) iter.Seq2[K, error] {
-	view := *db
-	rows := view.core.KeysRange(ctx, lower, upper, opts...)
+func (db View[K, V]) KeysRange(ctx context.Context, lower, upper []byte, opts ...ScanOption) iter.Seq2[K, error] {
+	rows := db.core.KeysRange(ctx, lower, upper, opts...)
 	return func(yield func(K, error) bool) {
-		view.decodeKeys(rows, yield)
+		db.decodeKeys(rows, yield)
 	}
 }

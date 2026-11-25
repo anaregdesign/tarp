@@ -33,20 +33,17 @@ fi
 
 run_case base baseline 0
 run_case next baseline 0
+run_case base pinned 0
 run_case next pinned 0
-# Only the historical releases driver runs its original check in both arms.
-if [ "$pair" = releases ]; then run_case base pinned 0; fi
 
 # Diagnostic windows run in separate binaries after the uninstrumented windows.
-diagnostic=lock-profile
-if [ "$pair" = releases ]; then diagnostic=diagnostic; fi
 for round in 1 2 3 4; do
   if [ "$((round % 2))" -eq 1 ]; then
-    run_case base "$diagnostic" "$round" .diag
-    run_case next "$diagnostic" "$round" .diag
+    run_case base lock-profile "$round" .diag
+    run_case next lock-profile "$round" .diag
   else
-    run_case next "$diagnostic" "$round" .diag
-    run_case base "$diagnostic" "$round" .diag
+    run_case next lock-profile "$round" .diag
+    run_case base lock-profile "$round" .diag
   fi
 done
 echo TARP_COMPARE_PASS

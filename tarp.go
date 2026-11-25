@@ -17,12 +17,11 @@ type DB engine.DB
 type IndexMode = engine.IndexMode
 
 const (
-	// IndexDefault selects IndexBTree.
-	IndexDefault = engine.IndexDefault
+	// IndexBTree is the zero value. It keeps DATA record addresses in B+tree
+	// pages. A clean Close persists or reuses an index checkpoint.
+	IndexBTree = engine.IndexBTree
 	// IndexMemory keeps all key locations in memory.
 	IndexMemory = engine.IndexMemory
-	// IndexBTree keeps DATA record addresses in B+tree pages. A clean Close persists or reuses an index checkpoint.
-	IndexBTree = engine.IndexBTree
 )
 
 // OpenValidation controls verification of DATA covered by a persisted index.
@@ -46,7 +45,7 @@ type Options struct {
 	// BTreeMemoryBudgetBytes sets the working-memory budget for IndexBTree,
 	// shared by the foreground index and its maintenance workspaces.
 	// Zero selects 16 MiB for the B+tree. A nonzero budget must be at least
-	// 1 MiB and is valid with IndexDefault or IndexBTree.
+	// 1 MiB and is valid only with IndexBTree.
 	BTreeMemoryBudgetBytes int64
 	// ValueCacheBudgetBytes sets the logical budget for the value LRU in
 	// either index mode. Each live key, value and its entry metadata must fit

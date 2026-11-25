@@ -62,7 +62,7 @@ func newEdgePrefixFixture(b testing.TB, opts tarp.Options, edges []tarp.Entry) *
 	// Scan validates the committed fixture and warms all DATA and index pages
 	// before either arm, including when running a single selected benchmark.
 	all := edgePrefixQuery{}
-	all.verify(b, db, edges, true, nil)
+	all.verify(b, db, edges, true, false)
 	return db
 }
 
@@ -71,24 +71,18 @@ type edgePrefixQuery struct {
 	first  bool
 }
 
-// The filter benchmark also runs against a checkout predating the prefix API.
-type edgePrefixReader interface {
-	KeysPrefix(context.Context, []byte) iter.Seq2[[]byte, error]
-	ScanPrefix(context.Context, []byte) iter.Seq2[tarp.Entry, error]
-}
-
 type edgePrefixCounts struct {
 	matches, candidates, valueBytes int
 }
 
 // candidates and valueBytes measure what the public iterator yielded before
 // the client's predicate. They do not measure index visits or disk I/O.
-func (q edgePrefixQuery) run(ctx context.Context, db *tarp.DB, values bool, native edgePrefixReader, check func([]byte, []byte)) (edgePrefixCounts, error) {
+func (q edgePrefixQuery) run(ctx context.Context, db *tarp.DB, values, usePrefix bool, check func([]byte, []byte)) (edgePrefixCounts, error) {
 	var counts edgePrefixCounts
 	visit := func(key, value []byte) bool {
 		counts.candidates++
 		counts.valueBytes += len(value)
-		if native == nil && !bytes.HasPrefix(key, q.prefix) {
+		if !usePrefix && !bytes.HasPrefix(key, q.prefix) {
 			return true
 		}
 		counts.matches++
@@ -100,8 +94,8 @@ func (q edgePrefixQuery) run(ctx context.Context, db *tarp.DB, values bool, nati
 
 	if values {
 		var rows iter.Seq2[tarp.Entry, error]
-		if native != nil {
-			rows = native.ScanPrefix(ctx, q.prefix)
+		if usePrefix {
+			rows = db.ScanPrefix(ctx, q.prefix)
 		} else {
 			rows = db.Scan(ctx)
 		}
@@ -115,8 +109,8 @@ func (q edgePrefixQuery) run(ctx context.Context, db *tarp.DB, values bool, nati
 		}
 	} else {
 		var keys iter.Seq2[[]byte, error]
-		if native != nil {
-			keys = native.KeysPrefix(ctx, q.prefix)
+		if usePrefix {
+			keys = db.KeysPrefix(ctx, q.prefix)
 		} else {
 			keys = db.Keys(ctx)
 		}
@@ -134,7 +128,7 @@ func (q edgePrefixQuery) run(ctx context.Context, db *tarp.DB, values bool, nati
 
 // The oracle comes from the inserted records and is independent of both
 // iterators and their traversal order. The first-match case accepts any match.
-func (q edgePrefixQuery) verify(b testing.TB, db *tarp.DB, edges []tarp.Entry, values bool, native edgePrefixReader) int {
+func (q edgePrefixQuery) verify(b testing.TB, db *tarp.DB, edges []tarp.Entry, values, usePrefix bool) int {
 	b.Helper()
 	want := make(map[string][]byte)
 	for _, e := range edges {
@@ -146,7 +140,7 @@ func (q edgePrefixQuery) verify(b testing.TB, db *tarp.DB, edges []tarp.Entry, v
 	if q.first {
 		n = min(1, n)
 	}
-	counts, err := q.run(b.Context(), db, values, native, func(k, v []byte) {
+	counts, err := q.run(b.Context(), db, values, usePrefix, func(k, v []byte) {
 		expected, ok := want[string(k)]
 		if !ok || (values && !bytes.Equal(v, expected)) {
 			b.Fatalf("unexpected key, duplicate or wrong value for %q", k)
@@ -159,26 +153,13 @@ func (q edgePrefixQuery) verify(b testing.TB, db *tarp.DB, edges []tarp.Entry, v
 	return n
 }
 
-func edgePrefixArm(t testing.TB, db *tarp.DB, native bool) edgePrefixReader {
-	t.Helper()
-	if !native {
-		return nil
-	}
-	reader, ok := any(db).(edgePrefixReader)
-	if !ok {
-		t.Fatal("this checkout does not implement KeysPrefix and ScanPrefix")
-	}
-	return reader
-}
-
 func (q edgePrefixQuery) measure(b *testing.B, db *tarp.DB, edges []tarp.Entry, values, usePrefix bool) {
-	native := edgePrefixArm(b, db, usePrefix)
-	n := q.verify(b, db, edges, values, native)
+	n := q.verify(b, db, edges, values, usePrefix)
 	ctx := b.Context()
 	var candidates, valueBytes int64
 	b.ReportAllocs()
 	for b.Loop() {
-		counts, err := q.run(ctx, db, values, native, nil)
+		counts, err := q.run(ctx, db, values, usePrefix, nil)
 		if err != nil || counts.matches != n {
 			b.Fatalf("got %d matches, want %d: %v", counts.matches, n, err)
 		}
@@ -188,6 +169,34 @@ func (q edgePrefixQuery) measure(b *testing.B, db *tarp.DB, edges []tarp.Entry, 
 	b.ReportMetric(float64(n), "matches/op")
 	b.ReportMetric(float64(candidates)/float64(b.N), "yielded/op")
 	b.ReportMetric(float64(valueBytes)/float64(b.N), "yielded-value-B/op")
+}
+
+func TestEdgePrefixArmsCountVisitedRows(t *testing.T) {
+	edges := []tarp.Entry{
+		{Key: []byte("a/1"), Value: []byte("one")},
+		{Key: []byte("b/1"), Value: []byte("two")},
+	}
+	db := newEdgePrefixFixture(t, tarp.Options{}, edges)
+	query := edgePrefixQuery{prefix: []byte("a/")}
+	for _, usePrefix := range []bool{false, true} {
+		for _, values := range []bool{false, true} {
+			got, err := query.run(t.Context(), db, values, usePrefix, func(key, value []byte) {
+				if !bytes.Equal(key, edges[0].Key) || (values && !bytes.Equal(value, edges[0].Value)) {
+					t.Fatalf("unexpected row: %q, %q", key, value)
+				}
+			})
+			want := edgePrefixCounts{matches: 1, candidates: len(edges)}
+			if usePrefix {
+				want.candidates = 1
+			}
+			if values {
+				want.valueBytes = 3 * want.candidates
+			}
+			if err != nil || got != want {
+				t.Fatalf("usePrefix=%t values=%t: got %+v, %v; want %+v", usePrefix, values, got, err, want)
+			}
+		}
+	}
 }
 
 func BenchmarkEdgePrefix(b *testing.B) {

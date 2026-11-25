@@ -2,7 +2,6 @@ package benchmark
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"iter"
 	"slices"
@@ -36,11 +35,6 @@ type typedEdgeState struct {
 
 type typedEdgeEntry = tarp.TypedEntry[typedEdgeKey, typedEdgeState]
 type typedEdgeDB = tarp.TypedDB[typedEdgeKey, typedEdgeState]
-
-type typedEdgePrefixReader interface {
-	KeysPrefix(context.Context, []byte) iter.Seq2[typedEdgeKey, error]
-	ScanPrefix(context.Context, []byte) iter.Seq2[typedEdgeEntry, error]
-}
 
 func typedEdgeCodec[T any](t testing.TB) tarp.Codec[T] {
 	t.Helper()
@@ -188,24 +182,16 @@ func BenchmarkTypedEdgePrefix(b *testing.B) {
 					b.Run(op+"/"+arm, func(b *testing.B) {
 						ctx := b.Context()
 						native := arm == "prefix"
-						var reader typedEdgePrefixReader
-						if native {
-							var ok bool
-							reader, ok = any(db).(typedEdgePrefixReader)
-							if !ok {
-								b.Fatal("this checkout does not implement typed KeysPrefix and ScanPrefix")
-							}
-						}
 						if op == "Keys" {
 							rows := func() iter.Seq2[typedEdgeKey, error] { return db.Keys(ctx) }
 							if native {
-								rows = func() iter.Seq2[typedEdgeKey, error] { return reader.KeysPrefix(ctx, prefix) }
+								rows = func() iter.Seq2[typedEdgeKey, error] { return db.KeysPrefix(ctx, prefix) }
 							}
 							measureTypedEdgeRows(b, rows, func(k typedEdgeKey) typedEdgeKey { return k }, nil, native, want)
 						} else {
 							rows := func() iter.Seq2[typedEdgeEntry, error] { return db.Scan(ctx) }
 							if native {
-								rows = func() iter.Seq2[typedEdgeEntry, error] { return reader.ScanPrefix(ctx, prefix) }
+								rows = func() iter.Seq2[typedEdgeEntry, error] { return db.ScanPrefix(ctx, prefix) }
 							}
 							measureTypedEdgeRows(b, rows, func(e typedEdgeEntry) typedEdgeKey { return e.Key }, func(e typedEdgeEntry, want typedEdgeState) bool {
 								return e.Value.HLC == want.HLC && slices.Equal(e.Value.Contributions, want.Contributions)

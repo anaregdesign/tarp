@@ -28,21 +28,20 @@ func (db *DB) KeysPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[[]
 // Keys decodes each key in a DB.Keys snapshot. The iterator retains the DB and
 // key codec from this call. A DB or key codec error yields the zero value of K
 // and ends iteration.
-func (db *View[K, V]) Keys(ctx context.Context) iter.Seq2[K, error] {
+func (db View[K, V]) Keys(ctx context.Context) iter.Seq2[K, error] {
 	return db.KeysPrefix(ctx, nil)
 }
 
 // KeysPrefix decodes the keys selected by [DB.KeysPrefix]. The prefix is a
 // prefix of the stored key bytes and does not need to encode a complete K.
-func (db *View[K, V]) KeysPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[K, error] {
-	view := *db
-	rows := view.core.KeysPrefix(ctx, encodedPrefix)
+func (db View[K, V]) KeysPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[K, error] {
+	rows := db.core.KeysPrefix(ctx, encodedPrefix)
 	return func(yield func(K, error) bool) {
-		view.decodeKeys(rows, yield)
+		db.decodeKeys(rows, yield)
 	}
 }
 
-func (db *View[K, V]) decodeKeys(seq iter.Seq2[[]byte, error], yield func(K, error) bool) {
+func (db View[K, V]) decodeKeys(seq iter.Seq2[[]byte, error], yield func(K, error) bool) {
 	var zero K
 	for data, err := range seq {
 		if err != nil {

@@ -194,10 +194,13 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if err != nil {
 		return nil, err
 	}
+	var createdDir bool
 	if !existingOnly {
-		if err := os.Mkdir(absolute, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		err := os.Mkdir(absolute, 0700)
+		if err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
+		createdDir = err == nil
 	}
 	absolute, err = filepath.EvalSymlinks(absolute)
 	if err != nil {
@@ -217,8 +220,8 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	// Restored databases have CURRENT but no LOCK. Reject an unrecognized
-	// frontier before creating LOCK. Validate the selected DB under lock.
+	// A restored database has CURRENT but no LOCK. Reject a foreign frontier
+	// or an unrelated directory before creating LOCK. Recheck under lock.
 	if _, err := os.Lstat(filepath.Join(absolute, "LOCK")); errors.Is(err, os.ErrNotExist) {
 		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
 		if err == nil {
@@ -227,8 +230,8 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
-		} else if existingOnly {
-			if err := checkUninitializedDir(absolute); err != nil {
+		} else if !createdDir {
+			if err := checkUninitializedDir(absolute, existingOnly); err != nil {
 				return nil, err
 			}
 		}
@@ -390,15 +393,18 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 	return nil
 }
 
-// Neither LOCK nor CURRENT was observed before locking. Keep empty directories
-// untouched and report partial images as corrupt. A concurrently created LOCK
-// or CURRENT requires the usual authoritative check under the directory lock.
-func checkUninitializedDir(dir string) error {
+// Neither LOCK nor CURRENT was observed before locking. Only create-or-open
+// may initialize an empty directory. A concurrent initializer may have added
+// LOCK or CURRENT since the preflight, in which case recheck under lock.
+func checkUninitializedDir(dir string, existingOnly bool) error {
 	names, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	if len(names) == 0 {
+		if !existingOnly {
+			return nil
+		}
 		return &os.PathError{Op: "open", Path: filepath.Join(dir, "CURRENT"), Err: os.ErrNotExist}
 	}
 	for _, entry := range names {

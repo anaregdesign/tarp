@@ -82,6 +82,36 @@ func TestOpenExistingRequiresInitializedDirectory(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsUninitializedNonemptyDirectoryWithoutCreatingLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes")
+	if err := os.WriteFile(path, []byte("preserve me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if db, err := tarp.Open(dir, tarp.Options{}); db != nil || !errors.Is(err, tarp.ErrCorrupt) {
+			t.Fatalf("open: %v, %v", db, err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 1 || entries[0].Name() != "notes" {
+			t.Fatalf("directory after failed Open: %v, %v", entries, err)
+		}
+		if data, err := os.ReadFile(path); err != nil || string(data) != "preserve me" {
+			t.Fatalf("notes after failed Open: %q, %v", data, err)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	db, err := tarp.Open(dir, tarp.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenExistingAcceptsRestoredDatabaseWithoutLockFile(t *testing.T) {
 	db := openPublicDB(t, t.TempDir(), tarp.Options{})
 	if err := db.Put([]byte("k"), []byte("v")); err != nil {
@@ -720,8 +750,8 @@ func TestIndexModesShareDataSnapshotsAndBackups(t *testing.T) {
 		name         string
 		source, dest tarp.IndexMode
 	}{
-		{"memory to default", tarp.IndexMemory, tarp.IndexDefault},
-		{"default to memory", tarp.IndexDefault, tarp.IndexMemory},
+		{"memory to B+tree", tarp.IndexMemory, tarp.IndexBTree},
+		{"B+tree to memory", tarp.IndexBTree, tarp.IndexMemory},
 	} {
 		t.Run(source.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "source")
@@ -859,7 +889,7 @@ func TestBTreeOpenRespectsCurrentOwnerBeforeCreatingWorkspace(t *testing.T) {
 
 func TestIndexOptionErrorsLeaveNewDirectoryAbsent(t *testing.T) {
 	for _, o := range []tarp.Options{
-		{IndexMode: 99},
+		{IndexMode: 2}, // Outside the two supported modes.
 		{IndexMode: tarp.IndexMemory, BTreeMemoryBudgetBytes: 1 << 20},
 		{IndexMode: tarp.IndexBTree, BTreeMemoryBudgetBytes: 1},
 		{IndexMode: tarp.IndexBTree, BTreeMemoryBudgetBytes: -1},

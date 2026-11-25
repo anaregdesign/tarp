@@ -2,7 +2,7 @@
 
 The implementation from [Issue #150](https://github.com/anaregdesign/tarp/issues/150) uses the existing DATA and catalog formats. The order proof is process-local. A service that reads many values under one prefix can request a key-ordered full DATA checkpoint after a bulk import or during a maintenance window.
 
-## Public API (unreleased)
+## Public API since v0.14.0
 
 ```go
 func WithKeyOrder() CompactOption

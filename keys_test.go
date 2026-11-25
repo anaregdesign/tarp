@@ -63,7 +63,7 @@ func TestTypedKeysKeepsItsDatabaseAndCodecAfterViewReplacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			keys = append(keys, key)
-			*view = *replacement
+			view = replacement
 		}
 		slices.Sort(keys)
 		if !slices.Equal(keys, []string{"invalid1", "invalid2"}) {

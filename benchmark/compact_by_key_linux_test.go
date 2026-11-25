@@ -116,7 +116,7 @@ func keyCheckpointRow(t *testing.T, row map[string]any) {
 
 func measureKeyCheckpointPrefixes(t *testing.T, db *tarp.DB, dir, index, layout string, edges []tarp.Entry, keyBytes int, checkpoint time.Duration) {
 	t.Helper()
-	(edgePrefixQuery{}).verify(t, db, edges, true, db)
+	(edgePrefixQuery{}).verify(t, db, edges, true, true)
 	device, err := openContainerBatchIO(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -139,14 +139,14 @@ func measureKeyCheckpointPrefixes(t *testing.T, db *tarp.DB, dir, index, layout 
 	}
 	for _, tail := range []int{0, 192, 384} {
 		q := edgePrefixQuery{prefix: edgeTailPrefix(tail)}
-		n := q.verify(t, db, edges, true, db)
+		n := q.verify(t, db, edges, true, true)
 		for trial := 1; trial <= 3; trial++ {
 			if err := device.Evict(); err != nil {
 				t.Fatal(err)
 			}
 			before := readPrefixIOBytes(t, device)
 			start := time.Now()
-			got, err := q.run(t.Context(), db, true, db, nil)
+			got, err := q.run(t.Context(), db, true, true, nil)
 			elapsed := time.Since(start)
 			charged := prefixIOBytesSince(t, device, before)
 			if err != nil || got.matches != n {
@@ -349,7 +349,7 @@ func measureKeyCheckpointWrites(t *testing.T, source string, opts tarp.Options, 
 	for _, put := range trace {
 		expected[put.slot].Value = put.value
 	}
-	(edgePrefixQuery{}).verify(t, image, expected, true, image)
+	(edgePrefixQuery{}).verify(t, image, expected, true, true)
 	q := latency(samples, int64(len(samples)), elapsed)
 	during := latency(overlapping, int64(len(overlapping)), checkpointTime)
 	trial := checkpointWriterTrial{samples: samples, overlapSlots: overlapSlots,

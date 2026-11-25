@@ -302,6 +302,50 @@ func TestWriteBatchElidedDeletesPreserveRecoveryCompactionAndBackup(t *testing.T
 	}
 }
 
+func TestWriteBatchRecordLimitChargesOnlySurvivingRecords(t *testing.T) {
+	for _, mode := range []tarp.IndexMode{tarp.IndexMemory, tarp.IndexBTree} {
+		t.Run(fmt.Sprintf("mode=%d", mode), func(t *testing.T) {
+			opts := tarp.Options{IndexMode: mode, MaxRecordBytes: 128, TargetSegmentBytes: 256}
+			dir := t.TempDir()
+			db := openPublicDB(t, dir, opts)
+			var batch tarp.WriteBatch
+			for i := range 6 {
+				batch.Delete([]byte(fmt.Sprintf("missing-%d", i)))
+			}
+			before := db.Stats()
+			if err := db.Apply(&batch); err != nil || db.Stats() != before {
+				t.Fatalf("fully elided Apply = %v, stats = %+v, want %+v", err, db.Stats(), before)
+			}
+
+			batch.Put([]byte("live"), []byte("old"))
+			if err := db.Apply(&batch); err != nil {
+				t.Fatal(err)
+			}
+			// The live Delete and two 110-byte Puts cannot fit together.
+			// The error index still refers to the original queued operation.
+			batch.Reset()
+			batch.Delete([]byte("live"))
+			batch.Put([]byte("b"), nil)
+			batch.Delete([]byte("missing"))
+			batch.Put([]byte("a"), bytes.Repeat([]byte("x"), 61))
+			batch.Put([]byte("b"), bytes.Repeat([]byte("y"), 61))
+			var limit *tarp.BatchLimitError
+			if err := db.Apply(&batch); !errors.As(err, &limit) || limit.Kind != tarp.BatchRecordBytesLimit ||
+				limit.Index != 4 || limit.Actual != 272 || limit.Limit != 192 {
+				t.Fatalf("oversized Apply = %v, want 272 record bytes at index 4 (limit 192)", err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openPublicDB(t, dir, opts)
+			results, err := reopened.BatchGet([][]byte{[]byte("live"), []byte("a"), []byte("b")})
+			if err != nil || len(results) != 3 || string(results[0].Value) != "old" || results[1].Found || results[2].Found {
+				t.Fatalf("reopened BatchGet = %+v, %v", results, err)
+			}
+		})
+	}
+}
+
 func TestWriteBatchLimitsErrorsAndClosedDB(t *testing.T) {
 	opts := tarp.Options{
 		MaxRecordBytes:     4 << 10,

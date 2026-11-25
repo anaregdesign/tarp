@@ -9,8 +9,8 @@ rounds=${4:-3}
 cpu=${TARP_PREFIX_CPU:-2}
 [[ $rounds =~ ^[1-9][0-9]*$ && $cpu =~ ^[0-9]+$ ]] || { echo 'expected positive rounds and a single CPU number' >&2; exit 2; }
 repo=$(git rev-parse --show-toplevel)
-base=$(git -C "$repo" rev-parse --verify --end-of-options "${2:-59ddf19}^{commit}")
 tip=$(git -C "$repo" rev-parse --verify --end-of-options "${3:-HEAD}^{commit}")
+base=$(git -C "$repo" rev-parse --verify --end-of-options "${2:-$tip}^{commit}")
 mkdir -p "$1"
 out=$(cd "$1" && pwd -P)
 [[ -z $(ls -A "$out") ]] || { echo "results directory must be empty: $out" >&2; exit 2; }
@@ -28,12 +28,20 @@ trap 'exit 143' TERM
 mkdir "$tmp/filter" "$tmp/prefix"
 git -C "$repo" archive "$base" | tar -x -C "$tmp/filter"
 git -C "$repo" archive "$tip" | tar -x -C "$tmp/prefix"
+drivers=(edge_prefix_benchmark_test.go typed_edge_prefix_benchmark_test.go edge_prefix_io_linux_test.go
+        edge_prefix_working_set_test.go batch_get_container_io_linux_test.go
+        batch_get_container_fadvise{,_other}_linux_test.go)
+for arm in filter prefix; do
+    mkdir "$tmp/$arm/benchmark/edgecomparison"
+    for file in "${drivers[@]}"; do
+        cp "$tmp/prefix/benchmark/$file" "$tmp/$arm/benchmark/edgecomparison/$file"
+    done
+done
 {
     echo "filter=$base"
     echo "prefix=$tip"
-    for file in edge_prefix_benchmark_test.go typed_edge_prefix_benchmark_test.go edge_prefix_io_linux_test.go edge_prefix_working_set_test.go; do
-        cp "$tmp/prefix/benchmark/$file" "$tmp/filter/benchmark/$file"
-        echo "baseline-overlay $(git -C "$repo" rev-parse "$tip:benchmark/$file") benchmark/$file"
+    for file in "${drivers[@]}"; do
+        echo "driver $(git -C "$repo" rev-parse "$tip:benchmark/$file") benchmark/$file"
     done
 } > "$out/sources.txt"
 curl -fsSL --retry 2 'https://go.dev/dl/?mode=json' -o "$out/go-releases.json"
@@ -69,7 +77,7 @@ test "$(go env GOVERSION)" = "$EXPECTED_GO_VERSION"
     findmnt --noheadings --target /bench --output SOURCE,FSTYPE,OPTIONS
 } > /out/environment.txt
 for arm in filter prefix; do
-    (cd "/$arm" && go test -buildvcs=false -c -o "/bench/$arm" ./benchmark)
+    (cd "/$arm" && go test -buildvcs=false -c -o "/bench/$arm" ./benchmark/edgecomparison)
 done
 bench() {
     local family=$1 pattern=$2 time=$3 leaves=$4 log="/out/r$round-$arm-$1.txt"
