@@ -58,7 +58,8 @@
 // and cache activity, and [DB.AutoCompactionStatus] reports the worker's
 // progress. For a full DATA checkpoint, call [DB.Compact]. [WithKeyOrder]
 // clusters retained records by encoded key. Compaction uses PARITY to recover
-// sealed DATA and reports the number of proven irrecoverable live keys it drops.
+// sealed DATA. If a live value cannot be recovered, the checkpoint returns
+// [ErrDataUnavailable] and the key stays in the index.
 // Allow temporary space for compaction and backups.
 //
 // To reduce index rebuilding on restart, [DB.CheckpointIndex] persists an

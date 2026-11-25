@@ -13,7 +13,7 @@ import (
 // PARITY stay charged through publication; carried-forward files cost nothing.
 type orderedScratchBudget struct{ remaining uint64 }
 
-func (c *DataCheckpoint) prepareOrderedScratch(spools ...*Relocations) error {
+func (c *DataCheckpoint) prepareOrderedScratch(moves *Relocations) error {
 	if c.scratch == nil {
 		available, err := platform.AvailableBytes(c.store.Dir)
 		if err != nil {
@@ -27,9 +27,7 @@ func (c *DataCheckpoint) prepareOrderedScratch(spools ...*Relocations) error {
 		}
 		c.scratch = &orderedScratchBudget{remaining: available}
 	}
-	for _, m := range spools {
-		m.budget = c.scratch
-	}
+	moves.budget = c.scratch
 	return nil
 }
 

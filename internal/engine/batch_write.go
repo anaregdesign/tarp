@@ -12,12 +12,12 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
-// MaxBatchEntries limits the number of inputs, including duplicate keys.
-const MaxBatchEntries = 4096
+// MaxWriteBatchEntries caps the one-based uint16 slots used by write batches.
+const MaxWriteBatchEntries = math.MaxUint16
 
-func CheckBatchCount(count int) error {
-	if count > MaxBatchEntries {
-		return &BatchLimitError{Kind: BatchInputCountLimit, Index: -1, Actual: uint64(count), Limit: MaxBatchEntries}
+func CheckBatchCount(count, limit int) error {
+	if count > limit {
+		return &BatchLimitError{Kind: BatchInputCountLimit, Index: -1, Actual: uint64(count), Limit: uint64(limit)}
 	}
 	return nil
 }
@@ -56,7 +56,7 @@ type PreparedBatch struct {
 // The caller must check each key with CheckBatchKey before supplying its value.
 // No database lock is held while calling entryAt.
 func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (PreparedBatch, error) {
-	if err := CheckBatchCount(count); err != nil {
+	if err := CheckBatchCount(count, MaxWriteBatchEntries); err != nil {
 		return PreparedBatch{}, err
 	}
 	records := make([]storage.Entry, count)
@@ -83,7 +83,7 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 // of each encoded key. The caller must check each key with CheckBatchKey.
 // Existence is checked under the writer gate at commit.
 func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (PreparedBatch, error) {
-	if err := CheckBatchCount(count); err != nil {
+	if err := CheckBatchCount(count, MaxWriteBatchEntries); err != nil {
 		return PreparedBatch{}, err
 	}
 	// Slots index the original immutable key bytes in records. Small sets

@@ -127,7 +127,7 @@ func TestRelocationsSpillOnlyBeyondCountOrByteLimit(t *testing.T) {
 			if err := moves.seal(); err != nil {
 				t.Fatal(err)
 			}
-			resident, ok := moves.Resident()
+			resident, ok := moves.small, moves.fd == nil
 			if ok == tc.spill || ok && len(resident) != tc.count || !ok && resident != nil {
 				t.Fatalf("resident batch has %d moves, ok=%t, expected spill=%t", len(resident), ok, tc.spill)
 			}

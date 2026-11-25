@@ -17,11 +17,11 @@ func TestPrepareMixedCopiesRepeatedKeysOnce(t *testing.T) {
 		})
 	}
 	one := allocations(1)
-	many := allocations(MaxBatchEntries)
+	many := allocations(MaxWriteBatchEntries)
 	if many > one+2 {
-		t.Errorf("preparing one key allocated %.0f times, %d repetitions allocated %.0f times", one, MaxBatchEntries, many)
+		t.Errorf("preparing one key allocated %.0f times, %d repetitions allocated %.0f times", one, MaxWriteBatchEntries, many)
 	}
-	if batch.order != nil || len(batch.records) != 1 || cap(batch.records) > 16 || batch.records[0].inputIndex != MaxBatchEntries-1 || batch.records[0].key != string(key) {
+	if batch.order != nil || len(batch.records) != 1 || cap(batch.records) > 16 || batch.records[0].inputIndex != MaxWriteBatchEntries-1 || batch.records[0].key != string(key) {
 		t.Fatalf("coalesced batch = %+v", batch.records)
 	}
 }

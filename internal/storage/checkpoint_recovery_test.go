@@ -35,13 +35,12 @@ func TestRecoveryRejectsIndexAddressInsideDamagedRecord(t *testing.T) {
 	defer v.Close()
 	h := memory.New()
 	defer h.Close()
-	moves, lost := s.NewRelocations(), s.NewRelocations()
+	moves := s.NewRelocations()
 	defer moves.Close()
-	defer lost.Close()
 	before := s.Current
-	err := c.CopyRecovered(t.Context(), h, v, moves, lost, s.ReserveSnapshotSegment, nil)
-	if !errors.Is(err, ErrCorrupt) || lost.count != 0 || s.Current != before {
-		t.Fatalf("forged index address accepted for loss: %v; lost %d", err, lost.count)
+	err := c.CopyRecovered(t.Context(), h, v, moves, s.ReserveSnapshotSegment, nil)
+	if !errors.Is(err, ErrCorrupt) || IsDataUnavailable(err) || s.Current != before {
+		t.Fatalf("forged index address accepted as a live version: %v", err)
 	}
 }
 
@@ -97,29 +96,23 @@ func TestRecoveryPreservesOtherLiveKeyWhenDamagedKeyBytesCollide(t *testing.T) {
 	}
 	v := keys.View()
 	defer v.Close()
-	moves, lost := s.NewRelocations(), s.NewRelocations()
+	moves := s.NewRelocations()
 	defer moves.Close()
-	defer lost.Close()
 	out := s.NewDataCheckpoint(c)
 	defer out.Discard()
-	if err := out.CopyRecovered(t.Context(), h, v, moves, lost, s.ReserveSnapshotSegment, nil); err != nil {
-		t.Fatal(err)
+	before := s.Current
+	err = out.CopyRecovered(t.Context(), h, v, moves, s.ReserveSnapshotSegment, nil)
+	var unavailable *UnavailableVersionError
+	if !IsDataUnavailable(err) || !errors.As(err, &unavailable) || unavailable.Key != "b" || unavailable.Location != newest || s.Current != before {
+		t.Fatalf("damaged record misidentified or published: %v, version %+v", err, unavailable)
 	}
-	for _, want := range []struct {
-		spool *Relocations
-		key   string
-	}{{moves, "a"}, {lost, "b"}} {
-		if want.spool.count != 1 {
-			t.Fatalf("%s count %d", want.key, want.spool.count)
-		}
-		if err := want.spool.Each(func(key string, _, _ Location) error {
-			if key != want.key {
-				t.Errorf("got %q, want %q", key, want.key)
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
+	addr, found, err := v.Lookup("a")
+	if err != nil || !found {
+		t.Fatalf("intact key missing from captured index: %v", err)
+	}
+	value, err := s.Read(At(src.Segment, addr), "a")
+	if err != nil || string(value) != "keep" {
+		t.Fatalf("intact neighbor: %q, %v", value, err)
 	}
 }
 

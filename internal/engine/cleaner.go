@@ -19,7 +19,6 @@ import (
 // AutoCompactionStatus describes the automatic compaction worker since this Open.
 type AutoCompactionStatus struct {
 	DeferredReason         string
-	DroppedKeys            uint64 // Cumulative unrecoverable live versions discarded by the worker.
 	PinnedRetiredDataBytes int64  // Retired DATA bytes retained by segment pins or live index references at the last retirement pass.
 	UnlinkedBytes          uint64 // Cumulative logical lengths of files unlinked by the worker, including obsolete manifests.
 	LastError              error
@@ -321,7 +320,6 @@ func (db *DB) recoverDamaged(ctx context.Context) error {
 	}()
 	result, err := db.compactCheckpoint(ctx, sourceRecovery)
 	w.mu.Lock()
-	w.status.DroppedKeys += min(result.DroppedKeys, math.MaxUint64-w.status.DroppedKeys)
 	w.status.UnlinkedBytes += min(uint64(result.UnlinkedBytes), math.MaxUint64-w.status.UnlinkedBytes)
 	w.status.PinnedRetiredDataBytes = result.PinnedRetiredDataBytes
 	w.mu.Unlock()

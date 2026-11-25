@@ -720,9 +720,19 @@ func TestRepackGroupUsesHealthyRunAfterUnavailableFile(t *testing.T) {
 	}
 }
 
-func TestReadWakesCleanerToCheckpointUnrecoverableKeys(t *testing.T) {
+func TestReadWakesCleanerAndRetainsUnrecoverableKeys(t *testing.T) {
 	start := make(chan struct{})
-	db := newTestDBWithHooks(t, Options{}, nil, &Hooks{CleanerStart: start, ParityStart: make(chan struct{})})
+	checked := make(chan struct{}, 1)
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "compact.unavailable:before" {
+			select {
+			case checked <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{}, fs, &Hooks{CleanerStart: start, ParityStart: make(chan struct{})})
 	mustPut(t, db, "kept", "healthy")
 	mustPut(t, db, "lost", strings.Repeat("v", 10000))
 	if _, err := db.Compact(t.Context()); err != nil {
@@ -747,19 +757,28 @@ func TestReadWakesCleanerToCheckpointUnrecoverableKeys(t *testing.T) {
 		t.Fatalf("initial failing read: %v", err)
 	}
 	close(start)
-	waitForUnlink(t, db, path)
-	// Retirement happens before the checkpoint reports its result to the worker.
+	select {
+	case <-checked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed read did not wake automatic recovery")
+	}
 	<-db.cleaner.gate
 	status := db.AutoCompactionStatus()
 	db.cleaner.gate <- struct{}{}
-	if status.DroppedKeys != 1 || status.UnlinkedBytes == 0 {
+	if !errors.Is(status.LastError, ErrDataUnavailable) {
 		t.Fatalf("unexpected automatic recovery result: %+v", status)
 	}
-	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("discarded key: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("selected damaged source: %v", err)
+	}
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
+		t.Fatalf("unavailable key: %v", err)
 	}
 	wantValue(t, db, "kept", "healthy")
 	mustPut(t, db, "lost", "later")
+	if _, err := db.Compact(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -770,6 +789,28 @@ func TestReadWakesCleanerToCheckpointUnrecoverableKeys(t *testing.T) {
 	defer image.Close()
 	wantValue(t, image, "kept", "healthy")
 	wantValue(t, image, "lost", "later")
+}
+
+func TestAutomaticCheckpointPreservesUnavailableKeys(t *testing.T) {
+	db := openMaintenanceDamageDB(t, Options{}, nil)
+	corruptUncachedCheckpointValue(t, db)
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
+		t.Fatalf("initial failing read: %v", err)
+	}
+	before := db.store.Current
+	if again, retry := db.cleanPass(t.Context()); again || retry {
+		t.Fatalf("unrecoverable checkpoint rescheduled: again %t, retry %t", again, retry)
+	}
+	status := db.AutoCompactionStatus()
+	var op *OpError
+	if !errors.As(status.LastError, &op) || op.Outcome != NotApplied ||
+		!errors.Is(status.LastError, ErrDataUnavailable) || db.store.Current != before {
+		t.Fatalf("automatic checkpoint: %+v, frontier %+v", status, db.store.Current)
+	}
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("unavailable key after automatic checkpoint: %v", err)
+	}
+	wantValue(t, db, "keep", "healthy")
 }
 
 func TestAutomaticCheckpointRejectsInvalidSidecarAfterUnrecoverableStripe(t *testing.T) {
@@ -799,7 +840,7 @@ func TestAutomaticCheckpointRejectsInvalidSidecarAfterUnrecoverableStripe(t *tes
 	}
 	status := db.AutoCompactionStatus()
 	if !errors.Is(status.LastError, format.ErrInvalidParity) || !errors.Is(status.LastError, ErrDataUnavailable) ||
-		status.DroppedKeys != 0 || db.store.Current != before || db.health() != nil {
+		db.store.Current != before || db.health() != nil {
 		t.Fatalf("invalid proof allowed progress or stopped service: %+v, %v", status, db.health())
 	}
 	scanCount := scans.Load()
@@ -814,7 +855,7 @@ func TestManualCompactPreemptsAutomaticRecoveryBeforePublication(t *testing.T) {
 	ready, release := make(chan struct{}), make(chan struct{})
 	var first atomic.Bool
 	db := openMaintenanceDamageDB(t, Options{}, &storage.IO{Hook: func(point string) error {
-		if point == "compact.parity.sync:before" && first.CompareAndSwap(false, true) {
+		if point == "compact.recover.scan:before" && first.CompareAndSwap(false, true) {
 			close(ready)
 			<-release
 		}
@@ -832,27 +873,24 @@ func TestManualCompactPreemptsAutomaticRecoveryBeforePublication(t *testing.T) {
 	select {
 	case <-ready:
 	case <-autoDone:
-		t.Fatalf("automatic checkpoint did not stage a replacement: %+v", db.AutoCompactionStatus())
+		t.Fatalf("automatic checkpoint did not start recovery: %+v", db.AutoCompactionStatus())
 	}
 	select {
 	case <-db.cleaner.resume:
 	default:
 	}
-	type outcome struct {
-		result CompactResult
-		err    error
-	}
-	manualDone := make(chan outcome, 1)
+	mustPut(t, db, "lost", "replacement")
+	manualDone := make(chan error, 1)
 	go func() {
-		result, err := db.Compact(t.Context())
-		manualDone <- outcome{result, err}
+		_, err := db.Compact(t.Context())
+		manualDone <- err
 	}()
 	<-db.cleaner.resume // Manual Compact has canceled the private worker checkpoint.
 	close(release)
 	<-autoDone
-	manual := <-manualDone
-	if manual.err != nil || manual.result.DroppedKeys != 1 || db.AutoCompactionStatus().DroppedKeys != 0 {
-		t.Fatalf("manual recovery %+v, worker %+v", manual, db.AutoCompactionStatus())
+	if err := <-manualDone; err != nil {
+		t.Fatalf("manual recovery: %v, worker %+v", err, db.AutoCompactionStatus())
 	}
+	wantValue(t, db, "lost", "replacement")
 	wantValue(t, db, "keep", "healthy")
 }

@@ -90,7 +90,7 @@ by the operating system. Use **filesystem block**, **OS page cache** and
 | Segment pin, live index reference and read-handle lease | A reader, backup or worker can pin a segment. Live index entries also retain their referenced segment until remapped. Either delays unlink. A read-handle lease keeps an opened descriptor available to an in-flight read, including during replacement of the named file. |
 | Parity protection and DATA repair | Sealing ends appends to a segment. Protection starts once its PARITY sidecar is durable. `ProtectParity` verifies or builds sidecars. `RepairDataFromParity` verifies the selected DATA and repairs recoverable sealed segments from PARITY. |
 | File backup, live key-value export and historical record salvage | `Backup` captures committed file bytes at one point in time. Scanning live entries exports the current key-value state of the captured view. `SalvageData` exports verified historical records from one sealed segment, including superseded Puts and Deletes. Its reported gaps are physical byte ranges. |
-| Unavailable DATA and dropped key | An unavailable record cannot be served by that read. Repair may require additional space. A dropped key leaves the live state only when a recovery checkpoint publishes proven loss. |
+| Unavailable DATA | An unavailable record cannot be served by that read. Repair may require additional space. Compaction refuses to publish a checkpoint that would discard a live key. |
 
 See the [wire format](format.md) for byte layouts and the
 [durability contract](durability.md) for publication and recovery guarantees.

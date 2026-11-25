@@ -1284,7 +1284,7 @@ func TestCompactRecapturesConcurrentChangeToUnrecoverableVersion(t *testing.T) {
 				paused, resume := make(chan struct{}), make(chan struct{})
 				var armed atomic.Bool
 				fs := &storage.IO{Hook: func(point string) error {
-					if point == "index.moves.flush:after" && armed.CompareAndSwap(true, false) {
+					if point == "compact.unavailable:before" && armed.CompareAndSwap(true, false) {
 						close(paused)
 						<-resume
 					}
@@ -1294,14 +1294,10 @@ func TestCompactRecapturesConcurrentChangeToUnrecoverableVersion(t *testing.T) {
 				db := openMaintenanceDamageDB(t, opts, fs)
 				corruptUncachedCheckpointValue(t, db)
 				armed.Store(true)
-				type completion struct {
-					CompactResult
-					error
-				}
-				done := make(chan completion, 1)
+				done := make(chan error, 1)
 				go func() {
-					result, err := db.Compact(t.Context())
-					done <- completion{result, err}
+					_, err := db.Compact(t.Context())
+					done <- err
 				}()
 				select {
 				case early := <-done:
@@ -1314,7 +1310,7 @@ func TestCompactRecapturesConcurrentChangeToUnrecoverableVersion(t *testing.T) {
 				}
 				close(resume)
 				finished := <-done
-				if err != nil || finished.error != nil || finished.DroppedKeys != 0 {
+				if err != nil || finished != nil {
 					t.Fatalf("concurrent mutation %v, checkpoint %+v", err, finished)
 				}
 				check := func(d *DB) {
@@ -1340,7 +1336,7 @@ func TestCompactRecapturesConcurrentChangeToUnrecoverableVersion(t *testing.T) {
 	}
 }
 
-func TestCompactPublishesLossOnlyWithCompleteCheckpoint(t *testing.T) {
+func TestCompactRecoveryPublicationFaultKeepsReplacement(t *testing.T) {
 	for _, point := range []string{"compact.sync:after", "compact.remap:after"} {
 		t.Run(point, func(t *testing.T) {
 			var armed atomic.Bool
@@ -1353,6 +1349,11 @@ func TestCompactPublishesLossOnlyWithCompleteCheckpoint(t *testing.T) {
 			opts := Options{IndexMode: IndexBTree}
 			db := openMaintenanceDamageDB(t, opts, fs)
 			corruptUncachedCheckpointValue(t, db)
+			if _, err := db.Compact(t.Context()); !errors.Is(err, ErrDataUnavailable) {
+				t.Fatalf("checkpoint with unavailable live version: %v", err)
+			}
+			mustPut(t, db, "lost", "replacement")
+			sealForCleaning(t, db)
 			before, stats := db.store.Current, db.Stats()
 			armed.Store(true)
 			result, err := db.Compact(t.Context())
@@ -1361,23 +1362,21 @@ func TestCompactPublishesLossOnlyWithCompleteCheckpoint(t *testing.T) {
 				t.Fatalf("result %+v, err %v", result, err)
 			}
 			if point == "compact.sync:after" {
-				if result.DroppedKeys != 0 || op.Outcome != NotApplied || db.store.Current != before || db.Stats() != stats {
-					t.Fatalf("unpublished loss: result %+v, err %v, frontier %+v, stats %+v", result, err, db.store.Current, db.Stats())
+				if op.Outcome != NotApplied || db.store.Current != before || db.Stats() != stats {
+					t.Fatalf("unpublished checkpoint: result %+v, err %v, frontier %+v, stats %+v", result, err, db.store.Current, db.Stats())
 				}
-				if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
-					t.Fatalf("source after failed publication: %v", err)
-				}
+				wantValue(t, db, "lost", "replacement")
 				mustPut(t, db, "tail", "acknowledged")
 				result, err = db.Compact(t.Context())
-				if err != nil || result.DroppedKeys != 1 {
+				if err != nil {
 					t.Fatalf("retry: result %+v, err %v", result, err)
 				}
 				if err := db.Close(); err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				if result.DroppedKeys != 1 || op.Outcome != Committed || !errors.Is(db.health(), ErrUnhealthy) {
-					t.Fatalf("published loss: result %+v, err %v, health %v", result, err, db.health())
+				if op.Outcome != Committed || !errors.Is(db.health(), ErrUnhealthy) {
+					t.Fatalf("published checkpoint: result %+v, err %v, health %v", result, err, db.health())
 				}
 				_ = db.Close()
 			}
@@ -1386,9 +1385,7 @@ func TestCompactPublishesLossOnlyWithCompleteCheckpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			if _, err := reopened.Get([]byte("lost")); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("lost key after Full Open: %v", err)
-			}
+			wantValue(t, reopened, "lost", "replacement")
 			wantValue(t, reopened, "keep", "healthy")
 			if point == "compact.sync:after" {
 				wantValue(t, reopened, "tail", "acknowledged")
@@ -1401,7 +1398,7 @@ func TestCompactKeepsVersionRepairedAfterRecoveryCopy(t *testing.T) {
 	paused, resume := make(chan struct{}), make(chan struct{})
 	var armed atomic.Bool
 	fs := &storage.IO{Hook: func(point string) error {
-		if point == "index.moves.flush:after" && armed.CompareAndSwap(true, false) {
+		if point == "compact.unavailable:before" && armed.CompareAndSwap(true, false) {
 			close(paused)
 			<-resume
 		}
@@ -1414,10 +1411,7 @@ func TestCompactKeepsVersionRepairedAfterRecoveryCopy(t *testing.T) {
 	armed.Store(true)
 	done := make(chan error, 1)
 	go func() {
-		result, err := db.Compact(t.Context())
-		if err == nil && result.DroppedKeys != 0 {
-			err = fmt.Errorf("dropped %d keys after their source was repaired", result.DroppedKeys)
-		}
+		_, err := db.Compact(t.Context())
 		done <- err
 	}()
 	select {
@@ -1774,20 +1768,26 @@ func TestCompactByKeyReusesUncheckedNeighborAndRecoversAfterFailedRead(t *testin
 	Observe(db).ClearCache()
 	mustPut(t, db, "z", "updated")
 	result, err := db.CompactByKey(t.Context())
-	if err != nil || result.DroppedKeys != 0 || testLoc(t, db, "a") != bad || testLoc(t, db, "m") != good {
+	if err != nil || testLoc(t, db, "a") != bad || testLoc(t, db, "m") != good {
 		t.Fatalf("delta discarded or relocated an untouched version: %+v, %v", result, err)
 	}
 	if _, err := db.Get([]byte("a")); !errors.Is(err, ErrDataUnavailable) {
 		t.Fatalf("read of damaged neighbor = %v", err)
 	}
+	before := db.store.Current
 	result, err = db.CompactByKey(t.Context())
-	if err != nil || result.DroppedKeys != 1 {
-		t.Fatalf("known damage at unchanged cutoff: %+v, %v", result, err)
+	if !errors.Is(err, ErrDataUnavailable) || db.store.Current != before || testLoc(t, db, "a") != bad {
+		t.Fatalf("checkpoint with known damage at unchanged cutoff: %+v, %v", result, err)
 	}
-	checkKeyOrderedSnapshot(t, db, map[string]uint64{"m": 2, "z": 4})
-	if _, err := db.Get([]byte("a")); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("record after loss publication: %v", err)
+	if _, err := db.Get([]byte("a")); !errors.Is(err, ErrDataUnavailable) {
+		t.Fatalf("record after refused checkpoint: %v", err)
 	}
+	mustPut(t, db, "a", "replacement")
+	if _, err := db.CompactByKey(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	checkKeyOrderedSnapshot(t, db, map[string]uint64{"a": 5, "m": 2, "z": 4})
+	wantValue(t, db, "a", "replacement")
 	wantValue(t, db, "m", large)
 	wantValue(t, db, "z", "updated")
 }

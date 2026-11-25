@@ -6,16 +6,13 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses [v0.14.0](https://github.com/anaregdesign/tarp/tree/v0.14.0).
-Mixed `WriteBatch`, reusable read snapshots, ordered codecs and range scans
-were added on `main` after v0.14.0. To try those examples from a Go module
-before the next tag, run `go get github.com/anaregdesign/tarp@main`.
+uses [v0.15.0](https://github.com/anaregdesign/tarp/tree/v0.15.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.14.0
+go get github.com/anaregdesign/tarp@v0.15.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -72,7 +69,14 @@ backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
 
-On `main` after v0.14.0, `IndexMode` has two values, `IndexBTree` (zero)
+v0.15.0 keeps the v0.14.0 database and backup formats. Compaction now refuses
+to publish a checkpoint that would drop a live key. Handle `ErrDataUnavailable`
+from `Compact` or `AutoCompactionStatus().LastError` in place of the removed
+`DroppedKeys` counters. Keys already discarded by an older release require
+recovery from an independent copy. In callers that use batch limits, replace
+`MaxBatchEntries` with `MaxBatchGetEntries` or `MaxWriteBatchEntries`.
+
+`IndexMode` now has two values, `IndexBTree` (zero)
 and `IndexMemory`. Omit `Options.IndexMode` or set it to `IndexBTree` wherever
 your code previously used `IndexDefault`. If your application stores the
 numeric mode in its own configuration, change the former B+tree value 2 to 0.
@@ -380,13 +384,18 @@ the caller can read them sequentially. If reads slow down, the batch can use ava
 for the remaining records. A fully cached batch uses no read slots or workers. `Get` runs
 independently of this limit, and each DB has its own read slots.
 
-Each call accepts up to `tarp.MaxBatchEntries` (4,096) inputs, counting
-duplicates. An empty batch succeeds on a healthy open DB. Write batches
+`BatchGet` accepts up to `tarp.MaxBatchGetEntries` (4,096) inputs.
+`BatchPut`, `BatchDelete`, and `Apply` accept up to
+`tarp.MaxWriteBatchEntries` (65,535). Every input counts, including duplicates.
+For example, 10,000 records and one progress key can be published in one
+`Apply` when their encoded records fit within the segment capacity.
+An empty batch succeeds on a healthy open DB. Write batches
 must fit a single segment. The sum of encoded record sizes must fit the
 effective `TargetSegmentBytes` minus the 64-byte segment header.
-All put entries count, including repeated keys. For deletes, only distinct
-keys consume record bytes. Exceeding a limit returns `ErrTooLarge`
-before publication. Each nonempty write batch has one commit outcome.
+`BatchPut` charges each encoded record, including repeated keys. `BatchDelete`
+charges each distinct key once. `Apply` charges the final operation for each key
+after eliding deletes of absent keys. Exceeding a limit returns `ErrTooLarge`
+before publication. All surviving records share one commit outcome.
 Use `errors.As` with `*tarp.BatchLimitError` to distinguish input count,
 per-entry size, total encoded record bytes written and total encoded value bytes returned
 by `BatchGet`. Its `Index` is the original input position, or -1 for a
@@ -696,9 +705,7 @@ worker and can overlap one online backup.
 Duplicate manual full DATA checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult.UnlinkedBytes` counts the logical lengths of files removed by
 that call. `PinnedRetiredDataBytes` reports the retired DATA file bytes still
-retained by segment pins or live index references at cleanup. `DroppedKeys` counts live keys discarded by this
-checkpoint after recovery. The worker reports its own cumulative `DroppedKeys`
-in `AutoCompactionStatus`.
+retained by segment pins or live index references at cleanup.
 If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
@@ -757,17 +764,16 @@ Compaction first tries to restore the complete DATA file. If two or more
 damaged blocks in a stripe exceed its parity budget, a full DATA checkpoint can
 still keep independently verified records, including neighbors in those same
 blocks. It can also recover a value from the live cache when its version and
-record checksum match. A live key is dropped only when its current record
-cannot be recovered. An older value or a deleted key cannot reappear.
-After publication, `Get` returns `ErrNotFound` for a dropped key and a new
-`Put` for that key works normally.
+record checksum match. If any current live value remains unreadable, Tarp
+refuses the checkpoint and reports `ErrDataUnavailable`. The key stays in the
+index. A replica that stores application data and its progress cursor together
+can detect that it still needs to recover data.
 
-The automatic worker uses this full DATA checkpoint when it learns of damage
-beyond parity's correction budget. `Compact(ctx)` can also perform the
-recovery explicitly. A missing or invalid sidecar, an I/O error without
-verified loss, or insufficient staging space cannot authorize dropping keys.
-Compaction verifies and syncs the replacement DATA and PARITY before switching
-to the new files. Readers with pins keep their original files until release.
+Automatic compaction and both manual checkpoint orders use this rule.
+Replace an unreadable value from a verified copy, or restore a complete backup.
+After replacing the value, retry `Compact(ctx)`. Damage affecting only obsolete
+versions permits a checkpoint if every live value can be recovered and verified.
+Readers with pins keep their original files until release.
 
 For offline recovery of historical records, run
 `tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` after closing the

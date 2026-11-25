@@ -245,7 +245,7 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
 
-// CompactResult reports discarded live keys, unlinked bytes and retired DATA bytes
+// CompactResult reports unlinked bytes and retired DATA bytes
 // still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult
 
@@ -267,9 +267,9 @@ func WithKeyOrder() CompactOption {
 // Use it to reclaim obsolete DATA history in addition to automatic incremental cleaning.
 // By default it copies live records in source order. Pass [WithKeyOrder] to
 // cluster the snapshot by encoded key.
-// It uses PARITY to recover damaged sealed DATA. A live key whose record is
-// proved irrecoverable is removed when the checkpoint commits. The operation
-// requires temporary disk space for recovery and protected snapshot files.
+// It uses PARITY to recover damaged sealed DATA. If a live version remains
+// unreadable, the checkpoint returns [ErrDataUnavailable] and keeps its source
+// selected. Recovery and protected snapshot files require temporary disk space.
 func (db *DB) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error) {
 	for _, opt := range opts {
 		if opt.keyOrder {

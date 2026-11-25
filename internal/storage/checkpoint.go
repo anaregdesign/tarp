@@ -31,7 +31,6 @@ type DataCheckpoint struct {
 	ordered        bool                  // globally ordered output, valid only after successful scan
 	certifiedBase  bool
 	ordinals       map[uint64]int
-	lossSources    []lossSource
 	attempted      bool
 }
 

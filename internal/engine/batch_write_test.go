@@ -35,7 +35,7 @@ func TestPrepareDeletesResolvesHashCollisionsAndTableGrowth(t *testing.T) {
 			distinct = append(distinct, key)
 		}
 	}
-	batch, err := db.PrepareDeletes(MaxBatchEntries, func(i int) ([]byte, error) {
+	batch, err := db.PrepareDeletes(MaxWriteBatchEntries, func(i int) ([]byte, error) {
 		return bytes.Clone(distinct[(i/2)%len(distinct)]), nil
 	})
 	if err != nil || len(batch.records) != len(distinct) || cap(batch.records) > 2*len(distinct) {
@@ -55,15 +55,16 @@ func TestPrepareDeletesResolvesHashCollisionsAndTableGrowth(t *testing.T) {
 }
 
 func TestPrepareDeletesRetainsOnlyDistinctKeysInOrder(t *testing.T) {
+	const count = MaxWriteBatchEntries
 	db := newTestDB(t, Options{}, nil)
-	for _, distinct := range []int{1, 16, MaxBatchEntries} {
+	for _, distinct := range []int{1, 16, count} {
 		calls := 0
-		batch, err := db.PrepareDeletes(MaxBatchEntries, func(i int) ([]byte, error) {
+		batch, err := db.PrepareDeletes(count, func(i int) ([]byte, error) {
 			calls++
 			k := i % distinct
 			return []byte{byte(k >> 8), byte(k)}, nil
 		})
-		if err != nil || calls != MaxBatchEntries || len(batch.records) != distinct {
+		if err != nil || calls != count || len(batch.records) != distinct {
 			t.Fatalf("%d distinct: %d encoded, %d retained, %v", distinct, calls, len(batch.records), err)
 		}
 		if distinct <= 16 && cap(batch.records) > 16 {
@@ -98,8 +99,8 @@ func TestBatchWriteRejectsWholeRequestBeforeMutation(t *testing.T) {
 		{func() error { return db.BatchPut([]Entry{entry, {entry.Key, make([]byte, 200)}}) }, ErrTooLarge},
 		{func() error { return db.BatchPut([]Entry{entry, entry, entry, entry}) }, ErrTooLarge},
 		{func() error { return db.BatchDelete([][]byte{{1}, {2}, {3}, {4}}) }, ErrTooLarge},
-		{func() error { return db.BatchPut(make([]Entry, MaxBatchEntries+1)) }, ErrTooLarge},
-		{func() error { return db.BatchDelete(make([][]byte, MaxBatchEntries+1)) }, ErrTooLarge},
+		{func() error { return db.BatchPut(make([]Entry, MaxWriteBatchEntries+1)) }, ErrTooLarge},
+		{func() error { return db.BatchDelete(make([][]byte, MaxWriteBatchEntries+1)) }, ErrTooLarge},
 	} {
 		if err := tc.run(); !errors.Is(err, tc.want) {
 			t.Fatalf("got %v, want %v", err, tc.want)

@@ -39,7 +39,7 @@ func (s *Snapshot) Get(key []byte) ([]byte, error) {
 }
 
 // BatchGet reads keys from this snapshot in input order. It enforces
-// [MaxBatchEntries] and Options.MaxBatchGetValueBytes identically to [DB.BatchGet].
+// [MaxBatchGetEntries] and Options.MaxBatchGetValueBytes identically to [DB.BatchGet].
 func (s *Snapshot) BatchGet(keys [][]byte) ([]BatchResult, error) {
 	return (*engine.Snapshot)(s).BatchGet(keys)
 }

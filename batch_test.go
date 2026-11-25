@@ -38,7 +38,7 @@ func TestBatchKeyErrorsReportOriginalInput(t *testing.T) {
 	missing := []byte("missing")
 	requireBatchKeyError(t, db.BatchDelete([][]byte{a, missing, a, b}), "BatchDelete", 1, tarp.ErrNotFound)
 	requireBatchKeyError(t, db.BatchDelete([][]byte{a, a, b, a, missing, missing, []byte("also missing")}), "BatchDelete", 4, tarp.ErrNotFound)
-	full := make([][]byte, tarp.MaxBatchEntries)
+	full := make([][]byte, tarp.MaxWriteBatchEntries)
 	for i := range full {
 		full[i] = a
 	}

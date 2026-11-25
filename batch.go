@@ -2,8 +2,12 @@ package tarp
 
 import "github.com/anaregdesign/tarp/internal/engine"
 
-// MaxBatchEntries limits the number of input items per batch, including duplicates.
-const MaxBatchEntries = engine.MaxBatchEntries
+// MaxBatchGetEntries limits the number of input keys per BatchGet, including duplicates.
+const MaxBatchGetEntries = engine.MaxBatchGetEntries
+
+// MaxWriteBatchEntries limits the number of inputs per BatchPut, BatchDelete,
+// or Apply, including duplicate keys. Each write batch must also fit one DATA segment.
+const MaxWriteBatchEntries = engine.MaxWriteBatchEntries
 
 // BatchResult holds a value from BatchGet. Found distinguishes a stored empty
 // value from a missing key. The caller owns the returned bytes.

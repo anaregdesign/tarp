@@ -12,9 +12,8 @@ import (
 
 // CompactResult reports the published checkpoint and its cleanup.
 type CompactResult struct {
-	DroppedKeys            uint64 // Unrecoverable live key versions omitted from the published checkpoint.
-	UnlinkedBytes          int64  // Logical lengths of files unlinked during cleanup.
-	PinnedRetiredDataBytes int64  // Retired DATA bytes retained by segment pins or live index references during cleanup.
+	UnlinkedBytes          int64 // Logical lengths of files unlinked during cleanup.
+	PinnedRetiredDataBytes int64 // Retired DATA bytes retained by segment pins or live index references during cleanup.
 }
 
 // Compact builds a full DATA checkpoint through the captured user sequence.
@@ -85,11 +84,8 @@ func (db *DB) manualCompact(ctx context.Context, mode checkpointMode) (CompactRe
 
 var errOrderedRecovery = errors.New("recapture the live index for ordered checkpoint recovery")
 
-var errCheckpointChanged = errors.New("a lost key changed during checkpoint recovery")
+var errCheckpointChanged = errors.New("a captured unavailable version changed during checkpoint recovery")
 
-// The caller owns the cleaner gate. If a lost key changed after capture, the
-// tail could start with its Delete. Capture again so replay always sees a valid
-// predecessor, including when a Delete was followed by a Put of the same key.
 func (db *DB) compactCheckpoint(ctx context.Context, mode checkpointMode) (CompactResult, error) {
 	for {
 		result, err := db.checkpointAttempt(ctx, mode)
@@ -190,9 +186,9 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 		}
 		return db.store.ReserveSnapshotSegment()
 	}
-	moves, lost := db.store.NewRelocations(), db.store.NewRelocations()
+	moves := db.store.NewRelocations()
 	defer func() {
-		if err := errors.Join(moves.Close(), lost.Close()); err != nil {
+		if err := moves.Close(); err != nil {
 			if returned != nil {
 				returned = errors.Join(returned, err)
 			} else {
@@ -220,10 +216,10 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 			}
 		}()
 		if salvage && ordered {
-			return checkpoint.CopyRecoveredByKey(ctx, history, live, moves, lost, reserve, db.cachedSource)
+			return checkpoint.CopyRecoveredByKey(ctx, history, live, moves, reserve, db.cachedSource)
 		}
 		if salvage {
-			return checkpoint.CopyRecovered(ctx, history, live, moves, lost, reserve, db.cachedSource)
+			return checkpoint.CopyRecovered(ctx, history, live, moves, reserve, db.cachedSource)
 		}
 		return checkpoint.Copy(ctx, history, live, moves, reserve)
 	}
@@ -240,69 +236,43 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 		live.Close()
 	}
 	if err != nil {
+		var version *storage.UnavailableVersionError
+		if storage.IsDataUnavailable(err) && errors.As(err, &version) {
+			err = db.recheckUnavailableVersion(ctx, version, capture.Current.LastUserSequence, err)
+			if err == errCheckpointChanged {
+				return result, err
+			}
+		}
 		db.compactFailure(err)
 		return result, operationError("compact", "copy", err)
 	}
 	if err := checkpoint.Protect(ctx); err != nil {
 		return result, operationError("compact", "output parity", err)
 	}
-	releaseLossGuard, err := checkpoint.GuardLosses(ctx)
-	if err != nil {
-		if errors.Is(err, storage.ErrLossSourceRepaired) {
-			return result, errCheckpointChanged
-		}
-		var uncertain *storage.UncertainReadRepair
-		if errors.As(err, &uncertain) {
-			db.poison(err)
-		}
-		return result, operationError("compact", "confirm losses", err)
-	}
 	oldData, newData := checkpointDataTotals(capture, checkpoint.Entries())
 	db.writer.Lock()
 	if err := errors.Join(ctx.Err(), db.health()); err != nil {
-		releaseLossGuard()
 		db.writer.Unlock()
 		return result, operationError("compact", "pre-publication", err)
 	}
 	if ordered && checkpoint.AdoptUnchangedOrdered() {
-		releaseLossGuard()
 		capture.Release()
 		released = true
 		result.UnlinkedBytes, result.PinnedRetiredDataBytes, err = db.cleanupCheckpoint(true)
 		db.writer.Unlock()
 		return result, compactCleanupError(err)
 	}
-	losses, err := db.prepareLosses(ctx, lost)
-	if err != nil {
-		if err == errCheckpointChanged && db.store.Current.LastUserSequence == capture.Current.LastUserSequence {
-			// No foreground commit could have changed the captured address.
-			err = errors.Join(format.ErrCorrupt, errors.New("checkpoint lost address disagrees with live index"))
-			db.poison(err)
-		}
-		releaseLossGuard()
-		db.writer.Unlock()
-		if err == errCheckpointChanged {
-			return result, err
-		}
-		return result, operationError("compact", "prepare losses", err)
-	}
 	maxBatch := storage.RelocationBatchCount
-	if err = errors.Join(ctx.Err(), db.health()); err == nil {
-		err = checkpoint.Install()
-	}
+	err = checkpoint.Install()
 	if err == nil {
 		db.resetParity()
-		result.DroppedKeys = db.publishLosses(losses, lost, oldData, newData)
+		db.replaceDataStats(oldData, newData)
 		if resident, ok := db.keys.(index.ResidentRelocator); ok && db.opts.IndexMode == IndexMemory {
 			db.memoryRemap = &memoryCheckpointRemap{index: resident, staged: make(map[string]struct{})}
 			maxBatch = 128 // The spool still caps a batch of small keys at 8 KiB.
 		}
 	}
-	if err != nil && losses != nil {
-		losses.tx.Abort()
-	}
 	db.storageFailure(err)
-	releaseLossGuard()
 	db.writer.Unlock()
 	if err != nil {
 		return result, operationError("compact", "publication", err)
@@ -318,6 +288,35 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 	}
 	result.UnlinkedBytes, result.PinnedRetiredDataBytes, err = db.cleanupCheckpoint(ordered)
 	return result, compactCleanupError(err)
+}
+
+// A failed recovery may have raced a newer write or a successful file repair.
+// Compare the current address and sequence at the same publication boundary.
+func (db *DB) recheckUnavailableVersion(ctx context.Context, version *storage.UnavailableVersionError, cutoff uint64, cause error) error {
+	if err := db.store.IO.Check("compact.unavailable:before"); err != nil {
+		return errors.Join(cause, err)
+	}
+	db.writer.Lock()
+	defer db.writer.Unlock()
+	if err := errors.Join(ctx.Err(), db.health()); err != nil {
+		return err
+	}
+	current, found, err := db.lookupLocation(version.Key)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	if !found || current != version.Location {
+		if db.store.Current.LastUserSequence == cutoff {
+			err := errors.Join(format.ErrCorrupt, errors.New("unavailable checkpoint address disagrees with live index"))
+			db.poison(err)
+			return err
+		}
+		return errCheckpointChanged
+	}
+	if current.Segment.UnavailableData() == nil {
+		return errCheckpointChanged
+	}
+	return cause
 }
 
 // The caller holds the writer gate. Ordered checkpoints queue the old files
@@ -342,86 +341,6 @@ func (db *DB) cachedSource(key string, old storage.Location) ([]byte, bool, erro
 	defer db.state.Unlock()
 	value, ok := db.cache.Peek([]byte(key))
 	return value, ok, nil
-}
-
-type lostFileTotals struct {
-	keys, bytes int64
-}
-
-type checkpointLosses struct {
-	tx    index.Tx
-	files map[*storage.DataSegment]lostFileTotals
-}
-
-// Stage all deletions against the current index under the writer gate. No key
-// becomes absent until CURRENT selects the replacement. Counts aggregated by
-// file keep spilled loss lists bounded in BTree mode.
-func (db *DB) prepareLosses(ctx context.Context, lost *storage.Relocations) (*checkpointLosses, error) {
-	var losses *checkpointLosses
-	err := lost.Each(func(key string, old, _ storage.Location) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if losses == nil {
-			losses = &checkpointLosses{db.keys.Begin(), make(map[*storage.DataSegment]lostFileTotals)}
-		}
-		addr, found, err := losses.tx.Apply(index.Mutation{Key: key, Delete: true})
-		if err != nil {
-			var lookup *index.LookupError
-			if errors.As(err, &lookup) {
-				db.poison(lookup.Err)
-			}
-			return err
-		}
-		if !found || addr != old.Address() {
-			return errCheckpointChanged
-		}
-		total := losses.files[old.Segment]
-		total.keys++
-		total.bytes += old.RecordBytes
-		losses.files[old.Segment] = total
-		return nil
-	})
-	if err != nil && losses != nil {
-		losses.tx.Abort()
-		return nil, err
-	}
-	return losses, err
-}
-
-// Publish the prepared index, invalidate cached/in-flight reads, and change
-// both logical and physical gauges as one reader-visible state transition.
-func (db *DB) publishLosses(losses *checkpointLosses, lost *storage.Relocations, old, next dataTotals) uint64 {
-	if losses == nil {
-		db.replaceDataStats(old, next)
-		return 0
-	}
-	db.indexGate.Lock()
-	defer db.indexGate.Unlock()
-	db.state.Lock()
-	defer db.state.Unlock()
-	losses.tx.Commit()
-	if batch, ok := lost.Resident(); ok {
-		for _, move := range batch {
-			db.cache.Delete(move.Key)
-		}
-	} else {
-		// Avoid scratch I/O under the reader locks for a large damaged region.
-		db.cache.Clear()
-	}
-	db.revision++
-	var dropped uint64
-	for segment, total := range losses.files {
-		if segment.LiveKeys.Add(-total.keys) == 0 {
-			delete(db.segments, segment.ID)
-		}
-		segment.LiveBytes.Add(-total.bytes)
-		dropped += uint64(total.keys)
-		db.stats.LiveRecordBytes -= uint64(total.bytes)
-	}
-	db.stats.LiveKeys -= dropped
-	db.replaceDataStatsLocked(old, next)
-	return dropped
 }
 
 // The replacement layout is already committed. A partial remap fail-stops the

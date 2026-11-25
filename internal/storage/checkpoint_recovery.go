@@ -16,27 +16,38 @@ import (
 	"github.com/anaregdesign/tarp/internal/platform"
 )
 
+// UnavailableVersionError identifies the captured version that prevented a
+// lossless checkpoint. The engine can recapture if a later write superseded it.
+type UnavailableVersionError struct {
+	Key      string
+	Location Location
+	Err      error
+}
+
+func (e *UnavailableVersionError) Error() string { return e.Err.Error() }
+func (e *UnavailableVersionError) Unwrap() error { return e.Err }
+
 // CopyRecovered runs only after the normal checkpoint encountered unavailable
 // sealed DATA. Healthy inputs still require strict file validation. A private
 // partial replay checks the pinned view against all readable history.
-func (c *DataCheckpoint) CopyRecovered(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error)) error {
-	return c.copyRecovered(ctx, history, live, moves, lost, reserve, cached, false)
+func (c *DataCheckpoint) CopyRecovered(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error)) error {
+	return c.copyRecovered(ctx, history, live, moves, reserve, cached, false)
 }
 
 // CopyRecoveredByKey stages recovered bytes while their verified source is
 // available. In particular a cached value can cease to be available as soon
 // as a concurrent writer publishes its next version.
-func (c *DataCheckpoint) CopyRecoveredByKey(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error)) error {
-	return c.copyRecovered(ctx, history, live, moves, lost, reserve, cached, true)
+func (c *DataCheckpoint) CopyRecoveredByKey(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error)) error {
+	return c.copyRecovered(ctx, history, live, moves, reserve, cached, true)
 }
 
-func (c *DataCheckpoint) copyRecovered(ctx context.Context, history index.Backend, live index.View, moves, lost *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error), ordered bool) error {
-	r := checkpointRecovery{c: c, ctx: ctx, live: live, lost: lost, cached: cached, buf: make([]byte, 32<<10)}
+func (c *DataCheckpoint) copyRecovered(ctx context.Context, history index.Backend, live index.View, moves *Relocations, reserve func() (*DataSegment, error), cached func(string, Location) ([]byte, bool, error), ordered bool) error {
+	r := checkpointRecovery{c: c, ctx: ctx, live: live, cached: cached, buf: make([]byte, 32<<10)}
 	// A readable Delete may have its predecessor in an unreadable region.
 	r.history = newReplayBuilder(ctx, history, c.capture.Current.LastUserSequence)
 	defer r.history.abort()
 	if ordered {
-		if err := c.prepareOrderedScratch(moves, lost); err != nil {
+		if err := c.prepareOrderedScratch(moves); err != nil {
 			return err
 		}
 		if r.history.sort != nil {
@@ -68,9 +79,6 @@ func (c *DataCheckpoint) copyRecovered(ctx context.Context, history index.Backen
 	if err != nil {
 		return err
 	}
-	if err := lost.seal(); err != nil {
-		return err
-	}
 	if err := r.history.finishWith(func(key string, a index.Address) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -96,7 +104,7 @@ func (c *DataCheckpoint) copyRecovered(ctx context.Context, history index.Backen
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if count != moves.count+lost.count {
+	if count != moves.count {
 		return fmt.Errorf("%w: recovered index count disagrees with capture", ErrCorrupt)
 	}
 	return nil
@@ -234,7 +242,6 @@ type checkpointRecovery struct {
 	c              *DataCheckpoint
 	ctx            context.Context
 	live           index.View
-	lost           *Relocations
 	history        replayBuilder
 	cached         func(string, Location) ([]byte, bool, error)
 	emit           func(string, Location) (io.Writer, error)
@@ -263,8 +270,6 @@ func (r *checkpointRecovery) file(src CapturedSegment) (result error) {
 		// of the strict pass. Try complete repair independently for each.
 		err = c.store.RepairRead(r.ctx, src.Segment, err)
 		if IsDataUnavailable(err) && !errors.Is(err, syscall.ENOSPC) && !errors.Is(err, syscall.EDQUOT) {
-			repair := src.Segment.sealed.Load()
-			repairGeneration := repair.repairGeneration.Load()
 			stage, stageErr := c.stageBlocks(r.ctx, src)
 			if stage != nil {
 				defer func() { result = errors.Join(result, stage.Close()) }()
@@ -280,14 +285,7 @@ func (r *checkpointRecovery) file(src CapturedSegment) (result error) {
 			if err := r.scanDamaged(src, stage); err != nil {
 				return err
 			}
-			before := r.lost.count
-			if err := r.copyDamaged(src, stage); err != nil {
-				return err
-			}
-			if before != r.lost.count {
-				c.lossSources = append(c.lossSources, lossSource{repair, repairGeneration})
-			}
-			return nil
+			return r.copyDamaged(src, stage, err)
 		}
 		if err == nil {
 			fd, err = open()
@@ -446,7 +444,7 @@ func (r *checkpointRecovery) scanDamaged(src CapturedSegment, b *recoveredBlocks
 	return nil
 }
 
-func (r *checkpointRecovery) copyDamaged(src CapturedSegment, b *recoveredBlocks) error {
+func (r *checkpointRecovery) copyDamaged(src CapturedSegment, b *recoveredBlocks, unavailable error) error {
 	var callbackErr error
 	err := r.live.All(func(key string, a index.Address) bool {
 		if callbackErr = r.ctx.Err(); callbackErr != nil {
@@ -467,7 +465,7 @@ func (r *checkpointRecovery) copyDamaged(src CapturedSegment, b *recoveredBlocks
 		if !marked {
 			return true
 		}
-		callbackErr = r.recoverRecord(b, key, At(src.Segment, a))
+		callbackErr = r.recoverRecord(b, key, At(src.Segment, a), unavailable)
 		r.keys++
 		r.bytes += a.RecordBytes
 		return callbackErr == nil
@@ -481,7 +479,7 @@ func (r *checkpointRecovery) copyDamaged(src CapturedSegment, b *recoveredBlocks
 	return callbackErr
 }
 
-func (r *checkpointRecovery) recoverRecord(b *recoveredBlocks, key string, old Location) error {
+func (r *checkpointRecovery) recoverRecord(b *recoveredBlocks, key string, old Location, unavailable error) error {
 	rec, actual, err := format.ReadRecordKey(r.ctx, io.NewSectionReader(b, old.RecordOffset, old.RecordBytes), old.RecordOffset, b.end-old.RecordOffset, r.buf)
 	if err == nil {
 		if rec.Kind != format.Put || actual != key || rec.Sequence != old.Sequence || rec.EncodedRecordBytes() != old.RecordBytes || rec.ValueBytes != old.ValueBytes {
@@ -542,5 +540,5 @@ func (r *checkpointRecovery) recoverRecord(b *recoveredBlocks, key string, old L
 			}
 		}
 	}
-	return r.lost.append(key, old, old)
+	return &UnavailableVersionError{Key: key, Location: old, Err: unavailable}
 }

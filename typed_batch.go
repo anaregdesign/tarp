@@ -36,7 +36,7 @@ func (db View[K, V]) BatchGet(keys []K) ([]TypedBatchResult[V], error) {
 }
 
 func (db *View[K, V]) batchGet(keys []K, snapshot *Snapshot) ([]TypedBatchResult[V], error) {
-	if err := engine.CheckBatchCount(len(keys)); err != nil {
+	if err := engine.CheckBatchCount(len(keys), MaxBatchGetEntries); err != nil {
 		return nil, err
 	}
 	// Only the call to the engine needs these slice headers. Keep a small
