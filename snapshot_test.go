@@ -436,14 +436,14 @@ func TestSnapshotBatchGetLimits(t *testing.T) {
 	}
 	defer snap.Close()
 
-	// Exceeding MaxBatchEntries.
-	tooMany := make([][]byte, tarp.MaxBatchEntries+1)
+	// Exceeding MaxBatchGetEntries.
+	tooMany := make([][]byte, tarp.MaxBatchGetEntries+1)
 	for i := range tooMany {
 		tooMany[i] = []byte("a")
 	}
 	var limitErr *tarp.BatchLimitError
 	if _, err := snap.BatchGet(tooMany); !errors.As(err, &limitErr) || limitErr.Kind != tarp.BatchInputCountLimit {
-		t.Fatalf("snap.BatchGet(MaxBatchEntries+1) = %v, want BatchInputCountLimit", err)
+		t.Fatalf("snap.BatchGet(MaxBatchGetEntries+1) = %v, want BatchInputCountLimit", err)
 	}
 
 	// Exceeding MaxBatchGetValueBytes both at same revision and after revision advance.

@@ -39,10 +39,6 @@ func (db *DB) initDataStats() {
 func (db *DB) replaceDataStats(old, next dataTotals) {
 	db.state.Lock()
 	defer db.state.Unlock()
-	db.replaceDataStatsLocked(old, next)
-}
-
-func (db *DB) replaceDataStatsLocked(old, next dataTotals) {
 	db.stats.SelectedSegments = db.stats.SelectedSegments - old.segments + next.segments
 	db.stats.SelectedDataBytes = db.stats.SelectedDataBytes - old.bytes + next.bytes
 	db.stats.TombstoneBytes = db.stats.TombstoneBytes - old.tombstones + next.tombstones

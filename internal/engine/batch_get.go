@@ -10,6 +10,9 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+// MaxBatchGetEntries limits input keys in a single BatchGet, including duplicates.
+const MaxBatchGetEntries = 4096
+
 // BatchResult holds one requested key's value. Found distinguishes an empty
 // value from a missing key. The caller owns Value.
 type BatchResult struct {
@@ -19,13 +22,13 @@ type BatchResult struct {
 
 // BatchGet returns a point-in-time view in input order, preserving cache
 // membership and LRU recency. Misses read pinned, checked records. A failed
-// read returns no results. It accepts at most MaxBatchEntries keys.
+// read returns no results. It accepts at most MaxBatchGetEntries keys.
 func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 	if err := db.admit(); err != nil {
 		return nil, err
 	}
 	defer db.done()
-	if err := CheckBatchCount(len(keys), MaxBatchEntries); err != nil {
+	if err := CheckBatchCount(len(keys), MaxBatchGetEntries); err != nil {
 		return nil, err
 	}
 	for i, key := range keys {
@@ -386,10 +389,10 @@ func (s *batchKeySet) source(keys [][]byte, i, count int) int {
 
 var batchKeySeed = maphash.MakeSeed()
 
-const _ uint16 = MaxBatchEntries // One-based input positions must fit in slots.
+const _ uint16 = MaxBatchGetEntries // One-based input positions must fit in slots.
 
 // The table stores input indices plus one. This bounds scratch memory by
-// MaxBatchEntries even when absent keys contain arbitrarily many bytes.
+// MaxBatchGetEntries even when absent keys contain arbitrarily many bytes.
 func batchKeySlot(slots []uint16, keys [][]byte, i, sample int) int {
 	key := keys[i]
 	mask := len(slots) - 1

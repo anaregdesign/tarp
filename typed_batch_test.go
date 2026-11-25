@@ -198,17 +198,17 @@ func TestTypedBatchBounds(t *testing.T) {
 	if err := db.BatchDelete([]string{"a", "b", "c", "rejected"}); !errors.Is(err, tarp.ErrTooLarge) {
 		t.Fatalf("expected size rejection before encoding the last delete: %v", err)
 	}
-	entries := make([]entry, tarp.MaxBatchEntries+1)
+	entries := make([]entry, tarp.MaxWriteBatchEntries+1)
 	entries[0].Key = "rejected"
 	if err := db.BatchPut(entries); !errors.Is(err, tarp.ErrTooLarge) {
 		t.Fatalf("oversized input count = %v", err)
 	}
-	keys := make([]string, tarp.MaxBatchEntries+1)
+	keys := make([]string, tarp.MaxWriteBatchEntries+1)
 	keys[0] = "rejected"
 	if err := db.BatchDelete(keys); !errors.Is(err, tarp.ErrTooLarge) {
 		t.Fatalf("oversized delete = %v", err)
 	}
-	if _, err := db.BatchGet(keys); !errors.Is(err, tarp.ErrTooLarge) {
+	if _, err := db.BatchGet(keys[:tarp.MaxBatchGetEntries+1]); !errors.Is(err, tarp.ErrTooLarge) {
 		t.Fatalf("oversized read = %v", err)
 	}
 }
@@ -233,37 +233,32 @@ func TestTypedBatchGetChargesEncodedBytesBeforeDecoding(t *testing.T) {
 	requireBatchCodecError(t, err, decodeErr, "BatchGet", 0, "value")
 }
 
-func TestWriteBatchCountPrecedesEncodingAndDoesNotLimitReads(t *testing.T) {
-	const limit = 1
-	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxWriteBatchEntries: limit})
+func TestTypedApplyCountsInputsBeforeCoalescingAndEncoding(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
 	codec := rejectingStringCodec{errors.New("unexpected codec call")}
 	view, err := tarp.Bind(db, codec, codec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var batch tarp.TypedWriteBatch[string, string]
-	batch.Put("rejected", "rejected")
-	batch.Delete("rejected")
-	var raw tarp.WriteBatch
-	raw.Put(nil, nil)
-	raw.Delete(nil)
-	for _, run := range []func() error{
-		func() error { return db.BatchPut(make([]tarp.Entry, 2)) },
-		func() error { return db.BatchDelete(make([][]byte, 2)) },
-		func() error { return db.Apply(&raw) },
-		func() error {
-			return view.BatchPut([]tarp.TypedEntry[string, string]{{Key: "rejected"}, {Key: "rejected"}})
-		},
-		func() error { return view.BatchDelete([]string{"rejected", "rejected"}) },
-		func() error { return view.Apply(&batch) },
-	} {
-		var detail *tarp.BatchLimitError
-		if err := run(); !errors.As(err, &detail) || detail.Kind != tarp.BatchInputCountLimit || detail.Index != -1 || detail.Actual != 2 || detail.Limit != limit {
-			t.Fatalf("over-limit write: %v, want input count 2 above limit %d", err, limit)
-		}
+	for range tarp.MaxWriteBatchEntries - 1 {
+		batch.Delete("k")
 	}
-	if got, err := view.BatchGet([]string{"a", "b"}); err != nil || len(got) != 2 {
-		t.Fatalf("BatchGet = %v, %v", got, err)
+	batch.Put("k", "committed")
+	if err := view.Apply(&batch); err != nil {
+		t.Fatalf("Apply at the upper bound: %v", err)
+	}
+	batch.Reset()
+	batch.Put("rejected", "rejected")
+	for range tarp.MaxWriteBatchEntries {
+		batch.Delete("k")
+	}
+	var limit *tarp.BatchLimitError
+	if err := view.Apply(&batch); !errors.As(err, &limit) || limit.Kind != tarp.BatchInputCountLimit || limit.Index != -1 || limit.Actual != tarp.MaxWriteBatchEntries+1 || limit.Limit != tarp.MaxWriteBatchEntries {
+		t.Fatalf("Apply above the upper bound: %v", err)
+	}
+	if got, err := view.Get("k"); err != nil || got != "committed" {
+		t.Fatalf("Get after rejected Apply: %q, %v", got, err)
 	}
 }
 

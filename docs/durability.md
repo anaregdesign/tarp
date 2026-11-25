@@ -118,9 +118,8 @@ active log at the existing sequence. Sequences, generations and file IDs never w
 No record spans files or overwrites previously committed bytes.
 
 BatchPut, BatchDelete and Apply commit their surviving records with dense user
-sequences in a single segment. The write input limit is 4,096 by default.
-Options.MaxWriteBatchEntries sets a per-handle limit up to 65,535, counting
-all inputs before deduplication. Encoded records must still fit within
+sequences in a single segment. Each write batch accepts up to 65,535 inputs,
+counting all inputs before deduplication. Encoded records must still fit within
 TargetSegmentBytes minus the segment header. If the active file has insufficient
 room, the writer starts a new segment containing the entire batch. A single
 replacement CURRENT publishes its final sequence and offset, after the data
@@ -129,7 +128,7 @@ An uncertain commit outcome applies to the entire batch. Reopen and backup
 select either frontier and can never select an intermediate record boundary.
 The recorded whole-VM matrix at `d89f7b8` used an external batch-aware
 witness to verify whole-batch recovery across 100 cuts per Go family. It
-predates mixed Apply and the configurable write input limit.
+predates mixed Apply and the 65,535-input write limit.
 
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
@@ -413,8 +412,8 @@ untrusted index retains its existing fail-stop behavior.
 Manual and automatic compaction first attempt ordinary repair of the original
 file. When a valid sidecar confirms multiple lost blocks in a stripe, the
 automatic worker can run a full DATA checkpoint even if the damaged file would
-normally be too small or too live to clean. Replacing all history through
-the cutoff lets Tarp discard a lost current value without exposing an older Put.
+normally be too small or too live to clean. The recovery checkpoint must
+preserve the complete live key set.
 If the current sequence is already checkpointed and there is no known DATA damage,
 manual compaction only retries cleanup. It does not scrub the snapshot.
 
@@ -427,27 +426,24 @@ Tarp reconstructs correctable stripes, validates
 records individually in damaged stripes and preserves verified live records
 from the rest of the file. Raw records in a damaged block require a matching
 original segment header. Tarp can use a matching live cache value when the
-record header confirms the expected payload checksum. Obsolete damaged records
-do not count as lost keys. A missing or invalid sidecar, a temporary staging
-failure, or an unverified source error does not establish record loss. If a
+record header confirms the expected payload checksum. The checkpoint may omit
+superseded records. A missing or invalid sidecar, a temporary staging failure,
+or an unverified source error does not establish record loss. If a
 damaged key could belong to an ambiguous update and the captured index cannot
 resolve ownership, compaction returns `ErrDataUnavailable` and keeps serving.
 
-Options.PreserveUnavailableKeys applies to all compaction on one open handle.
-With the option enabled, a checkpoint that would drop a current live version
-returns ErrDataUnavailable with a NotApplied checkpoint outcome. The selected
-source remains available for repair or replacement from an independent copy.
-An already superseded version does not prevent a lossless checkpoint. Use the
-option on every open that must preserve this behavior. It cannot restore a key
-discarded by a prior checkpoint.
+If a current live version cannot be recovered, manual and automatic compaction
+refuse the checkpoint with `ErrDataUnavailable`. The checkpoint outcome is
+`NotApplied`. The selected DATA and the live index retain the key. A service
+using that state can use its cursor and its own recovery source to repair the
+replica before serving it again. Replace the affected value from a verified
+copy or restore the database from backup. Restart with `Full` validation still
+requires intact selected DATA.
 
-At publication, concurrent Put and Delete operations keep their normal ordering.
-Under the default policy, a key dropped by the committed checkpoint is absent from Get, Keys, backups and
-subsequent Full or Indexed opens. Put can create it again. Manual
-`CompactResult.DroppedKeys` counts live keys discarded by the committed
-checkpoint. `AutoCompactionStatus.DroppedKeys` accumulates the corresponding
-automatic count since Open. File reclamation waits for pins on the old layout,
-including scans or backups that began before recovery.
+Compaction rechecks a damaged version against concurrent writes before
+refusing publication. A replacement or explicit deletion can make the damaged
+version obsolete. File reclamation after a successful checkpoint waits for
+existing scans, snapshots and backups to release their pins.
 
 ### Offline repair and salvage
 

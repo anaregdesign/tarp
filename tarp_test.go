@@ -1179,7 +1179,7 @@ func TestIndexedReopenReplaysWritesMadeWithUnavailableSealedData(t *testing.T) {
 func TestCompactPreservesUnavailableKeysThroughReopenAndReplacement(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
-	opts := tarp.Options{PreserveUnavailableKeys: true}
+	opts := tarp.Options{}
 	seed := openPublicDB(t, dir, opts)
 	key, cursor := []byte("graph"), []byte("cursor")
 	if err := seed.BatchPut([]tarp.Entry{
@@ -1212,7 +1212,7 @@ func TestCompactPreservesUnavailableKeysThroughReopenAndReplacement(t *testing.T
 		result, err := db.Compact(ctx, order...)
 		var op *tarp.OpError
 		var unavailable *tarp.UnavailableDataError
-		if result.DroppedKeys != 0 || !errors.As(err, &op) || op.Outcome != tarp.NotApplied ||
+		if !errors.As(err, &op) || op.Outcome != tarp.NotApplied ||
 			!errors.Is(err, tarp.ErrDataUnavailable) || !errors.As(err, &unavailable) || unavailable.FileID == 0 {
 			t.Fatalf("compacting damaged DATA: %+v, %v", result, err)
 		}
@@ -1234,7 +1234,7 @@ func TestCompactPreservesUnavailableKeysThroughReopenAndReplacement(t *testing.T
 	if err := indexed.Put(key, []byte("restored")); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := indexed.Compact(ctx); err != nil || result.DroppedKeys != 0 {
+	if result, err := indexed.Compact(ctx); err != nil {
 		t.Fatalf("compacting after replacement: %+v, %v", result, err)
 	}
 	if err := indexed.Close(); err != nil {
@@ -1247,7 +1247,7 @@ func TestCompactPreservesUnavailableKeysThroughReopenAndReplacement(t *testing.T
 	}
 }
 
-func TestCompactSalvagesLiveRecordsAndDropsOnlyLostKeys(t *testing.T) {
+func TestCompactRecoversEveryLiveKeyAfterExplicitDelete(t *testing.T) {
 	for _, mode := range []struct {
 		name string
 		mode tarp.IndexMode
@@ -1307,9 +1307,14 @@ func TestCompactSalvagesLiveRecordsAndDropsOnlyLostKeys(t *testing.T) {
 				t.Fatal("large records at unexpected offsets")
 			}
 			flipSealedTestBytes(t, data, wire, append(offsets, 4300, 66<<10)...)
-			result, err := db.Compact(ctx)
-			if err != nil || result.DroppedKeys != 1 {
-				t.Fatalf("Compact: %+v, %v", result, err)
+			if _, err := db.Compact(ctx); !errors.Is(err, tarp.ErrDataUnavailable) {
+				t.Fatalf("checkpoint with an unreadable live record: %v", err)
+			}
+			if err := db.Delete([]byte("lost")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Compact(ctx); err != nil {
+				t.Fatalf("checkpoint after explicit delete: %v", err)
 			}
 			check := func(db *tarp.DB) {
 				t.Helper()

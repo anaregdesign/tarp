@@ -227,7 +227,8 @@ func TestBatchLimitsReportOriginalInputAndPreserveSizeCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial := db.Stats()
-	count := tarp.MaxBatchEntries + 1
+	const readCount = tarp.MaxBatchGetEntries + 1
+	const writeCount = tarp.MaxWriteBatchEntries + 1
 	for _, tc := range []struct {
 		name   string
 		run    func() error
@@ -236,8 +237,8 @@ func TestBatchLimitsReportOriginalInputAndPreserveSizeCause(t *testing.T) {
 		actual uint64
 		limit  uint64
 	}{
-		{"raw get count", func() error { _, err := db.BatchGet(make([][]byte, count)); return err }, tarp.BatchInputCountLimit, -1, uint64(count), tarp.MaxBatchEntries},
-		{"typed put count", func() error { return view.BatchPut(make([]tarp.TypedEntry[string, string], count)) }, tarp.BatchInputCountLimit, -1, uint64(count), tarp.MaxBatchEntries},
+		{"raw get count", func() error { _, err := db.BatchGet(make([][]byte, readCount)); return err }, tarp.BatchInputCountLimit, -1, readCount, tarp.MaxBatchGetEntries},
+		{"typed put count", func() error { return view.BatchPut(make([]tarp.TypedEntry[string, string], writeCount)) }, tarp.BatchInputCountLimit, -1, writeCount, tarp.MaxWriteBatchEntries},
 		{"raw put entry", func() error {
 			return db.BatchPut([]tarp.Entry{{Key: []byte("a")}, {Key: []byte("a"), Value: []byte("long")}})
 		}, tarp.BatchEntrySizeLimit, 1, 0, 0},

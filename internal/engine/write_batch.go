@@ -35,7 +35,7 @@ type PreparedMixedBatch struct {
 // wins. Commit checks the combined record bytes after resolving absent Deletes.
 // No database lock is held while calling opAt.
 func (db *DB) PrepareMixed(count int, opAt func(int) (MixedOp, error)) (PreparedMixedBatch, error) {
-	if err := CheckBatchCount(count, db.opts.MaxWriteBatchEntries); err != nil {
+	if err := CheckBatchCount(count, MaxWriteBatchEntries); err != nil {
 		return PreparedMixedBatch{}, err
 	}
 	if count == 0 {

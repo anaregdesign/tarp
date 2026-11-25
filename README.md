@@ -69,7 +69,13 @@ backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
 
-v0.15.0 keeps the v0.14.0 database and backup formats.
+v0.15.0 keeps the v0.14.0 database and backup formats. Compaction now refuses
+to publish a checkpoint that would drop a live key. Handle `ErrDataUnavailable`
+from `Compact` or `AutoCompactionStatus().LastError` in place of the removed
+`DroppedKeys` counters. Keys already discarded by an older release require
+recovery from an independent copy. In callers that use batch limits, replace
+`MaxBatchEntries` with `MaxBatchGetEntries` or `MaxWriteBatchEntries`.
+
 `IndexMode` now has two values, `IndexBTree` (zero)
 and `IndexMemory`. Omit `Options.IndexMode` or set it to `IndexBTree` wherever
 your code previously used `IndexDefault`. If your application stores the
@@ -378,12 +384,11 @@ the caller can read them sequentially. If reads slow down, the batch can use ava
 for the remaining records. A fully cached batch uses no read slots or workers. `Get` runs
 independently of this limit, and each DB has its own read slots.
 
-`BatchGet` accepts up to `tarp.MaxBatchEntries` (4,096) inputs.
-`BatchPut`, `BatchDelete`, and `Apply` default to the same limit. Set
-`Options.MaxWriteBatchEntries` to a value from 1 to 65,535 to choose a
-different write limit for this handle. Every input counts, including duplicates.
-For example, writing 10,000 records and one progress key together requires a
-limit of at least 10,001 and enough segment capacity for all encoded records.
+`BatchGet` accepts up to `tarp.MaxBatchGetEntries` (4,096) inputs.
+`BatchPut`, `BatchDelete`, and `Apply` accept up to
+`tarp.MaxWriteBatchEntries` (65,535). Every input counts, including duplicates.
+For example, 10,000 records and one progress key can be published in one
+`Apply` when their encoded records fit within the segment capacity.
 An empty batch succeeds on a healthy open DB. Write batches
 must fit a single segment. The sum of encoded record sizes must fit the
 effective `TargetSegmentBytes` minus the 64-byte segment header.
@@ -567,14 +572,12 @@ the commit sync protocol.
 | Option | Default | What the limit applies to |
 | --- | ---: | --- |
 | `OpenValidation` | `Full` | Select how Open verifies DATA covered by an index checkpoint. Both runtime backends support both validation modes. |
-| `PreserveUnavailableKeys` | `false` | Refuse compaction that would discard a live key with irrecoverable DATA. Set on each open. |
 | `IndexMode` | `IndexBTree` | Selects a built-in key index for this Open. |
 | `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
 | `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
 | `TargetSegmentBytes` | 4 MiB | Target size for each new log or snapshot segment. Bounds the total input to small-segment repacking and the output of grouped log cleaning. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
-| `MaxWriteBatchEntries` | 4,096 | Maximum inputs to one `BatchPut`, `BatchDelete`, or `Apply`, up to 65,535. |
 | `BatchGetReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 | `MaxBatchGetValueBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
 
@@ -702,9 +705,7 @@ worker and can overlap one online backup.
 Duplicate manual full DATA checkpoints or duplicate backups return `ErrBusy`. Its
 `CompactResult.UnlinkedBytes` counts the logical lengths of files removed by
 that call. `PinnedRetiredDataBytes` reports the retired DATA file bytes still
-retained by segment pins or live index references at cleanup. `DroppedKeys` counts live keys discarded by this
-checkpoint after recovery. The worker reports its own cumulative `DroppedKeys`
-in `AutoCompactionStatus`.
+retained by segment pins or live index references at cleanup.
 If the context is canceled while `Compact` or `Backup` waits for the initial
 writer lock, the call returns an error matching `ctx.Err()` once it acquires
 the lock, before starting checkpoint or backup work.
@@ -763,25 +764,16 @@ Compaction first tries to restore the complete DATA file. If two or more
 damaged blocks in a stripe exceed its parity budget, a full DATA checkpoint can
 still keep independently verified records, including neighbors in those same
 blocks. It can also recover a value from the live cache when its version and
-record checksum match. By default, a live key is dropped only when its current record
-cannot be recovered. An older value or a deleted key cannot reappear.
-After publication, `Get` returns `ErrNotFound` for a dropped key and a new
-`Put` for that key works normally.
+record checksum match. If any current live value remains unreadable, Tarp
+refuses the checkpoint and reports `ErrDataUnavailable`. The key stays in the
+index. A replica that stores application data and its progress cursor together
+can detect that it still needs to recover data.
 
-The automatic worker uses this full DATA checkpoint when it learns of damage
-beyond parity's correction budget. `Compact(ctx)` can also perform the
-recovery explicitly. A missing or invalid sidecar, an I/O error without
-verified loss, or insufficient staging space cannot authorize dropping keys.
-Compaction verifies and syncs the replacement DATA and PARITY before switching
-to the new files. Readers with pins keep their original files until release.
-
-If you keep application state and its replication cursor in this DB, set
-`Options.PreserveUnavailableKeys` on every open. Manual and automatic
-compaction can then publish a recovery checkpoint only if they preserve every
-live key. A checkpoint that would discard a live key reports
-`ErrDataUnavailable`. An application can fetch a verified replacement value
-from its own recovery source and retry compaction. The option applies to the
-current handle. Keys discarded during an earlier open require external recovery.
+Automatic compaction and both manual checkpoint orders use this rule.
+Replace an unreadable value from a verified copy, or restore a complete backup.
+After replacing the value, retry `Compact(ctx)`. Damage affecting only obsolete
+versions permits a checkpoint if every live value can be recovered and verified.
+Readers with pins keep their original files until release.
 
 For offline recovery of historical records, run
 `tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` after closing the

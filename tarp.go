@@ -42,12 +42,6 @@ type Options struct {
 	IndexMode IndexMode
 	// OpenValidation selects Full (the default) or Indexed recovery.
 	OpenValidation OpenValidation
-	// PreserveUnavailableKeys makes manual and automatic compaction refuse a
-	// checkpoint that would drop an irrecoverable live key. The checkpoint
-	// reports ErrDataUnavailable and keeps the key indexed. Set this on each
-	// open when the application must detect missing data. By default a
-	// checkpoint may drop live keys whose loss is proved.
-	PreserveUnavailableKeys bool
 	// BTreeMemoryBudgetBytes sets the working-memory budget for IndexBTree,
 	// shared by the foreground index and its maintenance workspaces.
 	// Zero selects 16 MiB for the B+tree. A nonzero budget must be at least
@@ -71,11 +65,6 @@ type Options struct {
 	// result, including duplicates. Missing keys and empty values cost zero.
 	// It excludes result metadata and allocations by application codecs. Zero selects 64 MiB.
 	MaxBatchGetValueBytes int64
-	// MaxWriteBatchEntries limits the input operations in one BatchPut, BatchDelete,
-	// or Apply, counting duplicates. Zero selects [MaxBatchEntries] (4,096).
-	// Positive values up to [MaxWriteBatchEntries] (65,535) are valid.
-	// The encoded records must also fit one DATA segment after its header.
-	MaxWriteBatchEntries int
 }
 
 // RestoreLimits returns the limits used to verify live records for restore.
@@ -256,7 +245,7 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
 
-// CompactResult reports discarded live keys, unlinked bytes and retired DATA bytes
+// CompactResult reports unlinked bytes and retired DATA bytes
 // still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult
 
@@ -278,9 +267,9 @@ func WithKeyOrder() CompactOption {
 // Use it to reclaim obsolete DATA history in addition to automatic incremental cleaning.
 // By default it copies live records in source order. Pass [WithKeyOrder] to
 // cluster the snapshot by encoded key.
-// It uses PARITY to recover damaged sealed DATA. A live key whose record is
-// proved irrecoverable is removed when the checkpoint commits. The operation
-// requires temporary disk space for recovery and protected snapshot files.
+// It uses PARITY to recover damaged sealed DATA. If a live version remains
+// unreadable, the checkpoint returns [ErrDataUnavailable] and keeps its source
+// selected. Recovery and protected snapshot files require temporary disk space.
 func (db *DB) Compact(ctx context.Context, opts ...CompactOption) (CompactResult, error) {
 	for _, opt := range opts {
 		if opt.keyOrder {

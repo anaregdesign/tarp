@@ -85,7 +85,7 @@ func TestBatchGetCountsDistinctKeysInEachCall(t *testing.T) {
 	mustPut(t, db, "a", "A")
 	mustPut(t, db, "b", "B") // Only b fits in the LRU.
 	const distinct = 64
-	keys := make([][]byte, MaxBatchEntries)
+	keys := make([][]byte, MaxBatchGetEntries)
 	for i := range keys {
 		keys[i] = []byte{byte('a' + i%distinct)}
 	}
@@ -95,7 +95,7 @@ func TestBatchGetCountsDistinctKeysInEachCall(t *testing.T) {
 		}
 		s := db.Stats()
 		if s.ValueCache.Hits != call || s.ValueCache.Misses != call || s.MissingKeyLookups != call*(distinct-2) ||
-			s.BatchGetDuplicateInputs != call*(MaxBatchEntries-distinct) {
+			s.BatchGetDuplicateInputs != call*(MaxBatchGetEntries-distinct) {
 			t.Fatalf("after BatchGet call %d: %+v", call, s)
 		}
 	}
@@ -144,7 +144,7 @@ func TestBatchGetRejectsInvalidInputBeforeReading(t *testing.T) {
 	if got, err := db.BatchGet([][]byte{[]byte("a"), []byte("a"), nil}); got != nil || !errors.Is(err, ErrEmptyKey) {
 		t.Fatalf("empty key: %+v, %v", got, err)
 	}
-	large := make([][]byte, MaxBatchEntries+1)
+	large := make([][]byte, MaxBatchGetEntries+1)
 	for i := range large {
 		large[i] = []byte("a")
 	}

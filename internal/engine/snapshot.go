@@ -220,7 +220,7 @@ func (s *Snapshot) BatchGet(keys [][]byte) ([]BatchResult, error) {
 	}
 	defer db.done()
 
-	if err := CheckBatchCount(len(keys), MaxBatchEntries); err != nil {
+	if err := CheckBatchCount(len(keys), MaxBatchGetEntries); err != nil {
 		return nil, err
 	}
 	for i, key := range keys {

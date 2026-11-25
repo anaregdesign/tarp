@@ -22,12 +22,11 @@ type sealedRepair struct {
 	uuid  [16]byte
 	entry format.CatalogEntry
 
-	mu               sync.Mutex
-	running          *readRepair
-	uncertain        error
-	repairGeneration atomic.Uint64 // successful full-file verifications or repairs
-	unavailable      atomic.Pointer[UnavailableDataError]
-	retryAfter       time.Time
+	mu          sync.Mutex
+	running     *readRepair
+	uncertain   error
+	unavailable atomic.Pointer[UnavailableDataError]
+	retryAfter  time.Time
 }
 
 type readRepair struct {
@@ -205,9 +204,6 @@ func (s *Store) runReadRepair(ctx context.Context, r *sealedRepair, checkRoot, r
 		var f *Fault
 		if errors.As(call.err, &f) && f.Outcome == publication.Unknown {
 			r.uncertain = call.err
-		}
-		if call.err == nil {
-			r.repairGeneration.Add(1)
 		}
 		prior := r.unavailable.Load()
 		if local, ok := call.err.(*UnavailableDataError); ok {

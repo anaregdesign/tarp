@@ -346,11 +346,10 @@ func TestWriteBatchRecordLimitChargesOnlySurvivingRecords(t *testing.T) {
 	}
 }
 
-func TestLargeWriteBatchCommitsAtOneFrontierAndReopensWithDefaultLimit(t *testing.T) {
+func TestLargeWriteBatchCommitsAtOneFrontierAndReopens(t *testing.T) {
 	const rows = 10_000
-	const limit = rows + 2
 	dir := t.TempDir()
-	db := openPublicDB(t, dir, tarp.Options{MaxWriteBatchEntries: limit})
+	db := openPublicDB(t, dir, tarp.Options{})
 	if err := db.Put([]byte("prior"), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +367,7 @@ func TestLargeWriteBatchCommitsAtOneFrontierAndReopensWithDefaultLimit(t *testin
 	if err := db.Apply(&batch); err != nil {
 		t.Fatal(err)
 	}
-	if s := db.Stats(); s.WriteCommits != 2 || s.WrittenRecords != 1+limit || s.LiveKeys != rows+1 {
+	if s := db.Stats(); s.WriteCommits != 2 || s.WrittenRecords != uint64(1+batch.Len()) || s.LiveKeys != rows+1 {
 		t.Fatalf("expected one commit for all rows and metadata: %+v", s)
 	}
 	if _, err := before.Get([]byte("progress")); !errors.Is(err, tarp.ErrNotFound) {
@@ -376,17 +375,6 @@ func TestLargeWriteBatchCommitsAtOneFrontierAndReopensWithDefaultLimit(t *testin
 	}
 	if _, err := before.Get([]byte("prior")); err != nil {
 		t.Fatalf("previous snapshot lost deleted key: %v", err)
-	}
-	if _, err := db.BatchGet(make([][]byte, tarp.MaxBatchEntries+1)); !errors.Is(err, tarp.ErrTooLarge) {
-		t.Fatalf("oversized read on enlarged write batch DB: %v", err)
-	}
-	batch.Reset()
-	for range limit + 1 {
-		batch.Delete([]byte("progress"))
-	}
-	var detail *tarp.BatchLimitError
-	if err := db.Apply(&batch); !errors.As(err, &detail) || detail.Kind != tarp.BatchInputCountLimit || detail.Actual != limit+1 || detail.Limit != limit {
-		t.Fatalf("oversized duplicate deletes: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -421,16 +409,16 @@ func TestWriteBatchLimitsErrorsAndClosedDB(t *testing.T) {
 	}
 	before := db.Stats()
 
-	// 1. MaxBatchEntries count limit (Index == -1).
+	// 1. MaxWriteBatchEntries count limit (Index == -1).
 	var tooMany tarp.WriteBatch
-	for i := range tarp.MaxBatchEntries + 1 {
-		tooMany.Delete([]byte(fmt.Sprintf("k-%d", i)))
+	for range tarp.MaxWriteBatchEntries + 1 {
+		tooMany.Delete([]byte("keep"))
 	}
 	var limitErr *tarp.BatchLimitError
 	err := db.Apply(&tooMany)
 	if !errors.Is(err, tarp.ErrTooLarge) || !errors.As(err, &limitErr) ||
-		limitErr.Kind != tarp.BatchInputCountLimit || limitErr.Index != -1 {
-		t.Fatalf("Apply(>MaxBatchEntries) = %v, want BatchInputCountLimit at -1", err)
+		limitErr.Kind != tarp.BatchInputCountLimit || limitErr.Index != -1 || limitErr.Actual != tarp.MaxWriteBatchEntries+1 || limitErr.Limit != tarp.MaxWriteBatchEntries {
+		t.Fatalf("Apply(>MaxWriteBatchEntries) = %v, want BatchInputCountLimit at -1", err)
 	}
 
 	// 2. Empty key reports original input index even after duplicates.

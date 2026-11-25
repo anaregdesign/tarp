@@ -29,9 +29,8 @@ type recoveredBlocks struct {
 	charge                         uint64
 }
 
-// An EIO is not authority to permanently discard a key. The parity codec
-// normally counts EIO as an erasure for full-file reconstruction. Remember it
-// here so a best-effort checkpoint cannot turn an I/O outage into data loss.
+// The parity codec normally counts EIO as an erasure for full-file
+// reconstruction. Preserve the underlying I/O error during record recovery.
 type recoveringReader struct {
 	io.ReaderAt
 	fs  *IO
@@ -170,7 +169,7 @@ func (c *DataCheckpoint) stageBlocks(ctx context.Context, src CapturedSegment) (
 		return stage, err
 	}
 	// Read back both regions before treating any private byte as evidence of
-	// source damage. Output failures must never expand the allowed loss.
+	// source damage.
 	for _, region := range []struct {
 		off, n int64
 		sum    []byte
