@@ -1176,6 +1176,77 @@ func TestIndexedReopenReplaysWritesMadeWithUnavailableSealedData(t *testing.T) {
 	}
 }
 
+func TestCompactPreservesUnavailableKeysThroughReopenAndReplacement(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	opts := tarp.Options{PreserveUnavailableKeys: true}
+	seed := openPublicDB(t, dir, opts)
+	key, cursor := []byte("graph"), []byte("cursor")
+	if err := seed.BatchPut([]tarp.Entry{
+		{Key: key, Value: bytes.Repeat([]byte("v"), 10000)},
+		{Key: cursor, Value: []byte("42")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.ProtectParity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := tarp.OpenExisting(ctx, dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.ProtectParity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := sealedTestPaths(t, dir)
+	wire, err := os.ReadFile(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipSealedTestBytes(t, data, wire, 300, 4096+300)
+	for _, order := range [][]tarp.CompactOption{nil, {tarp.WithKeyOrder()}} {
+		result, err := db.Compact(ctx, order...)
+		var op *tarp.OpError
+		var unavailable *tarp.UnavailableDataError
+		if result.DroppedKeys != 0 || !errors.As(err, &op) || op.Outcome != tarp.NotApplied ||
+			!errors.Is(err, tarp.ErrDataUnavailable) || !errors.As(err, &unavailable) || unavailable.FileID == 0 {
+			t.Fatalf("compacting damaged DATA: %+v, %v", result, err)
+		}
+	}
+	if err := db.Close(); !errors.Is(err, tarp.ErrDataUnavailable) {
+		t.Fatalf("close with selected damage: %v", err)
+	}
+	if full, err := tarp.OpenExisting(ctx, dir, opts); full != nil || !errors.Is(err, tarp.ErrCorrupt) {
+		t.Fatalf("full reopen with selected damage: %v", err)
+	}
+	opts.OpenValidation = tarp.Indexed
+	indexed := openPublicDB(t, dir, opts)
+	if _, err := indexed.Get(key); !errors.Is(err, tarp.ErrDataUnavailable) || errors.Is(err, tarp.ErrNotFound) {
+		t.Fatalf("indexed reopen lost evidence of the damaged key: %v", err)
+	}
+	if got, err := indexed.Get(cursor); err != nil || string(got) != "42" {
+		t.Fatalf("cursor after refusing checkpoint: %q, %v", got, err)
+	}
+	if err := indexed.Put(key, []byte("restored")); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := indexed.Compact(ctx); err != nil || result.DroppedKeys != 0 {
+		t.Fatalf("compacting after replacement: %+v, %v", result, err)
+	}
+	if err := indexed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts.OpenValidation = tarp.Full
+	reopened := openPublicDB(t, dir, opts)
+	if got, err := reopened.Get(key); err != nil || string(got) != "restored" {
+		t.Fatalf("full reopen after recovery: %q, %v", got, err)
+	}
+}
+
 func TestCompactSalvagesLiveRecordsAndDropsOnlyLostKeys(t *testing.T) {
 	for _, mode := range []struct {
 		name string

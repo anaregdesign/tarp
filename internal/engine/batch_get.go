@@ -25,7 +25,7 @@ func (db *DB) BatchGet(keys [][]byte) ([]BatchResult, error) {
 		return nil, err
 	}
 	defer db.done()
-	if err := CheckBatchCount(len(keys)); err != nil {
+	if err := CheckBatchCount(len(keys), MaxBatchEntries); err != nil {
 		return nil, err
 	}
 	for i, key := range keys {

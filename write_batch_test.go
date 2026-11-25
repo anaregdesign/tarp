@@ -346,6 +346,70 @@ func TestWriteBatchRecordLimitChargesOnlySurvivingRecords(t *testing.T) {
 	}
 }
 
+func TestLargeWriteBatchCommitsAtOneFrontierAndReopensWithDefaultLimit(t *testing.T) {
+	const rows = 10_000
+	const limit = rows + 2
+	dir := t.TempDir()
+	db := openPublicDB(t, dir, tarp.Options{MaxWriteBatchEntries: limit})
+	if err := db.Put([]byte("prior"), nil); err != nil {
+		t.Fatal(err)
+	}
+	var batch tarp.WriteBatch
+	batch.Delete([]byte("prior"))
+	for i := range rows {
+		batch.Put([]byte(fmt.Sprintf("row/%05d", i)), nil)
+	}
+	batch.Put([]byte("progress"), []byte("complete"))
+	before, err := db.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer before.Close()
+	if err := db.Apply(&batch); err != nil {
+		t.Fatal(err)
+	}
+	if s := db.Stats(); s.WriteCommits != 2 || s.WrittenRecords != 1+limit || s.LiveKeys != rows+1 {
+		t.Fatalf("expected one commit for all rows and metadata: %+v", s)
+	}
+	if _, err := before.Get([]byte("progress")); !errors.Is(err, tarp.ErrNotFound) {
+		t.Fatalf("progress visible in previous snapshot: %v", err)
+	}
+	if _, err := before.Get([]byte("prior")); err != nil {
+		t.Fatalf("previous snapshot lost deleted key: %v", err)
+	}
+	if _, err := db.BatchGet(make([][]byte, tarp.MaxBatchEntries+1)); !errors.Is(err, tarp.ErrTooLarge) {
+		t.Fatalf("oversized read on enlarged write batch DB: %v", err)
+	}
+	batch.Reset()
+	for range limit + 1 {
+		batch.Delete([]byte("progress"))
+	}
+	var detail *tarp.BatchLimitError
+	if err := db.Apply(&batch); !errors.As(err, &detail) || detail.Kind != tarp.BatchInputCountLimit || detail.Actual != limit+1 || detail.Limit != limit {
+		t.Fatalf("oversized duplicate deletes: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openPublicDB(t, dir, tarp.Options{})
+	if got, err := reopened.Get([]byte("progress")); err != nil || string(got) != "complete" {
+		t.Fatalf("reopened progress = %q, %v", got, err)
+	}
+	if _, err := reopened.Get([]byte("prior")); !errors.Is(err, tarp.ErrNotFound) {
+		t.Fatalf("deleted key after reopen: %v", err)
+	}
+	seen := 0
+	for key, err := range reopened.KeysRange(t.Context(), []byte("row/"), []byte("row0")) {
+		if err != nil || string(key) != fmt.Sprintf("row/%05d", seen) {
+			t.Fatalf("reopened row %d = %q, %v", seen, key, err)
+		}
+		seen++
+	}
+	if seen != rows {
+		t.Fatalf("reopened %d rows, want %d", seen, rows)
+	}
+}
+
 func TestWriteBatchLimitsErrorsAndClosedDB(t *testing.T) {
 	opts := tarp.Options{
 		MaxRecordBytes:     4 << 10,

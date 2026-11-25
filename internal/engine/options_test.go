@@ -62,6 +62,20 @@ func TestMaxBatchGetValueBytesNormalization(t *testing.T) {
 	}
 }
 
+func TestMaxWriteBatchEntriesNormalization(t *testing.T) {
+	for _, tc := range []struct{ input, want int }{{0, MaxBatchEntries}, {1, 1}, {MaxWriteBatchEntries, MaxWriteBatchEntries}} {
+		got, err := (Options{MaxWriteBatchEntries: tc.input}).normalized()
+		if err != nil || got.MaxWriteBatchEntries != tc.want {
+			t.Fatalf("MaxWriteBatchEntries %d: got %d, %v", tc.input, got.MaxWriteBatchEntries, err)
+		}
+	}
+	for _, input := range []int{-1, MaxWriteBatchEntries + 1} {
+		if _, err := (Options{MaxWriteBatchEntries: input}).normalized(); !errors.Is(err, ErrInvalidOptions) {
+			t.Fatalf("MaxWriteBatchEntries %d: %v", input, err)
+		}
+	}
+}
+
 func TestAdmissionCacheAndRecoveryUseSameEntrySizes(t *testing.T) {
 	opts := Options{MaxRecordBytes: 51, ValueCacheBudgetBytes: 131}
 	db := newTestDB(t, opts, nil)

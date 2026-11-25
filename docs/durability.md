@@ -117,17 +117,19 @@ the committed record. Sealing for a full DATA checkpoint instead selects an empt
 active log at the existing sequence. Sequences, generations and file IDs never wrap.
 No record spans files or overwrites previously committed bytes.
 
-A nonempty BatchPut or BatchDelete encodes consecutive ordinary records with
-dense user sequences in a single segment. If the active file has insufficient
+BatchPut, BatchDelete and Apply commit their surviving records with dense user
+sequences in a single segment. The write input limit is 4,096 by default.
+Options.MaxWriteBatchEntries sets a per-handle limit up to 65,535, counting
+all inputs before deduplication. Encoded records must still fit within
+TargetSegmentBytes minus the segment header. If the active file has insufficient
 room, the writer starts a new segment containing the entire batch. A single
 replacement CURRENT publishes its final sequence and offset, after the data
 and any new catalog are synced. Memory publication follows durable publication.
 An uncertain commit outcome applies to the entire batch. Reopen and backup
 select either frontier and can never select an intermediate record boundary.
-The historical whole-VM campaign predates the batch API. The current matrix
-uses an external batch-aware witness to verify whole-batch recovery across
-100 cuts per Go family; the guest race suites also exercise the batch
-functional and injected-failure tests.
+The recorded whole-VM matrix at `d89f7b8` used an external batch-aware
+witness to verify whole-batch recovery across 100 cuts per Go family. It
+predates mixed Apply and the configurable write input limit.
 
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
@@ -431,8 +433,16 @@ failure, or an unverified source error does not establish record loss. If a
 damaged key could belong to an ambiguous update and the captured index cannot
 resolve ownership, compaction returns `ErrDataUnavailable` and keeps serving.
 
+Options.PreserveUnavailableKeys applies to all compaction on one open handle.
+With the option enabled, a checkpoint that would drop a current live version
+returns ErrDataUnavailable with a NotApplied checkpoint outcome. The selected
+source remains available for repair or replacement from an independent copy.
+An already superseded version does not prevent a lossless checkpoint. Use the
+option on every open that must preserve this behavior. It cannot restore a key
+discarded by a prior checkpoint.
+
 At publication, concurrent Put and Delete operations keep their normal ordering.
-A key dropped by the committed checkpoint is absent from Get, Keys, backups and
+Under the default policy, a key dropped by the committed checkpoint is absent from Get, Keys, backups and
 subsequent Full or Indexed opens. Put can create it again. Manual
 `CompactResult.DroppedKeys` counts live keys discarded by the committed
 checkpoint. `AutoCompactionStatus.DroppedKeys` accumulates the corresponding

@@ -233,6 +233,40 @@ func TestTypedBatchGetChargesEncodedBytesBeforeDecoding(t *testing.T) {
 	requireBatchCodecError(t, err, decodeErr, "BatchGet", 0, "value")
 }
 
+func TestWriteBatchCountPrecedesEncodingAndDoesNotLimitReads(t *testing.T) {
+	const limit = 1
+	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxWriteBatchEntries: limit})
+	codec := rejectingStringCodec{errors.New("unexpected codec call")}
+	view, err := tarp.Bind(db, codec, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch tarp.TypedWriteBatch[string, string]
+	batch.Put("rejected", "rejected")
+	batch.Delete("rejected")
+	var raw tarp.WriteBatch
+	raw.Put(nil, nil)
+	raw.Delete(nil)
+	for _, run := range []func() error{
+		func() error { return db.BatchPut(make([]tarp.Entry, 2)) },
+		func() error { return db.BatchDelete(make([][]byte, 2)) },
+		func() error { return db.Apply(&raw) },
+		func() error {
+			return view.BatchPut([]tarp.TypedEntry[string, string]{{Key: "rejected"}, {Key: "rejected"}})
+		},
+		func() error { return view.BatchDelete([]string{"rejected", "rejected"}) },
+		func() error { return view.Apply(&batch) },
+	} {
+		var detail *tarp.BatchLimitError
+		if err := run(); !errors.As(err, &detail) || detail.Kind != tarp.BatchInputCountLimit || detail.Index != -1 || detail.Actual != 2 || detail.Limit != limit {
+			t.Fatalf("over-limit write: %v, want input count 2 above limit %d", err, limit)
+		}
+	}
+	if got, err := view.BatchGet([]string{"a", "b"}); err != nil || len(got) != 2 {
+		t.Fatalf("BatchGet = %v, %v", got, err)
+	}
+}
+
 type closeOwnerCodec struct {
 	tarp.StringCodec
 	owner *tarp.DB

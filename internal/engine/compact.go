@@ -376,6 +376,10 @@ func (db *DB) prepareLosses(ctx context.Context, lost *storage.Relocations) (*ch
 		if !found || addr != old.Address() {
 			return errCheckpointChanged
 		}
+		if db.opts.PreserveUnavailableKeys {
+			// GuardLosses holds the confirmed file error stable through this check.
+			return old.Segment.UnavailableData()
+		}
 		total := losses.files[old.Segment]
 		total.keys++
 		total.bytes += old.RecordBytes

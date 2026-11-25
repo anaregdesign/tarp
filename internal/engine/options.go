@@ -29,11 +29,13 @@ const (
 // Options uses zero for each default, never to disable caching or syncing.
 // Bounds apply to encoded records and logically charged value cache entries.
 type Options struct {
-	IndexMode              IndexMode
-	OpenValidation         OpenValidation
-	BTreeMemoryBudgetBytes int64
-	ValueCacheBudgetBytes  int64
-	MaxRecordBytes         int64
+	IndexMode      IndexMode
+	OpenValidation OpenValidation
+	// PreserveUnavailableKeys refuses checkpoints that would drop live keys.
+	PreserveUnavailableKeys bool
+	BTreeMemoryBudgetBytes  int64
+	ValueCacheBudgetBytes   int64
+	MaxRecordBytes          int64
 	// TargetSegmentBytes sets the target for each new log or snapshot segment.
 	// It also caps the input to small-segment repacking.
 	// Zero selects 4 MiB. The target grows to fit a header and one maximum record.
@@ -45,6 +47,9 @@ type Options struct {
 	// MaxBatchGetValueBytes limits encoded value bytes returned by one BatchGet.
 	// Each occurrence of a found key counts. Zero selects 64 MiB.
 	MaxBatchGetValueBytes int64
+	// MaxWriteBatchEntries caps input operations per write batch, including duplicates.
+	// Zero selects MaxBatchEntries.
+	MaxWriteBatchEntries int
 }
 
 // RestoreLimits bounds the logical value cache charge and encoded size of each live
@@ -108,6 +113,12 @@ func (o Options) normalized() (Options, error) {
 	}
 	if o.MaxBatchGetValueBytes == 0 {
 		o.MaxBatchGetValueBytes = 64 << 20
+	}
+	if o.MaxWriteBatchEntries < 0 || o.MaxWriteBatchEntries > MaxWriteBatchEntries {
+		return o, fmt.Errorf("%w: MaxWriteBatchEntries must be between 0 and %d", ErrInvalidOptions, MaxWriteBatchEntries)
+	}
+	if o.MaxWriteBatchEntries == 0 {
+		o.MaxWriteBatchEntries = MaxBatchEntries
 	}
 	if o.TargetSegmentBytes == 0 {
 		o.TargetSegmentBytes = 4 << 20

@@ -55,15 +55,16 @@ func TestPrepareDeletesResolvesHashCollisionsAndTableGrowth(t *testing.T) {
 }
 
 func TestPrepareDeletesRetainsOnlyDistinctKeysInOrder(t *testing.T) {
-	db := newTestDB(t, Options{}, nil)
-	for _, distinct := range []int{1, 16, MaxBatchEntries} {
+	const count = MaxWriteBatchEntries
+	db := newTestDB(t, Options{MaxWriteBatchEntries: count}, nil)
+	for _, distinct := range []int{1, 16, count} {
 		calls := 0
-		batch, err := db.PrepareDeletes(MaxBatchEntries, func(i int) ([]byte, error) {
+		batch, err := db.PrepareDeletes(count, func(i int) ([]byte, error) {
 			calls++
 			k := i % distinct
 			return []byte{byte(k >> 8), byte(k)}, nil
 		})
-		if err != nil || calls != MaxBatchEntries || len(batch.records) != distinct {
+		if err != nil || calls != count || len(batch.records) != distinct {
 			t.Fatalf("%d distinct: %d encoded, %d retained, %v", distinct, calls, len(batch.records), err)
 		}
 		if distinct <= 16 && cap(batch.records) > 16 {

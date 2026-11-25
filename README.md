@@ -6,16 +6,13 @@ tests, and measurement tools use the Go standard library only.
 ## Quick start
 
 Use Go 1.26.0 or later on Linux or macOS (amd64 or arm64). This quick start
-uses [v0.14.0](https://github.com/anaregdesign/tarp/tree/v0.14.0).
-Mixed `WriteBatch`, reusable read snapshots, ordered codecs and range scans
-were added on `main` after v0.14.0. To try those examples from a Go module
-before the next tag, run `go get github.com/anaregdesign/tarp@main`.
+uses [v0.15.0](https://github.com/anaregdesign/tarp/tree/v0.15.0).
 
 ```sh
 mkdir tarp-example
 cd tarp-example
 go mod init example.com/tarp-example
-go get github.com/anaregdesign/tarp@v0.14.0
+go get github.com/anaregdesign/tarp@v0.15.0
 ```
 
 Save this as `main.go` to write a key to the local `store` directory and read it back.
@@ -72,7 +69,8 @@ backup format. Any of these can change between releases. To carry data across
 a format change, export the live keys and values with the version that wrote
 them, import them into a fresh database, and verify the result before switching.
 
-On `main` after v0.14.0, `IndexMode` has two values, `IndexBTree` (zero)
+v0.15.0 keeps the v0.14.0 database and backup formats.
+`IndexMode` now has two values, `IndexBTree` (zero)
 and `IndexMemory`. Omit `Options.IndexMode` or set it to `IndexBTree` wherever
 your code previously used `IndexDefault`. If your application stores the
 numeric mode in its own configuration, change the former B+tree value 2 to 0.
@@ -380,8 +378,13 @@ the caller can read them sequentially. If reads slow down, the batch can use ava
 for the remaining records. A fully cached batch uses no read slots or workers. `Get` runs
 independently of this limit, and each DB has its own read slots.
 
-Each call accepts up to `tarp.MaxBatchEntries` (4,096) inputs, counting
-duplicates. An empty batch succeeds on a healthy open DB. Write batches
+`BatchGet` accepts up to `tarp.MaxBatchEntries` (4,096) inputs.
+`BatchPut`, `BatchDelete`, and `Apply` default to the same limit. Set
+`Options.MaxWriteBatchEntries` to a value from 1 to 65,535 to choose a
+different write limit for this handle. Every input counts, including duplicates.
+For example, writing 10,000 records and one progress key together requires a
+limit of at least 10,001 and enough segment capacity for all encoded records.
+An empty batch succeeds on a healthy open DB. Write batches
 must fit a single segment. The sum of encoded record sizes must fit the
 effective `TargetSegmentBytes` minus the 64-byte segment header.
 All put entries count, including repeated keys. For deletes, only distinct
@@ -563,12 +566,14 @@ the commit sync protocol.
 | Option | Default | What the limit applies to |
 | --- | ---: | --- |
 | `OpenValidation` | `Full` | Select how Open verifies DATA covered by an index checkpoint. Both runtime backends support both validation modes. |
+| `PreserveUnavailableKeys` | `false` | Refuse compaction that would discard a live key with irrecoverable DATA. Set on each open. |
 | `IndexMode` | `IndexBTree` | Selects a built-in key index for this Open. |
 | `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
 | `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
 | `TargetSegmentBytes` | 4 MiB | Target size for each new log or snapshot segment. Bounds the total input to small-segment repacking and the output of grouped log cleaning. |
 | `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
+| `MaxWriteBatchEntries` | 4,096 | Maximum inputs to one `BatchPut`, `BatchDelete`, or `Apply`, up to 65,535. |
 | `BatchGetReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 | `MaxBatchGetValueBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
 
@@ -757,7 +762,7 @@ Compaction first tries to restore the complete DATA file. If two or more
 damaged blocks in a stripe exceed its parity budget, a full DATA checkpoint can
 still keep independently verified records, including neighbors in those same
 blocks. It can also recover a value from the live cache when its version and
-record checksum match. A live key is dropped only when its current record
+record checksum match. By default, a live key is dropped only when its current record
 cannot be recovered. An older value or a deleted key cannot reappear.
 After publication, `Get` returns `ErrNotFound` for a dropped key and a new
 `Put` for that key works normally.
@@ -768,6 +773,14 @@ recovery explicitly. A missing or invalid sidecar, an I/O error without
 verified loss, or insufficient staging space cannot authorize dropping keys.
 Compaction verifies and syncs the replacement DATA and PARITY before switching
 to the new files. Readers with pins keep their original files until release.
+
+If you keep application state and its replication cursor in this DB, set
+`Options.PreserveUnavailableKeys` on every open. Manual and automatic
+compaction can then publish a recovery checkpoint only if they preserve every
+live key. A checkpoint that would discard a live key reports
+`ErrDataUnavailable`. An application can fetch a verified replacement value
+from its own recovery source and retry compaction. The option applies to the
+current handle. Keys discarded during an earlier open require external recovery.
 
 For offline recovery of historical records, run
 `tarp.SalvageData(ctx, dir, fileID, maxRecordBytes, visit)` after closing the

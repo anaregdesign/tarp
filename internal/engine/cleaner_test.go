@@ -772,6 +772,28 @@ func TestReadWakesCleanerToCheckpointUnrecoverableKeys(t *testing.T) {
 	wantValue(t, image, "lost", "later")
 }
 
+func TestAutomaticCheckpointPreservesUnavailableKeys(t *testing.T) {
+	db := openMaintenanceDamageDB(t, Options{PreserveUnavailableKeys: true}, nil)
+	corruptUncachedCheckpointValue(t, db)
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) {
+		t.Fatalf("initial failing read: %v", err)
+	}
+	before := db.store.Current
+	if again, retry := db.cleanPass(t.Context()); again || retry {
+		t.Fatalf("unrecoverable checkpoint rescheduled: again %t, retry %t", again, retry)
+	}
+	status := db.AutoCompactionStatus()
+	var op *OpError
+	if status.DroppedKeys != 0 || !errors.As(status.LastError, &op) || op.Outcome != NotApplied ||
+		!errors.Is(status.LastError, ErrDataUnavailable) || db.store.Current != before {
+		t.Fatalf("automatic checkpoint: %+v, frontier %+v", status, db.store.Current)
+	}
+	if _, err := db.Get([]byte("lost")); !errors.Is(err, ErrDataUnavailable) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("unavailable key after automatic checkpoint: %v", err)
+	}
+	wantValue(t, db, "keep", "healthy")
+}
+
 func TestAutomaticCheckpointRejectsInvalidSidecarAfterUnrecoverableStripe(t *testing.T) {
 	var scans atomic.Int64
 	db := openMaintenanceDamageDB(t, Options{}, &storage.IO{Hook: func(point string) error {
