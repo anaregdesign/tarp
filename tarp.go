@@ -1,6 +1,7 @@
 package tarp
 
 import (
+	"bytes"
 	"context"
 	"iter"
 
@@ -119,6 +120,60 @@ func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 // guarantees as [DB.Scan].
 func (db *DB) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[Entry, error] {
 	return (*engine.DB)(db).ScanPrefix(ctx, encodedPrefix)
+}
+
+// ScanOption configures ordered range scans ([DB.ScanRange], [DB.KeysRange],
+// and their typed and snapshot counterparts).
+type ScanOption struct {
+	reverse bool
+}
+
+// WithReverse reverses ordered range iteration so keys in [lower, upper) are
+// yielded in strictly descending bytewise lexicographic order.
+func WithReverse() ScanOption {
+	return ScanOption{reverse: true}
+}
+
+func isReverseScan(opts []ScanOption) bool {
+	reverse := false
+	for _, opt := range opts {
+		if opt.reverse {
+			reverse = true
+		}
+	}
+	return reverse
+}
+
+// PrefixRange computes cloned half-open [lower, upper) bounds matching all
+// keys that satisfy bytes.HasPrefix(key, prefix). An empty prefix returns
+// (nil, nil). An all-0xff prefix returns (bytes.Clone(prefix), nil).
+func PrefixRange(prefix []byte) (lower, upper []byte) {
+	if len(prefix) == 0 {
+		return nil, nil
+	}
+	lower = bytes.Clone(prefix)
+	for i := len(prefix) - 1; i >= 0; i-- {
+		if prefix[i] != 0xff {
+			upper = make([]byte, i+1)
+			copy(upper, prefix[:i+1])
+			upper[i]++
+			return lower, upper
+		}
+	}
+	return lower, nil
+}
+
+// ScanRange yields live entries with encoded keys in the half-open range
+// [lower, upper) in strictly ascending bytewise lexicographic order, or
+// strictly descending order when [WithReverse] is passed.
+//
+// An empty or nil lower bound is unbounded below; an empty or nil upper bound
+// is unbounded above. When len(upper) > 0 and bytes.Compare(lower, upper) >= 0,
+// ScanRange yields zero entries after checking context and handle health.
+// ScanRange copies lower and upper before returning. Each iteration captures a
+// fresh point-in-time snapshot and returns caller-owned key and value slices.
+func (db *DB) ScanRange(ctx context.Context, lower, upper []byte, opts ...ScanOption) iter.Seq2[Entry, error] {
+	return (*engine.DB)(db).ScanRange(ctx, lower, upper, isReverseScan(opts))
 }
 
 // Put durably inserts or replaces a value. An oversized entry returns ErrTooLarge

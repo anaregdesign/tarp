@@ -309,3 +309,124 @@ func TestRangeKeysSurviveLaterGroupsAndViewClose(t *testing.T) {
 		t.Fatalf("retained keys changed: got %d, want %d matching entries", len(got), upper)
 	}
 }
+
+func TestRangeDescSeeksAcrossMultiLevelBranchesAndOverflowKeys(t *testing.T) {
+	tr := openTest(t)
+	const count = 1500
+	var keys []string
+	tx := tr.Begin()
+	for i := range count {
+		lead := byte('b' + (i / 300))
+		key := fmt.Sprintf("%c%s%04d", lead, strings.Repeat("m", 215), i)
+		if i%29 == 0 {
+			key += strings.Repeat("o", maxInline+64+(i%50))
+		}
+		keys = append(keys, key)
+		if err := tx.Put(key, addr(uint64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx.Commit()
+
+	// Delete scattered keys to exercise shortened separator boundaries where
+	// the initial leaf at upper has zero keys < upper.
+	tx = tr.Begin()
+	var live []string
+	var liveAddrs []index.Address
+	for i, key := range keys {
+		if i%7 == 0 {
+			if err := tx.Delete(key); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			live = append(live, key)
+			liveAddrs = append(liveAddrs, addr(uint64(i)))
+		}
+	}
+	tx.Commit()
+
+	v := tr.View().(*view)
+	defer v.Close()
+
+	// Confirm the tree has multiple branch levels.
+	root, err := tr.p.read(v.root)
+	if err != nil || root[4] != branch {
+		t.Fatalf("expected branch root: %v", err)
+	}
+	child0, err := tr.p.read(root.child(0))
+	if err != nil || child0[4] != branch {
+		t.Fatalf("expected multi-level branch tree (child kind=%d, err=%v)", child0[4], err)
+	}
+	sep0, err := root.cell(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sepKey, err := sep0.key.string(tr.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bounds := [][2]string{
+		{"", ""},
+		{"", live[0]},
+		{"", live[1]},
+		{"", sepKey},
+		{"", sepKey + "\x00"},
+		{sepKey, ""},
+		{live[len(live)-1], ""},
+		{live[len(live)-1] + "\x00", ""},
+		{live[10], live[len(live)-10]},
+		{live[50] + "\x00", live[120] + "\xff"},
+		{"a", "b"},
+		{"z", ""},
+		{live[40], live[40]},
+		{live[50], live[40]},
+	}
+	for idx, b := range bounds {
+		lower, upper := b[0], b[1]
+		var wantKeys []string
+		var wantAddrs []index.Address
+		if upper == "" || lower < upper {
+			for i := len(live) - 1; i >= 0; i-- {
+				if live[i] >= lower && (upper == "" || live[i] < upper) {
+					wantKeys = append(wantKeys, live[i])
+					wantAddrs = append(wantAddrs, liveAddrs[i])
+				}
+			}
+		}
+		var gotKeys []string
+		var gotAddrs []index.Address
+		err := v.RangeDesc(lower, upper, func(k string, a index.Address) bool {
+			if n := tr.Metrics().ReadWorkspaceBytes; n != 0 {
+				t.Fatalf("bound %d retained %d workspace bytes inside callback", idx, n)
+			}
+			gotKeys = append(gotKeys, k)
+			gotAddrs = append(gotAddrs, a)
+			return true
+		})
+		if err != nil {
+			t.Fatalf("bound %d [%q, %q): %v", idx, lower, upper, err)
+		}
+		if !slices.Equal(gotKeys, wantKeys) || !slices.Equal(gotAddrs, wantAddrs) {
+			t.Fatalf("bound %d [%q, %q): got %d keys, want %d", idx, lower, upper, len(gotKeys), len(wantKeys))
+		}
+	}
+
+	// Verify early break and close-inside-callback semantics.
+	calls := 0
+	err = v.RangeDesc("b", "z", func(string, index.Address) bool {
+		calls++
+		return calls < 3
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("early break: calls=%d, err=%v", calls, err)
+	}
+	v2 := tr.View().(*view)
+	err = v2.RangeDesc("", "", func(string, index.Address) bool {
+		v2.Close()
+		return true
+	})
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("close inside RangeDesc callback: got %v, want os.ErrClosed", err)
+	}
+}

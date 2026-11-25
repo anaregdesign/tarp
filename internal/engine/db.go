@@ -68,6 +68,7 @@ type DB struct {
 	// Upper bound on live encoded value lengths, guarded by state. Deleting or
 	// shrinking a value can leave it high until the next Open.
 	maxSeenValueBytes int64
+	publishedSeq      uint64 // LastUserSequence matching the published index, guarded by state.
 
 	// Only Compact sets or clears this under writer while it owns the cleaner
 	// gate. indexGate guards the staged keys during that interval.
@@ -129,6 +130,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 		}
 	}
 	db.maxSeenValueBytes = s.LargestLiveValueBytes
+	db.publishedSeq = s.Current.LastUserSequence
 	db.stats.LiveKeys = uint64(keys.Count())
 	db.initDataStats()
 	// Finish opening a fresh, empty database once initialization has published
@@ -430,6 +432,7 @@ func (db *DB) mutate(kind uint8, key, value []byte) error {
 // countWriteCommit runs once per published single or batch write under state.
 func (db *DB) countWriteCommit(previousActive uint64) {
 	db.revision++
+	db.publishedSeq = db.store.Current.LastUserSequence
 	db.stats.WriteCommits++
 	if db.store.Current.ActiveID != previousActive {
 		db.stats.SelectedSegments++

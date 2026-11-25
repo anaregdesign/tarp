@@ -25,7 +25,19 @@ func (db *DB) Scan(ctx context.Context) iter.Seq2[Entry, error] {
 func (db *DB) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[Entry, error] {
 	bounds := index.PrefixBounds(encodedPrefix)
 	return func(yield func(Entry, error) bool) {
-		err := db.walkSnapshot(ctx, true, bounds, func(k, value []byte) bool { return yield(Entry{Key: k, Value: value}, nil) })
+		err := db.walkSnapshot(ctx, true, bounds, false, false, func(k, value []byte) bool { return yield(Entry{Key: k, Value: value}, nil) })
+		if err != nil {
+			yield(Entry{}, err)
+		}
+	}
+}
+
+// ScanRange reads records in [lower, upper) in strictly ascending or descending
+// bytewise lexicographic key order from a single index and DATA snapshot.
+func (db *DB) ScanRange(ctx context.Context, lower, upper []byte, reverse bool) iter.Seq2[Entry, error] {
+	bounds := index.Bounds{Lower: string(lower), Upper: string(upper)}
+	return func(yield func(Entry, error) bool) {
+		err := db.walkSnapshot(ctx, true, bounds, true, reverse, func(k, value []byte) bool { return yield(Entry{Key: k, Value: value}, nil) })
 		if err != nil {
 			yield(Entry{}, err)
 		}
@@ -34,7 +46,7 @@ func (db *DB) ScanPrefix(ctx context.Context, encodedPrefix []byte) iter.Seq2[En
 
 // walkSnapshot pins the selected DATA segments for a value scan. Index cursors never
 // hold a DB lock or admission across user code, which may close or mutate it.
-func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds, yield func([]byte, []byte) bool) error {
+func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds, ordered, reverse bool, yield func([]byte, []byte) bool) error {
 	op := "keys"
 	if values {
 		op = "scan"
@@ -50,8 +62,21 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		db.done()
 		return operationError(op, "context", err)
 	}
+	if ordered && bounds.Upper != "" && bounds.Lower >= bounds.Upper {
+		err := db.health()
+		db.done()
+		return err
+	}
 	db.indexGate.RLock()
-	v, err := bounds.Capture(ctx, db.keys)
+	var (
+		v   index.ScanView
+		err error
+	)
+	if ordered {
+		v, err = bounds.CaptureOrdered(ctx, db.keys)
+	} else {
+		v, err = bounds.Capture(ctx, db.keys)
+	}
 	if err != nil {
 		db.indexGate.RUnlock()
 		db.done()
@@ -93,10 +118,10 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 	var result error
 	var stopped bool
 	var copies *prefixKeyCopies
-	if bounds.Lower != "" {
+	if bounds.Lower != "" || bounds.Upper != "" {
 		copies = new(prefixKeyCopies)
 	}
-	err = v.Walk(ctx, func(k string, a index.Address) bool {
+	visit := func(k string, a index.Address) bool {
 		if result = check(); result != nil {
 			return false
 		}
@@ -137,7 +162,12 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		}
 		stopped = !yield(key, value)
 		return !stopped
-	})
+	}
+	if ordered {
+		err = v.WalkOrdered(reverse, visit)
+	} else {
+		err = v.Walk(ctx, visit)
+	}
 	if result != nil {
 		return result
 	}
@@ -150,8 +180,8 @@ func (db *DB) walkSnapshot(ctx context.Context, values bool, bounds index.Bounds
 		db.poison(err)
 		return operationError(op, "index", err)
 	}
-	// A bounded walk can reach its upper bound without another callback.
-	if !stopped && bounds.Lower != "" {
+	// A bounded or ordered walk can reach its end without another callback.
+	if !stopped && (ordered || bounds.Lower != "" || bounds.Upper != "") {
 		return check()
 	}
 	return nil
