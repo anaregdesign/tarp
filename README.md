@@ -527,29 +527,62 @@ limits entries kept in the value LRU. `MaxBatchGetValueBytes` limits encoded
 value bytes returned by one batch read. Long-running readers can
 hold previous B+tree root generations and retired DATA segments on disk.
 
-Both index modes can reuse the same immutable `INDEX` file. A healthy B+tree handle
-refreshes a missing or outdated index checkpoint at `Close`. To checkpoint a
-long-running DB or an in-memory index, call `db.CheckpointIndex(ctx)`. It seals
-a nonempty active log and packs the index for the captured DATA history. Writes can continue
-during the build. Size the volume for both the build workspace and the new INDEX,
-and allow for the extra Close time. Checkpoint creation leaves the normal
-per-write sync protocol intact.
+`db.CheckpointIndex(ctx)` builds a standalone packed INDEX from the captured
+DATA history. It seals a nonempty active log and lets writes continue during
+the build. A healthy B+tree handle also builds a full checkpoint on `Close`
+when its index checkpoint needs updating. Size the volume for the build
+workspace and the new INDEX, and allow for this Close time.
 
 | `Options.OpenValidation` | Work done during Open |
 | --- | --- |
-| `tarp.Full` (default) | Verify every committed DATA byte. Import the packed index when available and apply later commits. |
-| `tarp.Indexed` | With B+tree, authenticate the INDEX summary, verify selected DATA headers, and replay bounded changed DATA. Authenticate untouched INDEX pages on access. The memory backend imports a usable checkpoint eagerly. |
+| `tarp.Full` (default) | Verify every committed DATA byte. Import a usable standalone INDEX eagerly and apply later commits. A layered INDEX uses authoritative DATA replay. |
+| `tarp.Indexed` | With B+tree, authenticate INDEX metadata, verify selected DATA headers, and replay bounded changed DATA. Authenticate individual INDEX pages on access. The memory backend imports a usable standalone checkpoint eagerly and rebuilds from DATA for a layered INDEX. |
 
 `Indexed` can defer detection of disk damage. A value read verifies the record's
 identity and CRC. `Keys` and `KeysPrefix` enumerate keys without reading DATA. Reopen
 with `Full` to check the complete selected history, including obsolete values.
-Both modes rebuild from DATA when INDEX is missing or unusable. The
-B+tree fast path falls back to DATA replay if changed DATA exceeds its 4 GiB
-budget. Incremental cleaning can reuse a checkpoint across relocations. A
-full DATA checkpoint invalidates the old INDEX. Backups omit INDEX and remain
-independently verifiable. See the [format](docs/format.md) and the
-[checkpoint measurements](docs/benchmarks/index-checkpoints.md) and
+Both modes rebuild from DATA when INDEX is missing or unusable. The B+tree
+fast path also rebuilds if the committed lengths of newly selected DATA and
+replacement DATA exceed 4 GiB, including the active prefix. Cleaner
+relocations count toward the budget even at an unchanged user sequence. A
+full DATA checkpoint clears the old INDEX. Backups omit INDEX and remain
+independently verifiable. See the [format](docs/format.md),
+[checkpoint measurements](docs/benchmarks/index-checkpoints.md), and
 [runtime index measurements](docs/benchmarks/index-modes.md).
+
+### Refreshing the index on long-running databases
+
+Call `db.RefreshIndex(ctx)` periodically when you rely on fast B+tree `Indexed`
+reopen. With a usable checkpoint, it replays newly selected DATA and cleaner
+replacements and publishes newly allocated B+tree pages in an immutable INDEX
+overlay. It also writes the covered layout and accounting metadata. If the
+checkpoint is unusable or incremental work exceeds its limits, RefreshIndex
+builds a new standalone checkpoint. The chain supports up to eight overlays,
+each with at most 256 MiB of page slots. RefreshIndex can read its full
+captured change set even when fast Open would exceed its 4 GiB replay budget.
+It retains a validated checkpoint that already covers the current user
+sequence and selected layout.
+
+Poll `db.IndexCheckpointStatus(ctx)` to schedule the next refresh. It reports
+the captured user sequence, selected checkpoint coverage, changed DATA bytes,
+and replay budget for the running raw or typed DB. It authenticates the selected
+INDEX tip's metadata outside the writer gate without reading DATA. An absent
+or unusable checkpoint reports an inexact zero for changed DATA. Use
+`RefreshIndex` to establish new coverage in that case.
+
+Start refreshing while the changed bytes are still below the budget. Allow
+headroom for growth before the next poll and for writes committed during
+the refresh. Include cleaner replacements in that growth estimate even when
+`SelectedDataBytes` stays flat. Measure cold reopen and refresh time on the
+deployment storage before setting a restart target.
+
+Log `db.RecoveryInfo()` after Open to see the recovery path, fallback reason,
+selected checkpoint, covered sequence, and changed DATA estimate. Both raw
+and typed handles report this Open result. The report stays unchanged after
+writes, refresh, and Close. `ChangedDataBytes` describes logical DATA lengths,
+including headers. An inexact value is a lower bound, and an inexact zero
+means the estimate was unavailable. See [database statistics](docs/stats.md#recovery-report)
+and the [checkpoint durability contract](docs/durability.md#index-checkpoints).
 
 ## Limits
 
@@ -699,7 +732,9 @@ limits, then publishes a new closed database. Existing destinations, even empty
 directories, are never replaced. Parents must be caller-controlled; destinations
 must be outside the source. Backups must be immutable during restore.
 
-The background worker selects the first eligible maintenance policy in this order.
+The worker seeds the initial cleaner inventory in batches of up to 128 catalog
+entries after Open starts it. Each pass considers a bounded set of candidates
+in this policy order.
 
 1. **Single-segment cleaning** reclaims obsolete records when the estimated
    replacement, including metadata, fits in half the source bytes. It ranks
@@ -720,7 +755,8 @@ while a reader or backup uses it.
 
 `db.AutoCompactionStatus()` reports the worker's deferral reason, most recent
 maintenance error, pinned retired bytes, and cumulative logical bytes actually
-unlinked by this worker since `Open`. Filesystem allocation and staging writes
+unlinked by this worker since `Open`. Reclaim estimates can increase as inventory
+seeding advances. Filesystem allocation and staging writes
 also affect free space. Provision room for current data, temporary replacements,
 metadata, backups, pinned sources and concurrent growth.
 

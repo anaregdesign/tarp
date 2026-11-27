@@ -202,7 +202,7 @@ func (s *Store) retireKnown(remaining, visits int) (unlinked, pinned int64, pend
 			break
 		}
 		metadataVisits--
-		if id == s.Catalog.Index.ID {
+		if id == s.Catalog.Index.ID || s.indexAncestors[id] {
 			result = fmt.Errorf("%w: retiring selected index", ErrCorrupt)
 			break
 		}

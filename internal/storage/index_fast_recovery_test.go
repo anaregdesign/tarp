@@ -46,7 +46,10 @@ func openFastTestIndex(t *testing.T, dir string, cfg Config, probe *IO) (*Store,
 	importer := func(ctx context.Context, _ *Store, r io.Reader, size int64, visit func(string, index.Address) error) (index.Backend, error) {
 		return btree.ImportPacked(ctx, r, size, scratch, btree.MinBudget, visit)
 	}
-	fast := func(ctx context.Context, _ *Store, pages io.ReaderAt, closer io.Closer, size int64) (index.Backend, error) {
+	fast := func(ctx context.Context, _ *Store, pages io.ReaderAt, closer io.Closer, size int64, layer *btree.OverlayLayout) (index.Backend, error) {
+		if layer != nil {
+			return btree.OpenOverlay(ctx, pages, closer, *layer, scratch, btree.MinBudget)
+		}
 		return btree.OpenPacked(ctx, pages, closer, size, scratch, btree.MinBudget)
 	}
 	s, keys, err := OpenIndexed(t.Context(), dir, cfg, true, probe, fresh, importer, fast)

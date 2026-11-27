@@ -15,31 +15,35 @@ import (
 
 // FastIndexImporter opens an authenticated immutable base with a writable
 // overlay and owns closeSource on success. Page reads are authenticated lazily.
-type FastIndexImporter func(ctx context.Context, store *Store, pages io.ReaderAt, closeSource io.Closer, size int64) (index.Backend, error)
+type FastIndexImporter func(ctx context.Context, store *Store, pages io.ReaderAt, closeSource io.Closer, size int64, layer *btree.OverlayLayout) (index.Backend, error)
 
 const maxIndexedReplayBytes = 4 << 30
 
 // A failed fast attempt discards its temporary tree and accounting. Recovery
 // then rebuilds from authoritative DATA at the same committed frontier.
-func (s *Store) loadFastIndexCheckpoint(ctx context.Context, image *Image, load FastIndexImporter) (keys index.Backend, result error) {
-	file, err := s.openIndexFile(ctx, image.Catalog)
+func (s *Store) loadFastIndexCheckpoint(ctx context.Context, image *Image, load FastIndexImporter, report *RecoveryInfo) (keys index.Backend, result error) {
+	chain, err := s.openIndexChain(ctx, image.Catalog)
 	if IsIndexCheckpointUnusable(err) {
+		report.noteCheckpointFailure(err)
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	s.indexAncestors = chain.ids(1)
+	file := chain.parts[0].file
 	var backend index.Backend
 	defer func() {
 		if keys != nil {
 			return
 		}
 		if backend == nil {
-			result = errors.Join(result, file.fd.Close())
+			result = errors.Join(result, chain.Close())
 		} else {
 			result = errors.Join(result, backend.Close())
 		}
 		if IsIndexCheckpointUnusable(result, btree.ErrInvalidPacked) {
+			report.noteCheckpointFailure(result)
 			result = nil
 		}
 	}()
@@ -47,7 +51,7 @@ func (s *Store) loadFastIndexCheckpoint(ctx context.Context, image *Image, load 
 	if err != nil {
 		return nil, err
 	}
-	replay.image = &recovered
+	report.noteChangedData(replay.sources, 0)
 	changed := make(map[uint64]bool, len(replay.sources))
 	for _, entry := range replay.sources {
 		changed[entry.ID] = true
@@ -57,37 +61,44 @@ func (s *Store) loadFastIndexCheckpoint(ctx context.Context, image *Image, load 
 	}); err != nil {
 		return nil, err
 	}
-	pages := file.verifiedPages()
-	backend, err = load(ctx, s, pages, file.fd, file.packedSize)
+	backend, err = chain.open(ctx, s, load)
 	if err != nil {
 		return nil, err
 	}
-	if uint64(backend.Count()) != recovered.LiveKeys {
-		return nil, ErrIndexCheckpointUnusable
-	}
-	replay.backend = backend
-	defer replay.abort()
-	if err := recovered.scanEntries(ctx, replay.sources, "log_suffix", replay.apply, nil); err != nil {
+	if err := replayIndexSources(ctx, &recovered, replay, backend, "log_suffix"); err != nil {
 		return nil, err
-	}
-	replay.finish()
-	for id, f := range replay.segments {
-		if recovered.Segments[id] == nil && (f.LiveBytes.Load() != 0 || f.LiveKeys.Load() != 0) {
-			return nil, ErrIndexCheckpointUnusable
-		}
-	}
-	if recovered.LiveKeys != uint64(backend.Count()) {
-		return nil, ErrIndexCheckpointUnusable
 	}
 	// Upper bounds remain safe after a delete or overwrite. A caller with
 	// stricter options must get the exact answer from authoritative replay.
 	if s.Config.CheckLimits(recovered.LiveRecordSizes) != nil {
-		return nil, ErrIndexCheckpointUnusable
+		return nil, errIndexCheckpointOptions
 	}
 	recovered.indexReplayed = true
-	pages.r = file.fd
+	chain.stopMetering()
 	*image = recovered
 	return backend, nil
+}
+
+func replayIndexSources(ctx context.Context, recovered *Image, replay *indexSuffixReplay, backend index.Backend, area string) error {
+	if uint64(backend.Count()) != recovered.LiveKeys {
+		return ErrIndexCheckpointUnusable
+	}
+	replay.image = recovered
+	replay.backend = backend
+	defer replay.abort()
+	if err := recovered.scanEntries(ctx, replay.sources, area, replay.apply, nil); err != nil {
+		return err
+	}
+	replay.finish()
+	for id, f := range replay.segments {
+		if recovered.Segments[id] == nil && (f.LiveBytes.Load() != 0 || f.LiveKeys.Load() != 0) {
+			return ErrIndexCheckpointUnusable
+		}
+	}
+	if recovered.LiveKeys != uint64(backend.Count()) {
+		return ErrIndexCheckpointUnusable
+	}
+	return nil
 }
 
 type indexSuffixReplay struct {
@@ -102,7 +113,11 @@ type indexSuffixReplay struct {
 	charge          int
 }
 
-func prepareIndexReplay(image *Image, file *selectedIndexFile) (recovered Image, replay *indexSuffixReplay, result error) {
+func prepareIndexReplay(image *Image, file *selectedIndexFile) (Image, *indexSuffixReplay, error) {
+	return prepareIndexReplayLimit(image, file, maxIndexedReplayBytes)
+}
+
+func prepareIndexReplayLimit(image *Image, file *selectedIndexFile, limit int64) (recovered Image, replay *indexSuffixReplay, result error) {
 	current := image.Catalog
 	covered := current.Index.CoveredSequence
 	if covered > image.Current.LastUserSequence || covered < current.CheckpointCutoffSequence {
@@ -166,7 +181,7 @@ func prepareIndexReplay(image *Image, file *selectedIndexFile) (recovered Image,
 	if err != nil {
 		return recovered, nil, err
 	}
-	left := int64(maxIndexedReplayBytes)
+	left := limit
 	add := func(f format.CatalogEntry) error {
 		if !f.HasPhysicalFile() {
 			return nil
@@ -178,7 +193,7 @@ func prepareIndexReplay(image *Image, file *selectedIndexFile) (recovered Image,
 			return nil
 		}
 		if f.Bytes > left {
-			return ErrIndexCheckpointUnusable
+			return &indexReplayBudgetError{bytes: uint64(limit-left) + uint64(f.Bytes)}
 		}
 		left -= f.Bytes
 		replay.sources = append(replay.sources, f)

@@ -160,8 +160,17 @@ func (s *Store) publishCatalogObject(catalog format.Catalog, entries CatalogEntr
 	}
 	s.catalogChain = append(s.catalogChain, id)
 	s.catalogBytes += uint64(len(b))
-	if old := s.Catalog.Index.ID; old != 0 && old != catalog.Index.ID {
-		s.retireIndex(old)
+	if old := s.Catalog.Index.ID; old != catalog.Index.ID {
+		next := s.pendingIndexAncestors
+		if old != 0 && !next[old] {
+			s.retireIndex(old)
+		}
+		for ancestor := range s.indexAncestors {
+			if !next[ancestor] {
+				s.retireIndex(ancestor)
+			}
+		}
+		s.indexAncestors = next
 	}
 	s.Catalog, s.catalogEntries = catalog, entries
 	return nil

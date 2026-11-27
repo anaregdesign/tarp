@@ -52,15 +52,26 @@ type selectedIndexFile struct {
 	levels      []indexHashLevel
 	header      [indexHeaderBytes]byte
 	packedHead  [btree.PackedHeaderBytes]byte
+	parent      format.IndexCheckpoint
+	tree        btree.OverlayLayout
+	inherited   uint64
 	layout      format.Catalog
 	counts      []indexCheckpointCounts
 }
 
-func (s *Store) openIndexFile(ctx context.Context, c format.Catalog) (_ *selectedIndexFile, result error) {
+func (s *Store) openIndexFile(ctx context.Context, c format.Catalog) (*selectedIndexFile, error) {
+	var observe func(string, int)
+	if s.IO != nil {
+		observe = s.IO.OpenRead
+	}
+	return s.readIndexFile(ctx, c, observe)
+}
+
+func (s *Store) readIndexFile(ctx context.Context, c format.Catalog, observe func(string, int)) (_ *selectedIndexFile, result error) {
 	cp := c.Index
 	fd, err := OpenRegular(filepath.Join(s.Dir, IndexName(c.UUID, cp.ID)))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrIndexCheckpointUnusable
+		return nil, errIndexCheckpointMissing
 	}
 	if err != nil {
 		return nil, err
@@ -78,20 +89,42 @@ func (s *Store) openIndexFile(ctx context.Context, c format.Catalog) (_ *selecte
 		return nil, ErrIndexCheckpointUnusable
 	}
 	file := &selectedIndexFile{fd: fd, r: fd}
-	if s.IO != nil && s.IO.OpenRead != nil {
-		file.r = checkpointReadMeter{fd, s.IO.OpenRead}
+	if observe != nil {
+		file.r = checkpointReadMeter{fd, observe}
 	}
 	if _, err := file.r.ReadAt(file.header[:], 0); err != nil {
 		return nil, indexReadError(err)
 	}
 	h := file.header[:]
 	u64 := binary.LittleEndian.Uint64
-	if string(h[:8]) != indexSignature || [32]byte(h[8:40]) != cp.CoveredLayoutFingerprint ||
+	if [32]byte(h[8:40]) != cp.CoveredLayoutFingerprint ||
 		u64(h[40:48]) != cp.CoveredCatalogEntries || u64(h[120:]) != 0 {
 		return nil, ErrIndexCheckpointUnusable
 	}
+	digest := sha256.New()
+	start := int64(indexHeaderBytes)
+	switch string(h[:8]) {
+	case indexSignature:
+	case indexLayerSignature:
+		var parent [format.IndexCheckpointBytes]byte
+		if _, err := file.r.ReadAt(parent[:], start); err != nil {
+			return nil, indexReadError(err)
+		}
+		file.parent, err = format.DecodeIndexCheckpoint(parent[:])
+		if err != nil || file.parent.ID == 0 || file.parent.ID >= cp.ID ||
+			file.parent.CoveredSequence > cp.CoveredSequence || file.parent.CoveredSequence < c.CheckpointCutoffSequence {
+			return nil, ErrIndexCheckpointUnusable
+		}
+		_, _ = digest.Write(parent[:])
+		start += format.IndexCheckpointBytes
+	default:
+		return nil, ErrIndexCheckpointUnusable
+	}
 	n, layoutSize, packed := cp.CoveredCatalogEntries, u64(h[48:56]), u64(h[56:64])
-	room := uint64(cp.Bytes - indexHeaderBytes)
+	if cp.Bytes < start {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	room := uint64(cp.Bytes - start)
 	// The summary embeds an ordinary base catalog and one count tuple per entry.
 	emptyCatalog := format.CatalogEncodedBytes(0)
 	entryBytes := format.CatalogEncodedBytes(1) - emptyCatalog
@@ -100,20 +133,19 @@ func (s *Store) openIndexFile(ctx context.Context, c format.Catalog) (_ *selecte
 		layoutSize > math.MaxInt || n > math.MaxInt {
 		return nil, ErrIndexCheckpointUnusable
 	}
-	file.packedStart, file.packedSize = indexHeaderBytes+int64(layoutSize+n*indexCountsBytes), int64(packed)
+	file.packedStart, file.packedSize = start+int64(layoutSize+n*indexCountsBytes), int64(packed)
 	var end int64
 	file.levels, end, err = indexHashLayout(file.packedStart, file.packedSize)
 	if err != nil || end != cp.Bytes {
 		return nil, ErrIndexCheckpointUnusable
 	}
 	raw := make([]byte, int(layoutSize))
-	if _, err := file.r.ReadAt(raw, indexHeaderBytes); err != nil {
+	if _, err := file.r.ReadAt(raw, start); err != nil {
 		return nil, indexReadError(err)
 	}
-	digest := sha256.New()
 	_, _ = digest.Write(raw)
 	file.counts = make([]indexCheckpointCounts, int(n))
-	countsReader := bufio.NewReaderSize(io.NewSectionReader(file.r, indexHeaderBytes+int64(layoutSize), int64(n*indexCountsBytes)), 32<<10)
+	countsReader := bufio.NewReaderSize(io.NewSectionReader(file.r, start+int64(layoutSize), int64(n*indexCountsBytes)), 32<<10)
 	var tuple [indexCountsBytes]byte
 	for i := range file.counts {
 		if err := ctx.Err(); err != nil {
@@ -131,6 +163,15 @@ func (s *Store) openIndexFile(ctx context.Context, c format.Catalog) (_ *selecte
 	_, _ = digest.Write(h)
 	_, _ = digest.Write(file.packedHead[:])
 	if [32]byte(digest.Sum(nil)) != cp.IndexFileDigest {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	if file.parent.ID != 0 {
+		file.tree, file.inherited, err = decodeIndexLayer(file.packedHead[:], file.packedSize)
+	} else {
+		file.tree, err = btree.PackedOverlayLayout(file.packedHead[:], file.packedSize)
+	}
+	if err != nil || file.tree.Keys != u64(h[64:72]) ||
+		len(file.levels) == 0 && [32]byte(h[88:120]) != ([32]byte{}) {
 		return nil, ErrIndexCheckpointUnusable
 	}
 	file.layout, err = format.DecodeCatalog(raw)
@@ -168,6 +209,9 @@ func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load 
 			result = errors.Join(result, keys.Close())
 		}
 	}()
+	if file.parent.ID != 0 {
+		return nil, nil, ErrIndexCheckpointUnusable
+	}
 	reader := io.NewSectionReader(file.verifiedPages(), 0, file.packedSize)
 	keys, err = load(ctx, s, reader, file.packedSize, visit)
 	if err != nil {
@@ -215,6 +259,7 @@ type IndexCheckpointBuild struct {
 	stage         string
 	final         string // unselected, protected from cleanup until Release
 	filePublished bool
+	ancestors     map[uint64]bool
 }
 
 func (b *IndexCheckpointBuild) Sources() []CapturedSegment { return b.capture.Segments }
@@ -274,14 +319,7 @@ func (b *IndexCheckpointBuild) Release() error {
 func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, export func(context.Context, index.Backend, io.Writer) error) (result error) {
 	// Isolate recovery counters from live accounting. The capture pins the
 	// original files even if rotations occur during the scan.
-	c := b.capture
-	image := Image{
-		Current: c.Current, Catalog: c.Catalog,
-		Segments: make(map[uint64]*DataSegment, len(c.Segments)), liveCapture: true,
-	}
-	for _, f := range c.Segments {
-		image.Segments[f.Segment.ID] = &DataSegment{ID: f.Segment.ID, Kind: f.Segment.Kind, Path: f.Segment.Path}
-	}
+	image := b.replayImage()
 	if err := b.store.IO.Check("index.scan:before"); err != nil {
 		return err
 	}
@@ -292,9 +330,33 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 		}
 		return &SourceError{Err: err}
 	}
+	return b.writeImage(ctx, image, format.IndexCheckpoint{}, func(pages *indexPageWriter) error {
+		return export(ctx, tree, pages)
+	})
+}
+
+func (b *IndexCheckpointBuild) replayImage() Image {
+	c := b.capture
+	image := Image{
+		Current: c.Current, Catalog: c.Catalog,
+		Segments: make(map[uint64]*DataSegment, len(c.Segments)), liveCapture: true,
+	}
+	for _, f := range c.Segments {
+		image.Segments[f.Segment.ID] = &DataSegment{ID: f.Segment.ID, Kind: f.Segment.Kind, Path: f.Segment.Path}
+	}
+	return image
+}
+
+func (b *IndexCheckpointBuild) writeImage(ctx context.Context, image Image, parent format.IndexCheckpoint, writePages func(*indexPageWriter) error) (result error) {
 	dir, err := b.store.WorkspaceDir()
 	if err != nil {
 		return err
+	}
+	if b.stage != "" {
+		if err := os.Remove(b.stage); err != nil {
+			return err
+		}
+		b.stage = ""
 	}
 	fd, err := os.CreateTemp(dir, "tarp-index-*")
 	if err != nil {
@@ -305,6 +367,15 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 	metadata := sha256.New()
 	writer := &outputWriter{fs: b.store.IO, fd: fd, offset: indexHeaderBytes, hash: metadata, point: "index.write"}
 	out := bufio.NewWriterSize(writer, 32<<10)
+	signature := indexSignature
+	if parent.ID != 0 {
+		signature = indexLayerSignature
+		encoded := format.EncodeIndexCheckpoint(parent)
+		if _, err := out.Write(encoded[:]); err != nil {
+			return err
+		}
+	}
+	c := b.capture
 	layout := c.Catalog
 	layout.Index = format.IndexCheckpoint{}
 	encodedLayout := format.EncodeCatalog(layout)
@@ -314,6 +385,9 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 	put := binary.LittleEndian.PutUint64
 	var raw [indexCountsBytes]byte
 	for _, entry := range c.Catalog.Entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		clear(raw[:])
 		if entry.HasPhysicalFile() {
 			f := image.Segments[entry.ID]
@@ -331,7 +405,7 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 	packedStart := writer.offset
 	writer.hash = nil
 	pages := indexPageWriter{packed: out, fs: b.store.IO, fd: fd, start: packedStart}
-	if err := export(ctx, tree, &pages); err != nil {
+	if err := writePages(&pages); err != nil {
 		return err
 	}
 	if err := pages.finish(); err != nil {
@@ -341,7 +415,7 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 		return err
 	}
 	var header [indexHeaderBytes]byte
-	copy(header[:8], indexSignature)
+	copy(header[:8], signature)
 	copy(header[8:40], b.descriptor.CoveredLayoutFingerprint[:])
 	put(header[40:48], b.descriptor.CoveredCatalogEntries)
 	put(header[48:56], uint64(len(encodedLayout)))
@@ -399,6 +473,8 @@ func (b *IndexCheckpointBuild) Install() error {
 	frontier := s.Current
 	catalog.Index = cp
 	frontier.PublicationGeneration++
+	s.pendingIndexAncestors = b.ancestors
+	defer func() { s.pendingIndexAncestors = nil }()
 	if err := s.publishCatalogMetadata(catalog, frontier, "index."); err != nil {
 		var f *Fault
 		if errors.As(err, &f) && f.Outcome == publication.Unknown {

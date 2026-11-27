@@ -743,7 +743,7 @@ func TestCompactReusePreservesConcurrentDeletesThroughBackupAndReopen(t *testing
 }
 
 func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
-	db := newTestDB(t, testOptions(), nil)
+	db := newTestDBWithHooks(t, testOptions(), nil, parkedMaintenance())
 	for round := 0; round < 6; round++ {
 		for i := 0; i < 4; i++ {
 			mustPut(t, db, fmt.Sprintf("k%d", i), fmt.Sprintf("round-%d-%s", round, strings.Repeat("x", 20)))
@@ -776,7 +776,7 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(db.store.Dir, testOptions())
+	reopened, err := OpenWithHooks(db.store.Dir, testOptions(), nil, parkedMaintenance())
 	if err != nil {
 		t.Fatal(err)
 	}

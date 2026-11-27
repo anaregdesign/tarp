@@ -239,7 +239,14 @@ type packedSeen struct {
 }
 
 func (s *packedSeen) open(p *pager) error {
-	windowCount := int64((p.top-1)/(uint64(len(s.bits))*8)) + 1
+	return s.openCount(p, p.top)
+}
+
+func (s *packedSeen) openCount(p *pager, pages uint64) error {
+	if pages == 0 {
+		return nil
+	}
+	windowCount := int64((pages-1)/(uint64(len(s.bits))*8)) + 1
 	if windowCount == 1 {
 		return nil
 	}
@@ -252,25 +259,31 @@ func (s *packedSeen) open(p *pager) error {
 }
 
 func (s *packedSeen) claim(id uint64) error {
-	offset := int64((id - 1) / 8)
-	windowIndex := offset / int64(len(s.bits))
-	if s.windowIndex != windowIndex {
-		if _, err := s.file.WriteAt(s.bits[:], s.windowIndex*int64(len(s.bits))); err != nil {
-			return err
-		}
-		if _, err := s.file.ReadAt(s.bits[:], windowIndex*int64(len(s.bits))); err != nil {
-			return err
-		}
-		s.windowIndex = windowIndex
+	i, bit, err := s.position(id)
+	if err != nil {
+		return err
 	}
-	i := offset % int64(len(s.bits))
-	bit := byte(1 << ((id - 1) % 8))
 	if s.bits[i]&bit != 0 {
 		return ErrInvalidPacked
 	}
 	s.bits[i] |= bit
 	s.count++
 	return nil
+}
+
+func (s *packedSeen) position(id uint64) (int64, byte, error) {
+	offset := int64((id - 1) / 8)
+	windowIndex := offset / int64(len(s.bits))
+	if s.windowIndex != windowIndex {
+		if _, err := s.file.WriteAt(s.bits[:], s.windowIndex*int64(len(s.bits))); err != nil {
+			return 0, 0, err
+		}
+		if _, err := s.file.ReadAt(s.bits[:], windowIndex*int64(len(s.bits))); err != nil {
+			return 0, 0, err
+		}
+		s.windowIndex = windowIndex
+	}
+	return offset % int64(len(s.bits)), byte(1 << ((id - 1) % 8)), nil
 }
 
 type packedCheck struct {

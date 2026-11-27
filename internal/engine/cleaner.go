@@ -80,7 +80,7 @@ func (db *DB) startCleaner() {
 		w.damageMu.Unlock()
 		db.notifyCleaner()
 	}
-	db.seedCleanerInventory(db.store.CatalogEntries().Len())
+	db.resetCleanerInventory()
 	var start <-chan struct{}
 	if db.hooks != nil {
 		start = db.hooks.CleanerStart
@@ -422,7 +422,7 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		return false, false
 	}
 	db.writer.Lock()
-	if db.health() != nil {
+	if ctx.Err() != nil || db.health() != nil {
 		db.writer.Unlock()
 		return false, false
 	}
@@ -432,12 +432,12 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		w.space.checked = time.Time{}
 	}
 	metadata := db.store.CatalogEditBytes()
-	if metadata < w.editBytes {
+	if metadata < w.editBytes && w.candidates.ready {
 		// A base rollover can make previously rejected candidates affordable.
 		db.resetCleanerInventory()
 	}
 	w.editBytes = metadata
-	inventoryReady := db.seedCleanerInventory(cleanerInventoryWindow)
+	inventoryReady := db.seedCleanerInventory()
 	q := &w.candidates
 	pinGeneration, pressure := w.pinChange.Load(), w.pressure.Load()
 	q.resumePins(pinGeneration, pressure)

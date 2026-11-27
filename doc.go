@@ -69,10 +69,12 @@
 // [ErrDataUnavailable] and the key stays in the index.
 // Allow temporary space for compaction and backups.
 //
-// To reduce index rebuilding on restart, [DB.CheckpointIndex] persists an
-// index checkpoint. The default [Full] validation still checks all committed
-// DATA during Open. [Indexed] checks selected DATA headers and lengths. With
-// B+tree it can reuse authenticated INDEX pages and replay changed DATA within
-// its replay budget. Reads verify covered records.
+// [DB.CheckpointIndex] builds a standalone index checkpoint. [DB.RefreshIndex]
+// updates a usable checkpoint with changed DATA and an INDEX overlay. The
+// default [Full] validation checks all committed DATA during Open. [Indexed]
+// with B+tree can reuse authenticated INDEX pages and replay changed DATA
+// within its budget. Use [DB.IndexCheckpointStatus] to schedule refreshes and
+// [DB.RecoveryInfo] to report the path used at Open. Reads verify covered DATA
+// records.
 // See the repository's durability contract for storage assumptions.
 package tarp

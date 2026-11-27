@@ -20,13 +20,14 @@ const (
 // segment only when its current DATA could qualify for cleaning or repacking.
 // A pass considers a bounded number of candidates before letting writers run.
 type cleanerCandidates struct {
-	files      map[uint64]*cleanerCandidate
-	pending    list.List
-	pinned     list.List
-	seeded     int
-	ready      bool
-	debt       uint64
-	pinnedDebt uint64
+	files       map[uint64]*cleanerCandidate
+	pending     list.List
+	pinned      list.List
+	seeded      int
+	seedThrough int
+	ready       bool
+	debt        uint64
+	pinnedDebt  uint64
 }
 
 type cleanerCandidate struct {
@@ -145,35 +146,32 @@ func (db *DB) cleanerSealed() {
 	}
 }
 
-func (db *DB) seedCleanerInventory(maxEntries int) bool {
+// The worker holds the maintenance slot and writer gate. Rotations may append
+// between passes, and a full layout replacement resets the seed boundary.
+func (db *DB) seedCleanerInventory() bool {
 	q := &db.cleaner.candidates
 	if q.ready {
 		return true
 	}
 	entries := db.store.CatalogEntries()
-	if q.seeded == 0 && maxEntries >= entries.Len() {
-		for entry := range entries.All() {
-			q.track(db.store, entry, q.seeded, db.opts.TargetSegmentBytes)
-			q.seeded++
-		}
-		q.ready = true
-		return true
-	}
-	for end := q.seeded + min(maxEntries, entries.Len()-q.seeded); q.seeded < end; q.seeded++ {
+	through := min(q.seedThrough, entries.Len())
+	for end := q.seeded + min(cleanerInventoryWindow, through-q.seeded); q.seeded < end; q.seeded++ {
 		q.track(db.store, entries.At(q.seeded), q.seeded, db.opts.TargetSegmentBytes)
 	}
-	q.ready = q.seeded == entries.Len()
+	q.ready = q.seeded >= through
 	return q.ready
 }
 
 func (db *DB) resetCleanerInventory() {
-	db.cleaner.candidates = cleanerCandidates{}
+	// Rotations after this cut enter the queue via cleanerSealed. A growing
+	// tail cannot keep the worker from finishing the original inventory.
+	db.cleaner.candidates = cleanerCandidates{seedThrough: db.store.CatalogEntries().Len()}
 }
 
 // Close has drained foreground calls and stopped maintenance. Preserve the
 // numeric status snapshot while dropping file-sized bookkeeping.
 func (db *DB) releaseCleanerCandidates() {
-	db.resetCleanerInventory()
+	db.cleaner.candidates = cleanerCandidates{}
 	db.cleaner.blocked = nil
 	db.cleaner.damageMu.Lock()
 	db.cleaner.damage = nil

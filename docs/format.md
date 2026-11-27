@@ -173,7 +173,7 @@ checkpoint descriptor.
 | ---: | ---: | --- |
 | 48 | 8 | INDEX object ID |
 | 56 | 8 | Exact INDEX length, within signed file-offset range |
-| 64 | 32 | SHA-256 authenticating the INDEX layout, counters, summary and packed tree header |
+| 64 | 32 | SHA-256 authenticating INDEX metadata and its B+tree header |
 | 96 | 8 | Covered user sequence |
 | 104 | 8 | Number of covered catalog entries |
 | 112 | 32 | Covered layout fingerprint |
@@ -274,37 +274,67 @@ when their descriptors close.
 
 ## INDEX file
 
-An INDEX begins with a 128-byte summary.
+Both standalone and layered INDEX files begin with a 128-byte summary.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | `TARPIDX2` |
+| 0 | 8 | `TARPIDX2` for a standalone INDEX, or `TARPIDXL` for an INDEX overlay |
 | 8 | 32 | Covered layout fingerprint |
 | 40 | 8 | Covered catalog entry count |
 | 48 | 8 | Length of the encoded covered catalog base |
-| 56 | 8 | Packed tree length |
+| 56 | 8 | Length of the physical B+tree header and page slots, excluding hashes |
 | 64 | 8 | Live key count |
-| 72 | 8 | Largest live encoded record |
-| 80 | 8 | Largest live value |
+| 72 | 8 | Upper bound on the largest live encoded record |
+| 80 | 8 | Upper bound on the largest live value |
 | 88 | 32 | Root SHA-256 for the page hashes |
 | 120 | 8 | Reserved |
 
-The covered catalog base follows with a cleared INDEX descriptor. Then each
-covered entry has three u64 counts in catalog order for tombstone bytes, live
-keys and live record bytes. The descriptor digest covers the encoded catalog,
-the tuples, the 128-byte summary and the 48-byte packed tree header, in that order.
+An overlay places its parent's 96-byte INDEX descriptor immediately after
+the summary. The covered catalog base follows, with its own INDEX descriptor
+cleared. Then each covered entry has three u64 counts in catalog order for
+tombstone bytes, live keys and live record bytes. The last metadata field is
+the 48-byte B+tree header. The descriptor digest hashes the optional parent
+descriptor, encoded catalog, count tuples, 128-byte summary, and B+tree header
+in that order.
 
-The packed tree's 48-byte header begins with
+The standalone packed tree's 48-byte header begins with
 `TARPBTP1`, followed by the u32 page size (8192), the CRC32C of [16,48),
 and four u64 fields for root page ID, page count, live key count and maximum
 key length. Empty trees have four zero fields. Exactly the declared number of
-8 KiB pages follow, in one-based page ID order. The footer stores SHA-256
-hashes in 4 KiB blocks with up to 128 hashes per block and zero padding in
-unused slots. The first level hashes packed pages. Each subsequent level
-hashes the previous level's blocks, ending with a single block whose hash
-is recorded in the summary. An empty tree has no hash blocks.
+8 KiB pages follow, in one-based page ID order.
 
-`Full` validates the packed pages and tree topology before admitting readers.
-`Indexed` with the B+tree authenticates individual pages as it loads them.
-New private pages use IDs above the immutable base. The immutable file stays
-readable through its open descriptor even if a newer checkpoint retires its name.
+An INDEX overlay has this 48-byte B+tree header. The numeric fields are u64.
+
+| Offset | Bytes | Field |
+| ---: | ---: | --- |
+| 0 | 8 | `TARPBTL1` |
+| 8 | 8 | Highest inherited page ID |
+| 16 | 8 | Root page ID |
+| 24 | 8 | Highest logical page ID |
+| 32 | 8 | Live key count |
+| 40 | 8 | Maximum key length |
+
+The parent's highest logical page ID equals the inherited boundary. The overlay
+stores one 8 KiB slot per page ID strictly above that boundary through the new
+highest logical page ID, in ascending order. Slots unreachable from its tree
+are zero-filled. An empty logical tree has a zero root, count and key length
+and retains its page ID boundary. A chain has one standalone base and at most
+eight overlays, each with at most 32,768 slots (256 MiB of page slots). Parent
+object IDs decrease and parent covered sequences never exceed the child's.
+Each covered catalog shares the same full DATA checkpoint cutoff. Ancestors
+supply inherited pages, while the tip supplies the layout and counts used to
+replay changed DATA.
+
+The footer stores SHA-256 hashes in 4 KiB blocks with up to 128 hashes per
+block and zero padding in unused hash positions. The first level hashes the
+physical page slots. Each subsequent level hashes the previous level's blocks,
+ending with a single block whose hash is recorded in the summary. A file with
+zero physical page slots has no hash blocks and a zero root hash.
+
+Eager standalone INDEX import validates packed pages and tree topology before
+admitting readers. `Indexed` with B+tree authenticates individual pages as it
+loads them. `Full` and IndexMemory replay authoritative DATA for layered
+checkpoints. A valid selected INDEX chain retains its ancestor files through
+publication and cleanup. New private pages use IDs above the highest immutable
+page ID. An open immutable file stays readable through its descriptor after a
+newer checkpoint retires its name.

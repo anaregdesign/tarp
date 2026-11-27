@@ -73,6 +73,40 @@ the selected disk state on the next Open. Each Open reconstructs storage
 gauges, starts with a cold cache and resets all counters. Close retains the
 final numeric snapshot for callers holding that DB handle.
 
+## Recovery report
+
+Both `DB` and `TypedDB` expose `RecoveryInfo()` as an immutable report of the
+last successful Open of that handle. It remains available after Close and can
+be logged once to explain startup time. Ongoing writes and index refreshes
+leave the report unchanged.
+
+| Field | Measures |
+| --- | --- |
+| `Path` | New database, authoritative DATA replay, eager checkpoint import and suffix replay, or fast checkpoint replay using authenticated INDEX pages |
+| `Reason` | Why fast checkpoint replay was skipped or abandoned, including missing or unusable checkpoint metadata, replay budget, option limits, and the chosen validation or index mode |
+| `LastUserSequence`, `CheckpointID`, `CoveredSequence` | The recovered frontier and selected INDEX coverage at Open, even if it rebuilt from DATA |
+| `ChangedDataBytes`, `ChangedDataBytesExact` | Logical committed lengths including headers beyond the INDEX's physical coverage. An inexact value is a lower bound, and an inexact zero means Open could not estimate it |
+| `ReplayBudgetBytes` | The fast replay byte limit at Open. Zero indicates that Open had no fast replay path configured |
+
+### Running checkpoint status
+
+Use `IndexCheckpointStatus(ctx)` on a raw or typed DB for the current changed
+DATA budget. It captures a point-in-time frontier, authenticates the selected
+INDEX tip's metadata outside the writer gate, and compares its covered layout
+with selected DATA lengths. It performs no DATA reads. `LastUserSequence`,
+`CheckpointID`, and `CoveredSequence` identify the captured state.
+`ChangedDataBytes` and `ChangedDataBytesExact` report the coverage estimate,
+including headers, and `ReplayBudgetBytes` gives the fast replay limit.
+`Reason` distinguishes missing or unusable checkpoint metadata from a
+reported change set that exceeds the budget. Absent or unusable metadata
+reports an inexact zero.
+
+Changed DATA includes cleaner replacements even at an unchanged user sequence.
+Use the report to schedule [`RefreshIndex`](../README.md#refreshing-the-index-on-long-running-databases)
+with headroom for normal writes and cleaner replacements. Open still checks
+the required INDEX ancestors, selected DATA, and configured limits before
+choosing fast replay.
+
 ## Collecting from a Go server
 
 This collector exposes two of the fields above. Place it in the server module
