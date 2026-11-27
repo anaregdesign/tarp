@@ -152,8 +152,9 @@ VM qualification workflow, set `value-bytes=64` and enter
 `confirmation=disposable-vm-only`. Both arms open clones of the same closed
 fixture seeded by the baseline. The baseline is the v0.14.0 commit
 `5f21d8c`, pinned in [compact-compare-baseline](../benchmark/testdata/compact-compare-baseline).
-CI checks that both revisions can open the fixture, witness captured DATA
-retention and verify reclamation.
+Both revisions must support the baseline fixture's storage format.
+Regular CI seeds and opens a fixture with the checked-out revision and checks
+captured DATA retention and reclamation.
 
 | `compact-pair` | Revisions and windows |
 | --- | --- |

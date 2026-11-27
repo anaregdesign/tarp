@@ -131,9 +131,9 @@ Its scripts refuse local execution. It does not change ordinary Linux/stable CI.
 The pinned Ubuntu kernel/initramfs boot a small guarded static PID 1 and mount
 the matching Ubuntu root read-only, without systemd, cloud-init or networking.
 This avoids network-wait delays and records the exact minimal guest setup.
-The verdict parser accepts complete raw or cloud-init-framed protocol lines
-and requires both an explicit pass and a subsequent successful exit; shell
-traces, embedded marker text, missing exits and failed exits are not passes.
+The verdict parser reads raw `TARP_` protocol lines and requires an explicit
+pass followed by a successful exit. It ignores shell tracing and marker text
+embedded in other console output.
 
 The optional `controls` mode boots a raw, unmounted 256 MiB data disk behind
 the standard-library NBD test backend. Ordinary block writes live only in its

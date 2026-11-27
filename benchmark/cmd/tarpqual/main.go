@@ -22,7 +22,7 @@ func main() {
 
 func run(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("tarpqual", flag.ContinueOnError)
-	probe := flags.String("verify-probe", "", "verify an immutable raw/cloud-init console log")
+	probe := flags.String("verify-probe", "", "verify an immutable raw guest console log")
 	initrd := flags.String("append-initrd", "", "pinned original Ubuntu initramfs")
 	init := flags.String("init", "", "static disposable-guest PID 1 binary")
 	target := flags.String("output", "", "new output initramfs filename")
