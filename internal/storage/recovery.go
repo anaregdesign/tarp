@@ -237,7 +237,7 @@ type coveredSegment struct {
 
 // loadIndexCheckpoint falls back to DATA replay when the index checkpoint is unusable.
 // Measurements from the import become visible once the complete checkpoint passes validation.
-func (s *Store) loadIndexCheckpoint(ctx context.Context, image *Image, load IndexImporter) (index.Backend, error) {
+func (s *Store) loadIndexCheckpoint(ctx context.Context, image *Image, load IndexImporter, report *RecoveryInfo) (index.Backend, error) {
 	c := image.Catalog
 	cp := c.Index
 	fingerprint, err := c.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
@@ -276,6 +276,7 @@ func (s *Store) loadIndexCheckpoint(ctx context.Context, image *Image, load Inde
 	}
 	keys, deletes, err := s.readIndexCheckpoint(ctx, c, load, visit)
 	if IsIndexCheckpointUnusable(err) {
+		report.noteCheckpointFailure(err)
 		return nil, nil
 	}
 	if err != nil {

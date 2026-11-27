@@ -335,6 +335,34 @@ type IndexCheckpoint struct {
 	CoveredLayoutFingerprint               [sha256.Size]byte
 }
 
+const IndexCheckpointBytes = 96
+
+func EncodeIndexCheckpoint(d IndexCheckpoint) [IndexCheckpointBytes]byte {
+	var b [IndexCheckpointBytes]byte
+	order.PutUint64(b[:8], d.ID)
+	order.PutUint64(b[8:16], uint64(d.Bytes))
+	copy(b[16:48], d.IndexFileDigest[:])
+	order.PutUint64(b[48:56], d.CoveredSequence)
+	order.PutUint64(b[56:64], d.CoveredCatalogEntries)
+	copy(b[64:96], d.CoveredLayoutFingerprint[:])
+	return b
+}
+
+func DecodeIndexCheckpoint(b []byte) (IndexCheckpoint, error) {
+	if len(b) != IndexCheckpointBytes {
+		return IndexCheckpoint{}, bad("index descriptor length")
+	}
+	d := IndexCheckpoint{
+		ID: order.Uint64(b[:8]), Bytes: int64(order.Uint64(b[8:16])),
+		IndexFileDigest: [32]byte(b[16:48]), CoveredSequence: order.Uint64(b[48:56]),
+		CoveredCatalogEntries: order.Uint64(b[56:64]), CoveredLayoutFingerprint: [32]byte(b[64:96]),
+	}
+	if d.Bytes < 0 || d.ID == 0 && d != (IndexCheckpoint{}) {
+		return IndexCheckpoint{}, bad("index descriptor fields")
+	}
+	return d, nil
+}
+
 // Catalog is the layout selected by CURRENT. Entries lists snapshot segments
 // and sealed log intervals. ActiveID identifies the separate active log.
 type Catalog struct {
@@ -399,13 +427,8 @@ func encodeCatalogPayload(c Catalog) []byte {
 	order.PutUint64(p[24:], c.PrunedThroughSequence)
 	order.PutUint64(p[32:], c.ActiveID)
 	order.PutUint64(p[40:], uint64(len(c.Entries)))
-	d := c.Index
-	order.PutUint64(p[48:], d.ID)
-	order.PutUint64(p[56:], uint64(d.Bytes))
-	copy(p[64:96], d.IndexFileDigest[:])
-	order.PutUint64(p[96:], d.CoveredSequence)
-	order.PutUint64(p[104:], d.CoveredCatalogEntries)
-	copy(p[112:144], d.CoveredLayoutFingerprint[:])
+	d := EncodeIndexCheckpoint(c.Index)
+	copy(p[48:144], d[:])
 	for i, f := range c.Entries {
 		putCatalogEntry(p[catalogHeaderBytes+catalogEntryBytes*i:], f)
 	}
@@ -474,11 +497,9 @@ func decodeCatalogPayload(p []byte) (Catalog, error) {
 	if c.ActiveID == 0 || c.CheckpointCutoffSequence > c.PrunedThroughSequence {
 		return c, bad("catalog identity or pruning boundary")
 	}
-	c.Index.ID, c.Index.Bytes = order.Uint64(p[48:]), int64(order.Uint64(p[56:]))
-	copy(c.Index.IndexFileDigest[:], p[64:96])
-	c.Index.CoveredSequence, c.Index.CoveredCatalogEntries = order.Uint64(p[96:]), order.Uint64(p[104:])
-	copy(c.Index.CoveredLayoutFingerprint[:], p[112:144])
-	if c.Index.ID == c.ActiveID || c.Index.Bytes < 0 || c.Index.ID == 0 && c.Index != (IndexCheckpoint{}) {
+	var err error
+	c.Index, err = DecodeIndexCheckpoint(p[48:144])
+	if err != nil || c.Index.ID == c.ActiveID {
 		return c, bad("catalog index descriptor")
 	}
 	c.Entries = make([]CatalogEntry, 0, len(entries)/catalogEntryBytes)

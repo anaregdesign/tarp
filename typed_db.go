@@ -213,6 +213,11 @@ func (db *TypedDB[K, V]) CheckpointIndex(ctx context.Context) error {
 	return db.core.CheckpointIndex(ctx)
 }
 
+// RefreshIndex advances the durable encoded-key index. See [DB.RefreshIndex].
+func (db *TypedDB[K, V]) RefreshIndex(ctx context.Context) error {
+	return db.core.RefreshIndex(ctx)
+}
+
 // ProtectParity seals the active DATA and completes protection for the underlying DB.
 func (db *TypedDB[K, V]) ProtectParity(ctx context.Context) error {
 	return db.core.ProtectParity(ctx)

@@ -16,10 +16,13 @@ func (o Options) fastCheckpointImporter() storage.FastIndexImporter {
 	if o.IndexMode != IndexBTree || o.OpenValidation != Indexed {
 		return nil
 	}
-	return func(ctx context.Context, s *storage.Store, source io.ReaderAt, closer io.Closer, size int64) (index.Backend, error) {
+	return func(ctx context.Context, s *storage.Store, source io.ReaderAt, closer io.Closer, size int64, layer *btree.OverlayLayout) (index.Backend, error) {
 		dir, err := s.WorkspaceDir()
 		if err != nil {
 			return nil, err
+		}
+		if layer != nil {
+			return btree.OpenOverlay(ctx, source, closer, *layer, dir, o.BTreeMemoryBudgetBytes/2)
 		}
 		return btree.OpenPacked(ctx, source, closer, size, dir, o.BTreeMemoryBudgetBytes/2)
 	}
@@ -77,15 +80,23 @@ func (o Options) importCheckpoint(ctx context.Context, s *storage.Store, src io.
 // CheckpointIndex shares the compaction workspace and leaves foreground
 // mutations free to append and rotate while the immutable prefix is packed.
 func (db *DB) CheckpointIndex(ctx context.Context) error {
+	return db.runIndexCheckpoint(ctx, "checkpoint index", false)
+}
+
+func (db *DB) RefreshIndex(ctx context.Context) error {
+	return db.runIndexCheckpoint(ctx, "refresh index", true)
+}
+
+func (db *DB) runIndexCheckpoint(ctx context.Context, op string, incremental bool) error {
 	if err := db.admit(); err != nil {
 		return err
 	}
 	defer db.done()
 	if ctx == nil {
-		return validContextError("checkpoint index")
+		return validContextError(op)
 	}
 	if err := ctx.Err(); err != nil {
-		return operationError("checkpoint index", "context", err)
+		return operationError(op, "context", err)
 	}
 	if !db.manualCheckpoint.CompareAndSwap(false, true) {
 		return ErrBusy
@@ -97,19 +108,18 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 	case <-db.cleaner.gate:
 		defer func() { db.cleaner.gate <- struct{}{} }()
 	case <-ctx.Done():
-		return operationError("checkpoint index", "wait", ctx.Err())
+		return operationError(op, "wait", ctx.Err())
 	}
-	return db.checkpointIndex(ctx, false)
+	return db.checkpointIndex(ctx, op, incremental, incremental)
 }
 
-func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) {
-	const op = "checkpoint index"
+func (db *DB) checkpointIndex(ctx context.Context, op string, incremental, skipCurrent bool) (result error) {
 	db.writer.Lock()
 	if err := errors.Join(ctx.Err(), db.health()); err != nil {
 		db.writer.Unlock()
 		return operationError(op, "capture", err)
 	}
-	if closing && db.store.IndexCheckpointValidated && db.store.CatalogMatchesIndexCheckpoint() {
+	if skipCurrent && db.store.IndexCheckpointValidated && db.store.CatalogMatchesIndexCheckpoint() {
 		db.writer.Unlock()
 		return nil
 	}
@@ -140,17 +150,32 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 	if db.opts.IndexMode == IndexMemory {
 		budget = defaultBTreeMemoryBudgetBytes / 4
 	}
-	tree, err := openIndex(db.store, IndexBTree, budget)
-	if err != nil {
-		return operationError(op, "workspace", err)
+	var tree index.Backend
+	if !incremental {
+		tree, err = openIndex(db.store, IndexBTree, budget)
+		if err != nil {
+			return operationError(op, "workspace", err)
+		}
 	}
 	err = db.store.RetryMaintenance(ctx, work.Sources(), func() error {
-		return errors.Join(work.Write(ctx, tree, btree.ExportPacked), tree.Close())
-	}, func() error {
-		var err error
-		tree, err = openIndex(db.store, IndexBTree, budget)
+		if incremental {
+			err := work.WriteIncremental(ctx, budget)
+			if !storage.IndexRefreshNeedsBase(err) {
+				return err
+			}
+			incremental = false
+		}
+		if tree == nil {
+			var err error
+			tree, err = openIndex(db.store, IndexBTree, budget)
+			if err != nil {
+				return err
+			}
+		}
+		err := errors.Join(work.Write(ctx, tree, btree.ExportPacked), tree.Close())
+		tree = nil
 		return err
-	})
+	}, nil)
 	if err != nil {
 		var source *storage.SourceError
 		if errors.As(err, &source) {

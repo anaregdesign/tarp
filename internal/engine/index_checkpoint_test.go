@@ -146,6 +146,66 @@ func TestCheckpointIndexConcurrentRotationPreservesTail(t *testing.T) {
 	}
 }
 
+func TestRefreshIndexConcurrentRotationPreservesTail(t *testing.T) {
+	staged, resume := make(chan struct{}), make(chan struct{})
+	var arm atomic.Bool
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "index.dirsync:before" && arm.CompareAndSwap(true, false) {
+			close(staged)
+			<-resume
+		}
+		return nil
+	}}
+	db := newTestDBWithHooks(t, Options{MaxRecordBytes: 64, TargetSegmentBytes: 128}, fs, parkedMaintenance())
+	mustPut(t, db, "a", "base")
+	if err := db.CheckpointIndex(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	parent := db.store.Catalog.Index.ID
+	mustPut(t, db, "b", "captured")
+	arm.Store(true)
+	done := make(chan error, 1)
+	go func() { done <- db.RefreshIndex(t.Context()) }()
+	select {
+	case <-staged:
+	case err := <-done:
+		t.Fatalf("refresh finished before staging: %v", err)
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	}
+	defer func() {
+		if resume != nil {
+			close(resume)
+			<-done
+		}
+	}()
+	if err := db.RefreshIndex(t.Context()); !errors.Is(err, ErrBusy) {
+		t.Fatalf("parallel refresh = %v", err)
+	}
+	mustPut(t, db, "a", "tail-a")
+	mustPut(t, db, "b", "tail-b")
+	sealForCleaning(t, db)
+	db.writer.Lock()
+	_, _, err := db.store.Cleanup()
+	db.writer.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	if err := <-done; err != nil {
+		resume = nil
+		t.Fatal(err)
+	}
+	resume = nil
+	reopened := openRefreshFixture(t, db)
+	info := reopened.RecoveryInfo()
+	if info.Path != RecoveryFastCheckpointReplay || info.CheckpointID == parent || info.CoveredSequence != 2 || info.LastUserSequence != 4 {
+		t.Fatalf("recovery: %+v", info)
+	}
+	wantValue(t, reopened, "a", "tail-a")
+	wantValue(t, reopened, "b", "tail-b")
+}
+
 func TestFailedAutomaticIndexCheckpointReleasesLock(t *testing.T) {
 	dir := t.TempDir()
 	opts := Options{IndexMode: IndexBTree}

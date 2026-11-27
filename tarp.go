@@ -254,6 +254,14 @@ func (db *DB) CheckpointIndex(ctx context.Context) error {
 	return (*engine.DB)(db).CheckpointIndex(ctx)
 }
 
+// RefreshIndex advances the durable index to a captured committed frontier.
+// It uses an authenticated checkpoint to replay changed DATA, including cleaner
+// relocations. It builds a complete checkpoint when a usable base is unavailable
+// or an overlay limit is reached. Foreground writes may continue during the build.
+func (db *DB) RefreshIndex(ctx context.Context) error {
+	return (*engine.DB)(db).RefreshIndex(ctx)
+}
+
 // CompactResult reports unlinked bytes and retired DATA bytes
 // still retained by segment pins or live index references at cleanup.
 type CompactResult = engine.CompactResult

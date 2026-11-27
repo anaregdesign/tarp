@@ -142,11 +142,11 @@ An unknown outer signature in an existing `CURRENT` returns
 supported layout, recovery locks the directory and validates the selected `CURRENT`, its
 SHA-256-bound catalog base and edit chain, each selected segment header and length, and all live
 option minima. Full recovery verifies each sealed DATA digest and each committed
-active record. A validated INDEX can supply the covered key history. Indexed
-B+tree recovery authenticates the INDEX summary and checks individual pages on
-access. It reads the committed DATA suffix and replacement DATA segments that
-differ from the covered layout. Both modes start with a cold value cache. Raw
-logs retain dense sequences. Cleaned intervals
+active record. A validated standalone INDEX can supply the covered key history.
+Indexed B+tree recovery authenticates the selected INDEX and any ancestors, and
+checks individual pages on access. It reads the committed DATA suffix and
+replacement DATA segments that differ from the covered layout. Both modes
+start with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
 preserve coverage even when they have zero records. Deletes through the catalog
 pruning boundary may refer to a Put removed by cleaning. All selected physical
 DATA files must exist. See the [replay rules](format.md#catalog-payload).
@@ -244,9 +244,14 @@ larger file as a few tiny ones accumulate. An empty log interval between
 inputs contributes its sequence coverage without counting as a physical file.
 Fewer than four small files, or small files separated by a large one, can remain.
 
-The worker builds its candidate queue in bounded passes on Open and after a
-full checkpoint. Rotation, obsolete records, and pin or damage transitions
-update candidates. It considers bounded groups in the sealed catalog and
+During Open, the cleaner records the length of the selected catalog in
+constant time. After Open starts the worker, each pass seeds at most 128
+catalog entries. Rotation adds new sealed DATA directly, so incoming writes
+can continue without moving the end of the initial inventory. The worker reads
+current live byte counts as it visits each entry and defers queued damage
+notifications until the inventory is complete. A full DATA checkpoint starts
+a new bounded inventory. Pin changes and obsolete records update candidates.
+The worker considers bounded groups in the sealed catalog and
 validates and streams their records, including obsolete ones. Under sustained
 writes it alternates bounded waits with cleaner work. Backup can defer work
 while headroom is healthy. Under space pressure, eligible unpinned inputs
@@ -445,9 +450,11 @@ read is unavailable. `Keys` and `KeysPrefix` can still enumerate the index
 without reading DATA. Individual `Get` calls during that enumeration see the
 version current at each call.
 
-Backup and index checkpoint creation report an error while their captured input
-contains unavailable DATA. A successful recovery checkpoint lets subsequent
-backups use the new, validated layout. Protection of other sealed files continues.
+Backup and `CheckpointIndex` report an error while their captured input contains
+unavailable DATA. `RefreshIndex` validates the changed DATA it replays and uses
+existing authenticated coverage for unchanged DATA. A successful recovery DATA
+checkpoint lets subsequent backups use the new, validated layout. Protection of
+other sealed files continues.
 `Close` reports known unavailable DATA still in the selected layout and releases the directory lock. Writes
 acknowledged during this period retain their ordinary durability contract.
 
@@ -523,17 +530,40 @@ the final result is known. The report uses one range per disjoint damaged area.
 `CheckpointIndex` seals a nonempty active log under the writer gate and pins
 the captured DATA. It shares the maintenance slot with compaction. Foreground
 writes and rotation can proceed while a private B+tree is bulk-built from the
-validated record stream. After syncing the staging file, the publisher renames the INDEX and syncs
-the database directory. Under the gate, it checks the covered catalog prefix against the latest
-catalog. A MANIFEST edit and CURRENT then select it together with the latest
-committed tail. Incremental cleaning retains the descriptor so Indexed B+tree
-Open can recover relocations by validating replacement DATA against the saved
-layout and replaying the committed tail. A full DATA checkpoint clears the
-descriptor. The fast path budgets up to 4 GiB for the committed lengths of
-newly selected and replacement DATA files, including the active prefix.
-It rebuilds from DATA at the same committed frontier for an unusable checkpoint
-or a larger tail. Sealed DATA digests also protect maintenance reads of
-segments opened with Indexed validation.
+validated record stream. The result is a standalone INDEX.
+
+`RefreshIndex` uses the same capture and maintenance slot. With a usable INDEX,
+it opens the authenticated pages in a private B+tree, validates and replays the
+changed selected DATA, and writes an immutable INDEX overlay with the new page
+slots and coverage metadata. Cleaner replacement DATA contributes work even
+when the user sequence stays the same. The refresh falls back to a standalone
+build when the checkpoint cannot be used or incremental work exceeds its
+limits. Those limits include eight overlays and 256 MiB of page slots per
+overlay. Both builds leave normal foreground commit synchronization intact.
+
+After syncing the staging file, the publisher renames the INDEX and syncs the
+database directory. Under the writer gate, it checks the covered catalog prefix
+against the latest catalog. A MANIFEST edit and CURRENT select the INDEX
+together with the latest committed tail. A valid selected overlay retains every
+INDEX it references, and a new standalone checkpoint can retire the previous
+chain.
+Incremental cleaner publications retain the descriptor so Indexed B+tree Open
+can recover relocations against the saved physical layout. A full DATA
+checkpoint clears the descriptor.
+
+The Indexed B+tree fast path admits up to 4 GiB of committed lengths for
+newly selected and replacement DATA files, including the active prefix. It
+rebuilds from authoritative DATA at the same committed frontier for an unusable
+checkpoint or a larger tail. Full and IndexMemory can still import a usable
+standalone checkpoint eagerly. A layered INDEX takes the authoritative replay
+path in those modes. Sealed DATA digests also protect maintenance reads of
+segments opened with Indexed validation. `RecoveryInfo` reports the path and
+reason chosen at Open and the checkpoint's coverage. `IndexCheckpointStatus`
+compares the selected checkpoint's authenticated layout with the running DB's
+captured frontier so an application can schedule refreshes with room for writes
+committed during the build. It reads INDEX metadata outside the writer gate
+and reports unavailable coverage when it cannot use that metadata. See [refresh
+guidance](../README.md#refreshing-the-index-on-long-running-databases).
 
 A failure building the optional index leaves existing acknowledged writes
 committed. A failure during selector rename or directory sync has an unknown
@@ -545,7 +575,7 @@ error. Memory handles checkpoint explicitly.
 ## Runtime index and scratch space
 
 The backend is selected per Open. A B+tree stores pointer-free DATA addresses
-in process-private scratch files or reuse pages from the selected immutable
+in process-private scratch files or reuses pages from the selected immutable
 INDEX with a private writable overlay. The database reserves `.tarp-work/` for
 B+tree pages, replay sort runs, and indexes used by compaction and online
 backup. Compaction also uses this directory when its relocation list spills

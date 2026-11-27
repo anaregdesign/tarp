@@ -143,6 +143,8 @@ type Store struct {
 	retiredData           retiredDataScan
 	retiredCatalogs       map[uint64]struct{}
 	retiredIndexes        map[uint64]struct{}
+	indexAncestors        map[uint64]bool
+	pendingIndexAncestors map[uint64]bool // installed only when its CURRENT publication succeeds
 	buildingIndex         atomic.Uint64
 	retireSyncPending     bool
 	orderedSnapshot       bool // current snapshot prefix is globally key ordered
@@ -153,6 +155,7 @@ type Store struct {
 	// IndexCheckpointValidated records a successful import or publication. A
 	// reusable checkpoint must also match the current catalog and user sequence.
 	IndexCheckpointValidated bool
+	recoveryInfo             RecoveryInfo // initialized once at successful Open
 	// LargestLiveValueBytes is the largest live value at indexed Open.
 	LargestLiveValueBytes int64
 	// ReaderRetainsData reports captured index views that keep a DATA file
@@ -321,16 +324,55 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 	// Until the DATA and limits pass validation, remove only a workspace
 	// created by this Open. An incompatible Open preserves prior remnants.
 	s.cleanWorkspaceOnClose = !listing.hasWorkspace
-	if image != nil && image.Catalog.Index.ID != 0 && load != nil {
-		if cfg.IndexedOpen && len(fast) != 0 && fast[0] != nil {
-			keys, err = s.loadFastIndexCheckpoint(ctx, image, fast[0])
+	report := RecoveryInfo{Path: RecoveryCreated}
+	useFast := cfg.IndexedOpen && len(fast) != 0 && fast[0] != nil
+	if useFast {
+		report.ReplayBudgetBytes = maxIndexedReplayBytes
+	}
+	if image != nil {
+		report.Path = RecoveryFullReplay
+		report.LastUserSequence = image.Current.LastUserSequence
+		checkpoint := image.Catalog.Index
+		report.CheckpointID, report.CoveredSequence = checkpoint.ID, checkpoint.CoveredSequence
+		if checkpoint.ID == 0 {
+			report.Reason = RecoveryNoCheckpoint
 		} else {
-			keys, err = s.loadIndexCheckpoint(ctx, image, load)
+			report.Reason = RecoveryCheckpointUnusable
+			if load != nil {
+				if useFast {
+					keys, err = s.loadFastIndexCheckpoint(ctx, image, fast[0], &report)
+				} else {
+					keys, err = s.loadIndexCheckpoint(ctx, image, load, &report)
+				}
+				if err != nil {
+					return nil, nil, err
+				}
+				s.IndexCheckpointValidated = keys != nil
+				if keys != nil {
+					report.noteCheckpointSuccess(cfg.IndexedOpen, useFast, image)
+				} else if !useFast {
+					// Full validation and the eager map rebuild from DATA for a
+					// layered checkpoint. Retain its authenticated ancestors.
+					chain, chainErr := s.openIndexChain(ctx, image.Catalog)
+					if chainErr == nil {
+						s.indexAncestors = chain.ids(1)
+						if err := chain.Close(); err != nil {
+							return nil, nil, err
+						}
+						if len(s.indexAncestors) != 0 {
+							report.Reason = RecoveryFullValidation
+							if cfg.IndexedOpen {
+								report.Reason = RecoveryEagerIndex
+							}
+						}
+					} else if IsIndexCheckpointUnusable(chainErr) {
+						report.noteCheckpointFailure(chainErr)
+					} else {
+						return nil, nil, chainErr
+					}
+				}
+			}
 		}
-		if err != nil {
-			return nil, nil, err
-		}
-		s.IndexCheckpointValidated = keys != nil
 	}
 	if keys == nil {
 		keys, err = newIndex(s)
@@ -347,6 +389,7 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 			return nil, nil, err
 		}
 	}
+	s.recoveryInfo = report
 	return s, keys, nil
 }
 
@@ -900,7 +943,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 		id := obj.id
 		switch obj.kind {
 		case "INDEX":
-			if id == s.Catalog.Index.ID || id == s.buildingIndex.Load() {
+			if id == s.Catalog.Index.ID || id == s.buildingIndex.Load() || s.indexAncestors[id] {
 				continue
 			}
 		case "MANIFEST":

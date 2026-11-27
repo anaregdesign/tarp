@@ -69,26 +69,34 @@ func (w *indexPageWriter) Write(p []byte) (int, error) {
 		if len(p) != btree.PackedHeaderBytes {
 			return 0, ErrIndexCheckpointUnusable
 		}
-		pages := binary.LittleEndian.Uint64(p[24:32])
-		if pages > uint64((math.MaxInt64-btree.PackedHeaderBytes)/btree.PackedPageBytes) {
-			return 0, ErrIndexCheckpointUnusable
-		}
-		w.size = btree.PackedHeaderBytes + int64(pages)*btree.PackedPageBytes
-		var err error
-		w.levels, w.end, err = indexHashLayout(w.start, w.size)
-		if err != nil {
-			return 0, err
-		}
-		w.buffers = make([]indexHashBuffer, len(w.levels))
-		w.header = append([]byte(nil), p...)
-	} else {
-		if len(p) != btree.PackedPageBytes || int64(len(p)) > w.size-w.written {
-			return 0, ErrIndexCheckpointUnusable
-		}
-		if err := w.add(0, sha256.Sum256(p)); err != nil {
-			return 0, err
-		}
+		return w.writeHeader(p, binary.LittleEndian.Uint64(p[24:32]))
 	}
+	if len(p) != btree.PackedPageBytes || int64(len(p)) > w.size-w.written {
+		return 0, ErrIndexCheckpointUnusable
+	}
+	if err := w.add(0, sha256.Sum256(p)); err != nil {
+		return 0, err
+	}
+	return w.write(p)
+}
+
+func (w *indexPageWriter) writeHeader(p []byte, pages uint64) (int, error) {
+	if len(p) != btree.PackedHeaderBytes || w.header != nil ||
+		pages > uint64((math.MaxInt64-btree.PackedHeaderBytes)/btree.PackedPageBytes) {
+		return 0, ErrIndexCheckpointUnusable
+	}
+	w.size = btree.PackedHeaderBytes + int64(pages)*btree.PackedPageBytes
+	var err error
+	w.levels, w.end, err = indexHashLayout(w.start, w.size)
+	if err != nil {
+		return 0, err
+	}
+	w.buffers = make([]indexHashBuffer, len(w.levels))
+	w.header = append([]byte(nil), p...)
+	return w.write(p)
+}
+
+func (w *indexPageWriter) write(p []byte) (int, error) {
 	n, err := w.packed.Write(p)
 	w.written += int64(n)
 	return n, err

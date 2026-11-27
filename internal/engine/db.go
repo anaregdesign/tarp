@@ -545,7 +545,7 @@ func (db *DB) Close() error {
 	<-db.parity.done
 	var checkpointErr error
 	if db.opts.IndexMode == IndexBTree && db.health() == nil {
-		checkpointErr = db.checkpointIndex(context.Background(), true)
+		checkpointErr = db.checkpointIndex(context.Background(), "checkpoint index", false, true)
 	}
 	var parityErr error
 	if db.health() == nil {
