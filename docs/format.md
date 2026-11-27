@@ -228,7 +228,8 @@ sealed DATA segments, and the active committed DATA prefix. Empty logical interv
 reside entirely in the captured catalog. Its digest in CURRENT binds H and the
 interval metadata to the backup. BACKUP excludes itself and LOCK. Restore
 independently replays the complete image, derives live minima, checks exact
-prefixes, and validates staged bytes.
+prefixes, and validates staged bytes. The restored database is published with
+a fresh, empty LOCK file.
 
 Independent fixed hex vectors for all five codecs and cleaned-interval variants, per-byte bit flips,
 truncations, and decoder fuzzing live in `internal/format/format_test.go`.

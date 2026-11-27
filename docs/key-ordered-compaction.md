@@ -69,6 +69,29 @@ Reusing a segment keeps its previously selected identity and digest. The delta c
 
 The work scales with the **retained suffix records and affected segment bytes**. One update in a 4 MiB segment can cost a whole segment rewrite. Updates scattered across all segments can approach a full checkpoint. Even a sparse publishing call currently needs a flat MANIFEST covering all selected segments, with segment-level bookkeeping and pins that can cost O(number of segments). The zero-change path skips that publication entirely.
 
+### Estimating rewrite work
+
+`db.EstimateKeyOrderCompaction(ctx)` on a raw or typed DB returns the current
+sequence, checkpoint cutoff, known-order state and retained log record bytes.
+Use `RewriteRecordBytesUpperBound` to decide whether to call `Compact` with
+`WithKeyOrder` now or coalesce changes for a later checkpoint. While maintenance
+updates the index to match a newly published layout, the estimate returns
+`ErrBusy`.
+
+The estimate looks at selected file sizes and live record counters, with work
+proportional to the number of catalog entries and zero DATA I/O. It allows for
+copying all live records from snapshot segments with overwritten or deleted
+records. For other snapshot segments, each live suffix key can affect at most
+one previously unchanged range. The bound charges the largest such range per
+key, capped at the total bytes in those segments. It also includes live suffix
+record bytes. Unknown order or known DATA damage uses all live record bytes.
+
+The bound applies to encoded records emitted into new snapshot segments in a
+single healthy attempt at the estimated cut. Reads, DATA headers, repairs,
+retries, PARITY, scratch, INDEX, metadata, cleanup and filesystem write
+amplification are separate costs. Writers and maintenance can change the layout
+after estimation. The estimate does not impose a budget on `Compact`.
+
 ## Adoption and follow-up
 
 In the experimental 16,384-record graph, the key-ordered layout reduced the mean number of distinct 4 KiB DATA file ranges covered by matching records per vertex prefix scan from 70.89 to 9.00. The key-ordered mean was 9.01 after 4,096 overwrites of the first key, and 24.82 after 4,096 distributed overwrites. Before updates, sampled cold prefix scans fell from 296 to 112 KiB in Linux VM process reads and from 2.34 to 0.084 ms in latency. The prototype staged up to 32 MiB and 65,536 records in RAM. [Experiment and sampling details](https://github.com/anaregdesign/tarp/blob/fedad012a6d88170f59741ddd1048bc37d54943b/docs/benchmarks/key-locality-150.md).

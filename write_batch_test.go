@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,6 +41,131 @@ func ExampleDB_Apply() {
 	}
 	fmt.Printf("queued %t, active %s\n", results[0].Found, results[1].Value)
 	// Output: queued false, active running
+}
+
+func TestWriteBatchSizerReservesTrailingRecord(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxRecordBytes: 256, TargetSegmentBytes: 400})
+	plan := db.WriteBatchSizer()
+	if err := plan.Add(1, 119); err != nil {
+		t.Fatal(err)
+	}
+	var batch tarp.WriteBatch
+	batch.Put([]byte("a"), make([]byte, 119))
+
+	trail := plan
+	var limit *tarp.BatchLimitError
+	if err := trail.Add(1, 120); !errors.As(err, &limit) || limit.Kind != tarp.BatchRecordBytesLimit ||
+		limit.Index != 1 || limit.Actual != 337 || limit.Limit != 336 {
+		t.Fatalf("plan one byte over capacity: %v", err)
+	}
+	if err := trail.Add(1, 119); err != nil {
+		t.Fatalf("plan exactly at capacity: %v", err)
+	}
+	if err := plan.Add(1, 119); err != nil {
+		t.Fatalf("preview changed original plan: %v", err)
+	}
+	batch.Put([]byte("b"), make([]byte, 119))
+	if err := db.Apply(&batch); err != nil {
+		t.Fatalf("Apply planned batch: %v", err)
+	}
+}
+
+func TestWriteBatchSizerUsesEffectiveLimits(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{MaxRecordBytes: 128, TargetSegmentBytes: 1})
+	plan := db.WriteBatchSizer()
+	var limit *tarp.BatchLimitError
+	if err := plan.Add(1, 80); !errors.As(err, &limit) || limit.Kind != tarp.BatchEntrySizeLimit || limit.Index != 0 {
+		t.Fatalf("oversized planned entry: %v", err)
+	}
+	if err := plan.Add(1, math.MaxUint64); !errors.As(err, &limit) || limit.Kind != tarp.BatchEntrySizeLimit ||
+		limit.Index != 0 || !limit.Entry.Overflow {
+		t.Fatalf("overflowing planned entry: %v", err)
+	}
+	if err := plan.Add(0, 0); !errors.Is(err, tarp.ErrEmptyKey) {
+		t.Fatalf("empty planned key: %v", err)
+	}
+	if err := plan.Add(1, 79); err != nil {
+		t.Fatalf("normalized segment target: %v", err)
+	}
+	if err := plan.Add(1, 0); !errors.As(err, &limit) || limit.Kind != tarp.BatchRecordBytesLimit ||
+		limit.Index != 1 || limit.Actual != 177 || limit.Limit != 128 {
+		t.Fatalf("normalized segment capacity check: %v", err)
+	}
+
+	smallCache := openPublicDB(t, t.TempDir(), tarp.Options{ValueCacheBudgetBytes: 140, MaxRecordBytes: 128})
+	plan = smallCache.WriteBatchSizer()
+	if err := plan.Add(1, 12); !errors.As(err, &limit) || limit.Kind != tarp.BatchEntrySizeLimit || limit.Entry.ValueCacheChargeBytes != 141 {
+		t.Fatalf("value cache limit: %v", err)
+	}
+	if allocs := testing.AllocsPerRun(10, func() {
+		s := smallCache.WriteBatchSizer()
+		if err := s.Add(1, 11); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs != 0 {
+		t.Fatalf("successful plan allocated %g objects", allocs)
+	}
+
+	defaultDB := openPublicDB(t, t.TempDir(), tarp.Options{})
+	plan = defaultDB.WriteBatchSizer()
+	for range tarp.MaxWriteBatchEntries {
+		if err := plan.Add(1, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := plan.Add(1, 0); !errors.As(err, &limit) || limit.Kind != tarp.BatchInputCountLimit ||
+		limit.Index != -1 || limit.Actual != tarp.MaxWriteBatchEntries+1 || limit.Limit != tarp.MaxWriteBatchEntries {
+		t.Fatalf("planned input count limit: %v", err)
+	}
+}
+
+func TestWriteBatchSizerChargesDuplicatesAndAbsentDeletes(t *testing.T) {
+	for _, scenario := range []string{"duplicate", "absent delete", "live delete"} {
+		t.Run(scenario, func(t *testing.T) {
+			db := openPublicDB(t, t.TempDir(), tarp.Options{MaxRecordBytes: 256, TargetSegmentBytes: 400})
+			plan := db.WriteBatchSizer()
+			var batch tarp.WriteBatch
+			put := func(k string, n int) error {
+				batch.Put([]byte(k), make([]byte, n))
+				return plan.Add(uint64(len(k)), uint64(n))
+			}
+			if scenario == "live delete" {
+				if err := db.Put([]byte("x"), []byte("survives")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var plannedErr error
+			if scenario == "duplicate" {
+				if err := errors.Join(put("a", 180), put("a", 119)); err == nil {
+					t.Fatal("planning did not charge both versions of a")
+				} else {
+					plannedErr = err
+				}
+				batch.Put([]byte("b"), make([]byte, 119))
+			} else {
+				if err := errors.Join(put("a", 119), put("b", 119)); err != nil {
+					t.Fatal(err)
+				}
+				batch.Delete([]byte("x"))
+				plannedErr = plan.Add(1, 0)
+			}
+			var limit *tarp.BatchLimitError
+			if !errors.As(plannedErr, &limit) || limit.Kind != tarp.BatchRecordBytesLimit {
+				t.Fatalf("conservative planning result: %v", plannedErr)
+			}
+			if err := db.Apply(&batch); scenario == "live delete" {
+				if !errors.As(err, &limit) || limit.Kind != tarp.BatchRecordBytesLimit ||
+					limit.Index != 2 || limit.Actual != 385 || limit.Limit != 336 {
+					t.Fatalf("Apply with live Delete: %v", err)
+				}
+				if got, err := db.Get([]byte("x")); string(got) != "survives" || err != nil {
+					t.Fatalf("rejected batch changed live key: %q, %v", got, err)
+				}
+			} else if err != nil {
+				t.Fatalf("Apply conservative overflow: %v", err)
+			}
+		})
+	}
 }
 
 func TestWriteBatchMixedCoalescingAndScratchSafety(t *testing.T) {

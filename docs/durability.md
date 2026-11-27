@@ -289,6 +289,10 @@ and catalog formats.
 Old paths remain until they are unselected, have no index references, and have
 no reader/backup/compaction pins. The compaction releases its own capture pins
 before cleanup; successful unlinks also remove retired registry objects.
+Snapshots and value scans share an immutable DATA set while index membership is
+unchanged. Capturing the first view after a membership change copies the current
+set. Later views reuse it. An idle set does not prevent retirement. A long-lived
+view can retain an older set and keep its DATA files on disk until release.
 After an unlink, a failed directory sync stays pending. The next manual cleanup
 or worker retirement pass retries it, even if there are no more files to remove.
 Retired read descriptors close after their final read-handle lease is released. Pin release performs
@@ -310,9 +314,19 @@ enough free space for concurrent foreground writes.
 Online backup captures metadata bytes and exact committed prefixes at S under
 the writer gate, pins them, and copies outside it. The active file can grow;
 only its captured prefix is copied. Source CRCs are checked on copied bytes and
-each output file is SHA-256 hashed. The unversioned `BACKUP` envelope records advisory
+each output file is SHA-256 hashed. The copy must match the sealed DATA digests
+and the active prefix digest captured from the committed byte stream. The
+unversioned `BACKUP` envelope records advisory
 source settings. Restore rejects an unsupported outer signature before publishing
 a destination. For supported backups it derives live compatibility minima independently.
+
+`BackupWithSnapshot` captures the index view and DATA pins under the same
+writer gate. The callback runs after the staged copy has passed validation and
+before publication, with the writer gate released. It may read keys and ordered
+ranges at S. A callback error discards the stage and releases the view.
+The default B+tree adds a pinned root at capture. An in-memory index copies
+its key-to-address map during capture. In both modes the captured DATA stays
+pinned until the callback has returned and the backup has finished.
 
 Backup/restore use private sibling staging, file syncs, staging-directory sync,
 atomic no-replace directory rename, and parent sync. Linux amd64/arm64 use
@@ -327,8 +341,14 @@ It reports the required record and cache limits. BackupInfo.CheckLimits
 compares those requirements with a target configuration in memory.
 Restore enforces the target limits before staging, then independently validates
 the staged image and its size requirements before publishing a new closed
-database. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
+database with a synced LOCK file. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
 explicitly and does not poison an otherwise healthy source DB.
+
+`InspectKey` takes exclusive ownership of an existing LOCK with a read-only
+file descriptor. It validates committed DATA using bounded replay windows
+under that lock. No checkpoints, repairs or cleanup run, and uncommitted
+active suffix bytes are left in place. An image without a LOCK file cannot
+be inspected through this API.
 
 ## Sealed DATA protection and offline recovery
 
@@ -364,6 +384,11 @@ retrying. This leaves the commit frontier, record addresses and sequences
 unchanged.
 
 `Get` rechecks concurrent changes to the key through its usual read path.
+`GetContext` on a DB or a Snapshot forwards cancellation to the repair path.
+A canceled waiter releases its read resources while the leading caller
+continues the repair. If the leading caller stops before publication, another
+caller can take over. An uncertain DATA replacement still forces close and
+reopen, including when the repair fails while its context is canceled.
 `BatchGet`, `Scan` and `ScanPrefix` keep their original snapshots. A pinned old segment
 can be repaired after compaction while a snapshot still needs its bytes.
 Backup, compaction and index checkpoint creation retry private work against

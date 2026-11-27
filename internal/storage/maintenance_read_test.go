@@ -19,6 +19,7 @@ func TestMaintenanceRetryRequiresOneLocalizedFailure(t *testing.T) {
 		selectedReadFailure(0, ErrCorrupt),
 		&destinationError{syscall.EIO},
 		&IndexWorkError{Err: syscall.EIO},
+		errors.Join(&BackupInspectionError{Err: fmt.Errorf("nested operation: %w", read)}),
 		errors.Join(read, syscall.EACCES),
 		fmt.Errorf("cleanup: %w", errors.Join(read, context.DeadlineExceeded)),
 	} {

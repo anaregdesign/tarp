@@ -40,6 +40,7 @@ func TestProcessCrashRecoveryMatrix(t *testing.T) {
 		{"backup", "backup.manifest.sync:after", 1}, {"backup", "backup.rename:after", 1},
 		{"backup", "backup.parent.sync:after", 1},
 		{"restore", "restore.copy:after", 1}, {"restore", "restore.file.sync:after", 1},
+		{"restore", "restore.lock.sync:after", 1},
 		{"restore", "restore.stage.sync:after", 1}, {"restore", "restore.rename:after", 1},
 		{"restore", "restore.parent.sync:after", 1},
 	}
@@ -102,17 +103,13 @@ func TestProcessCrashRecoveryMatrix(t *testing.T) {
 				}
 			}
 			if tc.mode == "restore" {
-				if _, err := os.Stat(filepath.Join(parent, "output")); err == nil {
-					got, err := Open(filepath.Join(parent, "output"), testOptions())
-					if err != nil {
-						t.Fatal(err)
+				path := filepath.Join(parent, "output")
+				if tc.point == "restore.rename:after" || tc.point == "restore.parent.sync:after" {
+					if value, err := InspectKey(t.Context(), path, []byte("k")); string(value) != "old" || err != nil {
+						t.Fatalf("published restore could not be inspected: %q, %v", value, err)
 					}
-					wantValue(t, got, "k", "old")
-					if err := got.Close(); err != nil {
-						t.Fatal(err)
-					}
-				} else if !errors.Is(err, os.ErrNotExist) {
-					t.Fatal(err)
+				} else if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("restore published before rename: %v", err)
 				}
 			}
 		})

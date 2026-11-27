@@ -98,7 +98,14 @@ func cleanStage(fs *IO, stage, point string) error {
 	return fs.Do(point+".cleanup", func() error { return os.RemoveAll(stage) })
 }
 
-func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error, newIndex func() (index.Backend, error)) (returned error) {
+// BackupInspectionError keeps callback errors out of repair and retry of the
+// staged copy, even if the callback reports a DATA error of its own.
+type BackupInspectionError struct{ Err error }
+
+func (e *BackupInspectionError) Error() string { return e.Err.Error() }
+func (e *BackupInspectionError) Unwrap() error { return e.Err }
+
+func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destination string, yield func() error, newIndex func() (index.Backend, error), beforePublish func() error) (returned error) {
 	target, err := destinationPath(filepath.Dir(capture.Segments[0].Segment.Path), destination)
 	if err != nil {
 		return err
@@ -160,6 +167,17 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 	backend = nil
 	if err != nil {
 		return &IndexWorkError{Err: err}
+	}
+	if beforePublish != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := beforePublish(); err != nil {
+			return &BackupInspectionError{Err: err}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 	if err := fs.NewFile(filepath.Join(stage, "BACKUP"), format.EncodeBackup(meta), "backup.manifest"); err != nil {
 		return err
@@ -254,7 +272,13 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedSegment
 	if err := span.Finish(); err != nil {
 		return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: fmt.Errorf("%s: %w", name, err)})
 	}
-	if captured.Segment.ID != capture.Current.ActiveID {
+	var digest [sha256.Size]byte
+	h.Sum(digest[:0])
+	if captured.Segment.ID == capture.Current.ActiveID {
+		if digest != capture.activeDigest {
+			return entry, selectedReadFailure(captured.Entry.ID, fmt.Errorf("%s: %w: active DATA digest", name, ErrCorrupt))
+		}
+	} else {
 		if err := checkSealedDigest(h, captured.Entry); err != nil {
 			return entry, selectedReadFailure(captured.Entry.ID, err)
 		}
@@ -262,12 +286,11 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedSegment
 	if err := fs.Sync(dst, "backup.file.sync"); err != nil {
 		return entry, err
 	}
-	entry = format.BackupFile{Name: name, Bytes: captured.Entry.Bytes}
-	copy(entry.Digest[:], h.Sum(nil))
+	entry = format.BackupFile{Name: name, Bytes: captured.Entry.Bytes, Digest: digest}
 	return entry, nil
 }
 
-func backupSourcePath(ctx context.Context, source string) (string, error) {
+func existingDirectoryPath(ctx context.Context, source string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -280,7 +303,7 @@ func backupSourcePath(ctx context.Context, source string) (string, error) {
 
 // Restore verifies the source and staged copy using independent replay state.
 func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO) (returned error) {
-	source, err := backupSourcePath(ctx, source)
+	source, err := existingDirectoryPath(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -329,6 +352,12 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err := cfg.CheckLimits(image.LiveRecordSizes); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := fs.NewFile(filepath.Join(stage, "LOCK"), nil, "restore.lock"); err != nil {
+		return fault("restore.lock", publication.NotApplied, false, err)
+	}
 	err = publishDirectory(ctx, fs, stage, target, "restore")
 	published = err == nil
 	return err
@@ -350,7 +379,7 @@ type verifiedBackup struct {
 
 // VerifyBackup checks an immutable backup without creating a destination or acquiring a lock.
 func VerifyBackup(ctx context.Context, dir string) (BackupInfo, error) {
-	source, err := backupSourcePath(ctx, dir)
+	source, err := existingDirectoryPath(ctx, dir)
 	if err != nil {
 		return BackupInfo{}, err
 	}
@@ -364,14 +393,14 @@ func VerifyBackup(ctx context.Context, dir string) (BackupInfo, error) {
 // VerifyBackupWithScratch places its temporary sort runs in an existing
 // caller-selected directory outside the immutable backup.
 func VerifyBackupWithScratch(ctx context.Context, dir, scratch string) (BackupInfo, error) {
-	source, err := backupSourcePath(ctx, dir)
+	source, err := existingDirectoryPath(ctx, dir)
 	if err != nil {
 		return BackupInfo{}, err
 	}
 	if scratch == "" {
 		return BackupInfo{}, fmt.Errorf("storage: empty verification scratch directory: %w", os.ErrInvalid)
 	}
-	scratch, err = backupSourcePath(ctx, scratch)
+	scratch, err = existingDirectoryPath(ctx, scratch)
 	if err != nil {
 		return BackupInfo{}, err
 	}

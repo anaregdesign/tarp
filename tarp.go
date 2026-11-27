@@ -91,6 +91,7 @@ func OpenContext(ctx context.Context, dir string, opts Options) (*DB, error) {
 
 // OpenExisting reopens an initialized database with cancellable recovery.
 // An absent or empty directory returns an error matching fs.ErrNotExist.
+// An initialized database must have its original LOCK file.
 // It accepts a database just published by [Restore]. Opening the source backup
 // returns an error matching [ErrBackupDirectory].
 func OpenExisting(ctx context.Context, dir string, opts Options) (*DB, error) {
@@ -102,6 +103,14 @@ func OpenExisting(ctx context.Context, dir string, opts Options) (*DB, error) {
 // If its sealed DATA cannot supply the value, Get may return [ErrDataUnavailable].
 func (db *DB) Get(key []byte) ([]byte, error) {
 	return (*engine.DB)(db).Get(key)
+}
+
+// GetContext reads an independently owned value like [DB.Get]. A context
+// canceled before lookup returns its error. Cancellation can also interrupt
+// DATA repair or a wait for another caller's repair. An in-progress filesystem
+// call may finish before GetContext returns.
+func (db *DB) GetContext(ctx context.Context, key []byte) ([]byte, error) {
+	return (*engine.DB)(db).GetContext(ctx, key)
 }
 
 // Entry pairs a key and value for BatchPut and Scan. Both slices belong to the caller.

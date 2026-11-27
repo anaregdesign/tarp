@@ -1771,8 +1771,16 @@ func TestCompactByKeyReusesUncheckedNeighborAndRecoversAfterFailedRead(t *testin
 	if err != nil || testLoc(t, db, "a") != bad || testLoc(t, db, "m") != good {
 		t.Fatalf("delta discarded or relocated an untouched version: %+v, %v", result, err)
 	}
+	estimate, err := db.EstimateKeyOrderCompaction(t.Context())
+	if err != nil || estimate.RewriteRecordBytesUpperBound != 0 {
+		t.Fatalf("estimate at unchanged cutoff before damage detection = %+v, %v", estimate, err)
+	}
 	if _, err := db.Get([]byte("a")); !errors.Is(err, ErrDataUnavailable) {
 		t.Fatalf("read of damaged neighbor = %v", err)
+	}
+	estimate, err = db.EstimateKeyOrderCompaction(t.Context())
+	if err != nil || !estimate.OrderedBase || estimate.RewriteRecordBytesUpperBound != db.Stats().LiveRecordBytes {
+		t.Fatalf("estimate at unchanged cutoff with known damage = %+v, %v", estimate, err)
 	}
 	before := db.store.Current
 	result, err = db.CompactByKey(t.Context())

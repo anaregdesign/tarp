@@ -87,14 +87,24 @@ func validateWindows(ctx context.Context, dir string, limit int64, spill imageVe
 	if err != nil {
 		return nil, err
 	}
+	return image.validateWindows(ctx, dir, limit, spill, nil)
+}
+
+// firstPass observes validated records in replay order without retaining
+// additional key history in each window.
+func (image *Image) validateWindows(ctx context.Context, dir string, limit int64, spill imageVerifier, firstPass func(*DataSegment, int64, format.RecordHeader, string)) (*Image, error) {
 	after := ""
 	for {
 		w := newKeyWindow(after, limit)
-		if err := image.scan(ctx, func(f *DataSegment, _ int64, r format.RecordHeader, key string) error {
+		if err := image.scan(ctx, func(f *DataSegment, off int64, r format.RecordHeader, key string) error {
+			if firstPass != nil {
+				firstPass(f, off, r, key)
+			}
 			return w.apply(f.Kind, image.Catalog.PrunedThroughSequence, r, key)
 		}); err != nil {
 			return nil, err
 		}
+		firstPass = nil
 		if w.more && spill != nil {
 			return spill(ctx, dir)
 		}

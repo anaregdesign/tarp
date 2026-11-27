@@ -59,61 +59,14 @@ Run the example. It prints `value` and closes the database.
 go run .
 ```
 
-## Storage and compatibility
+## Storage format
 
 The [storage terminology guide](docs/terminology.md) defines DATA segments,
 B+tree pages, parity stripes and the units used by APIs and metrics.
 
 During v0, each revision supports its current Go API, database format and
-backup format. Any of these can change between releases. To carry data across
-a format change, export the live keys and values with the version that wrote
-them, import them into a fresh database, and verify the result before switching.
-
-v0.15.0 keeps the v0.14.0 database and backup formats. Compaction now refuses
-to publish a checkpoint that would drop a live key. Handle `ErrDataUnavailable`
-from `Compact` or `AutoCompactionStatus().LastError` in place of the removed
-`DroppedKeys` counters. Keys already discarded by an older release require
-recovery from an independent copy. In callers that use batch limits, replace
-`MaxBatchEntries` with `MaxBatchGetEntries` or `MaxWriteBatchEntries`.
-
-`IndexMode` now has two values, `IndexBTree` (zero)
-and `IndexMemory`. Omit `Options.IndexMode` or set it to `IndexBTree` wherever
-your code previously used `IndexDefault`. If your application stores the
-numeric mode in its own configuration, change the former B+tree value 2 to 0.
-
-`Bind` and `TypedDB.View` now return a `View[K,V]` value. Use that value
-type for borrowed handle parameters and fields. Check the error returned by
-`Bind` before using the view.
-
-v0.14.0 keeps the v0.13.0 database and backup formats. Existing calls to
-`db.Compact(ctx)` keep their source-order checkpoint behavior. Both `DB` and
-`TypedDB` now accept `...tarp.CompactOption`. If an interface declares
-`Compact(context.Context) (tarp.CompactResult, error)`, update it and its
-implementations to accept the variadic options. A callback with the old function
-signature can wrap the method as `func(ctx context.Context) (tarp.CompactResult, error) { return db.Compact(ctx) }`.
-
-v0.13.0 keeps the v0.12.0 database and backup formats. Update Go callers and
-consumers of batch-limit diagnostics when upgrading from v0.12.0.
-
-| v0.12.0 | v0.13.0 |
-| --- | --- |
-| `RepairParity` | `RepairDataFromParity` |
-| `BackupInfo.Sequence` | `BackupInfo.LastUserSequence` |
-| `BackupInfo.RequiredLimits.ValueCacheBudgetBytes` | `BackupInfo.LargestLiveCacheChargeBytes` |
-| `BackupInfo.RequiredLimits.MaxRecordBytes` | `BackupInfo.LargestLiveRecordBytes` |
-| `CompatibilityError.RequiredRecordBytes` | `CompatibilityError.RequiredMaxRecordBytes` |
-| `DataRange` and `SalvageReport.Unrecoverable` | `DataByteRange` and `SalvageReport.UnrecoverableByteRanges` |
-| `BatchPayloadLimit` (`payload-bytes`) | `BatchRecordBytesLimit` (`encoded-record-bytes`) |
-| `BatchGetValueBytesLimit` (`result-bytes`) | `BatchGetValueBytesLimit` (`result-value-bytes`) |
-
-v0.12.0 can open v0.11.0 databases and restore v0.11.0 backups directly.
-`Options{}` now selects the disk-backed B+tree. Allow space on the database
-volume for B+tree pages and index checkpoints, or set `IndexMode: tarp.IndexMemory`
-to keep using the previous in-memory default. See [Choosing the key index](#choosing-the-key-index).
-
-v0.11.0 changes the BACKUP header. You can open a v0.10.0 database directly
-with v0.11.0 and create a new backup. If you have only a v0.10.0 backup,
-restore it with v0.10.0 first, then open the restored database with v0.11.0.
+backup format. These can change between releases. See the
+[storage format specification](docs/format.md) for the current layout.
 
 The parent directory must exist. One process exclusively owns a directory, while
 its `DB` supports concurrent goroutines without caller locks. Individual key operations are linearizable. Each batch call operates on its
@@ -439,10 +392,37 @@ puts and deletes of live keys count toward the segment capacity
 (`BatchRecordBytesLimit`). A nil, empty, or fully elided batch checks database
 health and returns `nil` without writing DATA or advancing `WriteCommits`.
 
+Use `db.WriteBatchSizer()` to plan a chunk before adding inputs to the batch
+arena. `Add` takes encoded key and value lengths. For a Delete, pass zero
+value bytes. The sizer takes constant space and charges every proposed record
+against the DB's effective limits. A successful plan covers the size and
+count checks. An aggregate byte-limit error can be conservative because
+`Apply` folds duplicates and elides absent Deletes at commit time.
+
+For a chunk that must end with a known marker, keep the accepted plan beside
+the batch and check the marker using a copy of the proposed plan:
+
+```go
+next := plan // plan was initialized with db.WriteBatchSizer()
+if err := next.Add(uint64(len(key)), uint64(len(value))); err != nil {
+	return err
+}
+withMarker := next
+if err := withMarker.Add(uint64(len(markerKey)), uint64(len(markerValue))); err != nil {
+	return err
+}
+batch.Put(key, value)
+plan = next
+```
+
+If the candidate and marker exceed a nonempty chunk's capacity, finalize that
+chunk, start a new plan and check both sizes again before copying the candidate.
+Use `Apply` to publish each chunk with its actual marker.
+
 ## Consistent read snapshots
 
 Call `db.Snapshot()` on a `DB`, `TypedDB`, or `View` to capture a consistent
-point-in-time read view across multiple operations (`Sequence()`, `Get`,
+point-in-time read view across multiple operations (`Sequence()`, `Get`, `GetContext`,
 `BatchGet`, `Scan`, `ScanPrefix`, `ScanRange`, `Keys`, `KeysPrefix`, `KeysRange`):
 
 ```go
@@ -462,6 +442,11 @@ releases its DATA segment pins once it is closed and its last in-flight
 operation or iterator exits. Closing the owning DB also ends read access
 through the snapshot. After a later write publishes, reads through the
 older snapshot bypass the live value cache.
+
+Use `GetContext` on a DB or snapshot, including the typed APIs, for a point
+read with a request deadline. A canceled caller can leave a shared sealed DATA
+repair in progress. Filesystem calls already in progress can finish before the
+point read returns.
 
 ## Contract
 
@@ -621,6 +606,15 @@ return tarp.Restore(ctx, tarp.RestoreRequest{
 Configure handles, batch read concurrency
 and the segment target when opening the restored DB.
 
+When an application needs to read its manifest or hash an ordered range from
+the exact backup cut, use `db.BackupWithSnapshot(ctx, backupDir, inspect)`.
+The callback receives the captured Snapshot after the copy is validated and
+before the destination is published. Writes can proceed during both phases.
+The callback can use `GetContext`, `ScanRange` and `Sequence` to build an
+application witness. A callback error discards the staged image. Tarp closes
+the borrowed Snapshot and releases its pins when the backup finishes. Publish
+the application witness only after the backup succeeds.
+
 To inspect an immutable backup, use the metadata returned by its verification.
 
 ```go
@@ -662,6 +656,15 @@ error alone permits continued use of the source DB. If a backup encounters
 correctable damage in protected sealed DATA, it repairs the source and retries
 from the same point in time. If sealed DATA is confirmed unavailable, the backup
 fails before publication and the open DB can keep serving other requests.
+
+Use `tarp.InspectKey(ctx, dbDir, key)` to verify an application marker in a
+stopped database before requesting offline maintenance. It takes exclusive
+ownership through the existing LOCK, validates the committed DATA and reads
+the selected value without creating or changing files. Only a validated
+absence returns `ErrNotFound`. A live owner returns `ErrLocked`. If the
+directory has no LOCK, inspection returns an error matching `fs.ErrNotExist`.
+`Restore` publishes a LOCK file with the restored DATA, so the result can
+be inspected before the first `OpenExisting`.
 
 `Backup` captures a
 consistent committed point in time and copies outside the writer gate while

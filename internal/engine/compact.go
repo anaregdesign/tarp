@@ -265,6 +265,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 	maxBatch := storage.RelocationBatchCount
 	err = checkpoint.Install()
 	if err == nil {
+		db.layoutRemapping = true
 		db.resetParity()
 		db.replaceDataStats(oldData, newData)
 		if resident, ok := db.keys.(index.ResidentRelocator); ok && db.opts.IndexMode == IndexMemory {
@@ -283,6 +284,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 	db.writer.Lock()
 	defer db.writer.Unlock()
 	db.memoryRemap = nil
+	db.layoutRemapping = false
 	if err := db.health(); err != nil {
 		return result, &OpError{Operation: "compact", Phase: "post-publication", Outcome: Committed, Err: err}
 	}

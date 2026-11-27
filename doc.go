@@ -23,6 +23,8 @@
 // # Reading consistent data
 //
 // For one key, use [DB.Get] and check for [ErrNotFound] with [errors.Is].
+// Use [DB.GetContext] or [Snapshot.GetContext] when a point read should
+// observe the caller's cancellation while waiting for DATA repair.
 // For a known list of keys, [DB.BatchGet] returns one result per input at one
 // point in time. Check each result's Found field. For a report that combines
 // several lookups or scans while writes continue, capture one [DB.Snapshot],
@@ -42,6 +44,8 @@
 // of keys atomically and fails if any key is missing. To publish a result and
 // remove its pending job in one commit, queue both operations in a [WriteBatch]
 // and call [DB.Apply]. A delete in this batch succeeds even if the key is absent.
+// [DB.WriteBatchSizer] plans an upper bound from encoded lengths before copying
+// inputs to a batch.
 //
 // If a write fails, use [errors.As] to inspect the [OpError] when present.
 // An [Unknown] database commit requires closing the handle, reopening the
@@ -50,9 +54,12 @@
 // # Backup and maintenance
 //
 // Use [DB.Backup] to capture a consistent copy while an application keeps
-// writing. [VerifyBackup] checks the backup and reports its size requirements.
+// writing. [DB.BackupWithSnapshot] provides a read view of the exact backup cut.
+// [VerifyBackup] checks the backup and reports its size requirements.
 // [Restore] publishes a new, closed database at a fresh destination. During
 // v0 each revision reads and writes its current database and backup formats.
+// [InspectKey] reads a committed value from a stopped database without changing
+// its files.
 //
 // Open starts an incremental compaction worker. [DB.Stats] reports storage
 // and cache activity, and [DB.AutoCompactionStatus] reports the worker's

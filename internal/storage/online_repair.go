@@ -106,7 +106,7 @@ func (s *Store) RepairRead(ctx context.Context, f *DataSegment, cause error) err
 	if cause == nil {
 		return errors.New("storage: read repair requires a source failure")
 	}
-	if f == nil || f.pins.Load() <= 0 || !repairableRead(cause) {
+	if f == nil || (f.pins.Load() <= 0 && !s.readerRetainsData(f)) || !repairableRead(cause) {
 		return cause
 	}
 	r := f.sealed.Load()

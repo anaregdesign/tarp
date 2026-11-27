@@ -109,12 +109,14 @@ func (db *DB) stage(tx index.Tx, kind uint8, key string, next storage.Location) 
 func (db *DB) dropLocation(segment *storage.DataSegment) {
 	if segment.LiveKeys.Add(-1) == 0 {
 		delete(db.segments, segment.ID)
+		db.readSegments.invalidate()
 	}
 }
 
 func (db *DB) addLocation(segment *storage.DataSegment) {
 	if segment.LiveKeys.Add(1) == 1 {
 		db.segments[segment.ID] = segment
+		db.readSegments.invalidate()
 	}
 }
 

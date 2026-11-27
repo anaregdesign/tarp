@@ -31,7 +31,7 @@ func TestRestoreRejectsStagedBytesThatDifferFromBackup(t *testing.T) {
 	}
 	defer capture.Release()
 	backup := filepath.Join(t.TempDir(), "backup")
-	if err := Backup(t.Context(), capture, cfg, nil, backup, nil, newBackupTestIndex); err != nil {
+	if err := Backup(t.Context(), capture, cfg, nil, backup, nil, newBackupTestIndex, nil); err != nil {
 		t.Fatal(err)
 	}
 	active := DataName(capture.Current.UUID, capture.Current.ActiveID)
@@ -189,7 +189,7 @@ func TestRestoreVerifiesSealedDigestEvenWhenBackupFileListMatches(t *testing.T) 
 	}
 	defer c.Release()
 	dir := filepath.Join(t.TempDir(), "backup")
-	if err := Backup(t.Context(), c, cfg, store.IO, dir, nil, newBackupTestIndex); err != nil {
+	if err := Backup(t.Context(), c, cfg, store.IO, dir, nil, newBackupTestIndex, nil); err != nil {
 		t.Fatal(err)
 	}
 	listPath := filepath.Join(dir, "BACKUP")

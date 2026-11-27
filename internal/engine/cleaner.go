@@ -172,7 +172,7 @@ func selectCleaningInputs(s *storage.Store, target int64) (inputs []format.Catal
 		work := bytes + output
 		work += min(protectedStage, math.MaxUint64-work)
 		var gain uint64
-		if !f.HasRetentionPin() {
+		if !s.HasDataRetentionPin(f) {
 			unlinkable := bytes
 			if f.ParityReady() {
 				unlinkable += format.ParitySidecarBytes(bytes)

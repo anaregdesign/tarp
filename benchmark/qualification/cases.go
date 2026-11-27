@@ -72,7 +72,7 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	pair("snapshots", "backup", 2, "backup.copy")
 	pair("snapshots", "backup", 3, "backup.copy")
 	add("snapshots", "backup", "operation.ack:after", 1)
-	pair("snapshots", "restore", 1, "restore.copy", "restore.file.sync", "restore.stage.sync", "restore.rename", "restore.parent.sync")
+	pair("snapshots", "restore", 1, "restore.copy", "restore.file.sync", "restore.lock.sync", "restore.stage.sync", "restore.rename", "restore.parent.sync")
 	add("snapshots", "restore", "operation.ack:after", 1)
 	pair("recovery", "recover", 1, "recover.truncate", "recover.sync")
 	pair("recovery", "overlap", 1, "compact.write", "compact.sync", "cleanup.unlink", "backup.parent.sync")
