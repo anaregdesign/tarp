@@ -42,6 +42,7 @@ func WriteMixedStore(t testing.TB, prune uint64) string {
 	}
 	active := segment(4, format.RawLogKind, 9, 9, format.EncodeRecord(format.Put, 9, []byte("tail"), []byte("new")))
 	manifest := format.EncodeCatalog(catalog)
+	write("LOCK", nil)
 	write(storage.ManifestName(uuid, 5), manifest)
 	write("CURRENT", format.EncodeFrontier(format.Frontier{
 		UUID: uuid, PublicationGeneration: 13, ManifestID: 5, ManifestDigest: sha256.Sum256(manifest),
