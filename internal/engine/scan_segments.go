@@ -63,13 +63,17 @@ func (db *DB) unpinScanSegments(set *scanSegmentSet) {
 	sets := &db.readSegments
 	sets.mu.Lock()
 	set.refs--
-	releasedOlder := set.refs == 0 && set != sets.current
+	last := set.refs == 0
+	releasedOlder := last && set != sets.current
 	if releasedOlder {
 		delete(sets.older, set)
 	}
 	sets.mu.Unlock()
-	if releasedOlder {
-		db.notifyCleaner()
+	if last {
+		db.cleaner.pinChange.Add(1)
+		if releasedOlder || db.cleaner.pinned.Load() {
+			db.notifyCleaner()
+		}
 	}
 }
 

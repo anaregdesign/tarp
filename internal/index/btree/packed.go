@@ -19,6 +19,9 @@ var ErrInvalidPacked = errors.New("btree: invalid packed index")
 
 const packedHeaderBytes = 48
 
+// Packed images use fixed page offsets after the file header.
+const PackedHeaderBytes, PackedPageBytes = packedHeaderBytes, pageSize
+
 type packedHeader struct {
 	root, pages, keys, maxKey uint64
 }
@@ -108,6 +111,58 @@ func readPacked(r io.Reader, b []byte) error {
 		return ErrInvalidPacked
 	}
 	return err
+}
+
+// OpenPacked uses a verified immutable page source directly and writes mutable
+// pages into a private overlay. The source must authenticate every page read
+// against the same checkpoint as its header. Ownership transfers on success.
+func OpenPacked(ctx context.Context, source io.ReaderAt, closer io.Closer, size int64, dir string, budget int64) (_ index.Backend, result error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if size < packedHeaderBytes {
+		return nil, ErrInvalidPacked
+	}
+	var b [packedHeaderBytes]byte
+	if err := readPacked(io.NewSectionReader(source, 0, packedHeaderBytes), b[:]); err != nil {
+		return nil, err
+	}
+	h, err := decodePackedHeader(b[:], size)
+	if err != nil {
+		return nil, err
+	}
+	backend, err := NewIn(dir, budget)
+	if err != nil {
+		return nil, err
+	}
+	t := backend.(*tree)
+	defer func() {
+		if result != nil {
+			result = errors.Join(result, t.Close())
+		}
+	}()
+	t.p.base = io.NewSectionReader(source, packedHeaderBytes, size-packedHeaderBytes)
+	t.p.top, t.p.basePages = h.pages, h.pages
+	t.p.maxKey.Store(h.maxKey)
+	t.root, t.count, t.packed = h.root, int(h.keys), h
+	t.p.root.Store(h.root)
+	if h.root != 0 {
+		p, err := t.p.read(h.root)
+		if err != nil {
+			if errors.Is(err, errPage) {
+				return nil, ErrInvalidPacked
+			}
+			return nil, err
+		}
+		if p[4] != branch && p[4] != leaf || p.count() == 0 {
+			return nil, ErrInvalidPacked
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	t.p.baseCloser = closer
+	return t, nil
 }
 
 // ImportPacked consumes size bytes and returns a writable private tree only

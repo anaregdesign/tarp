@@ -44,22 +44,22 @@ type Options struct {
 	OpenValidation OpenValidation
 	// BTreeMemoryBudgetBytes sets the working-memory budget for IndexBTree,
 	// shared by the foreground index and its maintenance workspaces.
-	// Zero selects 16 MiB for the B+tree. A nonzero budget must be at least
+	// Zero selects 128 MiB for the B+tree. A nonzero budget must be at least
 	// 1 MiB and is valid only with IndexBTree.
 	BTreeMemoryBudgetBytes int64
 	// ValueCacheBudgetBytes sets the logical budget for the value LRU in
 	// either index mode. Each live key, value and its entry metadata must fit
-	// together within the budget. Zero selects 64 MiB.
+	// together within the budget. Zero selects 128 MiB.
 	ValueCacheBudgetBytes int64
 	// MaxRecordBytes limits the encoded header, key and value of one record. Zero selects 1 MiB.
 	MaxRecordBytes int64
 	// TargetSegmentBytes sets the target for each new log or snapshot segment.
 	// It caps small-segment repacking input and grouped log cleaning output.
-	// The default is 4 MiB. The target grows to fit one maximum record and a segment header.
+	// The default is 256 MiB. The target grows to fit one maximum record and a segment header.
 	TargetSegmentBytes int64
-	// ReadFileHandles bounds the pool of reusable DATA handles. Zero selects 64.
+	// ReadFileHandles bounds the pool of reusable DATA handles. Zero selects 256.
 	ReadFileHandles int
-	// BatchGetReadConcurrency limits simultaneous DATA reads across BatchGet calls on this DB. Zero selects 8.
+	// BatchGetReadConcurrency limits simultaneous DATA reads across BatchGet calls on this DB. Zero selects 16.
 	BatchGetReadConcurrency int
 	// MaxBatchGetValueBytes limits the sum of encoded value bytes in one BatchGet
 	// result, including duplicates. Missing keys and empty values cost zero.
@@ -166,7 +166,7 @@ func (db *DB) ProtectParity(ctx context.Context) error {
 // record in a restored image. Zero fields select the same defaults as Open.
 type RestoreLimits struct {
 	// ValueCacheBudgetBytes must cover the largest live entry's value-cache
-	// charge (key, value and entry metadata). Zero selects 64 MiB.
+	// charge (key, value and entry metadata). Zero selects 128 MiB.
 	ValueCacheBudgetBytes int64
 	// MaxRecordBytes bounds the largest live encoded record, including its header. Zero selects 1 MiB.
 	MaxRecordBytes int64

@@ -384,7 +384,15 @@ const (
 	catalogEntryBytes  = 72
 )
 
+func CatalogEncodedBytes(entries int) uint64 {
+	return 32 + catalogHeaderBytes + uint64(entries)*catalogEntryBytes
+}
+
 func EncodeCatalog(c Catalog) []byte {
+	return envelope("TARPMNFT", encodeCatalogPayload(c))
+}
+
+func encodeCatalogPayload(c Catalog) []byte {
 	p := make([]byte, catalogHeaderBytes+catalogEntryBytes*len(c.Entries))
 	copy(p, c.UUID[:])
 	order.PutUint64(p[16:], c.CheckpointCutoffSequence)
@@ -401,7 +409,7 @@ func EncodeCatalog(c Catalog) []byte {
 	for i, f := range c.Entries {
 		putCatalogEntry(p[catalogHeaderBytes+catalogEntryBytes*i:], f)
 	}
-	return envelope("TARPMNFT", p)
+	return p
 }
 
 func putCatalogEntry(b []byte, f CatalogEntry) {
@@ -441,11 +449,19 @@ func (c Catalog) CoveredLayoutFingerprint(coveredEntries, coveredSequence uint64
 }
 
 func DecodeCatalog(b []byte) (Catalog, error) {
-	var c Catalog
 	p, err := payload(b, "TARPMNFT")
 	if err != nil {
-		return c, err
+		return Catalog{}, err
 	}
+	c, err := decodeCatalogPayload(p)
+	if err == nil {
+		err = ValidateCatalog(c)
+	}
+	return c, err
+}
+
+func decodeCatalogPayload(p []byte) (Catalog, error) {
+	var c Catalog
 	if len(p) < catalogHeaderBytes {
 		return c, bad("catalog length")
 	}
@@ -465,43 +481,56 @@ func DecodeCatalog(b []byte) (Catalog, error) {
 	if c.Index.ID == c.ActiveID || c.Index.Bytes < 0 || c.Index.ID == 0 && c.Index != (IndexCheckpoint{}) {
 		return c, bad("catalog index descriptor")
 	}
-	seen := map[uint64]bool{c.ActiveID: true, c.Index.ID: true}
-	previous := c.CheckpointCutoffSequence
+	c.Entries = make([]CatalogEntry, 0, len(entries)/catalogEntryBytes)
 	for q := entries; len(q) != 0; q = q[catalogEntryBytes:] {
 		id, n, kind := order.Uint64(q), order.Uint64(q[8:]), order.Uint64(q[16:])
 		first, last := order.Uint64(q[24:]), order.Uint64(q[32:])
-		if id == 0 {
-			if kind != CleanedLogKind || n != 0 || !zero(q[40:72]) {
-				return c, bad("empty cleaned interval")
-			}
-		} else {
-			if seen[id] || zero(q[40:72]) || n < SegmentHeaderBytes+RecordHeaderBytes+1 || n > math.MaxInt64 {
-				return c, bad("catalog duplicate ID or file length")
-			}
-			seen[id] = true
-		}
-		switch kind {
-		case SnapshotKind:
-			if c.CheckpointCutoffSequence == 0 || previous != c.CheckpointCutoffSequence || first != 0 || last != 0 {
-				return c, bad("snapshot segment outside the full DATA checkpoint")
-			}
-		case RawLogKind, CleanedLogKind:
-			if previous == math.MaxUint64 || first != previous+1 || last < first {
-				return c, bad("catalog log sequence coverage")
-			}
-			if kind == CleanedLogKind && last > c.PrunedThroughSequence {
-				return c, bad("cleaned interval beyond pruning boundary")
-			}
-			if kind == RawLogKind && last-first+1 > (n-SegmentHeaderBytes)/(RecordHeaderBytes+1) {
-				return c, bad("raw interval cannot fit file")
-			}
-			previous = last
-		default:
-			return c, bad("catalog entry kind")
+		if kind != SnapshotKind && kind != RawLogKind && kind != CleanedLogKind || n > math.MaxInt64 {
+			return c, bad("catalog entry kind or size")
 		}
 		c.Entries = append(c.Entries, CatalogEntry{ID: id, Bytes: int64(n), Kind: uint32(kind), FirstSequence: first, LastSequence: last, DataFileDigest: [32]byte(q[40:72])})
 	}
 	return c, nil
+}
+
+// ValidateCatalog checks all selected identities and the full sequence coverage
+// of a materialized catalog, including one assembled from incremental edits.
+func ValidateCatalog(c Catalog) error {
+	seen := map[uint64]bool{c.ActiveID: true, c.Index.ID: true}
+	previous := c.CheckpointCutoffSequence
+	for _, entry := range c.Entries {
+		if entry.ID == 0 {
+			if entry.Kind != CleanedLogKind || entry.Bytes != 0 || entry.DataFileDigest != [32]byte{} {
+				return bad("empty cleaned interval")
+			}
+		} else {
+			if seen[entry.ID] || entry.DataFileDigest == [32]byte{} || entry.Bytes < SegmentHeaderBytes+RecordHeaderBytes+1 {
+				return bad("catalog duplicate ID or file length")
+			}
+			seen[entry.ID] = true
+		}
+		first, last := entry.FirstSequence, entry.LastSequence
+		switch entry.Kind {
+		case SnapshotKind:
+			if c.CheckpointCutoffSequence == 0 || previous != c.CheckpointCutoffSequence || first != 0 || last != 0 {
+				return bad("snapshot segment outside the full DATA checkpoint")
+			}
+		case RawLogKind, CleanedLogKind:
+			if previous == math.MaxUint64 || first != previous+1 || last < first {
+				return bad("catalog log sequence coverage")
+			}
+			if entry.Kind == CleanedLogKind && last > c.PrunedThroughSequence {
+				return bad("cleaned interval beyond pruning boundary")
+			}
+			if entry.Kind == RawLogKind && last-first+1 > uint64(entry.Bytes-SegmentHeaderBytes)/(RecordHeaderBytes+1) {
+				return bad("raw interval cannot fit file")
+			}
+			previous = last
+		default:
+			return bad("catalog entry kind")
+		}
+	}
+	return nil
 }
 
 type BackupFile struct {

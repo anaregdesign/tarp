@@ -21,7 +21,7 @@ func (d *dataTotals) addSegment(size, tombstones int64) {
 // initDataStats runs once before this DB admits callers.
 func (db *DB) initDataStats() {
 	var selected dataTotals
-	for _, entry := range db.store.Catalog.Entries {
+	for entry := range db.store.CatalogEntries().All() {
 		if entry.HasPhysicalFile() {
 			selected.addSegment(entry.Bytes, db.store.Segments[entry.ID].DeleteBytes.Load())
 		}
@@ -51,6 +51,7 @@ func (db *DB) sealActive() error {
 	previous := db.store.Current.ActiveID
 	err := db.store.Rotate()
 	if db.store.Current.ActiveID != previous {
+		db.cleanerSealed()
 		db.notifyParity()
 		db.notifyCleaner()
 		db.replaceDataStats(dataTotals{}, dataTotals{segments: 1, bytes: format.SegmentHeaderBytes})

@@ -123,7 +123,7 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	indexPath := filepath.Join(dir, IndexName(s.Current.UUID, s.Catalog.Index.ID))
-	coveredPath := s.Segments[s.Catalog.Entries[0].ID].Path
+	coveredPath := s.Segments[s.CatalogSnapshot().Entries[0].ID].Path
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -150,13 +150,13 @@ func TestIndexCheckpointSuffixMatchesAuthoritativeReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		coveredRecordBytes := db.Catalog.Entries[0].Bytes - format.SegmentHeaderBytes
+		coveredRecordBytes := db.CatalogEntries().At(0).Bytes - format.SegmentHeaderBytes
 		coveredSegmentHeaderBytes := int64(2 * format.SegmentHeaderBytes)
 		if indexed {
 			coveredRecordBytes = 0
 			coveredSegmentHeaderBytes = format.SegmentHeaderBytes
 		}
-		logSuffixRecordBytes := db.Catalog.Entries[1].Bytes + db.Current.ActiveCommittedEndOffset - 2*format.SegmentHeaderBytes
+		logSuffixRecordBytes := db.CatalogEntries().At(1).Bytes + db.Current.ActiveCommittedEndOffset - 2*format.SegmentHeaderBytes
 		if reads["covered_encoded_records"] != coveredRecordBytes || reads["log_suffix_encoded_records"] != logSuffixRecordBytes ||
 			reads["covered_segment_header"] != coveredSegmentHeaderBytes || reads["log_suffix_segment_header"] < 2*format.SegmentHeaderBytes ||
 			reads["replay_segment_header"] != 0 || reads["replay_encoded_records"] != 0 || reads["index_checkpoint_file"] != db.Catalog.Index.Bytes {

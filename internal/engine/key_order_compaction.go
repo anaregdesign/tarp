@@ -54,7 +54,7 @@ func (db *DB) EstimateKeyOrderCompaction(ctx context.Context) (KeyOrderCompactio
 	suffixLiveBytes := uint64(active.LiveBytes.Load())
 	var affectedBytes, untouchedBytes, largestUntouched uint64
 	var unavailable bool
-	for _, entry := range store.Catalog.Entries {
+	for entry := range store.CatalogEntries().All() {
 		if err := ctx.Err(); err != nil {
 			return KeyOrderCompactionEstimate{}, operationError(op, "context", err)
 		}

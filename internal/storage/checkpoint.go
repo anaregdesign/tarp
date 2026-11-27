@@ -393,8 +393,8 @@ func (c *DataCheckpoint) AdoptUnchangedOrdered() bool {
 	if !c.ordered || !c.HasOrderedBase() || len(c.segments) != 0 ||
 		c.capture.Current.LastUserSequence != c.capture.Catalog.CheckpointCutoffSequence ||
 		s.Catalog.CheckpointCutoffSequence != c.capture.Catalog.CheckpointCutoffSequence ||
-		len(s.Catalog.Entries) < len(c.entries) || !slices.Equal(c.entries, c.capture.Catalog.Entries) ||
-		!slices.Equal(c.entries, s.Catalog.Entries[:len(c.entries)]) {
+		s.catalogEntries.Len() < len(c.entries) || !slices.Equal(c.entries, c.capture.Catalog.Entries) ||
+		!slices.Equal(c.entries, s.catalogEntries.Slice(0, len(c.entries))) {
 		return false
 	}
 	s.orderedSnapshot = true
@@ -417,7 +417,7 @@ func (c *DataCheckpoint) Install() error {
 		UUID: s.Current.UUID, CheckpointCutoffSequence: c.capture.Current.LastUserSequence, PrunedThroughSequence: c.capture.Current.LastUserSequence,
 		ActiveID: s.Current.ActiveID, Entries: append([]format.CatalogEntry(nil), c.entries...),
 	}
-	catalog.Entries = append(catalog.Entries, s.Catalog.Entries[len(c.capture.Catalog.Entries):]...)
+	catalog.Entries = append(catalog.Entries, s.catalogEntries.Slice(len(c.capture.Catalog.Entries), s.catalogEntries.Len())...)
 	candidate := s.Current
 	candidate.PublicationGeneration++
 	c.attempted = true

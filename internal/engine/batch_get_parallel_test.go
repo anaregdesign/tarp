@@ -62,8 +62,8 @@ func TestBatchGetLimitsConcurrentStorageReads(t *testing.T) {
 		limit, keys      int
 		calls, wantReads int
 	}{
-		{"default", 0, 10, 1, 8},
-		{"above-default", 16, 18, 1, 16},
+		{"default", 0, 18, 1, 16},
+		{"above-default", 24, 25, 1, 24},
 		{"serial", 1, 4, 2, 1},
 		{"distinct-cold-keys", 8, 2, 1, 2},
 		{"shared-across-batches", 2, 4, 3, 2},

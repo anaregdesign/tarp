@@ -58,7 +58,7 @@ func estimateFixture(t *testing.T, mode IndexMode, rowsPerSegment int) (*DB, str
 func checkEstimatedRewrite(t *testing.T, db *DB, wantBytes, wantUpper uint64) {
 	t.Helper()
 	before := make(map[uint64]bool)
-	for _, entry := range db.store.Catalog.Entries {
+	for _, entry := range db.store.CatalogSnapshot().Entries {
 		if entry.Kind == format.SnapshotKind {
 			before[entry.ID] = true
 		}
@@ -71,7 +71,7 @@ func checkEstimatedRewrite(t *testing.T, db *DB, wantBytes, wantUpper uint64) {
 		t.Fatal(err)
 	}
 	var rewrites uint64
-	for _, entry := range db.store.Catalog.Entries {
+	for _, entry := range db.store.CatalogSnapshot().Entries {
 		if entry.Kind == format.SnapshotKind && !before[entry.ID] {
 			rewrites += uint64(entry.Bytes - format.SegmentHeaderBytes)
 		}

@@ -40,7 +40,7 @@ func openedRepairFixture(t *testing.T) (repairFixture, *Store, *DataSegment) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := s.Segments[s.Catalog.Entries[0].ID]
+	f := s.Segments[s.CatalogSnapshot().Entries[0].ID]
 	f.Pin()
 	t.Cleanup(func() {
 		f.Unpin()
@@ -343,7 +343,7 @@ func TestUnavailableReadRetriesOncePrivateStagingSpaceReturns(t *testing.T) {
 
 func TestReconstructionDistinguishesParityReadFromOutputMediaError(t *testing.T) {
 	fixture, s, f := openedRepairFixture(t)
-	entry := s.Catalog.Entries[0]
+	entry := s.CatalogSnapshot().Entries[0]
 	fd, err := OpenRegular(filepath.Join(s.Dir, parityName(s.Current.UUID, f.ID)))
 	if err != nil {
 		t.Fatal(err)
@@ -485,7 +485,7 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				work, err := s.BeginClean(s.Catalog.Entries)
+				work, err := s.BeginClean(s.CatalogSnapshot().Entries)
 				if err != nil || work == nil {
 					t.Fatalf("BeginClean: %v", err)
 				}
@@ -500,7 +500,7 @@ func TestReadRepairsFreshlyInstalledCompactionOutput(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			entry := s.Catalog.Entries[0]
+			entry := s.CatalogSnapshot().Entries[0]
 			f := s.Segments[entry.ID]
 			if entry.ID == old.Segment.ID || f.Kind == format.RawLogKind {
 				t.Fatalf("expected replacement, got %+v", entry)

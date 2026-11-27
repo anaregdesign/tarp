@@ -351,10 +351,10 @@ func TestCheckpointSplitsAtSegmentTarget(t *testing.T) {
 	if _, err := db.Compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(db.store.Catalog.Entries) != 2 {
-		t.Fatalf("expected two snapshot files, got %v", db.store.Catalog.Entries)
+	if len(db.store.CatalogSnapshot().Entries) != 2 {
+		t.Fatalf("expected two snapshot files, got %v", db.store.CatalogSnapshot().Entries)
 	}
-	for _, f := range db.store.Catalog.Entries {
+	for _, f := range db.store.CatalogSnapshot().Entries {
 		if f.Kind != format.SnapshotKind || f.Bytes != opts.TargetSegmentBytes {
 			t.Fatalf("unexpected snapshot size or kind: %+v", f)
 		}
@@ -369,7 +369,7 @@ func TestRepeatedCompactionDoesNotRetainOldFileRegistry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(db.store.Segments) != len(db.store.Catalog.Entries)+1 {
+	if len(db.store.Segments) != len(db.store.CatalogSnapshot().Entries)+1 {
 		t.Fatalf("obsolete file metadata retained: %d", len(db.store.Segments))
 	}
 }
@@ -435,7 +435,7 @@ func TestCleanupAfterFaultDoesNotRetainUnlinkedMetadata(t *testing.T) {
 	if _, err := db.Compact(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(db.store.Segments) != len(db.store.Catalog.Entries)+1 {
+	if len(db.store.Segments) != len(db.store.CatalogSnapshot().Entries)+1 {
 		t.Fatal("deferred cleanup retained file metadata")
 	}
 }
@@ -499,7 +499,7 @@ func TestCompactKeepsWholeSnapshotsInSourceOrder(t *testing.T) {
 				if _, err := db.Compact(t.Context()); err != nil {
 					t.Fatal(err)
 				}
-				base := db.store.Catalog.Entries
+				base := db.store.CatalogSnapshot().Entries
 				if len(base) != len(keys)/recordsPerFile {
 					t.Fatalf("unexpected base layout: %v", base)
 				}
@@ -560,7 +560,7 @@ func TestCompactKeepsWholeSnapshotsInSourceOrder(t *testing.T) {
 						t.Fatalf("PARITY for unchanged DATA %d was replaced: %v", entry.ID, err)
 					}
 				}
-				for _, entry := range db.store.Catalog.Entries {
+				for _, entry := range db.store.CatalogSnapshot().Entries {
 					f, err := os.Open(db.store.Segments[entry.ID].Path)
 					if err != nil {
 						t.Fatal(err)
@@ -708,7 +708,7 @@ func TestCompactReusePreservesConcurrentDeletesThroughBackupAndReopen(t *testing
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
-			entries := db.store.Catalog.Entries
+			entries := db.store.CatalogSnapshot().Entries
 			if db.store.Catalog.CheckpointCutoffSequence != cutoff || len(entries) < 2 ||
 				entries[0].ID != kept.Segment.ID || entries[1].ID != dropped.Segment.ID || testLoc(t, db, "keep") != kept {
 				t.Fatalf("concurrent suffix changed the captured snapshot: %+v", db.store.Catalog)
@@ -770,7 +770,7 @@ func TestCompactionReclaimsAndPreservesEmptyCutoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	emptySequence := db.store.Current.LastUserSequence
-	if len(db.store.Catalog.Entries) != 0 || emptySequence == 0 {
+	if len(db.store.CatalogSnapshot().Entries) != 0 || emptySequence == 0 {
 		t.Fatalf("empty checkpoint: %+v", db.store.Catalog)
 	}
 	if err := db.Close(); err != nil {
@@ -1160,7 +1160,7 @@ func damageProtectedTail(t *testing.T, db *DB) format.CatalogEntry {
 	if err := db.ProtectParity(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	e := db.store.Catalog.Entries[len(db.store.Catalog.Entries)-1]
+	e := db.store.CatalogSnapshot().Entries[len(db.store.CatalogSnapshot().Entries)-1]
 	fd, err := os.OpenFile(db.store.Segments[e.ID].Path, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -1186,7 +1186,7 @@ func TestCompactRepairsProtectedSourceAndRestartsPrivateOutputs(t *testing.T) {
 	if _, err := db.Compact(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if db.store.Catalog.CheckpointCutoffSequence != cut.LastSequence || len(db.store.Catalog.Entries) != 1 || db.store.Catalog.Entries[0].Kind != format.SnapshotKind {
+	if db.store.Catalog.CheckpointCutoffSequence != cut.LastSequence || len(db.store.CatalogSnapshot().Entries) != 1 || db.store.CatalogSnapshot().Entries[0].Kind != format.SnapshotKind {
 		t.Fatalf("checkpoint after repair: %+v", db.store.Catalog)
 	}
 	wantValue(t, db, "original", "one")
@@ -1466,7 +1466,7 @@ func checkKeyOrderedSnapshot(t *testing.T, db *DB, want map[string]uint64) {
 	t.Helper()
 	got := make(map[string]uint64)
 	var previous string
-	for _, entry := range db.store.Catalog.Entries {
+	for _, entry := range db.store.CatalogSnapshot().Entries {
 		if entry.Kind != format.SnapshotKind {
 			break
 		}
@@ -1528,7 +1528,7 @@ func TestCompactByKeySortsAcrossFilesAndReusesUnaffectedRanges(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkKeyOrderedSnapshot(t, db, want)
-			base := db.store.Catalog.Entries
+			base := db.store.CatalogSnapshot().Entries
 			if len(base) != 3 {
 				t.Fatalf("base has %d segments; want three two-record segments", len(base))
 			}
@@ -1875,7 +1875,7 @@ func TestCompactByKeyAdvancesPastPrunedPutsAndCleanedSnapshot(t *testing.T) {
 	if _, err := db.CompactByKey(ctx); err != nil {
 		t.Fatal(err)
 	}
-	base := db.store.Catalog.Entries[0]
+	base := db.store.CatalogSnapshot().Entries[0]
 	mustPut(t, db, "temporary", "added")
 	obsolete := sealForCleaning(t, db)
 	if err := db.BatchDelete([][]byte{[]byte("b"), []byte("temporary")}); err != nil {
@@ -1997,7 +1997,7 @@ func TestFullOpenDerivesOrderOnlyFromReplayedSnapshotRecords(t *testing.T) {
 			defer reopened.Close()
 			var wantBytes int
 			if tc.validation != Indexed {
-				for _, entry := range reopened.store.Catalog.Entries {
+				for _, entry := range reopened.store.CatalogSnapshot().Entries {
 					wantBytes += int(entry.Bytes - format.SegmentHeaderBytes)
 				}
 				wantBytes += int(reopened.store.Current.ActiveCommittedEndOffset - format.SegmentHeaderBytes)

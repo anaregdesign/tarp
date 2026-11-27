@@ -38,7 +38,7 @@ func TestSealedDigestRejectsSubstitutionBeforeMaintenancePublication(t *testing.
 		t.Fatal(err)
 	}
 	before := store.Current
-	source := store.Catalog.Entries[0]
+	source := store.CatalogSnapshot().Entries[0]
 	path := store.Segments[source.ID].Path
 	b, err := os.ReadFile(path)
 	if err != nil || sha256.Sum256(b) != source.DataFileDigest {

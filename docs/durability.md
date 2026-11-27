@@ -109,13 +109,20 @@ For an ordinary mutation:
 
 This conservative protocol normally uses three sync barriers per mutation.
 There is no asynchronous acknowledgment, disabled-sync setting, or group commit.
-When an append would take a nonempty log past its target (4 MiB by default),
+When an append would take a nonempty log past its target (256 MiB by default),
 tarp writes the new segment header and first record, then syncs them together.
-It writes and syncs the new catalog and syncs the directory before replacing
+It writes and syncs a catalog edit and syncs the directory before replacing
 `CURRENT`. This one frontier publication selects both the new active log and
 the committed record. Sealing for a full DATA checkpoint instead selects an empty
 active log at the existing sequence. Sequences, generations and file IDs never wrap.
 No record spans files or overwrites previously committed bytes.
+
+A catalog edit authenticates the preceding MANIFEST ID and digest. Rotation,
+cleaning and INDEX installation can publish edits against an immutable in-memory
+view. Background rebasing prepares a standalone base outside the writer gate
+and publishes it if the catalog still matches. At the hard edit limit, a
+publication can build a base synchronously so recovery work stays bounded.
+A selected base and all its edits stay on disk until durably superseded.
 
 BatchPut, BatchDelete and Apply commit their surviving records with dense user
 sequences in a single segment. Each write batch accepts up to 65,535 inputs,
@@ -133,11 +140,13 @@ predates mixed Apply and the 65,535-input write limit.
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
 supported layout, recovery locks the directory and validates the selected `CURRENT`, its
-SHA-256-bound catalog, each selected segment header and length, and all live
+SHA-256-bound catalog base and edit chain, each selected segment header and length, and all live
 option minima. Full recovery verifies each sealed DATA digest and each committed
 active record. A validated INDEX can supply the covered key history. Indexed
-recovery skips the covered segments’ encoded records after validating INDEX and replays the
-committed DATA log suffix. Both start with a cold value cache. Raw logs retain dense sequences. Cleaned intervals
+B+tree recovery authenticates the INDEX summary and checks individual pages on
+access. It reads the committed DATA suffix and replacement DATA segments that
+differ from the covered layout. Both modes start with a cold value cache. Raw
+logs retain dense sequences. Cleaned intervals
 preserve coverage even when they have zero records. Deletes through the catalog
 pruning boundary may refer to a Put removed by cleaning. All selected physical
 DATA files must exist. See the [replay rules](format.md#catalog-payload).
@@ -235,14 +244,16 @@ larger file as a few tiny ones accumulate. An empty log interval between
 inputs contributes its sequence coverage without counting as a physical file.
 Fewer than four small files, or small files separated by a large one, can remain.
 
-The worker checks on Open, after rotation and after writes invalidate sealed
-records. It checks again after each completed pass. It validates and streams
-its inputs one at a time, including obsolete records, and yields in bounded
-chunks for queued writers and backup. Input selection and copying use the
-sealed catalog, leaving the active log available for appends.
+The worker builds its candidate queue in bounded passes on Open and after a
+full checkpoint. Rotation, obsolete records, and pin or damage transitions
+update candidates. It considers bounded groups in the sealed catalog and
+validates and streams their records, including obsolete ones. Under sustained
+writes it alternates bounded waits with cleaner work. Backup can defer work
+while headroom is healthy. Under space pressure, eligible unpinned inputs
+can proceed. The active log remains available for appends.
 
-After copying, the worker reserves a manifest ID and builds the replacement
-catalog under the writer gate. It releases the gate while writing and syncing
+After copying, the worker reserves a manifest ID and prepares a catalog edit
+under the writer gate. It releases the gate while writing and syncing
 the unselected manifest. Under the gate again, it publishes against the latest
 committed frontier. If a foreground rotation selected a different manifest,
 the worker discards its staging manifest and rebuilds it once under the gate.
@@ -299,9 +310,14 @@ Retired read descriptors close after their final read-handle lease is released. 
 no disk I/O. The worker revisits its pending retirements, and a full DATA checkpoint
 and validated reopen can also clean eligible files. `DB.AutoCompactionStatus`
 reports the worker's deferral reason and most recent error. Its
-`PinnedRetiredDataBytes` records the logical bytes of retired DATA segments
-retained by segment pins or live index references at the latest retirement check. Its `UnlinkedBytes` counts the logical file bytes
-unlinked by the worker during this DB lifetime.
+`PinnedRetiredDataBytes` reports the latest completed retirement sweep's
+estimate of DATA retained by pins or live index references. Automatic sweeps
+limit the number of file inspections and unlinks per pass. `UnlinkedBytes`
+counts the logical file bytes unlinked by the worker during this DB lifetime.
+`PendingReclaimDataBytes` estimates DATA savings for queued candidates.
+`PinnedReclaimDataBytes` measures the portion deferred by pins under space
+pressure. `AvailableBytes` and `WriteReserveBytes` report the latest
+filesystem-space sample and write-admission reserve.
 
 Provision space for current data, copied live records and tombstones, headers,
 catalogs, backup files, pinned generations, concurrent tail growth and allocation
@@ -309,7 +325,11 @@ overhead. Free-space inspection is advisory. Insufficient scratch space defers
 incremental work. Recoverable staging ENOSPC/EDQUOT leaves selected sources
 intact. If discarding the cleaner's unpublished DATA file fails, the worker
 retries the unlink and directory sync on a later retirement pass. Maintain
-enough free space for concurrent foreground writes.
+enough free space for concurrent foreground writes. At 1 GiB of selected
+DATA the engine begins checking write admission against estimated free space
+for a cleaner output, its PARITY and catalog staging. A rejected admission
+reports `ErrNoSpace` and `NotApplied`. The estimate is advisory and filesystem
+errors during admitted writes still follow the normal durability contract.
 
 Online backup captures metadata bytes and exact committed prefixes at S under
 the writer gate, pins them, and copies outside it. The active file can grow;
@@ -317,7 +337,13 @@ only its captured prefix is copied. Source CRCs are checked on copied bytes and
 each output file is SHA-256 hashed. The copy must match the sealed DATA digests
 and the active prefix digest captured from the committed byte stream. The
 unversioned `BACKUP` envelope records advisory
-source settings. Restore rejects an unsupported outer signature before publishing
+source settings. Incremental backup uses the same portable image. It shares
+previously verified sealed DATA by digest and length across generations and
+checksums the complete captured active prefix. Its atomic rename publishes
+a generation after the shared objects and metadata have been synced. Readers
+can optionally rehash reused objects during capture. Full verification and
+Restore independently check all selected content. Restore rejects an
+unsupported outer signature before publishing
 a destination. For supported backups it derives live compatibility minima independently.
 
 `BackupWithSnapshot` captures the index view and DATA pins under the same
@@ -499,10 +525,15 @@ the captured DATA. It shares the maintenance slot with compaction. Foreground
 writes and rotation can proceed while a private B+tree is bulk-built from the
 validated record stream. After syncing the staging file, the publisher renames the INDEX and syncs
 the database directory. Under the gate, it checks the covered catalog prefix against the latest
-catalog. A new MANIFEST and CURRENT then select it
-together with the latest committed tail. Cleaning and compaction invalidate
-the descriptor when replacing its physical layout. Sealed DATA digests also
-protect maintenance reads of segments opened with Indexed validation.
+catalog. A MANIFEST edit and CURRENT then select it together with the latest
+committed tail. Incremental cleaning retains the descriptor so Indexed B+tree
+Open can recover relocations by validating replacement DATA against the saved
+layout and replaying the committed tail. A full DATA checkpoint clears the
+descriptor. The fast path budgets up to 4 GiB for the committed lengths of
+newly selected and replacement DATA files, including the active prefix.
+It rebuilds from DATA at the same committed frontier for an unusable checkpoint
+or a larger tail. Sealed DATA digests also protect maintenance reads of
+segments opened with Indexed validation.
 
 A failure building the optional index leaves existing acknowledged writes
 committed. A failure during selector rename or directory sync has an unknown
@@ -514,7 +545,8 @@ error. Memory handles checkpoint explicitly.
 ## Runtime index and scratch space
 
 The backend is selected per Open. A B+tree stores pointer-free DATA addresses
-in process-private scratch files. The database reserves `.tarp-work/` for
+in process-private scratch files or reuse pages from the selected immutable
+INDEX with a private writable overlay. The database reserves `.tarp-work/` for
 B+tree pages, replay sort runs, and indexes used by compaction and online
 backup. Compaction also uses this directory when its relocation list spills
 in either index mode. These files share the database volume.

@@ -217,6 +217,9 @@ func (b PreparedMixedBatch) apply() error {
 	if len(surviving) == 0 {
 		return nil
 	}
+	if err := db.checkWriteReserve(op, used); err != nil {
+		return err
+	}
 
 	var prepare func(int, storage.Location) error
 	if hasPut {

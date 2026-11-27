@@ -50,11 +50,11 @@ func measureLayout(s *storage.Store, liveBytes int64) measurementLayout {
 		CheckpointCutoffSequence: s.Catalog.CheckpointCutoffSequence,
 		PrunedThroughSequence:    s.Catalog.PrunedThroughSequence,
 		SelectedDataSegments:     1, SelectedDataBytes: s.Current.ActiveCommittedEndOffset,
-		SelectedMetadataBytes: int64(len(s.Manifest)) + format.FrontierBytes,
+		SelectedMetadataBytes: int64(s.CatalogMetadataBytes()),
 		RetainedDeleteBytes:   s.Segments[s.Current.ActiveID].DeleteBytes.Load(),
 	}
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, e := range s.Catalog.Entries {
+	for e := range s.CatalogEntries().All() {
 		if e.ID == 0 {
 			layout.EmptyCleanedIntervals++
 			continue
@@ -206,8 +206,8 @@ func TestMeasurementLayoutAccountsForCanonicalRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine.Observe(db).Store(func(s *storage.Store) {
-		if len(s.Catalog.Entries) != 2 || s.Catalog.Entries[0] != carried {
-			t.Fatalf("checkpoint did not retain the original snapshot: %+v", s.Catalog.Entries)
+		if s.CatalogEntries().Len() != 2 || s.CatalogEntries().At(0) != carried {
+			t.Fatalf("checkpoint did not retain the original snapshot: %+v", s.CatalogSnapshot().Entries)
 		}
 	})
 	checkpoint := observedLayout(db)

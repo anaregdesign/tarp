@@ -14,6 +14,7 @@ import (
 
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/index"
+	"github.com/anaregdesign/tarp/internal/index/btree"
 	"github.com/anaregdesign/tarp/internal/platform"
 	"github.com/anaregdesign/tarp/internal/publication"
 )
@@ -22,80 +23,170 @@ import (
 var ErrIndexCheckpointUnusable = errors.New("storage: unusable index checkpoint")
 var ErrCoveredCatalogPrefixChanged = errors.New("storage: the catalog prefix covered by the index checkpoint was replaced")
 
-const indexSignature = "TARPIDX1"
-const indexHeaderBytes = 48
+type indexPageCorruption struct{}
+
+func (indexPageCorruption) Error() string { return "storage: checkpoint page integrity failure" }
+func (indexPageCorruption) Is(target error) bool {
+	return target == ErrIndexCheckpointUnusable || target == ErrCorrupt
+}
+
+const indexSignature = "TARPIDX2"
+const (
+	indexHeaderBytes = 128
+	indexCountsBytes = 24
+)
 
 func IndexName(uuid [16]byte, id uint64) string {
 	return fmt.Sprintf("INDEX-%x-%016x", uuid, id)
 }
 
-// A reader never holds the immutable INDEX past Open. The returned backend
-// owns a private copy. The selected catalog supplies the trusted file digest.
-func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load IndexImporter, visit func(string, index.Address) error) (_ index.Backend, _ []int64, result error) {
+type indexCheckpointCounts struct {
+	deletes, liveKeys, liveBytes int64
+}
+
+type selectedIndexFile struct {
+	fd          *os.File
+	r           io.ReaderAt
+	packedStart int64
+	packedSize  int64
+	levels      []indexHashLevel
+	header      [indexHeaderBytes]byte
+	packedHead  [btree.PackedHeaderBytes]byte
+	layout      format.Catalog
+	counts      []indexCheckpointCounts
+}
+
+func (s *Store) openIndexFile(ctx context.Context, c format.Catalog) (_ *selectedIndexFile, result error) {
 	cp := c.Index
 	fd, err := OpenRegular(filepath.Join(s.Dir, IndexName(c.UUID, cp.ID)))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil, ErrIndexCheckpointUnusable
+		return nil, ErrIndexCheckpointUnusable
 	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if result != nil {
+			result = errors.Join(result, fd.Close())
+		}
+	}()
+	st, err := fd.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() != cp.Bytes || cp.Bytes < indexHeaderBytes+btree.PackedHeaderBytes {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	file := &selectedIndexFile{fd: fd, r: fd}
+	if s.IO != nil && s.IO.OpenRead != nil {
+		file.r = checkpointReadMeter{fd, s.IO.OpenRead}
+	}
+	if _, err := file.r.ReadAt(file.header[:], 0); err != nil {
+		return nil, indexReadError(err)
+	}
+	h := file.header[:]
+	u64 := binary.LittleEndian.Uint64
+	if string(h[:8]) != indexSignature || [32]byte(h[8:40]) != cp.CoveredLayoutFingerprint ||
+		u64(h[40:48]) != cp.CoveredCatalogEntries || u64(h[120:]) != 0 {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	n, layoutSize, packed := cp.CoveredCatalogEntries, u64(h[48:56]), u64(h[56:64])
+	room := uint64(cp.Bytes - indexHeaderBytes)
+	// The summary embeds an ordinary base catalog and one count tuple per entry.
+	emptyCatalog := format.CatalogEncodedBytes(0)
+	entryBytes := format.CatalogEncodedBytes(1) - emptyCatalog
+	if room < emptyCatalog || n > (room-emptyCatalog)/(entryBytes+indexCountsBytes) || layoutSize != emptyCatalog+entryBytes*n ||
+		layoutSize+n*indexCountsBytes > room || packed > room-layoutSize-n*indexCountsBytes ||
+		layoutSize > math.MaxInt || n > math.MaxInt {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	file.packedStart, file.packedSize = indexHeaderBytes+int64(layoutSize+n*indexCountsBytes), int64(packed)
+	var end int64
+	file.levels, end, err = indexHashLayout(file.packedStart, file.packedSize)
+	if err != nil || end != cp.Bytes {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	raw := make([]byte, int(layoutSize))
+	if _, err := file.r.ReadAt(raw, indexHeaderBytes); err != nil {
+		return nil, indexReadError(err)
+	}
+	digest := sha256.New()
+	_, _ = digest.Write(raw)
+	file.counts = make([]indexCheckpointCounts, int(n))
+	countsReader := bufio.NewReaderSize(io.NewSectionReader(file.r, indexHeaderBytes+int64(layoutSize), int64(n*indexCountsBytes)), 32<<10)
+	var tuple [indexCountsBytes]byte
+	for i := range file.counts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if _, err := io.ReadFull(countsReader, tuple[:]); err != nil {
+			return nil, indexReadError(err)
+		}
+		_, _ = digest.Write(tuple[:])
+		file.counts[i] = indexCheckpointCounts{int64(u64(tuple[:8])), int64(u64(tuple[8:16])), int64(u64(tuple[16:24]))}
+	}
+	if _, err := file.r.ReadAt(file.packedHead[:], file.packedStart); err != nil {
+		return nil, indexReadError(err)
+	}
+	_, _ = digest.Write(h)
+	_, _ = digest.Write(file.packedHead[:])
+	if [32]byte(digest.Sum(nil)) != cp.IndexFileDigest {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	file.layout, err = format.DecodeCatalog(raw)
+	if err != nil || file.layout.UUID != c.UUID || file.layout.Index != (format.IndexCheckpoint{}) ||
+		file.layout.CheckpointCutoffSequence != c.CheckpointCutoffSequence ||
+		len(file.layout.Entries) != len(file.counts) {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	fingerprint, err := file.layout.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	if err != nil || fingerprint != cp.CoveredLayoutFingerprint {
+		return nil, ErrIndexCheckpointUnusable
+	}
+	return file, nil
+}
+
+func (f *selectedIndexFile) verifiedPages() *verifiedIndexPages {
+	return &verifiedIndexPages{
+		r: f.r, start: f.packedStart, size: f.packedSize,
+		root: [sha256.Size]byte(f.header[88:120]), header: f.packedHead[:],
+		levels: f.levels, cached: make([]indexHashCache, len(f.levels)),
+	}
+}
+
+// The eager importer checks the complete packed topology and file. Memory
+// mode additionally measures the live records while populating its map.
+func (s *Store) readIndexCheckpoint(ctx context.Context, c format.Catalog, load IndexImporter, visit func(string, index.Address) error) (_ index.Backend, _ []int64, result error) {
+	file, err := s.openIndexFile(ctx, c)
 	if err != nil {
 		return nil, nil, err
 	}
 	var keys index.Backend
 	defer func() {
-		result = errors.Join(result, fd.Close())
+		result = errors.Join(result, file.fd.Close())
 		if result != nil && keys != nil {
 			result = errors.Join(result, keys.Close())
 		}
 	}()
-	st, err := fd.Stat()
-	if err != nil {
-		return nil, nil, err
-	}
-	if st.Size() != cp.Bytes || cp.Bytes < indexHeaderBytes || cp.CoveredCatalogEntries > uint64(len(c.Entries)) || cp.CoveredCatalogEntries > uint64((cp.Bytes-indexHeaderBytes)/8) {
-		return nil, nil, ErrIndexCheckpointUnusable
-	}
-	h := sha256.New()
-	var source io.Reader = fd
-	if s.IO != nil && s.IO.OpenRead != nil {
-		source = checkpointReadMeter{fd, s.IO.OpenRead}
-	}
-	rd := bufio.NewReaderSize(io.TeeReader(source, h), 32<<10)
-	var header [indexHeaderBytes]byte
-	if _, err := io.ReadFull(rd, header[:]); err != nil {
-		return nil, nil, indexReadError(err)
-	}
-	if string(header[:8]) != indexSignature || [32]byte(header[8:40]) != cp.CoveredLayoutFingerprint || binary.LittleEndian.Uint64(header[40:]) != cp.CoveredCatalogEntries {
-		return nil, nil, ErrIndexCheckpointUnusable
-	}
-	deletes := make([]int64, int(cp.CoveredCatalogEntries))
-	var raw [8]byte
-	for i := range deletes {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		if _, err := io.ReadFull(rd, raw[:]); err != nil {
-			return nil, nil, indexReadError(err)
-		}
-		deletes[i] = int64(binary.LittleEndian.Uint64(raw[:]))
-	}
-	packed := cp.Bytes - indexHeaderBytes - int64(len(deletes))*8
-	keys, err = load(ctx, s, rd, packed, visit)
+	reader := io.NewSectionReader(file.verifiedPages(), 0, file.packedSize)
+	keys, err = load(ctx, s, reader, file.packedSize, visit)
 	if err != nil {
 		return nil, nil, indexReadError(err)
 	}
-	if [32]byte(h.Sum(nil)) != cp.IndexFileDigest {
-		return nil, nil, ErrIndexCheckpointUnusable
+	deletes := make([]int64, len(file.counts))
+	for i := range file.counts {
+		deletes[i] = file.counts[i].deletes
 	}
 	return keys, deletes, nil
 }
 
 type checkpointReadMeter struct {
-	io.Reader
+	io.ReaderAt
 	observe func(string, int)
 }
 
-func (r checkpointReadMeter) Read(b []byte) (int, error) {
-	n, err := r.Reader.Read(b)
+func (r checkpointReadMeter) ReadAt(b []byte, off int64) (int, error) {
+	n, err := r.ReaderAt.ReadAt(b, off)
 	if n > 0 {
 		r.observe("index_checkpoint_file", n)
 	}
@@ -128,14 +219,19 @@ type IndexCheckpointBuild struct {
 
 func (b *IndexCheckpointBuild) Sources() []CapturedSegment { return b.capture.Segments }
 
+func (s *Store) CatalogMatchesIndexCheckpoint() bool {
+	cp := s.Catalog.Index
+	if cp.ID == 0 || cp.CoveredSequence != s.Current.LastUserSequence || cp.CoveredCatalogEntries != uint64(s.CatalogEntries().Len()) {
+		return false
+	}
+	catalog := s.CatalogSnapshot()
+	hash, err := catalog.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	return err == nil && hash == cp.CoveredLayoutFingerprint
+}
+
 func (s *Store) BeginIndexCheckpoint() (*IndexCheckpointBuild, error) {
 	if s.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		return nil, errors.New("storage: index checkpoint requires a sealed boundary")
-	}
-	n, seq := uint64(len(s.Catalog.Entries)), s.Current.LastUserSequence
-	fingerprint, err := s.Catalog.CoveredLayoutFingerprint(n, seq)
-	if err != nil {
-		return nil, err
 	}
 	id, err := s.allocateID()
 	if err != nil {
@@ -143,6 +239,12 @@ func (s *Store) BeginIndexCheckpoint() (*IndexCheckpointBuild, error) {
 	}
 	c, err := s.Capture()
 	if err != nil {
+		return nil, err
+	}
+	n, seq := uint64(len(c.Catalog.Entries)), c.Current.LastUserSequence
+	fingerprint, err := c.Catalog.CoveredLayoutFingerprint(n, seq)
+	if err != nil {
+		c.Release()
 		return nil, err
 	}
 	s.buildingIndex.Store(id)
@@ -200,38 +302,64 @@ func (b *IndexCheckpointBuild) Write(ctx context.Context, tree index.Backend, ex
 	}
 	b.stage = fd.Name()
 	defer func() { result = errors.Join(result, fd.Close()) }()
-	h := sha256.New()
-	writer := &outputWriter{fs: b.store.IO, fd: fd, hash: h, point: "index.write"}
+	metadata := sha256.New()
+	writer := &outputWriter{fs: b.store.IO, fd: fd, offset: indexHeaderBytes, hash: metadata, point: "index.write"}
 	out := bufio.NewWriterSize(writer, 32<<10)
-	var header [indexHeaderBytes]byte
-	copy(header[:8], indexSignature)
-	copy(header[8:40], b.descriptor.CoveredLayoutFingerprint[:])
-	binary.LittleEndian.PutUint64(header[40:], b.descriptor.CoveredCatalogEntries)
-	if _, err := out.Write(header[:]); err != nil {
+	layout := c.Catalog
+	layout.Index = format.IndexCheckpoint{}
+	encodedLayout := format.EncodeCatalog(layout)
+	if _, err := out.Write(encodedLayout); err != nil {
 		return err
 	}
-	var raw [8]byte
+	put := binary.LittleEndian.PutUint64
+	var raw [indexCountsBytes]byte
 	for _, entry := range c.Catalog.Entries {
-		var count int64
+		clear(raw[:])
 		if entry.HasPhysicalFile() {
-			count = image.Segments[entry.ID].DeleteBytes.Load()
+			f := image.Segments[entry.ID]
+			put(raw[:8], uint64(f.DeleteBytes.Load()))
+			put(raw[8:16], uint64(f.LiveKeys.Load()))
+			put(raw[16:24], uint64(f.LiveBytes.Load()))
 		}
-		binary.LittleEndian.PutUint64(raw[:], uint64(count))
 		if _, err := out.Write(raw[:]); err != nil {
 			return err
 		}
 	}
-	if err := export(ctx, tree, out); err != nil {
+	if err := out.Flush(); err != nil {
+		return err
+	}
+	packedStart := writer.offset
+	writer.hash = nil
+	pages := indexPageWriter{packed: out, fs: b.store.IO, fd: fd, start: packedStart}
+	if err := export(ctx, tree, &pages); err != nil {
+		return err
+	}
+	if err := pages.finish(); err != nil {
 		return err
 	}
 	if err := out.Flush(); err != nil {
 		return err
 	}
+	var header [indexHeaderBytes]byte
+	copy(header[:8], indexSignature)
+	copy(header[8:40], b.descriptor.CoveredLayoutFingerprint[:])
+	put(header[40:48], b.descriptor.CoveredCatalogEntries)
+	put(header[48:56], uint64(len(encodedLayout)))
+	put(header[56:64], uint64(pages.size))
+	put(header[64:72], image.LiveKeys)
+	put(header[72:80], uint64(image.LargestLiveRecordBytes))
+	put(header[80:88], uint64(image.LargestLiveValueBytes))
+	copy(header[88:120], pages.root[:])
+	if err := b.store.IO.Write(fd, header[:], 0, "index.header"); err != nil {
+		return err
+	}
+	_, _ = metadata.Write(header[:])
+	_, _ = metadata.Write(pages.header)
 	if err := b.store.IO.Sync(fd, "index.sync"); err != nil {
 		return err
 	}
-	b.descriptor.Bytes = writer.offset
-	b.descriptor.IndexFileDigest = [32]byte(h.Sum(nil))
+	b.descriptor.Bytes = pages.end
+	b.descriptor.IndexFileDigest = [32]byte(metadata.Sum(nil))
 	return nil
 }
 
@@ -260,17 +388,18 @@ func (b *IndexCheckpointBuild) Install() error {
 	}
 	s := b.store
 	cp := b.descriptor
-	fingerprint, err := s.Catalog.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
+	catalog := s.CatalogSnapshot()
+	fingerprint, err := catalog.CoveredLayoutFingerprint(cp.CoveredCatalogEntries, cp.CoveredSequence)
 	if err != nil || fingerprint != cp.CoveredLayoutFingerprint {
 		return ErrCoveredCatalogPrefixChanged
 	}
 	if s.Current.PublicationGeneration == math.MaxUint64 {
 		return errors.New("storage: publication generation exhausted")
 	}
-	catalog, frontier := s.Catalog, s.Current
+	frontier := s.Current
 	catalog.Index = cp
 	frontier.PublicationGeneration++
-	if err := s.publishCatalogFor(catalog, frontier, "index.", nil); err != nil {
+	if err := s.publishCatalogMetadata(catalog, frontier, "index."); err != nil {
 		var f *Fault
 		if errors.As(err, &f) && f.Outcome == publication.Unknown {
 			b.final = "" // Reopen decides which catalog won.

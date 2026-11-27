@@ -185,12 +185,12 @@ func runExtendedPowerCase(t *testing.T, cfg qualification.PowerCase, dir, output
 		if _, _, err := db.store.RetireAfterCheckpoint(); err != nil {
 			t.Fatal(err)
 		}
-		inputs, _, blocked := selectCleaningInputs(db.store, opts.TargetSegmentBytes)
+		inputs, _, blocked := selectCleaningInputs(db.store, opts.TargetSegmentBytes, db.store.CatalogEditBytes())
 		if cfg.Mode == "clean-repack" {
 			if len(inputs) != 0 {
 				t.Fatal("repack fixture admits ordinary cleaning")
 			}
-			inputs, _ = smallSegmentRepackGroup(db.store.Catalog.Entries, opts.TargetSegmentBytes, blocked)
+			inputs, _ = smallSegmentRepackGroup(db.store.CatalogSnapshot().Entries, opts.TargetSegmentBytes, blocked)
 		}
 		if len(inputs) == 0 || cfg.Mode == "clean-single" && len(inputs) != 1 ||
 			cfg.Mode == "clean-group" && len(inputs) < 2 || cfg.Mode == "clean-repack" && len(inputs) < 4 {
@@ -238,7 +238,7 @@ func runExtendedPowerCase(t *testing.T, cfg qualification.PowerCase, dir, output
 				t.Fatal(err)
 			}
 			checkKeyOrderedSnapshot(t, db, want)
-			for _, entry := range db.store.Catalog.Entries {
+			for _, entry := range db.store.CatalogSnapshot().Entries {
 				if entry.Kind == format.SnapshotKind {
 					previous[entry.ID] = true
 				}
@@ -260,7 +260,7 @@ func runExtendedPowerCase(t *testing.T, cfg qualification.PowerCase, dir, output
 		}
 		checkKeyOrderedSnapshot(t, db, want)
 		var reused int
-		for _, entry := range db.store.Catalog.Entries {
+		for _, entry := range db.store.CatalogSnapshot().Entries {
 			if previous[entry.ID] {
 				reused++
 			}
@@ -294,7 +294,7 @@ func runExtendedPowerCase(t *testing.T, cfg qualification.PowerCase, dir, output
 		if err := db.ProtectParity(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		entry := db.store.Catalog.Entries[0]
+		entry := db.store.CatalogSnapshot().Entries[0]
 		path := db.store.Segments[entry.ID].Path
 		offset := int64(format.SegmentHeaderBytes + format.RecordHeaderBytes + len("keep"))
 		if cfg.Mode == "repair-parity" {

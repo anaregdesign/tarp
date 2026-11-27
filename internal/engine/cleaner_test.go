@@ -20,8 +20,51 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+// Exercise the ranking and group eligibility using small synthetic catalogs
+// with explicit metadata costs. The running worker reaches these decisions
+// through its incremental candidate queue.
+func selectCleaningInputs(s *storage.Store, target int64, metadata uint64) (inputs []format.CatalogEntry, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
+	var best cleanRank
+	entries := s.Catalog.Entries
+	if entries == nil {
+		entries = s.CatalogSnapshot().Entries
+	}
+	for i, entry := range entries {
+		if !entry.HasPhysicalFile() {
+			continue
+		}
+		if unavailable := s.Segments[entry.ID].UnavailableData(); unavailable != nil {
+			if blocked == nil {
+				blocked = make(map[uint64]*storage.UnavailableDataError)
+			}
+			blocked[entry.ID] = unavailable
+			continue
+		}
+		if rank, ok := rankCleanCandidate(s, entry, metadata); ok {
+			if betterCleanRank(rank, best) {
+				best = rank
+			}
+		} else if len(inputs) == 0 && entry.Kind != format.SnapshotKind && entry.Bytes <= target {
+			inputs, staging = groupedLogCleaningAt(s, entries[i:], uint64(target), metadata)
+		}
+	}
+	if best.entry.HasPhysicalFile() {
+		return []format.CatalogEntry{best.entry}, best.stage, blocked
+	}
+	return inputs, staging, blocked
+}
+
+func smallSegmentRepackGroup(entries []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
+	for i := range entries {
+		if group, bytes := smallSegmentRepackAt(entries[i:], target, blocked); len(group) != 0 {
+			return group, bytes
+		}
+	}
+	return nil, 0
+}
+
 func TestCleanerRanksNetSavings(t *testing.T) {
-	s := &storage.Store{Segments: map[uint64]*storage.DataSegment{}, Manifest: make([]byte, 64)}
+	s := &storage.Store{Segments: map[uint64]*storage.DataSegment{}}
 	// Output is 64-byte header + 256 live bytes + 192 metadata bytes = 512.
 	for _, n := range []int64{1023, 1024, 1025} {
 		e := format.CatalogEntry{ID: 2, Kind: format.RawLogKind, Bytes: n, FirstSequence: 1, LastSequence: 3}
@@ -30,24 +73,24 @@ func TestCleanerRanksNetSavings(t *testing.T) {
 		f.DeleteBytes.Store(64)
 		s.Segments[e.ID] = f
 		s.Catalog.Entries = []format.CatalogEntry{e}
-		got, needed, _ := selectCleaningInputs(s, 4096)
+		got, needed, _ := selectCleaningInputs(s, 4096, 64+format.FrontierBytes)
 		if (len(got) != 0) != (n >= 1024) || len(got) != 0 && (got[0].ID != e.ID || needed != 512) {
 			t.Fatalf("source %d: selected %+v, staging %d", n, got, needed)
 		}
 	}
 	s.Segments[3] = &storage.DataSegment{}
 	s.Catalog.Entries = append(s.Catalog.Entries, format.CatalogEntry{ID: 3, Kind: format.CleanedLogKind, Bytes: 1025, FirstSequence: 4, LastSequence: 7})
-	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 3 {
+	if got, _, _ := selectCleaningInputs(s, 4096, 64+format.FrontierBytes); len(got) != 1 || got[0].ID != 3 {
 		t.Fatal("higher net savings should win", got)
 	}
 	s.Catalog.Entries[1].Bytes = math.MaxInt64
 	s.Segments[3].LiveBytes.Store(math.MaxInt64 - 64)
-	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	if got, _, _ := selectCleaningInputs(s, 4096, 64+format.FrontierBytes); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("large low-benefit file should be skipped", got)
 	}
 	s.Catalog.Entries[1].Bytes = s.Catalog.Entries[0].Bytes
 	s.Segments[3].LiveBytes.Store(256)
-	if got, _, _ := selectCleaningInputs(s, 4096); len(got) != 1 || got[0].ID != 2 {
+	if got, _, _ := selectCleaningInputs(s, 4096, 64+format.FrontierBytes); len(got) != 1 || got[0].ID != 2 {
 		t.Fatal("oldest covered interval should win the tie", got)
 	}
 }
@@ -58,7 +101,6 @@ func TestCleanerRanksParityWorkAndLongLivedPins(t *testing.T) {
 	large.LiveBytes.Store(27 << 10)
 	large.LiveKeys.Store(3) // These references leave the source at remap.
 	s := &storage.Store{
-		Manifest: make([]byte, 64),
 		Segments: map[uint64]*storage.DataSegment{2: small, 3: large},
 		Catalog: format.Catalog{Entries: []format.CatalogEntry{
 			{ID: 2, Kind: format.RawLogKind, Bytes: 2 << 10, FirstSequence: 1, LastSequence: 4},
@@ -67,7 +109,7 @@ func TestCleanerRanksParityWorkAndLongLivedPins(t *testing.T) {
 	}
 	want := func(id uint64) {
 		t.Helper()
-		got, _, _ := selectCleaningInputs(s, 4<<20)
+		got, _, _ := selectCleaningInputs(s, 4<<20, 64+format.FrontierBytes)
 		if len(got) != 1 || got[0].ID != id {
 			t.Fatalf("selected %+v, want DATA %d", got, id)
 		}
@@ -117,7 +159,7 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 		{"source size overflow", math.MaxInt64, []segment{huge, huge, huge}, 0, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &storage.Store{Segments: map[uint64]*storage.DataSegment{}, Manifest: make([]byte, 256)}
+			s := &storage.Store{Segments: map[uint64]*storage.DataSegment{}}
 			for i, seg := range tc.segments {
 				entry := format.CatalogEntry{Kind: seg.kind, Bytes: seg.size}
 				if seg.size > 0 {
@@ -129,7 +171,7 @@ func TestCleanerGroupsObsoleteLogsWithinBounds(t *testing.T) {
 				}
 				s.Catalog.Entries = append(s.Catalog.Entries, entry)
 			}
-			got, staging, _ := selectCleaningInputs(s, tc.target)
+			got, staging, _ := selectCleaningInputs(s, tc.target, 256+format.FrontierBytes)
 			want := s.Catalog.Entries[tc.first : tc.first+tc.count]
 			if !slices.Equal(got, want) || staging != tc.staging {
 				t.Fatalf("selected %+v staging %d, want %+v staging %d", got, staging, want, tc.staging)
@@ -181,7 +223,7 @@ func TestCleanerCleansConsecutiveCatalogLogsAndReopens(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer image.Close()
-	entries := image.store.Catalog.Entries
+	entries := image.store.CatalogEntries().Slice(0, image.store.CatalogEntries().Len())
 	if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].FirstSequence != first.FirstSequence || entries[0].LastSequence != last.LastSequence ||
 		entries[0].ID == first.ID || entries[0].ID == last.ID || image.store.Current.PublicationGeneration != before.PublicationGeneration+1 ||
 		image.store.Current.ActiveID != before.ActiveID || image.store.Current.LastUserSequence != before.LastUserSequence {
@@ -282,6 +324,11 @@ func TestDefaultOpenAutomaticallyCleans(t *testing.T) {
 				value[0] = byte(i)
 				if err := db.Put([]byte("hot"), value); err != nil {
 					t.Fatal(err)
+				}
+				if i == 7 {
+					// Seal a bounded fixture independently of the production
+					// segment target. The next Put invalidates its final record.
+					sealForCleaning(t, db)
 				}
 			}
 			if reopen {
@@ -508,7 +555,7 @@ func TestAutomaticRepackAfterSingleFileCleaning(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer image.Close()
-		entries := image.store.Catalog.Entries
+		entries := image.store.CatalogEntries().Slice(0, image.store.CatalogEntries().Len())
 		before := image.store.Current
 		if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].FirstSequence != 1 || entries[0].LastSequence != lastSealed ||
 			before.LastUserSequence != lastSealed+1 || before.ActiveID != active || image.store.Catalog.CheckpointCutoffSequence != 0 {
@@ -559,7 +606,7 @@ func TestAutomaticRepackKeepsSnapshotsAndLogIntervalsSeparate(t *testing.T) {
 	defer live.Close()
 	waitForDataFiles(t, live, 3)
 	live.writer.Lock()
-	entries := slices.Clone(live.store.Catalog.Entries)
+	entries := slices.Clone(live.store.CatalogEntries().Slice(0, live.store.CatalogEntries().Len()))
 	cutoff, after := live.store.Catalog.CheckpointCutoffSequence, live.store.Current
 	live.writer.Unlock()
 	if len(entries) != 2 || entries[0].Kind != format.SnapshotKind || entries[0].FirstSequence != 0 || entries[0].LastSequence != 0 ||
@@ -696,7 +743,7 @@ func TestCleanerKeepsUnavailableInputAndReclaimsOtherObsoleteFiles(t *testing.T)
 	if again, retry := db.cleanPass(t.Context()); again || retry || !errors.Is(db.AutoCompactionStatus().LastError, ErrDataUnavailable) {
 		t.Fatalf("blocked input is being retried: %+v", db.AutoCompactionStatus())
 	}
-	if got := db.store.Catalog.Entries; len(got) != 2 || got[0] != damaged || got[1].ID != 0 {
+	if got := db.store.CatalogEntries().Slice(0, db.store.CatalogEntries().Len()); len(got) != 2 || got[0] != damaged || got[1].ID != 0 {
 		t.Fatalf("unexpected cleaned catalog %+v", got)
 	}
 	if _, err := os.Stat(db.store.Segments[damaged.ID].Path); err != nil {
@@ -822,7 +869,7 @@ func TestAutomaticCheckpointRejectsInvalidSidecarAfterUnrecoverableStripe(t *tes
 		return nil
 	}})
 	corruptUncachedCheckpointValue(t, db)
-	entry := db.store.Catalog.Entries[0]
+	entry := db.store.CatalogEntries().At(0)
 	path := selectedParity(t, db, entry)
 	sidecar, err := os.ReadFile(path)
 	if err != nil {

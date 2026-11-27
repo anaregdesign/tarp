@@ -41,7 +41,7 @@ func (db *DB) backupImage(ctx context.Context, destination string, inspect func(
 	defer func() {
 		db.backup.Store(false)
 		db.resumeCleaner()
-		db.notifyCleaner()
+		db.cleanerPinsReleased()
 	}()
 	db.writer.Lock()
 	if err := ctx.Err(); err != nil {

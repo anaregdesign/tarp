@@ -18,14 +18,16 @@ import (
 )
 
 type Image struct {
-	Current  format.Frontier
-	Catalog  format.Catalog
-	Manifest []byte
-	Segments map[uint64]*DataSegment
+	Current      format.Frontier
+	Catalog      format.Catalog
+	catalogChain []uint64
+	catalogBytes uint64
+	Segments     map[uint64]*DataSegment
 	LiveRecordSizes
 	LiveKeys              uint64
 	LargestLiveValueBytes int64
 	openRead              func(string, int)
+	indexReplayed         bool
 	// Only an index build has a live capture whose pinned DATA can be repaired.
 	liveCapture bool
 }
@@ -59,25 +61,23 @@ func readImage(ctx context.Context, dir string) (*Image, error) {
 		return nil, fmt.Errorf("CURRENT: %w", err)
 	}
 	manifestName := ManifestName(current.UUID, current.ManifestID)
-	b, err = ReadRegular(filepath.Join(dir, manifestName))
+	catalog, catalogBytes, chain, err := readCatalog(ctx, dir, current)
 	if err != nil {
-		return nil, requiredFileError(manifestName, err)
-	}
-	if sha256.Sum256(b) != current.ManifestDigest {
-		return nil, fmt.Errorf("%s: %w: selected catalog digest", manifestName, ErrCorrupt)
-	}
-	catalog, err := format.DecodeCatalog(b)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", manifestName, err)
+		return nil, err
 	}
 	active, err := catalog.ActiveEntry(current)
 	if err != nil {
 		return nil, fmt.Errorf("%s and CURRENT: %w", manifestName, err)
 	}
-	image := &Image{Current: current, Catalog: catalog, Manifest: b, Segments: make(map[uint64]*DataSegment)}
+	image := &Image{Current: current, Catalog: catalog, catalogBytes: catalogBytes, catalogChain: chain, Segments: make(map[uint64]*DataSegment)}
 	for _, entry := range append(append([]format.CatalogEntry(nil), catalog.Entries...), active) {
 		if entry.HasPhysicalFile() {
 			image.Segments[entry.ID] = &DataSegment{ID: entry.ID, Kind: entry.Kind, Path: filepath.Join(dir, DataName(current.UUID, entry.ID))}
+		}
+	}
+	for _, id := range chain {
+		if image.Segments[id] != nil || catalog.Index.ID == id {
+			return nil, fmt.Errorf("%w: catalog object and selected file share ID %d", ErrCorrupt, id)
 		}
 	}
 	return image, nil
@@ -101,7 +101,12 @@ func (image *Image) scanFrom(ctx context.Context, start int, area string, visit 
 	if err != nil {
 		return err
 	}
-	for _, entry := range append(append([]format.CatalogEntry(nil), image.Catalog.Entries[start:]...), active) {
+	entries := append(append([]format.CatalogEntry(nil), image.Catalog.Entries[start:]...), active)
+	return image.scanEntries(ctx, entries, area, visit, order)
+}
+
+func (image *Image) scanEntries(ctx context.Context, entries []format.CatalogEntry, area string, visit recordVisitor, order *snapshotOrderCheck) error {
+	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -239,7 +244,9 @@ func (s *Store) loadIndexCheckpoint(ctx context.Context, image *Image, load Inde
 	if err != nil || fingerprint != cp.CoveredLayoutFingerprint {
 		return nil, nil
 	}
-	if err := image.checkSelectedFiles(ctx, cp.CoveredCatalogEntries); err != nil {
+	if err := image.checkSelectedFiles(ctx, func(i int, _ format.CatalogEntry) bool {
+		return uint64(i) < cp.CoveredCatalogEntries
+	}); err != nil {
 		return nil, err
 	}
 	covered := make(map[uint64]*coveredSegment)
@@ -313,7 +320,7 @@ func validCheckpointAddress(key string, addr index.Address, entry format.Catalog
 }
 
 // Check every authoritative file before consulting the optional checkpoint.
-func (image *Image) checkSelectedFiles(ctx context.Context, covered uint64) error {
+func (image *Image) checkSelectedFiles(ctx context.Context, covered func(int, format.CatalogEntry) bool) error {
 	active, err := image.Catalog.ActiveEntry(image.Current)
 	if err != nil {
 		return err
@@ -326,7 +333,7 @@ func (image *Image) checkSelectedFiles(ctx context.Context, covered uint64) erro
 			continue
 		}
 		area := "log_suffix"
-		if uint64(i) < covered {
+		if covered(i, entry) {
 			area = "covered"
 		}
 		segment := image.Segments[entry.ID]

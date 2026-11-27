@@ -22,7 +22,7 @@ func (c *DataCheckpoint) prepareOrderedScratch(moves *Relocations) error {
 		target := uint64(c.store.Config.TargetSegmentBytes)
 		// Keep space for the writer's next segment and sidecar, the current
 		// catalog-sized publication, selector, and directory allocation blocks.
-		for _, reserve := range []uint64{target, format.ParitySidecarBytes(target), uint64(len(c.capture.Manifest)), format.FrontierBytes, 4 * 4096} {
+		for _, reserve := range []uint64{target, format.ParitySidecarBytes(target), format.CatalogEncodedBytes(len(c.capture.Catalog.Entries)), format.FrontierBytes, 4 * 4096} {
 			available -= min(available, reserve)
 		}
 		c.scratch = &orderedScratchBudget{remaining: available}

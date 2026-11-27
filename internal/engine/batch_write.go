@@ -47,6 +47,7 @@ type PreparedBatch struct {
 	db      *DB
 	kind    uint8
 	records []storage.Entry
+	bytes   uint64
 	// Original indices of distinct delete records following the first duplicate.
 	// Earlier records have the same positions in the input and the commit.
 	deleteInputs []uint16
@@ -76,7 +77,7 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		}
 		records[i] = storage.Entry(entry)
 	}
-	return PreparedBatch{db: db, kind: format.Put, records: records}, nil
+	return PreparedBatch{db: db, kind: format.Put, records: records, bytes: used}, nil
 }
 
 // PrepareDeletes counts every input but charges only the first occurrence
@@ -129,7 +130,7 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 		}
 		records = append(records, storage.Entry{Key: key})
 	}
-	return PreparedBatch{db: db, kind: format.Delete, records: records, deleteInputs: deleteInputs}, nil
+	return PreparedBatch{db: db, kind: format.Delete, records: records, bytes: used, deleteInputs: deleteInputs}, nil
 }
 
 // deleteKeySlot returns an empty bucket or the bucket of an equal key.
@@ -224,6 +225,9 @@ func (b PreparedBatch) apply() error {
 			}
 		}
 		prepare = nil
+	}
+	if err := db.checkWriteReserve(op, b.bytes); err != nil {
+		return err
 	}
 	locations, err := db.store.AppendBatchPrepared(kind, records, db.health, prepare)
 	if err != nil {

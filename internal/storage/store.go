@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -123,19 +124,23 @@ type Store struct {
 	checkDamage atomic.Bool // Set by a read repair that discovers unavailable DATA.
 	// DamageChanged wakes maintenance when known repair eligibility changes.
 	// The owner sets it once before starting any workers or serving requests.
-	DamageChanged         func()
+	DamageChanged         func(*DataSegment)
 	Dir                   string
 	Config                Config
 	IO                    *IO
 	Current               format.Frontier
 	Catalog               format.Catalog
-	Manifest              []byte
+	catalogEntries        CatalogEntries
+	catalogChain          []uint64
+	catalogBytes          uint64
+	buildingCatalogs      map[uint64]bool
 	Segments              map[uint64]*DataSegment
 	active                *os.File
 	lock                  *platform.DirectoryLock
 	readers               *handles
 	nextID                uint64
 	retired               map[uint64]*DataSegment
+	retiredData           retiredDataScan
 	retiredCatalogs       map[uint64]struct{}
 	retiredIndexes        map[uint64]struct{}
 	buildingIndex         atomic.Uint64
@@ -267,7 +272,7 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 
 // OpenIndexed constructs the backend under the directory lock. On success
 // the caller owns both objects and must close the backend before the store.
-func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error), load IndexImporter) (_ *Store, _ index.Backend, result error) {
+func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool, fs *IO, newIndex func(*Store) (index.Backend, error), load IndexImporter, fast ...FastIndexImporter) (_ *Store, _ index.Backend, result error) {
 	s, err := lockStore(ctx, dir, cfg, existingOnly, fs)
 	if err != nil {
 		return nil, nil, err
@@ -317,7 +322,11 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 	// created by this Open. An incompatible Open preserves prior remnants.
 	s.cleanWorkspaceOnClose = !listing.hasWorkspace
 	if image != nil && image.Catalog.Index.ID != 0 && load != nil {
-		keys, err = s.loadIndexCheckpoint(ctx, image, load)
+		if cfg.IndexedOpen && len(fast) != 0 && fast[0] != nil {
+			keys, err = s.loadFastIndexCheckpoint(ctx, image, fast[0])
+		} else {
+			keys, err = s.loadIndexCheckpoint(ctx, image, load)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
@@ -344,7 +353,9 @@ func OpenIndexed(ctx context.Context, dir string, cfg Config, existingOnly bool,
 func (s *Store) recover(ctx context.Context, image *Image, listing directoryListing, keys index.Backend) error {
 	var err error
 	var order *snapshotOrderCheck
-	if s.IndexCheckpointValidated {
+	if image.indexReplayed {
+		// The durable INDEX opener has already applied the selected tail.
+	} else if s.IndexCheckpointValidated {
 		err = image.replayAfterIndexCheckpoint(ctx, keys, s.Config.IndexedOpen)
 	} else {
 		if !s.Config.IndexedOpen {
@@ -365,8 +376,11 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 		}
 		s.cleanWorkspaceOnClose = true
 	}
-	s.Catalog, s.Manifest, s.Segments = image.Catalog, image.Manifest, image.Segments
-	for _, entry := range s.Catalog.Entries {
+	s.Catalog, s.Segments = image.Catalog, image.Segments
+	s.catalogEntries = CatalogEntries{catalogFromSlice(s.Catalog.Entries)}
+	s.Catalog.Entries = nil
+	s.catalogChain, s.catalogBytes = image.catalogChain, image.catalogBytes
+	for entry := range s.catalogEntries.All() {
 		if entry.HasPhysicalFile() {
 			s.Segments[entry.ID].markSealed(s.Catalog.UUID, entry)
 		}
@@ -545,23 +559,22 @@ func (s *Store) rotate(initialRecords appendData, lastSequence uint64, healthy f
 		}
 	}
 	catalog := s.Catalog
-	catalog.Entries = append(append([]format.CatalogEntry(nil), catalog.Entries...), format.CatalogEntry{
+	entry := format.CatalogEntry{
 		ID: s.Current.ActiveID, Bytes: s.Current.ActiveCommittedEndOffset, Kind: format.RawLogKind,
-		FirstSequence: s.Catalog.SealedThroughSequence() + 1, LastSequence: s.Current.LastUserSequence,
+		FirstSequence: s.sealedThroughSequence() + 1, LastSequence: s.Current.LastUserSequence,
 		DataFileDigest: [sha256.Size]byte(s.Segments[s.Current.ActiveID].activeDigest.Sum(nil)),
-	})
+	}
 	catalog.ActiveID = segment.ID
 	candidate := s.Current
 	candidate.PublicationGeneration++
 	candidate.ActiveID, candidate.ActiveCommittedEndOffset = segment.ID, segment.Size.Load()
 	candidate.LastUserSequence = lastSequence
-	if err := s.publishCatalog(catalog, candidate); err != nil {
+	if err := s.publishCatalogEdit(catalog, s.catalogEntries.Len(), 0, []format.CatalogEntry{entry}, candidate, "", nil); err != nil {
 		return errors.Join(err, fd.Close())
 	}
-	sealed := catalog.Entries[len(catalog.Entries)-1]
-	prior := s.Segments[sealed.ID]
+	prior := s.Segments[entry.ID]
 	prior.activeDigest = nil
-	prior.markSealed(catalog.UUID, sealed)
+	prior.markSealed(catalog.UUID, entry)
 	old := s.active
 	s.active = fd
 	if err := errors.Join(old.Close(), s.IO.Check("rotation.close:after")); err != nil {
@@ -875,7 +888,7 @@ func (s *Store) Cleanup() (removed, pinned int64, result error) {
 // The caller validates the entire listing before truncating or unlinking any file.
 func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject) (removed, pinned int64, result error) {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, f := range s.Catalog.Entries {
+	for f := range s.catalogEntries.All() {
 		if f.HasPhysicalFile() {
 			selected[f.ID] = true
 		}
@@ -891,7 +904,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 				continue
 			}
 		case "MANIFEST":
-			if id == s.Current.ManifestID {
+			if s.buildingCatalogs[id] || slices.Contains(s.catalogChain, id) {
 				continue
 			}
 		case "PARITY":

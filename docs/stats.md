@@ -28,8 +28,11 @@ bytes equal `LiveRecordBytes + ObsoletePutBytes + TombstoneBytes`. A newly
 created DB has one empty segment and 64 selected bytes. Physical disk use also
 includes filesystem allocation, metadata, temporary files and retired files.
 Obsolete records can reside in the active log or in segments below the
-automatic cleaner's threshold. For its most recent observation of retired
-bytes retained by segment pins or live index references, use `AutoCompactionStatus().PinnedRetiredDataBytes`.
+automatic cleaner's threshold. For the latest completed retirement sweep's
+estimate of retired bytes retained by pins or live index references, use
+`AutoCompactionStatus().PinnedRetiredDataBytes`. The status also reports pending
+reclaim, the portion deferred by pins under pressure, and measured free space
+and write reserve.
 
 ## Counters
 

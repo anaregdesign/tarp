@@ -25,7 +25,7 @@ func sealForCleaning(t *testing.T, db *DB) format.CatalogEntry {
 	if err := db.sealActive(); err != nil {
 		t.Fatal(err)
 	}
-	return db.store.Catalog.Entries[len(db.store.Catalog.Entries)-1]
+	return db.store.CatalogEntries().At(db.store.CatalogEntries().Len() - 1)
 }
 
 func TestSegmentCleaningRebasesOnConcurrentTailAndHonorsCapture(t *testing.T) {
@@ -80,9 +80,9 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	clean := db.store.Catalog.Entries[0]
+	clean := db.store.CatalogEntries().At(0)
 	if clean.Kind != format.CleanedLogKind || clean.FirstSequence != source.FirstSequence || clean.LastSequence != source.LastSequence ||
-		db.store.Catalog.PrunedThroughSequence != 9 || db.store.Current.LastUserSequence != 9 || db.store.Catalog.Entries[1] != tail {
+		db.store.Catalog.PrunedThroughSequence != 9 || db.store.Current.LastUserSequence != 9 || db.store.CatalogEntries().At(1) != tail {
 		t.Fatalf("lost range or tail: %+v current=%+v", db.store.Catalog, db.store.Current)
 	}
 	wantValue(t, db, "keep", "stable")
@@ -321,7 +321,7 @@ func TestCleanerValidatesDiscardedBytesWithoutOpeningUnrelatedSegments(t *testin
 	if err := os.Rename(hidden+".hold", hidden); err != nil {
 		t.Fatal(err)
 	}
-	if e := db.store.Catalog.Entries[1]; e.ID != 0 || e.Kind != format.CleanedLogKind || e.FirstSequence != source.FirstSequence || e.LastSequence != source.LastSequence {
+	if e := db.store.CatalogEntries().At(1); e.ID != 0 || e.Kind != format.CleanedLogKind || e.FirstSequence != source.FirstSequence || e.LastSequence != source.LastSequence {
 		t.Fatalf("invalid empty coverage %+v", e)
 	}
 	mustPut(t, db, "corrupt", "obsolete")
@@ -361,24 +361,24 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 	mustPut(t, db, "obsolete", "initial")
 	log := sealForCleaning(t, db)
 	mustPut(t, db, "obsolete", "updated")
-	if err := db.cleanSegment(ctx, db.store.Catalog.Entries[0]); err != nil {
+	if err := db.cleanSegment(ctx, db.store.CatalogEntries().At(0)); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := db.store.Catalog.Entries[0]
+	snapshot := db.store.CatalogEntries().At(0)
 	if snapshot.Kind != format.SnapshotKind || testLoc(t, db, "stable").Segment.ID != snapshot.ID {
 		t.Fatal("snapshot was not replaced by a snapshot")
 	}
 	if err := db.cleanSegment(ctx, log); err != nil {
 		t.Fatal(err)
 	}
-	sparse := db.store.Catalog.Entries[1]
+	sparse := db.store.CatalogEntries().At(1)
 	if err := db.Delete([]byte("later")); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.cleanSegment(ctx, sparse); err != nil {
 		t.Fatal(err)
 	}
-	sparse = db.store.Catalog.Entries[1]
+	sparse = db.store.CatalogEntries().At(1)
 	if sparse.FirstSequence != log.FirstSequence || sparse.LastSequence != log.LastSequence || sparse.Kind != format.CleanedLogKind ||
 		sparse.ID == 0 || db.store.Segments[sparse.ID].DeleteBytes.Load() != sparse.Bytes-format.SegmentHeaderBytes {
 		t.Fatalf("second cleaning lost required delete or covered interval %+v", sparse)
@@ -387,8 +387,8 @@ func TestCleaningSnapshotAndSparseFileRepeatedlyPreservesDeletes(t *testing.T) {
 	if err := db.cleanSegment(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if db.store.Catalog.Entries[0] != sparse {
-		t.Fatalf("fully discarded snapshot was not removed: %+v", db.store.Catalog.Entries)
+	if db.store.CatalogEntries().At(0) != sparse {
+		t.Fatalf("fully discarded snapshot was not removed: %+v", db.store.CatalogEntries().Slice(0, db.store.CatalogEntries().Len()))
 	}
 	if _, err := db.Compact(ctx); err != nil {
 		t.Fatal(err)
@@ -580,7 +580,7 @@ func TestRepackPublishesWholeGroupAndPreservesConcurrentTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer image.Close()
-			entries := image.store.Catalog.Entries
+			entries := image.store.CatalogEntries().Slice(0, image.store.CatalogEntries().Len())
 			if len(entries) < 3 || entries[0] != prefix || entries[len(entries)-1] != tail || image.store.Current.LastUserSequence != 8 {
 				t.Fatalf("lost prefix or acknowledged tail: %+v, sequence %d", entries, image.store.Current.LastUserSequence)
 			}
@@ -618,7 +618,7 @@ func TestCleanSegmentRepairsGroupAndRestartsTombstoneAccounting(t *testing.T) {
 	if err := db.cleanSegment(t.Context(), first, second); err != nil {
 		t.Fatal(err)
 	}
-	entries := db.store.Catalog.Entries
+	entries := db.store.CatalogEntries().Slice(0, db.store.CatalogEntries().Len())
 	if len(entries) != 1 || entries[0].Kind != format.CleanedLogKind || entries[0].FirstSequence != first.FirstSequence ||
 		entries[0].LastSequence != second.LastSequence || db.store.Segments[entries[0].ID].DeleteBytes.Load() != tombstones {
 		t.Fatalf("replacement after repair: %+v", entries)
@@ -648,7 +648,7 @@ func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, b := testLoc(t, db, "a"), testLoc(t, db, "b")
-	source := db.store.Catalog.Entries[0]
+	source := db.store.CatalogEntries().At(0)
 	if source.Kind != format.SnapshotKind || a.Segment.ID != source.ID || b.Segment != a.Segment || a.RecordOffset >= b.RecordOffset {
 		t.Fatal("expected two ordered records in one snapshot")
 	}
@@ -663,7 +663,7 @@ func TestCleanRepairsSnapshotKeyCollisionBeforePayloadCheck(t *testing.T) {
 	if err := db.cleanSegment(t.Context(), source); err != nil {
 		t.Fatal(err)
 	}
-	if got := db.store.Catalog.Entries; len(got) != 1 || got[0].ID == source.ID || got[0].Kind != format.SnapshotKind || verifies.Load() != 1 {
+	if got := db.store.CatalogEntries().Slice(0, db.store.CatalogEntries().Len()); len(got) != 1 || got[0].ID == source.ID || got[0].Kind != format.SnapshotKind || verifies.Load() != 1 {
 		t.Fatalf("replacement after repair: %+v, repairs %d", got, verifies.Load())
 	}
 	wantValue(t, db, "a", "first")
@@ -687,7 +687,7 @@ func TestCompactionKeepsSelectedPairOnReplacementParityFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := db.store.Current
-				entry := db.store.Catalog.Entries[0]
+				entry := db.store.CatalogEntries().At(0)
 				oldParity := selectedParity(t, db, entry)
 				run := func() error {
 					if operation == "clean" {
@@ -709,7 +709,7 @@ func TestCompactionKeepsSelectedPairOnReplacementParityFailure(t *testing.T) {
 				if err := run(); err != nil {
 					t.Fatal(err)
 				}
-				replacement := db.store.Catalog.Entries[0]
+				replacement := db.store.CatalogEntries().At(0)
 				if replacement.ID == entry.ID {
 					t.Fatal("retry did not publish a replacement")
 				}
