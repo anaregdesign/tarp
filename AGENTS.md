@@ -6,7 +6,11 @@ Keep the public `tarp` API, its package documentation, and its public API tests 
 
 Keep runnable Go examples with their public API tests. Place measurement drivers in `benchmark/`, qualification commands in `benchmark/cmd/`, and guest scripts in `benchmark/scripts/`. Use [the storage terminology](docs/terminology.md) in identifiers, comments, documentation and measurement labels. Consult [the format specification](docs/format.md) and [the durability contract](docs/durability.md) before changing persisted data or commit behavior.
 
-During v0, implement the current public API and formats without backward-compatibility shims, legacy readers, or dual writes. Update callers, tests and specifications together. Preserve safe rejection of unsupported input.
+## v0 Backward Compatibility
+
+**No backward compatibility is required for any `v0.*.*` release.** Use the simplest code that satisfies the current public API and on-disk format contracts.
+
+**Actively remove code that exists solely for backward compatibility whenever you find it.** This includes compatibility shims, legacy readers, and dual writes. Update callers, tests, and specifications together. Preserve safe rejection of unsupported inputs and formats.
 
 ## Build, Test, and Development Commands
 
