@@ -110,19 +110,5 @@ above has a hit ratio of 50%. A growing
 obsolete-byte gauge alongside stable live bytes indicates retained history
 from overwrites and deletes.
 
-### Migrating lookup metrics from v0.2.x
-
-In v0.2.x each input position contributed to hits, misses or missing keys.
-Starting in v0.3.0, a batch with duplicates contributes fewer lookups, and
-hit ratios can change for the same workload. For a rolling upgrade, add a
-constant `lookup_unit="distinct_key"` label to the three lookup metrics in
-the upgraded collector. Select that label in dashboards, recording rules and
-alerts so each aggregation uses the same counting unit. If retaining the
-unlabelled metric names, compare rates only within windows in which every
-included instance used the same definition. Adding the duplicate count to
-the sum of the three lookup counts recovers the total number of classified
-input positions. The individual v0.2.x hit, miss and missing totals cannot
-be reconstructed from that sum.
-
 See the [runnable Stats example](../stats_test.go) and
 [Prometheus custom collector documentation](https://pkg.go.dev/github.com/prometheus/client_golang/prometheus#Collector).

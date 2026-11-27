@@ -5,20 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 )
 
-var cloudPrefix = regexp.MustCompile(`^\[[ \t]*[0-9]+(?:\.[0-9]+)?[ \t]*\][ \t]+cloud-init\[[0-9]+\]:[ \t]*(.*)$`)
-
-// ConsolePayload recognizes a raw protocol line or the complete cloud-init
-// console frame. Shell tracing, quoted commands and embedded substrings do not
-// become protocol events.
+// ConsolePayload recognizes raw protocol lines. Shell tracing, quoted commands
+// and embedded substrings do not become protocol events.
 func ConsolePayload(line string) (string, bool) {
 	line = strings.TrimSpace(line)
-	if match := cloudPrefix.FindStringSubmatch(line); match != nil {
-		line = strings.TrimSpace(match[1])
-	}
 	return line, strings.HasPrefix(line, "TARP_")
 }
 

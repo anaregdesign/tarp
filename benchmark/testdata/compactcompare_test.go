@@ -2,7 +2,6 @@ package benchmark
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -171,27 +170,21 @@ func runCompactCompare(t *testing.T, fixture, arm, mode string, round, keyCount 
 	return row
 }
 
-// CI seeds once and runs each revision against clones of the same closed fixture.
 func TestCompactComparisonFixture(t *testing.T) {
 	const keys = 8
-	fixture := os.Getenv("TARP_COMPACT_TEST_FIXTURE")
-	if fixture == "" {
-		fixture = filepath.Join(t.TempDir(), "fixture")
-	}
-	t.Run("seed", func(t *testing.T) {
-		runCompactCompare(t, fixture, "base", "seed", 0, keys)
+	fixture := filepath.Join(t.TempDir(), "fixture")
+	runCompactCompare(t, fixture, "current", "seed", 0, keys)
+	t.Run("parked", func(t *testing.T) {
+		row := runCompactCompare(t, fixture, "current", "parked", 1, keys)
+		if row["reopened_last_user_sequence"] != uint64(21) || row["compact_records_copied"] != int64(9) {
+			t.Fatalf("unexpected sequence %v or copied DATA records %v", row["reopened_last_user_sequence"], row["compact_records_copied"])
+		}
 	})
-	for _, arm := range []string{"base", "next"} {
-		t.Run(arm, func(t *testing.T) {
-			row := runCompactCompare(t, fixture, arm, "parked", 1, keys)
-			if row["reopened_last_user_sequence"] != uint64(21) || row["compact_records_copied"] != int64(9) {
-				t.Fatalf("unexpected sequence %v or copied DATA records %v", row["reopened_last_user_sequence"], row["compact_records_copied"])
-			}
-			pinned := runCompactCompare(t, fixture, arm, "pinned", 0, keys)
-			pins := pinned["pinned_backup"].(pinnedBackupMeasurement)
-			if pins.RetiredFilesHeld == 0 || pins.RetiredBytesHeld == 0 || pins.RetiredFilesHeld != pins.ReleasedFilesUnlinked || pins.RetiredBytesHeld != pins.ReleasedBytesUnlinked {
-				t.Fatalf("captured DATA retention and reclamation: %+v", pins)
-			}
-		})
-	}
+	t.Run("pinned", func(t *testing.T) {
+		row := runCompactCompare(t, fixture, "current", "pinned", 0, keys)
+		pins := row["pinned_backup"].(pinnedBackupMeasurement)
+		if pins.RetiredFilesHeld == 0 || pins.RetiredBytesHeld == 0 || pins.RetiredFilesHeld != pins.ReleasedFilesUnlinked || pins.RetiredBytesHeld != pins.ReleasedBytesUnlinked {
+			t.Fatalf("captured DATA retention and reclamation: %+v", pins)
+		}
+	})
 }

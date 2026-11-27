@@ -11,8 +11,8 @@ func TestProbeConsoleFramingAndVerdict(t *testing.T) {
 		pass        bool
 	}{
 		{"raw", "TARP_ENVIRONMENT_PASS\r\nTARP_PROBE_EXIT 0\r\n", true},
-		{"cloud-init", "[ 201.387 ] cloud-init[905]: TARP_ENVIRONMENT_PASS\n[ 201.401 ] cloud-init[905]: TARP_PROBE_EXIT 0\n", true},
-		{"traced-commands-ignored", "+ echo TARP_ENVIRONMENT_PASS\n[ 201.2 ] cloud-init[905]: + echo TARP_PROBE_EXIT 0\n", false},
+		{"framed-markers-ignored", "[ 201.387 ] cloud-init[905]: TARP_ENVIRONMENT_PASS\n[ 201.401 ] cloud-init[905]: TARP_PROBE_EXIT 0\n", false},
+		{"traced-commands-ignored", "+ echo TARP_ENVIRONMENT_PASS\n+ echo TARP_PROBE_EXIT 0\n", false},
 		{"embedded-text-ignored", "command: echo TARP_ENVIRONMENT_PASS\nresult: TARP_PROBE_EXIT 0\n", false},
 		{"missing-exit", "TARP_ENVIRONMENT_PASS\n", false},
 		{"failed-exit", "TARP_ENVIRONMENT_PASS\nTARP_PROBE_EXIT 1\n", false},
