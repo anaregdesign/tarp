@@ -40,7 +40,7 @@ func newRepairFixture(t *testing.T, lengths ...int) repairFixture {
 		if err := db.Rotate(); err != nil {
 			t.Fatal(err)
 		}
-		entry := db.Catalog.Entries[i]
+		entry := db.CatalogSnapshot().Entries[i]
 		path := db.Segments[entry.ID].Path
 		data, err := os.ReadFile(path)
 		if err != nil {

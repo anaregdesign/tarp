@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/cache"
+	"github.com/anaregdesign/tarp/internal/entrysize"
 	"github.com/anaregdesign/tarp/internal/format"
 	"github.com/anaregdesign/tarp/internal/index"
 	"github.com/anaregdesign/tarp/internal/platform"
@@ -119,7 +120,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	cfg := storage.Config{IndexedOpen: opts.OpenValidation == Indexed, ValueCacheBudgetBytes: opts.ValueCacheBudgetBytes, MaxRecordBytes: opts.MaxRecordBytes, TargetSegmentBytes: opts.TargetSegmentBytes, Handles: opts.ReadFileHandles}
 	s, keys, err := storage.OpenIndexed(ctx, dir, cfg, existingOnly, fs, func(s *storage.Store) (index.Backend, error) {
 		return openIndex(s, opts.IndexMode, opts.BTreeMemoryBudgetBytes/2)
-	}, opts.importCheckpoint)
+	}, opts.importCheckpoint, opts.fastCheckpointImporter())
 	if err != nil {
 		return nil, operationError("open", "recovery", err)
 	}
@@ -380,6 +381,9 @@ func (db *DB) lockMutation() uint64 {
 
 func (db *DB) unlockMutation(previousActive uint64, invalidatedSealed bool) {
 	rotated := previousActive != db.store.Current.ActiveID
+	if rotated {
+		db.cleanerSealed()
+	}
 	if db.memoryRemap != nil {
 		db.indexGate.Lock()
 		clear(db.memoryRemap.staged)
@@ -430,6 +434,9 @@ func (db *DB) mutate(kind uint8, key, value []byte) error {
 			return operationError(op, "index-prepare", err)
 		}
 		prepare = nil
+	}
+	if err := db.checkWriteReserve(op, entrysize.RecordBytes(uint64(len(key)), uint64(len(value)))); err != nil {
+		return err
 	}
 	loc, err := db.store.AppendPrepared(kind, key, value, db.health, prepare)
 	if err != nil {
@@ -483,6 +490,10 @@ func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc, old storage.Lo
 	if old.Segment != nil {
 		invalidatedSealed = old.Segment != loc.Segment
 		old.Segment.LiveBytes.Add(-old.RecordBytes)
+		if invalidatedSealed {
+			q := &db.cleaner.candidates
+			q.changed(q.files[old.Segment.ID], old.Segment, db.opts.TargetSegmentBytes)
+		}
 		db.stats.LiveRecordBytes -= uint64(old.RecordBytes)
 		if kind == format.Delete || old.Segment != loc.Segment {
 			db.dropLocation(old.Segment)
@@ -542,10 +553,11 @@ func (db *DB) Close() error {
 			parityErr = operationError("close", "protect parity", err)
 		}
 	}
+	db.releaseCleanerCandidates()
 	// Close still releases ownership and never changes committed writes.
 	// Report any selected DATA damage even when its sidecar was already built.
 	var unavailable []error
-	for _, entry := range db.store.Catalog.Entries {
+	for entry := range db.store.CatalogEntries().All() {
 		if entry.HasPhysicalFile() {
 			if err := db.store.Segments[entry.ID].UnavailableData(); err != nil {
 				unavailable = append(unavailable, err)

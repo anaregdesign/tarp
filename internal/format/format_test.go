@@ -280,6 +280,7 @@ func FuzzDecoders(f *testing.F) {
 		parity,
 		EncodeSegmentHeader(SegmentHeader{ID: 1, Kind: CleanedLogKind}),
 		EncodeCatalog(Catalog{ActiveID: 1}),
+		EncodeCatalogEdit(CatalogEdit{PreviousID: 2, PreviousDigest: [32]byte{1}, Catalog: Catalog{ActiveID: 1}}),
 		EncodeCatalog(Catalog{ActiveID: 1, Index: IndexCheckpoint{ID: 2, Bytes: 1024, IndexFileDigest: [32]byte{1}, CoveredLayoutFingerprint: [32]byte{2}}}),
 		EncodeCatalog(Catalog{ActiveID: 1, PrunedThroughSequence: 5, Entries: []CatalogEntry{
 			{ID: 2, DataFileDigest: [32]byte{2}, Bytes: 128, Kind: RawLogKind, FirstSequence: 1, LastSequence: 1},
@@ -296,6 +297,7 @@ func FuzzDecoders(f *testing.F) {
 		_, _ = DecodeSegmentHeader(b)
 		_, _ = DecodeFrontier(b)
 		_, _ = DecodeCatalog(b)
+		_, _ = DecodeCatalogEdit(b)
 		_, _ = DecodeBackup(b)
 		_, _ = DecodeIndexedValue(b, []byte("k"), 1)
 		_ = ValidateParitySidecar(t.Context(), bytes.NewReader(b), parityTestUUID, sealed)

@@ -56,14 +56,20 @@ func (c *SegmentCleaning) ResetCopy(fs *IO) error {
 // BeginClean runs under the writer gate. The selected catalog is immutable.
 // New log rotations may append to the catalog while these sources are copied.
 func (s *Store) BeginClean(entries []format.CatalogEntry) (*SegmentCleaning, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	return s.BeginCleanAt(s.catalogEntries.Index(entries[0]), entries)
+}
+
+func (s *Store) BeginCleanAt(pos int, entries []format.CatalogEntry) (*SegmentCleaning, error) {
 	if len(entries) == 0 || !entries[0].HasPhysicalFile() || !entries[len(entries)-1].HasPhysicalFile() {
 		return nil, nil
 	}
-	pos := slices.Index(s.Catalog.Entries, entries[0])
-	if pos < 0 || len(entries) > len(s.Catalog.Entries)-pos {
+	if pos < 0 || len(entries) > s.catalogEntries.Len()-pos {
 		return nil, nil
 	}
-	run := s.Catalog.Entries[pos : pos+len(entries)]
+	run := s.catalogEntries.Slice(pos, pos+len(entries))
 	if !slices.Equal(run, entries) {
 		return nil, nil
 	}
@@ -309,7 +315,7 @@ func (s *Store) InstallCleaned(c *SegmentCleaning, offGate func(func() error) er
 		return errors.New("storage: cleaner replacement is not protected")
 	}
 	start, end := c.position, c.position+len(c.entries)
-	if end > len(s.Catalog.Entries) || !slices.Equal(s.Catalog.Entries[start:end], c.entries) {
+	if end > s.catalogEntries.Len() || !slices.Equal(s.catalogEntries.Slice(start, end), c.entries) {
 		return fmt.Errorf("%w: cleaner source selection changed", ErrCorrupt)
 	}
 	for _, source := range c.sources {
@@ -321,18 +327,15 @@ func (s *Store) InstallCleaned(c *SegmentCleaning, offGate func(func() error) er
 		return fault("clean.generation", publication.NotApplied, false, errors.New("storage: publication generation exhausted"))
 	}
 	catalog := s.Catalog
-	catalog.Index = format.IndexCheckpoint{}
-	catalog.Entries = slices.Clone(catalog.Entries)
 	catalog.PrunedThroughSequence = s.Current.LastUserSequence
 	replacement := c.replacement()
-	if !c.created && replacement.Kind == format.SnapshotKind {
-		catalog.Entries = slices.Delete(catalog.Entries, start, end)
-	} else {
-		catalog.Entries = slices.Replace(catalog.Entries, start, end, replacement)
+	var outputs []format.CatalogEntry
+	if c.created || replacement.Kind != format.SnapshotKind {
+		outputs = []format.CatalogEntry{replacement}
 	}
 	candidate := s.Current
 	candidate.PublicationGeneration++
-	if err := s.publishCatalogFor(catalog, candidate, "clean.", offGate); err != nil {
+	if err := s.publishCatalogEdit(catalog, start, end-start, outputs, candidate, "clean.", offGate); err != nil {
 		if err == errCatalogChanged {
 			// A rotation changed the catalog during preparation. Publish the
 			// rebased catalog once under the gate to guarantee progress.

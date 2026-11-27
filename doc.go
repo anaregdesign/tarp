@@ -8,7 +8,7 @@
 // Use [Open] with Options{} to create or reopen a database with the defaults.
 // Use [OpenContext] to bound startup recovery or [OpenExisting] when a missing
 // database should fail startup. The owner calls [DB.Close] to release the
-// directory. The default index is a paged B+tree with a 16 MiB working-memory
+// directory. The default index is a paged B+tree with a 128 MiB working-memory
 // budget. [IndexMemory] keeps all key locations in an in-memory hash index.
 // Both modes use the value cache.
 //
@@ -71,7 +71,8 @@
 //
 // To reduce index rebuilding on restart, [DB.CheckpointIndex] persists an
 // index checkpoint. The default [Full] validation still checks all committed
-// DATA during Open. [Indexed] checks the headers and lengths of covered DATA
-// segments, replays the log suffix, and verifies covered records when read.
+// DATA during Open. [Indexed] checks selected DATA headers and lengths. With
+// B+tree it can reuse authenticated INDEX pages and replay changed DATA within
+// its replay budget. Reads verify covered records.
 // See the repository's durability contract for storage assumptions.
 package tarp

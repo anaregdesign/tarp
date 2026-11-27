@@ -1,16 +1,35 @@
 package storage
 
 import (
+	"container/list"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 )
+
+const autoRetirementVisits = 32
+
+// Automatic retirement walks a FIFO cycle across bounded writer-gate passes.
+// Keep the last completed pin observation while the next cycle is in flight.
+type retiredDataScan struct {
+	ids       list.List
+	remaining int
+	added     bool
+	pinned    int64
+	last      int64
+}
 
 func (s *Store) retireData(f *DataSegment) {
 	if s.retired == nil {
 		s.retired = make(map[uint64]*DataSegment)
+	}
+	if s.retired[f.ID] == nil {
+		work := &s.retiredData
+		work.ids.PushBack(f.ID)
+		work.added = work.added || work.remaining != 0
 	}
 	s.retired[f.ID] = f
 }
@@ -52,19 +71,27 @@ func (s *Store) syncRetirements(point string) error {
 
 // RetireCleaned removes only known obsolete objects. The caller holds the
 // writer gate and checks health. Pin release itself never performs file I/O.
+// Pinned bytes reflect the most recent completed sweep of known DATA files.
 func (s *Store) RetireCleaned() (unlinked, pinned int64, pending bool, result error) {
-	return s.retireKnown(16)
+	return s.retireKnown(16, autoRetirementVisits)
+}
+
+// RetirementSweepPending reports unvisited DATA in the current automatic
+// sweep. A pinned file already visited can wait for a later notification.
+func (s *Store) RetirementSweepPending() bool {
+	return s.retiredData.remaining != 0 || s.retiredData.added
 }
 
 // RetireAfterCheckpoint visits the complete set of known retirements once and
-// syncs successful unlinks together, as manual directory cleanup does. Counting
-// pins in each automatic batch would repeatedly traverse the same large set.
+// syncs successful unlinks together, as manual directory cleanup does.
 func (s *Store) RetireAfterCheckpoint() (unlinked, pinned int64, err error) {
-	unlinked, pinned, _, err = s.retireKnown(math.MaxInt)
+	s.retiredData.remaining = 0
+	unlinked, pinned, _, err = s.retireKnown(math.MaxInt, math.MaxInt)
 	return unlinked, pinned, err
 }
 
-func (s *Store) retireKnown(remaining int) (unlinked, pinned int64, pending bool, result error) {
+func (s *Store) retireKnown(remaining, visits int) (unlinked, pinned int64, pending bool, result error) {
+	manual := visits == math.MaxInt
 	remove := func(path string) (removed bool, err error) {
 		st, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -98,9 +125,26 @@ func (s *Store) retireKnown(remaining int) (unlinked, pinned int64, pending bool
 		}
 		return removed, err
 	}
-	for id, f := range s.retired {
+	work := &s.retiredData
+	if work.remaining == 0 {
+		work.remaining, work.added, work.pinned = work.ids.Len(), false, 0
+	}
+	for observed := 0; work.remaining > 0 && observed < visits; observed++ {
+		if !manual && (remaining == 0 || result != nil) {
+			break
+		}
+		item := work.ids.Front()
+		id := item.Value.(uint64)
+		f := s.retired[id]
+		work.remaining--
+		if f == nil {
+			// Directory cleanup can retire this ID while a sweep is parked.
+			work.ids.Remove(item)
+			continue
+		}
+		work.ids.MoveToBack(item)
 		if s.DataReferenced(f) {
-			pinned += min(f.Size.Load(), math.MaxInt64-pinned)
+			work.pinned += min(f.Size.Load(), math.MaxInt64-work.pinned)
 			continue
 		}
 		if remaining == 0 || result != nil {
@@ -123,16 +167,26 @@ func (s *Store) retireKnown(remaining int) (unlinked, pinned int64, pending bool
 		}
 		removed, err := remove(f.Path)
 		if removed {
+			work.ids.Remove(item)
 			delete(s.retired, id)
 			delete(s.Segments, id)
 		}
 		result = err
 	}
+	if work.remaining == 0 {
+		work.last = work.pinned
+	}
+	if len(s.retired) == 0 {
+		*work = retiredDataScan{}
+	}
+	pinned = work.last
+	metadataVisits := visits
 	for id := range s.retiredCatalogs {
-		if remaining == 0 || result != nil {
+		if remaining == 0 || result != nil || metadataVisits == 0 {
 			break
 		}
-		if id == s.Current.ManifestID {
+		metadataVisits--
+		if slices.Contains(s.catalogChain, id) {
 			result = fmt.Errorf("%w: selected catalog scheduled for retirement", ErrCorrupt)
 			break
 		}
@@ -144,9 +198,10 @@ func (s *Store) retireKnown(remaining int) (unlinked, pinned int64, pending bool
 		result = err
 	}
 	for id := range s.retiredIndexes {
-		if remaining == 0 || result != nil {
+		if remaining == 0 || result != nil || metadataVisits == 0 {
 			break
 		}
+		metadataVisits--
 		if id == s.Catalog.Index.ID {
 			result = fmt.Errorf("%w: retiring selected index", ErrCorrupt)
 			break

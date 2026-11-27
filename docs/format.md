@@ -120,7 +120,7 @@ the DATA bytes plus 200 bytes of metadata.
 | 16 | 16 | Database UUID |
 | 32 | 8 | Nonzero CURRENT publication generation |
 | 40 | 8 | Selected catalog ID |
-| 48 | 32 | SHA-256 of selected complete catalog |
+| 48 | 32 | SHA-256 of the selected MANIFEST object |
 | 80 | 8 | Active log segment ID |
 | 88 | 8 | Active committed end offset (exclusive, in bytes), at least 64 |
 | 96 | 8 | Last user sequence; initial value zero |
@@ -138,13 +138,29 @@ end is discardable after validation and compatible-options checks.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | `TARPMNFT` or `TARPBKUP` |
+| 0 | 8 | `TARPMNFT`, `TARPMNED`, or `TARPBKUP` |
 | 8 | 2 | Reserved |
 | 10 | 2 | Reserved |
 | 12 | 8 | Payload length, exactly file size minus 32 |
 | 20 | 4 | Payload CRC32C |
 | 24 | 4 | Complete header CRC32C with this field zero |
 | 28 | 4 | Reserved |
+
+## Catalog base and edits
+
+A `TARPMNFT` MANIFEST is a complete catalog base. A `TARPMNED` object contains
+the previous MANIFEST ID (u64), its SHA-256 (32 bytes), a zero-based splice
+position (u64), and a removed entry count (u64). The remaining bytes encode a
+catalog payload with the replacement header and zero or one inserted entry.
+A rotation appends the sealed active segment. Cleaning replaces or removes
+one consecutive range. An INDEX-only publication changes the header.
+
+`CURRENT` authenticates the newest object. Recovery follows the authenticated
+predecessors back to a base, then applies edits from oldest to newest before
+validating the selected layout. Predecessor IDs must decrease and at most 256
+edits can follow a base. Full DATA checkpoints can directly publish a new base.
+Native backups serialize their captured layout as a standalone base with its
+digest in the captured `CURRENT`.
 
 ## Catalog payload
 
@@ -157,7 +173,7 @@ checkpoint descriptor.
 | ---: | ---: | --- |
 | 48 | 8 | INDEX object ID |
 | 56 | 8 | Exact INDEX length, within signed file-offset range |
-| 64 | 32 | SHA-256 of the complete INDEX |
+| 64 | 32 | SHA-256 authenticating the INDEX layout, counters, summary and packed tree header |
 | 96 | 8 | Covered user sequence |
 | 104 | 8 | Number of covered catalog entries |
 | 112 | 32 | Covered layout fingerprint |
@@ -180,10 +196,13 @@ The layout fingerprint is SHA-256 of these concatenated bytes, in order:
 
 A covered catalog prefix must contain every snapshot segment. Its covered sequence is the last
 user sequence of the final covered log interval, or C when there are no covered log intervals.
-The index checkpoint may only cover a sequence at or above H. Neither the active ID
+The index checkpoint covers a sequence at or above the H recorded in its own
+covered layout. Incremental cleaning can advance the selected catalog's H
+without changing that saved layout. Neither the active ID
 nor later sealed entries contribute to this fingerprint, so an append or rotation
-can preserve a previously published checkpoint. Cleaning or compaction clears
-the descriptor in the same catalog publication that replaces physical files.
+can preserve a previously published checkpoint. Incremental cleaning retains
+the descriptor and its original covered layout. A full DATA checkpoint clears
+the descriptor when publishing its new layout.
 
 | Entry kind | Selected file and coverage |
 | --- | --- |
@@ -237,8 +256,8 @@ truncations, and decoder fuzzing live in `internal/format/format_test.go`.
 ## Private B+tree files
 
 Opening with `IndexBTree` uses a process-private working tree. Recovery can
-import the selected packed index and replay the subsequent DATA log suffix,
-or build the tree from DATA. The in-process root descriptor identifies a
+reuse the selected packed INDEX as an immutable base with private copy-on-write
+pages, import the packed tree, or build from DATA. The in-process root descriptor identifies a
 B+tree root generation and its root page. A zero root represents an empty tree. Private files use 8 KiB
 pages with one-based IDs. The page header records its CRC-32C, kind, page ID,
 slot count, byte boundaries and leftmost child or next overflow page.
@@ -255,17 +274,37 @@ when their descriptors close.
 
 ## INDEX file
 
-The catalog selects the entire INDEX length and SHA-256. The outer header is
-48 bytes. Bytes [0,8) are `TARPIDX1`, [8,40) hold the covered layout
-fingerprint, and [40,48) hold the covered catalog entry count. One u64
-tombstone byte count per covered entry follows in catalog order. An empty
-interval or snapshot has zero tombstone bytes.
+An INDEX begins with a 128-byte summary.
 
-The packed tree follows immediately. Its 48-byte header begins with
+| Offset | Bytes | Field |
+| ---: | ---: | --- |
+| 0 | 8 | `TARPIDX2` |
+| 8 | 32 | Covered layout fingerprint |
+| 40 | 8 | Covered catalog entry count |
+| 48 | 8 | Length of the encoded covered catalog base |
+| 56 | 8 | Packed tree length |
+| 64 | 8 | Live key count |
+| 72 | 8 | Largest live encoded record |
+| 80 | 8 | Largest live value |
+| 88 | 32 | Root SHA-256 for the page hashes |
+| 120 | 8 | Reserved |
+
+The covered catalog base follows with a cleared INDEX descriptor. Then each
+covered entry has three u64 counts in catalog order for tombstone bytes, live
+keys and live record bytes. The descriptor digest covers the encoded catalog,
+the tuples, the 128-byte summary and the 48-byte packed tree header, in that order.
+
+The packed tree's 48-byte header begins with
 `TARPBTP1`, followed by the u32 page size (8192), the CRC32C of [16,48),
 and four u64 fields for root page ID, page count, live key count and maximum
 key length. Empty trees have four zero fields. Exactly the declared number of
-8 KiB pages follow, in one-based page ID order. The importer checks page and
-overflow links, search routing, live addresses and totals before admitting
-readers. Its private allocator starts above the imported pages. The immutable
-published file can be removed after the catalog selects a replacement.
+8 KiB pages follow, in one-based page ID order. The footer stores SHA-256
+hashes in 4 KiB blocks with up to 128 hashes per block and zero padding in
+unused slots. The first level hashes packed pages. Each subsequent level
+hashes the previous level's blocks, ending with a single block whose hash
+is recorded in the summary. An empty tree has no hash blocks.
+
+`Full` validates the packed pages and tree topology before admitting readers.
+`Indexed` with the B+tree authenticates individual pages as it loads them.
+New private pages use IDs above the immutable base. The immutable file stays
+readable through its open descriptor even if a newer checkpoint retires its name.

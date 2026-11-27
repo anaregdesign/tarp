@@ -93,8 +93,17 @@ func (x *transaction) key(key string) (keyRef, error) {
 	}
 	return ref, nil
 }
-func (x *transaction) retire(id uint64) error { return x.old.add(x.tree.p, id) }
+func (x *transaction) retire(id uint64) error {
+	if id <= x.tree.p.basePages {
+		return nil
+	}
+	return x.old.add(x.tree.p, id)
+}
+
 func (x *transaction) retireKey(k keyRef) error {
+	if k.tail != 0 && k.tail <= x.tree.p.basePages {
+		return nil
+	}
 	r := stream(k, x.tree.p.read)
 	r.data = nil
 	for r.remaining > 0 {

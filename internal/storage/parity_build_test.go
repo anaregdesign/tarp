@@ -37,7 +37,7 @@ func TestParityBuildCoalescesWritesAndPreservesUnsafeDestination(t *testing.T) {
 			if err := s.Rotate(); err != nil {
 				t.Fatal(err)
 			}
-			entry := s.Catalog.Entries[0]
+			entry := s.CatalogSnapshot().Entries[0]
 			source := CapturedSegment{Segment: s.Segments[entry.ID], Entry: entry}
 			source.Segment.Pin()
 			defer source.Segment.Unpin()

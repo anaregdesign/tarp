@@ -18,10 +18,14 @@ import (
 
 // AutoCompactionStatus describes the automatic compaction worker since this Open.
 type AutoCompactionStatus struct {
-	DeferredReason         string
-	PinnedRetiredDataBytes int64  // Retired DATA bytes retained by segment pins or live index references at the last retirement pass.
-	UnlinkedBytes          uint64 // Cumulative logical lengths of files unlinked by the worker, including obsolete manifests.
-	LastError              error
+	DeferredReason          string
+	PinnedRetiredDataBytes  int64  // Retired DATA bytes observed with pins or live index references during the last completed retirement sweep.
+	UnlinkedBytes           uint64 // Cumulative logical lengths of files unlinked by the worker, including obsolete manifests.
+	PendingReclaimDataBytes uint64 // Estimated DATA savings from obsolete-heavy segments before metadata, PARITY and pin checks.
+	PinnedReclaimDataBytes  uint64 // Estimated DATA savings deferred by current retention pins.
+	AvailableBytes          uint64 // Filesystem headroom at the last successful sample.
+	WriteReserveBytes       uint64 // Headroom reserved for cleaner work on a large DB.
+	LastError               error
 }
 
 type cleaner struct {
@@ -34,6 +38,16 @@ type cleaner struct {
 	pinned  atomic.Bool
 	mu      sync.Mutex
 	status  AutoCompactionStatus
+
+	candidates cleanerCandidates // writer gate
+	runUntil   time.Time         // cleaner maintenance slot
+	space      cleanerSpace      // writer gate
+	pressure   atomic.Bool
+	pinChange  atomic.Uint64
+	damageMu   sync.Mutex
+	damage     map[uint64]*storage.DataSegment
+	blocked    map[uint64]*storage.UnavailableDataError // cleaner maintenance slot
+	editBytes  uint64                                   // cleaner maintenance slot
 
 	recoverPending      atomic.Bool
 	cleanBeforeRecovery bool               // gate owner lets a healthy clean reclaim space before retrying
@@ -57,10 +71,16 @@ func (db *DB) startCleaner() {
 	w.gate <- struct{}{}
 	w.cancel = cancel
 	w.done = make(chan struct{})
-	db.store.DamageChanged = func() {
-		w.recoverPending.Store(true)
+	db.store.DamageChanged = func(segment *storage.DataSegment) {
+		w.damageMu.Lock()
+		if w.damage == nil {
+			w.damage = make(map[uint64]*storage.DataSegment)
+		}
+		w.damage[segment.ID] = segment
+		w.damageMu.Unlock()
 		db.notifyCleaner()
 	}
+	db.seedCleanerInventory(db.store.CatalogEntries().Len())
 	var start <-chan struct{}
 	if db.hooks != nil {
 		start = db.hooks.CleanerStart
@@ -93,6 +113,11 @@ func (db *DB) resumeCleaner() {
 	}
 }
 
+func (db *DB) cleanerPinsReleased() {
+	db.cleaner.pinChange.Add(1)
+	db.notifyCleaner()
+}
+
 func (db *DB) deferCleaning(reason string, err error) {
 	w := &db.cleaner
 	w.mu.Lock()
@@ -104,6 +129,7 @@ var errManualCheckpointPriority = errors.New("tarp: manual checkpoint requested"
 
 // Called between bounded I/O chunks, outside of DB locks.
 func (db *DB) cleanYield(ctx context.Context) error {
+	w := &db.cleaner
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -114,86 +140,100 @@ func (db *DB) cleanYield(ctx context.Context) error {
 		if db.manualCheckpoint.Load() {
 			return errManualCheckpointPriority
 		}
-		switch {
-		case db.backup.Load():
+		backup := db.backup.Load()
+		if backup && !w.pressure.Load() {
+			w.runUntil = time.Time{}
 			db.deferCleaning("backup", nil)
-		case db.cleaner.writers.Load() > 0:
-			db.deferCleaning("writer", nil)
-		default:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-w.resume:
+			}
+			continue
+		}
+		if !backup && w.writers.Load() == 0 {
+			w.runUntil = time.Time{}
 			return nil
 		}
+		if time.Now().Before(w.runUntil) {
+			return nil
+		}
+		reason := "writer"
+		if backup {
+			reason = "backup"
+		}
+		db.deferCleaning(reason, nil)
+		// Pace by time window, since one chunk may contain a single small
+		// record. Sustained traffic still leaves the cleaner some work time.
+		timer := time.NewTimer(8 * time.Millisecond)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-db.cleaner.resume:
+		case <-w.resume:
+			timer.Stop()
+		case <-timer.C:
+			w.runUntil = time.Now().Add(2 * time.Millisecond)
 		}
 	}
 }
 
-// selectCleaningInputs inspects committed per-file accounting under the writer gate.
 // With source bytes S and estimated output bytes W, (S-W)/(S+W) >= 1/3
-// simplifies to W <= S/2. Keep that eligibility test and rank single-file
-// candidates by estimated immediately reclaimable bytes per byte of work.
-func selectCleaningInputs(s *storage.Store, target int64) (inputs []format.CatalogEntry, staging uint64, blocked map[uint64]*storage.UnavailableDataError) {
-	metadata := uint64(len(s.Manifest)) + format.FrontierBytes
-	var best format.CatalogEntry
-	var bestGain, bestWork uint64
-	for i, entry := range s.Catalog.Entries {
-		if !entry.HasPhysicalFile() {
-			continue
-		}
-		f := s.Segments[entry.ID]
-		if err := f.UnavailableData(); err != nil {
-			if blocked == nil {
-				blocked = make(map[uint64]*storage.UnavailableDataError)
-			}
-			blocked[entry.ID] = err
-			continue
-		}
-		records := retainedRecordBytes(f)
-		half := uint64(entry.Bytes) / 2
-		if records > half {
-			continue
-		}
-		output := replacementBytes(records)
-		if output > half || metadata > half-output {
-			if len(inputs) == 0 && entry.Kind != format.SnapshotKind && entry.Bytes <= target {
-				// Save the oldest eligible group as a fallback. Any qualifying
-				// single file, including later in the catalog, takes priority.
-				inputs, staging = groupedLogCleaningAt(s, s.Catalog.Entries[i:], uint64(target), metadata)
-			}
-			continue
-		}
-		bytes := uint64(entry.Bytes)
-		stage := output + metadata
-		protectedStage := stage + format.ParitySidecarBytes(output)
-		// Scan the source, write DATA and metadata, and reread output DATA
-		// to build its sidecar. Retiring a sidecar does not read its bytes.
-		work := bytes + output
-		work += min(protectedStage, math.MaxUint64-work)
-		var gain uint64
-		if !s.HasDataRetentionPin(f) {
-			unlinkable := bytes
-			if f.ParityReady() {
-				unlinkable += format.ParitySidecarBytes(bytes)
-			}
-			gain = unlinkable - min(unlinkable, protectedStage)
-		}
-		if best.HasPhysicalFile() {
-			order := compareProducts(gain, bestWork, bestGain, work)
-			if order == 0 {
-				// Preserve progress even if every candidate has a long-lived
-				// pin or cannot yet be credited with its PARITY retirement.
-				order = compareProducts(staging, bytes, stage, uint64(best.Bytes))
-			}
-			if order < 0 || order == 0 && (entry.FirstSequence > best.FirstSequence || entry.FirstSequence == best.FirstSequence && entry.ID >= best.ID) {
-				continue
-			}
-		}
-		best, staging, bestGain, bestWork = entry, stage, gain, work
-		inputs = s.Catalog.Entries[i : i+1]
+// simplifies to W <= S/2. Rank the eligible candidates by estimated immediately
+// reclaimable bytes per byte of work, including the replacement's protection.
+type cleanRank struct {
+	entry             format.CatalogEntry
+	stage, gain, work uint64
+}
+
+func rankCleanCandidate(s *storage.Store, entry format.CatalogEntry, metadata uint64) (cleanRank, bool) {
+	f := s.Segments[entry.ID]
+	if f == nil || f.UnavailableData() != nil {
+		return cleanRank{}, false
 	}
-	return inputs, staging, blocked
+	bytes := uint64(entry.Bytes)
+	half := bytes / 2
+	records := retainedRecordBytes(f)
+	if records > half {
+		return cleanRank{}, false
+	}
+	output := replacementBytes(records)
+	if output > half || metadata > half-output {
+		return cleanRank{}, false
+	}
+	stage := output + metadata
+	protectedStage := stage + format.ParitySidecarBytes(output)
+	// Read the source, write the output and metadata, and then read the output
+	// to build PARITY. Retiring a sidecar does not read its bytes.
+	work := bytes + output
+	work += min(protectedStage, math.MaxUint64-work)
+	var gain uint64
+	if !s.HasDataRetentionPin(f) {
+		unlinkable := bytes
+		if f.ParityReady() {
+			unlinkable += format.ParitySidecarBytes(bytes)
+		}
+		gain = unlinkable - min(unlinkable, protectedStage)
+	}
+	return cleanRank{entry: entry, stage: stage, gain: gain, work: work}, true
+}
+
+func betterCleanRank(a, b cleanRank) bool {
+	if !b.entry.HasPhysicalFile() {
+		return true
+	}
+	order := compareProducts(a.gain, b.work, b.gain, a.work)
+	if order == 0 {
+		// Prefer a smaller rewrite when both sources retain long-lived pins.
+		order = compareProducts(b.stage, uint64(a.entry.Bytes), a.stage, uint64(b.entry.Bytes))
+	}
+	if order != 0 {
+		return order > 0
+	}
+	if a.entry.FirstSequence != b.entry.FirstSequence {
+		return a.entry.FirstSequence < b.entry.FirstSequence
+	}
+	return a.entry.ID < b.entry.ID
 }
 
 func compareProducts(a, b, c, d uint64) int {
@@ -252,43 +292,38 @@ func groupedLogCleaningAt(s *storage.Store, entries []format.CatalogEntry, targe
 	return group, staging
 }
 
-// smallSegmentRepackGroup finds 4–8 small DATA segments in consecutive
+// smallSegmentRepackAt finds 4–8 small DATA segments in consecutive
 // catalog entries, even when all records are live. Empty log intervals add
 // sequence coverage without a physical file. Each group contains only snapshot
 // segments or only log segments.
-func smallSegmentRepackGroup(entries []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
+func smallSegmentRepackAt(entries []format.CatalogEntry, target int64, blocked map[uint64]*storage.UnavailableDataError) ([]format.CatalogEntry, int64) {
 	const minFiles, maxFiles = 4, 8
-	for start, first := range entries {
-		if !first.HasPhysicalFile() || first.Bytes > target/4 {
+	first := entries[0]
+	if !first.HasPhysicalFile() || first.Bytes > target/4 {
+		return nil, 0
+	}
+	var group []format.CatalogEntry
+	var total, largest, groupBytes int64
+	count := 0
+	for i, entry := range entries {
+		if count == maxFiles || (entry.Kind == format.SnapshotKind) != (first.Kind == format.SnapshotKind) {
+			break
+		}
+		if !entry.HasPhysicalFile() {
 			continue
 		}
-		var group []format.CatalogEntry
-		var total, largest, groupBytes int64
-		count := 0
-		for i := start; i < len(entries) && count < maxFiles; i++ {
-			entry := entries[i]
-			if (entry.Kind == format.SnapshotKind) != (first.Kind == format.SnapshotKind) {
-				break
-			}
-			if !entry.HasPhysicalFile() {
-				continue
-			}
-			if blocked[entry.ID] != nil || entry.Bytes > target/4 || entry.Bytes > target-total {
-				break
-			}
-			count++
-			total += entry.Bytes
-			largest = max(largest, entry.Bytes)
-			// Avoid copying a previously packed file for a few small additions.
-			if count >= minFiles && largest <= total-largest {
-				group, groupBytes = entries[start:i+1], total
-			}
+		if blocked[entry.ID] != nil || entry.Bytes > target/4 || entry.Bytes > target-total {
+			break
 		}
-		if len(group) != 0 {
-			return group, groupBytes
+		count++
+		total += entry.Bytes
+		largest = max(largest, entry.Bytes)
+		// Avoid copying a previously packed file for a few small additions.
+		if count >= minFiles && largest <= total-largest {
+			group, groupBytes = entries[:i+1], total
 		}
 	}
-	return nil, 0
+	return group, groupBytes
 }
 
 // The automatic recovery checkpoint owns the same slot as manual Compact.
@@ -392,33 +427,84 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		return false, false
 	}
 	removed, pinned, pending, err := db.store.RetireCleaned()
-	var inputs []format.CatalogEntry
-	var staging uint64
-	var blocked map[uint64]*storage.UnavailableDataError
-	if err == nil {
-		inputs, staging, blocked = selectCleaningInputs(db.store, db.opts.TargetSegmentBytes)
+	retiring := db.store.RetirementSweepPending()
+	if removed != 0 {
+		w.space.checked = time.Time{}
 	}
-	entries, manifestBytes := db.store.Catalog.Entries, len(db.store.Manifest)
+	metadata := db.store.CatalogEditBytes()
+	if metadata < w.editBytes {
+		// A base rollover can make previously rejected candidates affordable.
+		db.resetCleanerInventory()
+	}
+	w.editBytes = metadata
+	inventoryReady := db.seedCleanerInventory(cleanerInventoryWindow)
+	q := &w.candidates
+	pinGeneration, pressure := w.pinChange.Load(), w.pressure.Load()
+	q.resumePins(pinGeneration, pressure)
+	db.observeCleanerDamage()
+	var best cleanRank
+	var files []*cleanerCandidate
+	if err == nil && inventoryReady {
+		files = q.take()
+		for i, file := range files {
+			segment := db.store.Segments[file.entry.ID]
+			if segment == nil {
+				q.remove(file.entry.ID)
+				files[i] = nil
+				continue
+			}
+			if unavailable := segment.UnavailableData(); unavailable != nil {
+				w.rememberDamage(segment.ID, unavailable)
+				files[i] = nil
+				continue
+			}
+			if pressure && db.store.HasDataRetentionPin(segment) {
+				q.deferPin(file, pinGeneration)
+				files[i] = nil
+				continue
+			}
+			if rank, ok := rankCleanCandidate(db.store, file.entry, metadata); ok && betterCleanRank(rank, best) {
+				best = rank
+			}
+		}
+	}
+	blocked := w.blocked
+	awaitPins := q.pinned.Len() != 0
+	w.pinned.Store(pinned > 0 || awaitPins)
+	more := retiring || !inventoryReady || q.pending.Len() != 0 || q.pinsReady(w.pinChange.Load(), pressure)
+	debt, pinnedDebt := q.debt, q.pinnedDebt
 	db.writer.Unlock()
 	w.mu.Lock()
 	w.status.PinnedRetiredDataBytes = pinned
-	if uint64(removed) > math.MaxUint64-w.status.UnlinkedBytes {
-		w.status.UnlinkedBytes = math.MaxUint64
-	} else {
-		w.status.UnlinkedBytes += uint64(removed)
-	}
+	w.status.PendingReclaimDataBytes = debt
+	w.status.PinnedReclaimDataBytes = pinnedDebt
+	w.status.UnlinkedBytes += min(uint64(removed), math.MaxUint64-w.status.UnlinkedBytes)
 	w.mu.Unlock()
-	w.pinned.Store(pinned > 0)
 	if err != nil {
 		db.deferCleaning("retirement", compactCleanupError(err))
 		return false, true
 	}
-	if len(inputs) == 0 {
-		// Foreground rotations publish a new catalog slice. Inspect this one
-		// outside the writer gate; BeginClean rechecks the selection.
-		var inputBytes int64
-		inputs, inputBytes = smallSegmentRepackGroup(entries, db.opts.TargetSegmentBytes, blocked)
-		staging = uint64(inputBytes) + uint64(manifestBytes) + format.FrontierBytes
+	if !inventoryReady {
+		return true, false
+	}
+	var inputs []format.CatalogEntry
+	var staging uint64
+	if best.entry.HasPhysicalFile() {
+		inputs, staging = []format.CatalogEntry{best.entry}, best.stage
+	} else if len(files) != 0 {
+		windows := db.candidateWindows(files)
+		db.writer.Lock()
+		inputs, staging = chooseCandidateGroups(db.store, windows, db.opts.TargetSegmentBytes, metadata, blocked, pressure)
+		db.writer.Unlock()
+	}
+	if len(inputs) != 0 {
+		// Retain the candidates that lost this pass. Installing a successful
+		// publication removes its input IDs from the queue.
+		db.writer.Lock()
+		for _, file := range files {
+			q.enqueue(file)
+		}
+		db.writer.Unlock()
 	}
 	if len(blocked) != 0 && w.recoverPending.Load() && (!w.cleanBeforeRecovery || len(inputs) == 0) {
 		// Incremental cleaning retains tombstones. Full DATA checkpoint recovery
@@ -444,29 +530,28 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 				w.recoverPending.Store(true)
 				w.cleanBeforeRecovery = true
 				db.deferCleaning("space", err)
-				return len(inputs) > 0, len(inputs) == 0
+				return more || len(inputs) > 0, !more && len(inputs) == 0
 			default:
 				// A missing/invalid proof does not improve on another pass.
 				// Further damage-state transitions or manual Compact can retry.
 				db.deferCleaning("recovery checkpoint", err)
-				return len(inputs) > 0 || pending && removed > 0, pending && removed == 0
+				return more || len(inputs) > 0 || pending && removed > 0, !more && pending && removed == 0
 			}
 		}
 	}
 	if len(inputs) == 0 {
-		if pinned != 0 {
+		if pinned != 0 || awaitPins {
 			db.deferCleaning("pinned", nil)
 		} else if len(blocked) != 0 {
-			for _, entry := range entries {
-				if unavailable := blocked[entry.ID]; unavailable != nil {
-					db.deferCleaning("unavailable DATA", publicCause(unavailable))
-					break
-				}
+			var first uint64 = math.MaxUint64
+			for id := range blocked {
+				first = min(first, id)
 			}
+			db.deferCleaning("unavailable DATA", publicCause(blocked[first]))
 		} else {
 			db.deferCleaning("", nil)
 		}
-		return pending && removed > 0, pending && removed == 0
+		return more || pending && removed > 0, !more && pending && removed == 0
 	}
 	w.cleanBeforeRecovery = false
 	err = db.store.IO.Check("clean.headroom:before")
@@ -475,9 +560,12 @@ func (db *DB) cleanPass(ctx context.Context) (again, retry bool) {
 		available, err = platform.AvailableBytes(db.store.Dir)
 		// Reserve space for the sidecar and allocation blocks alongside DATA,
 		// the catalog and CURRENT. Staging already includes catalog metadata.
-		outputBytes := staging - uint64(manifestBytes) - format.FrontierBytes
-		if err == nil && available < staging+format.ParitySidecarBytes(outputBytes)+4*4096 {
-			err = ErrNoSpace
+		outputBytes := staging - metadata
+		if err == nil {
+			db.recordCleanerSpace(available)
+			if available < staging+format.ParitySidecarBytes(outputBytes)+4*4096 {
+				err = ErrNoSpace
+			}
 		}
 	}
 	if err == nil {

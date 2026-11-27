@@ -71,10 +71,10 @@ func prepareCompactionFixture(t testing.TB, size int) compactionFixture {
 	probe := engine.Observe(db)
 	var source format.CatalogEntry
 	probe.Store(func(s *storage.Store) {
-		if len(s.Catalog.Entries) != 1 {
-			t.Fatalf("fixture must contain one sealed log; got %d", len(s.Catalog.Entries))
+		if s.CatalogEntries().Len() != 1 {
+			t.Fatalf("fixture must contain one sealed log; got %d", s.CatalogEntries().Len())
 		}
-		source = s.Catalog.Entries[0]
+		source = s.CatalogEntries().At(0)
 		if source.ID == 0 || source.Kind != format.RawLogKind ||
 			s.Segments[source.ID].LiveBytes.Load() != opts.MaxRecordBytes ||
 			s.Segments[source.ID].DeleteBytes.Load() != int64(format.RecordHeaderBytes+len(keys[1])) {
@@ -219,7 +219,7 @@ func (f compactionFixture) verify(t testing.TB, db *engine.DB, mode string) comp
 	probe.Store(func(s *storage.Store) {
 		result.LastUserSequence = current.LastUserSequence
 		result.CheckpointCutoffSequence, result.PrunedThroughSequence = s.Catalog.CheckpointCutoffSequence, s.Catalog.PrunedThroughSequence
-		for _, entry := range s.Catalog.Entries {
+		for entry := range s.CatalogEntries().All() {
 			switch entry.Kind {
 			case format.CleanedLogKind:
 				result.CleanedIntervals++

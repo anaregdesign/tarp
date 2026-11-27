@@ -59,41 +59,44 @@ func TestRequiredImageFilesDistinguishAccessFailureFromCorruption(t *testing.T) 
 		for _, pattern := range tc.files {
 			t.Run(tc.name+"/"+pattern, func(t *testing.T) {
 				files, err := filepath.Glob(filepath.Join(tc.dir, pattern))
-				if err != nil || len(files) != 1 {
+				if err != nil || len(files) == 0 {
 					t.Fatalf("required file %q: %v, %v", pattern, files, err)
 				}
-				path := files[0]
-				t.Run("permission", func(t *testing.T) {
-					if os.Geteuid() == 0 {
-						t.Skip("root can read mode-000 files")
-					}
-					if err := os.Chmod(path, 0); err != nil {
-						t.Fatal(err)
-					}
-					checkErr := tc.check()
-					if err := os.Chmod(path, 0600); err != nil {
-						t.Fatal(err)
-					}
-					var pathErr *os.PathError
-					if !errors.Is(checkErr, os.ErrPermission) || errors.Is(checkErr, tarp.ErrCorrupt) ||
-						!errors.As(checkErr, &pathErr) || filepath.Base(pathErr.Path) != filepath.Base(path) {
-						t.Fatalf("unreadable %q: %v", path, checkErr)
-					}
-				})
-				// Move the object outside the image to simulate a missing required file.
-				moved := filepath.Join(t.TempDir(), "saved")
-				if err := os.Rename(path, moved); err != nil {
-					t.Fatal(err)
-				}
-				checkErr := tc.check()
-				if err := os.Rename(moved, path); err != nil {
-					t.Fatal(err)
-				}
-				if !errors.Is(checkErr, os.ErrNotExist) || !errors.Is(checkErr, tarp.ErrCorrupt) {
-					t.Fatalf("missing %q: %v", path, checkErr)
-				}
-				if err := tc.check(); err != nil {
-					t.Fatalf("retry after restoring %q: %v", path, err)
+				for _, path := range files {
+					t.Run(filepath.Base(path), func(t *testing.T) {
+						t.Run("permission", func(t *testing.T) {
+							if os.Geteuid() == 0 {
+								t.Skip("root can read mode-000 files")
+							}
+							if err := os.Chmod(path, 0); err != nil {
+								t.Fatal(err)
+							}
+							checkErr := tc.check()
+							if err := os.Chmod(path, 0600); err != nil {
+								t.Fatal(err)
+							}
+							var pathErr *os.PathError
+							if !errors.Is(checkErr, os.ErrPermission) || errors.Is(checkErr, tarp.ErrCorrupt) ||
+								!errors.As(checkErr, &pathErr) || filepath.Base(pathErr.Path) != filepath.Base(path) {
+								t.Fatalf("unreadable %q: %v", path, checkErr)
+							}
+						})
+						// Move the object outside the image to simulate a missing required file.
+						moved := filepath.Join(t.TempDir(), "saved")
+						if err := os.Rename(path, moved); err != nil {
+							t.Fatal(err)
+						}
+						checkErr := tc.check()
+						if err := os.Rename(moved, path); err != nil {
+							t.Fatal(err)
+						}
+						if !errors.Is(checkErr, os.ErrNotExist) || !errors.Is(checkErr, tarp.ErrCorrupt) {
+							t.Fatalf("missing %q: %v", path, checkErr)
+						}
+						if err := tc.check(); err != nil {
+							t.Fatalf("retry after restoring %q: %v", path, err)
+						}
+					})
 				}
 			})
 		}

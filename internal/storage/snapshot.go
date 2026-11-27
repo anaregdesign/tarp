@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -26,7 +25,6 @@ type CapturedSegment struct {
 type Capture struct {
 	Current         format.Frontier
 	Catalog         format.Catalog
-	Manifest        []byte
 	Segments        []CapturedSegment
 	activeDigest    [sha256.Size]byte
 	orderedSnapshot bool
@@ -36,13 +34,13 @@ type Capture struct {
 // offset of the active segment. The caller holds the writer gate. Published
 // metadata is immutable, and the runtime index is captured separately.
 func (s *Store) Capture() (*Capture, error) {
-	active, err := s.Catalog.ActiveEntry(s.Current)
+	catalog := s.CatalogSnapshot()
+	active, err := catalog.ActiveEntry(s.Current)
 	if err != nil {
 		return nil, err
 	}
-	c := &Capture{Current: s.Current, Catalog: s.Catalog, Manifest: bytes.Clone(s.Manifest), orderedSnapshot: s.HasOrderedBase()}
-	c.Catalog.Entries = append([]format.CatalogEntry(nil), s.Catalog.Entries...)
-	for _, entry := range s.Catalog.Entries {
+	c := &Capture{Current: s.Current, Catalog: catalog, orderedSnapshot: s.HasOrderedBase()}
+	for _, entry := range catalog.Entries {
 		if entry.HasPhysicalFile() {
 			c.Segments = append(c.Segments, CapturedSegment{Segment: s.Segments[entry.ID], Entry: entry})
 		}
@@ -57,6 +55,15 @@ func (s *Store) Capture() (*Capture, error) {
 		captured.Segment.PinRetained()
 	}
 	return c, nil
+}
+
+// PortableCatalog materializes a standalone base so an archive depends only
+// on the captured DATA and metadata. Encode after releasing the writer gate.
+func (c *Capture) PortableCatalog() (format.Frontier, []byte) {
+	manifest := format.EncodeCatalog(c.Catalog)
+	frontier := c.Current
+	frontier.ManifestDigest = sha256.Sum256(manifest)
+	return frontier, manifest
 }
 
 func (c *Capture) Release() {

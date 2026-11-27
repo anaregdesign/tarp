@@ -330,7 +330,7 @@ reports index 2 when `a` exists.
 
 `BatchGet` preserves LRU recency and reads each distinct cold, live key once.
 Concurrent `BatchGet` calls on the same DB, including typed views, share the
-DATA read limit set by `Options.BatchGetReadConcurrency`. The default is 8.
+DATA read limit set by `Options.BatchGetReadConcurrency`. The default is 16.
 For example, `tarp.Options{BatchGetReadConcurrency: 16}` allows up to 16 reads,
 and a value of 1 serializes them. When reads of small records complete quickly,
 the caller can read them sequentially. If reads slow down, the batch can use available workers
@@ -493,7 +493,7 @@ records, or total disk quota is provided.
 
 ## Choosing the key index
 
-`Options{}` uses a disk-backed B+tree with a 16 MiB
+`Options{}` uses a disk-backed B+tree with a 128 MiB
 working-memory budget. The index mode is selected on each Open, so an
 existing database can use either backend without migration.
 If random lookup latency is a priority and every key and its DATA address fit
@@ -505,8 +505,9 @@ db, err := tarp.Open(dir, tarp.Options{
 })
 ```
 
-`IndexBTree` stores encoded keys and DATA addresses in private 8 KiB B+tree pages.
-Tarp creates the backing files in `.tarp-work/` inside the database directory
+`IndexBTree` stores encoded keys and DATA addresses in 8 KiB B+tree pages.
+With `Indexed` it can use immutable INDEX pages directly and write changed
+pages to private scratch. Tarp creates the backing files in `.tarp-work/` inside the database directory
 passed to `Open` or `OpenExisting`. Size the database volume for DATA, index
 pages, the index checkpoint, and temporary work during replay, compaction and online backup. Tarp
 unlinks private pager files immediately after opening them. The OS releases its
@@ -537,13 +538,15 @@ per-write sync protocol intact.
 | `Options.OpenValidation` | Work done during Open |
 | --- | --- |
 | `tarp.Full` (default) | Verify every committed DATA byte. Import the packed index when available and apply later commits. |
-| `tarp.Indexed` | Verify the INDEX and selected DATA headers, then read and validate only the records after the checkpoint. |
+| `tarp.Indexed` | With B+tree, authenticate the INDEX summary, verify selected DATA headers, and replay bounded changed DATA. Authenticate untouched INDEX pages on access. The memory backend imports a usable checkpoint eagerly. |
 
 `Indexed` can defer detection of disk damage. A value read verifies the record's
 identity and CRC. `Keys` and `KeysPrefix` enumerate keys without reading DATA. Reopen
 with `Full` to check the complete selected history, including obsolete values.
-Both modes rebuild from DATA when INDEX is missing or unusable. Compaction
-invalidates indexes tied to the superseded files. Backups omit INDEX and remain
+Both modes rebuild from DATA when INDEX is missing or unusable. The
+B+tree fast path falls back to DATA replay if changed DATA exceeds its 4 GiB
+budget. Incremental cleaning can reuse a checkpoint across relocations. A
+full DATA checkpoint invalidates the old INDEX. Backups omit INDEX and remain
 independently verifiable. See the [format](docs/format.md) and the
 [checkpoint measurements](docs/benchmarks/index-checkpoints.md) and
 [runtime index measurements](docs/benchmarks/index-modes.md).
@@ -558,12 +561,12 @@ the commit sync protocol.
 | --- | ---: | --- |
 | `OpenValidation` | `Full` | Select how Open verifies DATA covered by an index checkpoint. Both runtime backends support both validation modes. |
 | `IndexMode` | `IndexBTree` | Selects a built-in key index for this Open. |
-| `BTreeMemoryBudgetBytes` | 16 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
-| `ValueCacheBudgetBytes` | 64 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
+| `BTreeMemoryBudgetBytes` | 128 MiB for `IndexBTree` | B+tree workspace budget, minimum 1 MiB. Leave zero for `IndexMemory`. |
+| `ValueCacheBudgetBytes` | 128 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
-| `TargetSegmentBytes` | 4 MiB | Target size for each new log or snapshot segment. Bounds the total input to small-segment repacking and the output of grouped log cleaning. |
-| `ReadFileHandles` | 64 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
-| `BatchGetReadConcurrency` | 8 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
+| `TargetSegmentBytes` | 256 MiB | Target size for each new log or snapshot segment. Bounds the total input to small-segment repacking and the output of grouped log cleaning. |
+| `ReadFileHandles` | 256 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
+| `BatchGetReadConcurrency` | 16 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 | `MaxBatchGetValueBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
 
 For an encoded key of `K` bytes and an encoded value of `V` bytes, a Put has
@@ -656,6 +659,29 @@ error alone permits continued use of the source DB. If a backup encounters
 correctable damage in protected sealed DATA, it repairs the source and retries
 from the same point in time. If sealed DATA is confirmed unavailable, the backup
 fails before publication and the open DB can keep serving other requests.
+
+For repeated backups, create a caller-controlled repository on independent
+storage that supports hard links, then use `db.BackupIncremental`.
+
+```go
+result, err := db.BackupIncremental(ctx, tarp.IncrementalBackupRequest{
+    Repository: backupRepository,
+    Name:       "2026-11-27",
+})
+if err != nil {
+    return err
+}
+fmt.Println(result.LastUserSequence, result.CopiedDataBytes, result.ReusedDataBytes)
+```
+
+Each generation is a native backup directory at `Repository/Name`. Use
+`VerifyBackupWithScratch` and `Restore` on that directory. Newly copied sealed
+DATA is verified before reuse. Routine captures check the identity and size
+of previously verified objects. Set `VerifyReusedData` to rehash reused
+objects during capture. Keep generations immutable. After deleting unused
+generations, `PruneIncrementalBackupObjects` can remove objects with no
+remaining generation. The first backup and a full-volume restore still
+require space and I/O for the selected database.
 
 Use `tarp.InspectKey(ctx, dbDir, key)` to verify an application marker in a
 stopped database before requesting offline maintenance. It takes exclusive

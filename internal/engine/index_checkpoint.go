@@ -12,6 +12,19 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+func (o Options) fastCheckpointImporter() storage.FastIndexImporter {
+	if o.IndexMode != IndexBTree || o.OpenValidation != Indexed {
+		return nil
+	}
+	return func(ctx context.Context, s *storage.Store, source io.ReaderAt, closer io.Closer, size int64) (index.Backend, error) {
+		dir, err := s.WorkspaceDir()
+		if err != nil {
+			return nil, err
+		}
+		return btree.OpenPacked(ctx, source, closer, size, dir, o.BTreeMemoryBudgetBytes/2)
+	}
+}
+
 // Memory mode borrows a bounded, private pager to verify the packed topology
 // and consumes each leaf during validation.
 func (o Options) importCheckpoint(ctx context.Context, s *storage.Store, src io.Reader, size int64, visit func(string, index.Address) error) (index.Backend, error) {
@@ -96,8 +109,7 @@ func (db *DB) checkpointIndex(ctx context.Context, closing bool) (result error) 
 		db.writer.Unlock()
 		return operationError(op, "capture", err)
 	}
-	cp := db.store.Catalog.Index
-	if closing && db.store.IndexCheckpointValidated && cp.ID != 0 && cp.CoveredSequence == db.store.Current.LastUserSequence && cp.CoveredCatalogEntries == uint64(len(db.store.Catalog.Entries)) {
+	if closing && db.store.IndexCheckpointValidated && db.store.CatalogMatchesIndexCheckpoint() {
 		db.writer.Unlock()
 		return nil
 	}

@@ -12,12 +12,30 @@ import (
 // Clean one immutable file or repack a contiguous group. Foreground mutations
 // may continue during the scan and during conditional index relocation.
 func (db *DB) cleanSegment(ctx context.Context, entries ...format.CatalogEntry) (result error) {
+	if len(entries) == 0 {
+		return nil
+	}
+	db.writer.Lock()
+	view := db.store.CatalogEntries()
+	position := -1
+	if file := db.cleaner.candidates.files[entries[0].ID]; file != nil {
+		position = file.pos
+	}
+	db.writer.Unlock()
+	// Snapshot positions may require traversing the immutable catalog. Even
+	// then no foreground writer waits for a catalog-wide search.
+	if position < 0 || position >= view.Len() || view.At(position) != entries[0] {
+		position = view.Index(entries[0])
+	}
+	if position < 0 {
+		return nil
+	}
 	db.writer.Lock()
 	if err := db.health(); err != nil {
 		db.writer.Unlock()
 		return err
 	}
-	work, err := db.store.BeginClean(entries)
+	work, err := db.store.BeginCleanAt(position, entries)
 	db.writer.Unlock()
 	if err != nil {
 		db.compactFailure(err)
@@ -121,6 +139,9 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.CatalogEntry) 
 	}
 	keepOutput = true
 	db.resetParity()
+	for _, entry := range entries {
+		db.cleaner.candidates.remove(entry.ID)
+	}
 	// Cleaning retains every tombstone. Replace only the physical file counts
 	// and sizes, including a possible metadata-only cleaned interval.
 	var oldData, newData dataTotals
@@ -139,6 +160,10 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.CatalogEntry) 
 	db.relocate(moves, storage.RelocationBatchCount, "clean.remap:after", false)
 	db.writer.Lock()
 	db.layoutRemapping = false
+	if work.OutputBytes() != 0 {
+		entry := db.store.CatalogEntries().At(position)
+		db.cleaner.candidates.track(db.store, entry, position, db.opts.TargetSegmentBytes)
+	}
 	db.writer.Unlock()
 	if err := db.health(); err != nil {
 		return &OpError{Operation: "clean", Phase: "post-publication", Outcome: Committed, Err: err}

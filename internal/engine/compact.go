@@ -288,6 +288,7 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 	if err := db.health(); err != nil {
 		return result, &OpError{Operation: "compact", Phase: "post-publication", Outcome: Committed, Err: err}
 	}
+	db.resetCleanerInventory()
 	result.UnlinkedBytes, result.PinnedRetiredDataBytes, err = db.cleanupCheckpoint(ordered)
 	return result, compactCleanupError(err)
 }

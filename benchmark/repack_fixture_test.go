@@ -60,7 +60,7 @@ func prepareRepackFixture(t testing.TB, size int) repackFixture {
 	probe := engine.Observe(db)
 	fixture := repackFixture{dir: dir, opts: opts, readKey: keys[0], writeKey: writerKey, value: value, frontier: probe.Frontier()}
 	probe.Store(func(s *storage.Store) {
-		fixture.inputs = slices.Clone(s.Catalog.Entries)
+		fixture.inputs = slices.Clone(s.CatalogSnapshot().Entries)
 		if len(fixture.inputs) != logs {
 			t.Fatalf("fixture has %d sealed logs, want %d", len(fixture.inputs), logs)
 		}
@@ -150,7 +150,7 @@ func (f repackFixture) verify(t testing.TB, db *engine.DB, repacked bool, puts i
 		t.Fatalf("foreground writes changed the expected frontier: %+v after %d Puts", frontier, puts)
 	}
 	probe.Store(func(s *storage.Store) {
-		entries := s.Catalog.Entries
+		entries := s.CatalogSnapshot().Entries
 		if !repacked {
 			if !slices.Equal(entries, f.inputs) {
 				t.Fatalf("parked worker changed selected logs: %+v", entries)

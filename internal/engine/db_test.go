@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1214,7 +1215,7 @@ func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
 	}
 	dir := db.store.Dir
 	db.writer.Lock()
-	entries := db.store.Catalog.Entries
+	entries := db.store.CatalogSnapshot().Entries
 	current := db.store.Current
 	db.writer.Unlock()
 	if len(entries) != 1 || entries[0].Bytes <= smaller.TargetSegmentBytes || current.ActiveCommittedEndOffset <= smaller.TargetSegmentBytes {
@@ -1243,8 +1244,14 @@ func TestSoftTargetDoesNotLimitExistingFiles(t *testing.T) {
 		t.Cleanup(func() { image.Close() })
 		image.writer.Lock()
 		before := image.store.Current
+		selected := image.store.CatalogSnapshot().Entries
 		image.writer.Unlock()
-		if before != current {
+		want := current
+		if path == target {
+			// The archive materializes a standalone base with its own digest.
+			want.ManifestDigest = before.ManifestDigest
+		}
+		if before != want || !slices.Equal(entries, selected) {
 			t.Fatal("changing target rewrote the original selection")
 		}
 		for i := range 6 {
@@ -1336,7 +1343,10 @@ func TestRotatingAppendFaultOutcomes(t *testing.T) {
 				storage.ManifestName(frontier.UUID, frontier.ManifestID): true,
 				storage.DataName(frontier.UUID, frontier.ActiveID):       true,
 			}
-			for _, entry := range image.store.Catalog.Entries {
+			if tc.newImage {
+				want[storage.ManifestName(before.UUID, before.ManifestID)] = true
+			}
+			for _, entry := range image.store.CatalogSnapshot().Entries {
 				if entry.HasPhysicalFile() {
 					want[storage.DataName(frontier.UUID, entry.ID)] = true
 				}

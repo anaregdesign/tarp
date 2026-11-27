@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"slices"
 	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
@@ -11,10 +10,11 @@ import (
 )
 
 type parityWorker struct {
-	wake   chan struct{}
-	gate   chan struct{}
-	cancel context.CancelFunc
-	done   chan struct{}
+	wake        chan struct{}
+	catalogWake chan struct{}
+	gate        chan struct{}
+	cancel      context.CancelFunc
+	done        chan struct{}
 
 	// layoutRevision advances under the writer gate when maintenance replaces a catalog prefix.
 	layoutRevision uint64
@@ -28,6 +28,7 @@ func (db *DB) startMaintenance() {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &db.parity
 	w.wake, w.gate, w.done = make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{})
+	w.catalogWake = make(chan struct{}, 1)
 	w.cancel = cancel
 	var start <-chan struct{}
 	if db.hooks != nil {
@@ -36,8 +37,14 @@ func (db *DB) startMaintenance() {
 	// Each worker can notify the other. Initialize both sets of channels
 	// before either worker can send to an uninitialized receiver.
 	db.startCleaner()
+	catalogDone := make(chan struct{})
+	go func() {
+		defer close(catalogDone)
+		db.runCatalogRebase(ctx)
+	}()
 	go func() {
 		defer close(w.done)
+		defer func() { <-catalogDone }()
 		if start != nil {
 			select {
 			case <-ctx.Done():
@@ -53,6 +60,10 @@ func (db *DB) startMaintenance() {
 func (db *DB) notifyParity() {
 	select {
 	case db.parity.wake <- struct{}{}:
+	default:
+	}
+	select {
+	case db.parity.catalogWake <- struct{}{}:
 	default:
 	}
 }
@@ -132,14 +143,14 @@ func (db *DB) ProtectParity(ctx context.Context) error {
 }
 
 type parityCut struct {
-	entries        []format.CatalogEntry
+	entries        storage.CatalogEntries
 	layoutRevision uint64
 	uuid           [16]byte
 }
 
 // The caller holds writer. Published catalog slices are immutable.
 func (db *DB) parityCut() parityCut {
-	return parityCut{db.store.Catalog.Entries, db.parity.layoutRevision, db.store.Catalog.UUID}
+	return parityCut{db.store.CatalogEntries(), db.parity.layoutRevision, db.store.Catalog.UUID}
 }
 
 func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
@@ -184,16 +195,16 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 			w.next = 0
 		}
 		w.scannedLayoutRevision = layoutRevision
-		next := len(entries)
+		next := entries.Len()
 		var firstErr, unavailable error
-		for i := w.next; i < len(entries); i++ {
+		for i := w.next; i < entries.Len(); i++ {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			if err := db.health(); err != nil {
 				return err
 			}
-			entry := entries[i]
+			entry := entries.At(i)
 			if !entry.HasPhysicalFile() {
 				continue
 			}
@@ -226,7 +237,7 @@ func (db *DB) protectSealed(ctx context.Context, captured *parityCut) error {
 				var source *storage.SourceError
 				if errors.As(err, &source) {
 					db.writer.Lock()
-					if w.layoutRevision == layoutRevision || slices.Contains(db.store.Catalog.Entries, entry) {
+					if w.layoutRevision == layoutRevision || db.store.CatalogEntries().Index(entry) >= 0 {
 						db.poison(err)
 					}
 					db.writer.Unlock()

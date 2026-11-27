@@ -13,7 +13,7 @@ func TestIndexModeNormalization(t *testing.T) {
 		mode   IndexMode
 		budget int64
 	}{
-		{"default", Options{}, IndexBTree, 16 << 20},
+		{"default", Options{}, IndexBTree, 128 << 20},
 		{"default with budget", Options{BTreeMemoryBudgetBytes: 4 << 20}, IndexBTree, 4 << 20},
 		{"memory", Options{IndexMode: IndexMemory}, IndexMemory, 0},
 	} {
@@ -102,7 +102,7 @@ func TestTargetSegmentBytesNormalization(t *testing.T) {
 		opts Options
 		want int64
 	}{
-		{"default", Options{}, 4 << 20},
+		{"default", Options{}, 256 << 20},
 		{"override", Options{TargetSegmentBytes: 5 << 20}, 5 << 20},
 		{"largest target", Options{TargetSegmentBytes: math.MaxInt64}, math.MaxInt64},
 		{"fit largest record", Options{MaxRecordBytes: 6 << 20, TargetSegmentBytes: 400}, (6 << 20) + 64},

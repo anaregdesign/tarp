@@ -83,6 +83,9 @@ type pager struct {
 	scratchBytes, scratchPeak atomic.Int64
 	mu                        sync.Mutex
 	file                      pageFile
+	base                      io.ReaderAt
+	baseCloser                io.Closer
+	basePages                 uint64
 	dir                       string
 	capacity                  int
 	cache                     map[uint64]*list.Element
@@ -172,8 +175,11 @@ func (s *pager) cachePage(id uint64, p *page, owner uint64) error {
 	return nil
 }
 func (s *pager) flush(id uint64, p *page) error {
+	if id <= s.basePages {
+		return errPage
+	}
 	start := time.Now()
-	n, err := s.file.WriteAt(p[:], int64(id-1)*pageSize)
+	n, err := s.file.WriteAt(p[:], int64(id-s.basePages-1)*pageSize)
 	s.stats.SpillNanoseconds += uint64(time.Since(start))
 	if err != nil {
 		return err
@@ -206,7 +212,14 @@ func (s *pager) readLocked(id uint64, wantOverflow bool) (*page, error) {
 		return p, nil
 	}
 	p := new(page)
-	if _, err := s.file.ReadAt(p[:], int64(id-1)*pageSize); err != nil {
+	var source io.ReaderAt
+	var offset int64
+	if id <= s.basePages {
+		source, offset = s.base, int64(id-1)*pageSize
+	} else {
+		source, offset = s.file, int64(id-s.basePages-1)*pageSize
+	}
+	if _, err := source.ReadAt(p[:], offset); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, errors.Join(errPage, err)
 		}
@@ -292,6 +305,11 @@ func (s *pager) allocate() (uint64, error) {
 	return s.top, nil
 }
 func (s *pager) release(id uint64) error {
+	// A runtime root may stop referencing a page from the durable image.
+	// That page ID remains reserved for readers and cannot enter the allocator.
+	if id <= s.basePages {
+		return nil
+	}
 	s.mu.Lock()
 	if e := s.cache[id]; e != nil {
 		s.queue(e.Value.(cachedPage).p).Remove(e)
@@ -328,6 +346,10 @@ func (s *pager) close() error {
 	if s.file != nil {
 		err = s.file.Close()
 		s.file = nil
+	}
+	if s.baseCloser != nil {
+		err = errors.Join(err, s.baseCloser.Close())
+		s.base, s.baseCloser = nil, nil
 	}
 	if s.freeFile != nil {
 		err = errors.Join(err, s.freeFile.Close())

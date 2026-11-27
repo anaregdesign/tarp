@@ -16,7 +16,7 @@ const (
 	IndexMemory
 )
 
-const defaultBTreeMemoryBudgetBytes = 16 << 20
+const defaultBTreeMemoryBudgetBytes = 128 << 20
 
 // OpenValidation selects when DATA records covered by an index checkpoint are checked.
 type OpenValidation uint8
@@ -36,11 +36,11 @@ type Options struct {
 	MaxRecordBytes         int64
 	// TargetSegmentBytes sets the target for each new log or snapshot segment.
 	// It also caps the input to small-segment repacking.
-	// Zero selects 4 MiB. The target grows to fit a header and one maximum record.
+	// Zero selects 256 MiB. The target grows to fit a header and one maximum record.
 	TargetSegmentBytes int64
 	ReadFileHandles    int
 	// BatchGetReadConcurrency limits concurrent DATA reads across BatchGet calls
-	// on this DB. Zero selects 8. One runs the reads serially.
+	// on this DB. Zero selects 16. One runs the reads serially.
 	BatchGetReadConcurrency int
 	// MaxBatchGetValueBytes limits encoded value bytes returned by one BatchGet.
 	// Each occurrence of a found key counts. Zero selects 64 MiB.
@@ -61,7 +61,7 @@ func (o Options) RestoreLimits() RestoreLimits {
 
 func (l RestoreLimits) normalized() (RestoreLimits, error) {
 	if l.ValueCacheBudgetBytes == 0 {
-		l.ValueCacheBudgetBytes = 64 << 20
+		l.ValueCacheBudgetBytes = 128 << 20
 	}
 	if l.MaxRecordBytes == 0 {
 		l.MaxRecordBytes = 1 << 20
@@ -101,16 +101,16 @@ func (o Options) normalized() (Options, error) {
 	}
 	o.ValueCacheBudgetBytes, o.MaxRecordBytes = limits.ValueCacheBudgetBytes, limits.MaxRecordBytes
 	if o.ReadFileHandles == 0 {
-		o.ReadFileHandles = 64
+		o.ReadFileHandles = 256
 	}
 	if o.BatchGetReadConcurrency == 0 {
-		o.BatchGetReadConcurrency = 8
+		o.BatchGetReadConcurrency = 16
 	}
 	if o.MaxBatchGetValueBytes == 0 {
 		o.MaxBatchGetValueBytes = 64 << 20
 	}
 	if o.TargetSegmentBytes == 0 {
-		o.TargetSegmentBytes = 4 << 20
+		o.TargetSegmentBytes = 256 << 20
 	}
 	o.TargetSegmentBytes = max(o.TargetSegmentBytes, o.MaxRecordBytes+format.SegmentHeaderBytes)
 	return o, nil

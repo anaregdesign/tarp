@@ -113,7 +113,7 @@ func (s *Store) RepairRead(ctx context.Context, f *DataSegment, cause error) err
 	if r == nil || r.entry.ID != f.ID || f.Path != filepath.Join(s.Dir, DataName(r.uuid, f.ID)) {
 		return cause
 	}
-	err := s.runReadRepair(ctx, r, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
+	err := s.runReadRepair(ctx, f, r, func() error { return s.checkRepairRoot(r.uuid) }, func() error {
 		if err := s.IO.Check("data-repair.verify:before"); err != nil {
 			return err
 		}
@@ -161,7 +161,7 @@ func repairableRead(err error) bool {
 // of confirmed damage. An operator may later restore the recovery material.
 // A successful verification cannot be cached across distinct failures.
 // A directory publication with unknown durability can only be resolved by reopen.
-func (s *Store) runReadRepair(ctx context.Context, r *sealedRepair, checkRoot, repair func() error) error {
+func (s *Store) runReadRepair(ctx context.Context, segment *DataSegment, r *sealedRepair, checkRoot, repair func() error) error {
 	for {
 		r.mu.Lock()
 		if r.uncertain != nil {
@@ -221,8 +221,8 @@ func (s *Store) runReadRepair(ctx context.Context, r *sealedRepair, checkRoot, r
 		// blocked file can be fully read again.
 		newGap := next != nil && errors.Is(next.Err, format.ErrUnrecoverableDataBlocks) &&
 			(prior == nil || !errors.Is(prior.Err, format.ErrUnrecoverableDataBlocks))
-		if s.DamageChanged != nil && (newGap || prior != nil && next == nil) {
-			s.DamageChanged()
+		if s.DamageChanged != nil && (newGap || (prior == nil) != (next == nil)) {
+			s.DamageChanged(segment)
 		}
 		r.running = nil
 		close(call.done)
@@ -237,7 +237,7 @@ func (s *Store) HasUnavailableSource() bool {
 	if !s.checkDamage.Swap(false) {
 		return false
 	}
-	for _, entry := range s.Catalog.Entries {
+	for entry := range s.catalogEntries.All() {
 		if entry.HasPhysicalFile() && s.Segments[entry.ID].UnavailableData() != nil {
 			s.checkDamage.Store(true)
 			return true

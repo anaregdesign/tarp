@@ -120,19 +120,8 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 			returned = errors.Join(returned, cleanStage(fs, stage, "backup"))
 		}
 	}()
-	meta := format.Backup{UUID: capture.Current.UUID, LastUserSequence: capture.Current.LastUserSequence, CheckpointCutoffSequence: capture.Catalog.CheckpointCutoffSequence,
-		SourceValueCacheBudgetBytes: cfg.ValueCacheBudgetBytes, SourceMaxRecordBytes: cfg.MaxRecordBytes}
-	addBytes := func(name string, b []byte) error {
-		if err := fs.NewFile(filepath.Join(stage, name), b, "backup.metadata"); err != nil {
-			return err
-		}
-		meta.Files = append(meta.Files, format.BackupFile{Name: name, Bytes: int64(len(b)), Digest: sha256.Sum256(b)})
-		return nil
-	}
-	if err := addBytes("CURRENT", format.EncodeFrontier(capture.Current)); err != nil {
-		return err
-	}
-	if err := addBytes(ManifestName(capture.Current.UUID, capture.Current.ManifestID), capture.Manifest); err != nil {
+	meta, err := writeBackupMetadata(capture, cfg, fs, stage, "backup.metadata")
+	if err != nil {
 		return err
 	}
 	buffer := make([]byte, 32<<10)
@@ -185,6 +174,26 @@ func Backup(ctx context.Context, capture *Capture, cfg Config, fs *IO, destinati
 	err = publishDirectory(ctx, fs, stage, target, "backup")
 	published = err == nil
 	return err
+}
+
+func writeBackupMetadata(capture *Capture, cfg Config, fs *IO, stage, point string) (format.Backup, error) {
+	frontier, manifest := capture.PortableCatalog()
+	meta := format.Backup{UUID: frontier.UUID, LastUserSequence: frontier.LastUserSequence, CheckpointCutoffSequence: capture.Catalog.CheckpointCutoffSequence,
+		SourceValueCacheBudgetBytes: cfg.ValueCacheBudgetBytes, SourceMaxRecordBytes: cfg.MaxRecordBytes}
+	files := [...]struct {
+		name string
+		data []byte
+	}{
+		{"CURRENT", format.EncodeFrontier(frontier)},
+		{ManifestName(frontier.UUID, frontier.ManifestID), manifest},
+	}
+	for _, file := range files {
+		if err := fs.NewFile(filepath.Join(stage, file.name), file.data, point); err != nil {
+			return format.Backup{}, err
+		}
+		meta.Files = append(meta.Files, format.BackupFile{Name: file.name, Bytes: int64(len(file.data)), Digest: sha256.Sum256(file.data)})
+	}
+	return meta, nil
 }
 
 // backupReaderAt observes physical payload reads after the segment header.
@@ -264,8 +273,10 @@ func copySegment(ctx context.Context, capture *Capture, captured CapturedSegment
 		if err := span.Accept(r); err != nil {
 			return entry, selectedReadFailure(captured.Entry.ID, &SourceError{Err: fmt.Errorf("%s: record at offset %d: %w", name, offset, err)})
 		}
-		if err := visit(captured.Segment, offset, r, key); err != nil {
-			return entry, fmt.Errorf("%s: record at offset %d: %w", name, offset, err)
+		if visit != nil {
+			if err := visit(captured.Segment, offset, r, key); err != nil {
+				return entry, fmt.Errorf("%s: record at offset %d: %w", name, offset, err)
+			}
 		}
 		offset += r.EncodedRecordBytes()
 	}

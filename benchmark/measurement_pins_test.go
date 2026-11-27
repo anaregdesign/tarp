@@ -27,7 +27,7 @@ type pinnedBackupMeasurement struct {
 
 func selectedDataIDs(s *storage.Store) map[uint64]bool {
 	selected := map[uint64]bool{s.Current.ActiveID: true}
-	for _, entry := range s.Catalog.Entries {
+	for entry := range s.CatalogEntries().All() {
 		selected[entry.ID] = true
 	}
 	return selected

@@ -85,11 +85,14 @@ func TestOrderedBaseAdoptsOnlyIdenticalSelectedSnapshot(t *testing.T) {
 	c.entries = append(c.entries, c.capture.Catalog.Entries...)
 	c.store.Catalog = c.capture.Catalog
 	// A concurrent rotation may add tail files after the captured prefix.
-	c.store.Catalog.Entries = append(append([]format.CatalogEntry{}, c.entries...), format.CatalogEntry{ID: 6, Kind: format.RawLogKind})
+	entries := append(append([]format.CatalogEntry{}, c.entries...), format.CatalogEntry{ID: 6, Kind: format.RawLogKind})
+	c.store.Catalog.Entries = nil
+	c.store.catalogEntries = CatalogEntries{catalogFromSlice(entries)}
 	if !c.AdoptUnchangedOrdered() || !c.store.orderedSnapshot {
 		t.Fatal("did not adopt stable base with concurrent tail")
 	}
-	c.store.Catalog.Entries[0].ID++
+	entries[0].ID++
+	c.store.catalogEntries = CatalogEntries{catalogFromSlice(entries)}
 	if c.AdoptUnchangedOrdered() {
 		t.Fatal("adopted a different selected base")
 	}

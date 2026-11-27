@@ -19,12 +19,79 @@ func (s *Store) publishCatalog(catalog format.Catalog, candidate format.Frontier
 var errCatalogChanged = errors.New("storage: catalog changed while preparing cleaner manifest")
 
 func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Frontier, actor string, offGate func(func() error) error) (result error) {
+	entries := CatalogEntries{catalogFromSlice(catalog.Entries)}
+	catalog.Entries = nil
+	return s.publishCatalogBase(catalog, entries, candidate, actor, offGate)
+}
+
+const rebaseCatalogAt = 128
+const maxCatalogEdits = 256
+
+func (s *Store) CatalogEditBytes() uint64 {
+	if len(s.catalogChain) > maxCatalogEdits {
+		return format.CatalogEncodedBytes(s.catalogEntries.Len()+1) + format.FrontierBytes
+	}
+	return format.MaxCatalogEditBytes + format.FrontierBytes
+}
+
+func (s *Store) NeedsCatalogRebase() bool { return len(s.catalogChain) > rebaseCatalogAt }
+
+// RebaseCatalog checkpoints an immutable catalog view while callers continue
+// to append DATA. A foreground rotation can supersede the prepared base.
+func (s *Store) RebaseCatalog(offGate func(func() error) error) error {
+	if !s.NeedsCatalogRebase() || s.Current.PublicationGeneration == math.MaxUint64 {
+		return nil
+	}
+	candidate := s.Current
+	candidate.PublicationGeneration++
+	err := s.publishCatalogBase(s.Catalog, s.catalogEntries, candidate, "catalog-rebase.", offGate)
+	if err == errCatalogChanged {
+		return nil
+	}
+	return err
+}
+
+func (s *Store) publishCatalogBase(catalog format.Catalog, entries CatalogEntries, candidate format.Frontier, actor string, offGate func(func() error) error) error {
+	return s.publishCatalogObject(catalog, entries, candidate, actor, offGate, false, func() []byte {
+		materialized := catalog
+		materialized.Entries = entries.Slice(0, entries.Len())
+		return format.EncodeCatalog(materialized)
+	})
+}
+
+func (s *Store) publishCatalogEdit(catalog format.Catalog, start, remove int, inserted []format.CatalogEntry, candidate format.Frontier, actor string, offGate func(func() error) error) error {
+	catalog.Entries = nil
+	entries := s.catalogEntries.splice(start, remove, inserted)
+	// Keep recovery bounded even if foreground rotations continually supersede
+	// background rebasing or the background worker could not write its base.
+	if len(s.catalogChain) > maxCatalogEdits {
+		return s.publishCatalogBase(catalog, entries, candidate, actor, offGate)
+	}
+	edit := format.CatalogEdit{PreviousID: s.Current.ManifestID, PreviousDigest: s.Current.ManifestDigest,
+		Start: start, Remove: remove, Catalog: catalog}
+	edit.Catalog.Entries = inserted
+	return s.publishCatalogObject(catalog, entries, candidate, actor, offGate, true, func() []byte {
+		return format.EncodeCatalogEdit(edit)
+	})
+}
+
+func (s *Store) publishCatalogMetadata(catalog format.Catalog, candidate format.Frontier, actor string) error {
+	return s.publishCatalogEdit(catalog, s.catalogEntries.Len(), 0, nil, candidate, actor, nil)
+}
+
+func (s *Store) publishCatalogObject(catalog format.Catalog, entries CatalogEntries, candidate format.Frontier, actor string, offGate func(func() error) error, incremental bool, encode func() []byte) (result error) {
 	id, err := s.allocateID()
 	if err != nil {
 		return fault("catalog.identity", publication.NotApplied, false, err)
 	}
-	b := format.EncodeCatalog(catalog)
 	name := filepath.Join(s.Dir, ManifestName(s.Current.UUID, id))
+	if offGate != nil {
+		if s.buildingCatalogs == nil {
+			s.buildingCatalogs = make(map[uint64]bool)
+		}
+		s.buildingCatalogs[id] = true
+		defer delete(s.buildingCatalogs, id)
+	}
 	if actor != "" {
 		// Only this actor owns its freshly allocated catalog. Discard a
 		// known-unpublished file immediately, even on transient ENOSPC.
@@ -50,7 +117,11 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 			}
 		}()
 	}
+	var b []byte
+	var digest [32]byte
 	prepare := func() error {
+		b = encode()
+		digest = sha256.Sum256(b)
 		if err := s.IO.NewFile(name, b, actor+"catalog"); err != nil {
 			return fault("catalog.prepare", publication.NotApplied, true, err)
 		}
@@ -76,16 +147,23 @@ func (s *Store) publishCatalogFor(catalog format.Catalog, candidate format.Front
 	} else if err := prepare(); err != nil {
 		return err
 	}
-	candidate.ManifestID, candidate.ManifestDigest = id, sha256.Sum256(b)
-	previous := s.Current.ManifestID
+	candidate.ManifestID, candidate.ManifestDigest = id, digest
 	if err := s.publishFor(candidate, actor); err != nil {
 		return err
 	}
-	s.retireManifest(previous)
+	if !incremental {
+		for _, previous := range s.catalogChain {
+			s.retireManifest(previous)
+		}
+		s.catalogChain = s.catalogChain[:0]
+		s.catalogBytes = 0
+	}
+	s.catalogChain = append(s.catalogChain, id)
+	s.catalogBytes += uint64(len(b))
 	if old := s.Catalog.Index.ID; old != 0 && old != catalog.Index.ID {
 		s.retireIndex(old)
 	}
-	s.Catalog, s.Manifest = catalog, b
+	s.Catalog, s.catalogEntries = catalog, entries
 	return nil
 }
 
