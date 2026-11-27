@@ -160,9 +160,20 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.CatalogEntry) 
 	db.relocate(moves, storage.RelocationBatchCount, "clean.remap:after", false)
 	db.writer.Lock()
 	db.layoutRemapping = false
+	view = db.store.CatalogEntries()
 	if work.OutputBytes() != 0 {
-		entry := db.store.CatalogEntries().At(position)
+		entry := view.At(position)
 		db.cleaner.candidates.track(db.store, entry, position, db.opts.TargetSegmentBytes)
+	}
+	if len(entries) > 1 || work.OutputBytes() == 0 {
+		// Removing entries can make previously separated small segments a
+		// new repack group. Reconsider only neighbors of the changed span.
+		start := max(0, position-cleanerRepackEntries+1)
+		end := position + min(cleanerRepackEntries, view.Len()-position)
+		q := &db.cleaner.candidates
+		for _, entry := range view.Slice(start, end) {
+			q.changed(q.files[entry.ID], db.store.Segments[entry.ID], db.opts.TargetSegmentBytes)
+		}
 	}
 	db.writer.Unlock()
 	if err := db.health(); err != nil {
