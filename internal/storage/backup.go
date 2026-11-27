@@ -352,6 +352,12 @@ func Restore(ctx context.Context, source, destination string, cfg Config, fs *IO
 	if err := cfg.CheckLimits(image.LiveRecordSizes); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := fs.NewFile(filepath.Join(stage, "LOCK"), nil, "restore.lock"); err != nil {
+		return fault("restore.lock", publication.NotApplied, false, err)
+	}
 	err = publishDirectory(ctx, fs, stage, target, "restore")
 	published = err == nil
 	return err

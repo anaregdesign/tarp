@@ -91,6 +91,7 @@ func OpenContext(ctx context.Context, dir string, opts Options) (*DB, error) {
 
 // OpenExisting reopens an initialized database with cancellable recovery.
 // An absent or empty directory returns an error matching fs.ErrNotExist.
+// An initialized database must have its original LOCK file.
 // It accepts a database just published by [Restore]. Opening the source backup
 // returns an error matching [ErrBackupDirectory].
 func OpenExisting(ctx context.Context, dir string, opts Options) (*DB, error) {

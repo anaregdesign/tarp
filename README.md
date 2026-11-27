@@ -59,61 +59,14 @@ Run the example. It prints `value` and closes the database.
 go run .
 ```
 
-## Storage and compatibility
+## Storage format
 
 The [storage terminology guide](docs/terminology.md) defines DATA segments,
 B+tree pages, parity stripes and the units used by APIs and metrics.
 
 During v0, each revision supports its current Go API, database format and
-backup format. Any of these can change between releases. To carry data across
-a format change, export the live keys and values with the version that wrote
-them, import them into a fresh database, and verify the result before switching.
-
-v0.15.0 keeps the v0.14.0 database and backup formats. Compaction now refuses
-to publish a checkpoint that would drop a live key. Handle `ErrDataUnavailable`
-from `Compact` or `AutoCompactionStatus().LastError` in place of the removed
-`DroppedKeys` counters. Keys already discarded by an older release require
-recovery from an independent copy. In callers that use batch limits, replace
-`MaxBatchEntries` with `MaxBatchGetEntries` or `MaxWriteBatchEntries`.
-
-`IndexMode` now has two values, `IndexBTree` (zero)
-and `IndexMemory`. Omit `Options.IndexMode` or set it to `IndexBTree` wherever
-your code previously used `IndexDefault`. If your application stores the
-numeric mode in its own configuration, change the former B+tree value 2 to 0.
-
-`Bind` and `TypedDB.View` now return a `View[K,V]` value. Use that value
-type for borrowed handle parameters and fields. Check the error returned by
-`Bind` before using the view.
-
-v0.14.0 keeps the v0.13.0 database and backup formats. Existing calls to
-`db.Compact(ctx)` keep their source-order checkpoint behavior. Both `DB` and
-`TypedDB` now accept `...tarp.CompactOption`. If an interface declares
-`Compact(context.Context) (tarp.CompactResult, error)`, update it and its
-implementations to accept the variadic options. A callback with the old function
-signature can wrap the method as `func(ctx context.Context) (tarp.CompactResult, error) { return db.Compact(ctx) }`.
-
-v0.13.0 keeps the v0.12.0 database and backup formats. Update Go callers and
-consumers of batch-limit diagnostics when upgrading from v0.12.0.
-
-| v0.12.0 | v0.13.0 |
-| --- | --- |
-| `RepairParity` | `RepairDataFromParity` |
-| `BackupInfo.Sequence` | `BackupInfo.LastUserSequence` |
-| `BackupInfo.RequiredLimits.ValueCacheBudgetBytes` | `BackupInfo.LargestLiveCacheChargeBytes` |
-| `BackupInfo.RequiredLimits.MaxRecordBytes` | `BackupInfo.LargestLiveRecordBytes` |
-| `CompatibilityError.RequiredRecordBytes` | `CompatibilityError.RequiredMaxRecordBytes` |
-| `DataRange` and `SalvageReport.Unrecoverable` | `DataByteRange` and `SalvageReport.UnrecoverableByteRanges` |
-| `BatchPayloadLimit` (`payload-bytes`) | `BatchRecordBytesLimit` (`encoded-record-bytes`) |
-| `BatchGetValueBytesLimit` (`result-bytes`) | `BatchGetValueBytesLimit` (`result-value-bytes`) |
-
-v0.12.0 can open v0.11.0 databases and restore v0.11.0 backups directly.
-`Options{}` now selects the disk-backed B+tree. Allow space on the database
-volume for B+tree pages and index checkpoints, or set `IndexMode: tarp.IndexMemory`
-to keep using the previous in-memory default. See [Choosing the key index](#choosing-the-key-index).
-
-v0.11.0 changes the BACKUP header. You can open a v0.10.0 database directly
-with v0.11.0 and create a new backup. If you have only a v0.10.0 backup,
-restore it with v0.10.0 first, then open the restored database with v0.11.0.
+backup format. These can change between releases. See the
+[storage format specification](docs/format.md) for the current layout.
 
 The parent directory must exist. One process exclusively owns a directory, while
 its `DB` supports concurrent goroutines without caller locks. Individual key operations are linearizable. Each batch call operates on its
@@ -709,8 +662,9 @@ stopped database before requesting offline maintenance. It takes exclusive
 ownership through the existing LOCK, validates the committed DATA and reads
 the selected value without creating or changing files. Only a validated
 absence returns `ErrNotFound`. A live owner returns `ErrLocked`. If the
-directory has no LOCK, including a freshly restored database before its first
-open, inspection returns an error matching `fs.ErrNotExist`.
+directory has no LOCK, inspection returns an error matching `fs.ErrNotExist`.
+`Restore` publishes a LOCK file with the restored DATA, so the result can
+be inspected before the first `OpenExisting`.
 
 `Backup` captures a
 consistent committed point in time and copies outside the writer gate while

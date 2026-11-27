@@ -558,7 +558,7 @@ func (db *DB) Close() error {
 	db.state.Lock()
 	db.readStatsLocked(&db.stats)
 	db.segments, db.cache = nil, nil
-	db.readSegments.invalidate()
+	db.readSegments.clear()
 	db.state.Unlock()
 	err := publicCause(errors.Join(checkpointErr, parityErr, errors.Join(unavailable...), db.keys.Close(), db.store.Close()))
 	if f := db.failed.Load(); f != nil {

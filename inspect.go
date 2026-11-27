@@ -14,8 +14,8 @@ import (
 //
 // InspectKey requires an existing LOCK file and returns [ErrLocked] if another
 // handle owns the directory. A missing directory or LOCK file matches
-// fs.ErrNotExist. A freshly restored database acquires its LOCK file on first
-// [OpenExisting]. A backup directory returns [ErrBackupDirectory].
+// fs.ErrNotExist. [Restore] publishes a database with its LOCK file.
+// A backup directory returns [ErrBackupDirectory].
 func InspectKey(ctx context.Context, dir string, key []byte) ([]byte, error) {
 	return engine.InspectKey(ctx, dir, key)
 }

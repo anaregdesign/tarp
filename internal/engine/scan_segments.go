@@ -47,6 +47,15 @@ func (sets *scanSegmentSets) invalidate() {
 	sets.current = nil
 }
 
+// Close has drained admitted work and stopped maintenance. Outstanding views
+// still own their set pointers and can release them after the registry is gone.
+func (sets *scanSegmentSets) clear() {
+	sets.mu.Lock()
+	sets.current = nil
+	sets.older = nil
+	sets.mu.Unlock()
+}
+
 func (db *DB) unpinScanSegments(set *scanSegmentSet) {
 	if set == nil {
 		return

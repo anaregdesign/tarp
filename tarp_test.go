@@ -112,7 +112,7 @@ func TestOpenRejectsUninitializedNonemptyDirectoryWithoutCreatingLock(t *testing
 	}
 }
 
-func TestOpenExistingAcceptsRestoredDatabaseWithoutLockFile(t *testing.T) {
+func TestOpenExistingAcceptsRestoredDatabaseWithDurableLock(t *testing.T) {
 	db := openPublicDB(t, t.TempDir(), tarp.Options{})
 	if err := db.Put([]byte("k"), []byte("v")); err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestOpenExistingAcceptsRestoredDatabaseWithoutLockFile(t *testing.T) {
 	if err := tarp.Restore(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(req.Destination, "LOCK")); !errors.Is(err, os.ErrNotExist) {
+	if stat, err := os.Lstat(filepath.Join(req.Destination, "LOCK")); err != nil || !stat.Mode().IsRegular() || stat.Size() != 0 {
 		t.Fatalf("restored LOCK before open: %v", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())

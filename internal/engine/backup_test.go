@@ -240,6 +240,8 @@ func TestRestoreReportsPublicationOutcome(t *testing.T) {
 	}{
 		{"restore.copy:after", syscall.EDQUOT, NotApplied, false},
 		{"restore.file.sync:before", syscall.ENOSPC, NotApplied, false},
+		{"restore.lock.sync:before", syscall.EIO, NotApplied, false},
+		{"restore.lock.sync:after", syscall.EIO, NotApplied, false},
 		{"restore.stage.sync:before", syscall.EIO, NotApplied, false},
 		{"restore.stage.sync:after", context.Canceled, NotApplied, false},
 		{"restore.rename:before", syscall.EIO, Unknown, false},
@@ -295,6 +297,9 @@ func TestRestoreReportsPublicationOutcome(t *testing.T) {
 				}); err != nil {
 					t.Fatalf("restore retry: %v", err)
 				}
+			}
+			if value, err := InspectKey(t.Context(), dst, []byte("key")); string(value) != "acknowledged" || err != nil {
+				t.Fatalf("inspection of published restore: %q, %v", value, err)
 			}
 			restored, err := Open(dst, testOptions())
 			if err != nil {

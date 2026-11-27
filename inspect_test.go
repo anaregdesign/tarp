@@ -107,11 +107,29 @@ func TestInspectKeyRejectsMissingLockAndCorruptCommittedData(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := inspectInventory(t, restored, "")
+	if value, err := tarp.InspectKey(t.Context(), restored, key); string(value) != "latest" || err != nil {
+		t.Fatalf("inspect restored database before OpenExisting: %q, %v", value, err)
+	}
+	if !maps.Equal(before, inspectInventory(t, restored, "")) {
+		t.Fatal("inspection changed the restored database")
+	}
+	if err := os.Remove(filepath.Join(restored, "LOCK")); err != nil {
+		t.Fatal(err)
+	}
+	before = inspectInventory(t, restored, "")
 	if value, err := tarp.InspectKey(t.Context(), restored, key); value != nil || !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("inspect without existing LOCK: %q, %v", value, err)
 	}
+	for _, open := range []func(context.Context, string, tarp.Options) (*tarp.DB, error){tarp.OpenContext, tarp.OpenExisting} {
+		if owner, err := open(t.Context(), restored, tarp.Options{}); owner != nil || !errors.Is(err, tarp.ErrCorrupt) || !errors.Is(err, fs.ErrNotExist) {
+			if owner != nil {
+				owner.Close()
+			}
+			t.Fatalf("open without existing LOCK: %v, %v", owner, err)
+		}
+	}
 	if !maps.Equal(before, inspectInventory(t, restored, "")) {
-		t.Fatal("inspection created a LOCK in the restored database")
+		t.Fatal("refusing a missing LOCK changed the restored database")
 	}
 	if value, err := tarp.InspectKey(t.Context(), backup, key); value != nil || !errors.Is(err, tarp.ErrBackupDirectory) {
 		t.Fatalf("inspect backup: %q, %v", value, err)

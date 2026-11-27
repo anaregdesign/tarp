@@ -211,13 +211,10 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	if err != nil {
 		return nil, err
 	}
-	var createdDir bool
 	if !existingOnly {
-		err := os.Mkdir(absolute, 0700)
-		if err != nil && !errors.Is(err, os.ErrExist) {
+		if err := os.Mkdir(absolute, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-		createdDir = err == nil
 	}
 	absolute, err = filepath.EvalSymlinks(absolute)
 	if err != nil {
@@ -237,20 +234,11 @@ func lockStore(ctx context.Context, dir string, cfg Config, existingOnly bool, f
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	// A restored database has CURRENT but no LOCK. Reject a foreign frontier
-	// or an unrelated directory before creating LOCK. Recheck under lock.
+	// Only initialization may create LOCK. Restore publishes one with the
+	// frontier, and an initialized directory must retain that stable inode.
 	if _, err := os.Lstat(filepath.Join(absolute, "LOCK")); errors.Is(err, os.ErrNotExist) {
-		b, err := readCurrent(filepath.Join(absolute, "CURRENT"))
-		if err == nil {
-			if _, err := format.DecodeFrontier(b); err != nil {
-				return nil, fmt.Errorf("CURRENT: %w", err)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+		if err := checkUninitializedDir(absolute, existingOnly); err != nil {
 			return nil, err
-		} else if !createdDir {
-			if err := checkUninitializedDir(absolute, existingOnly); err != nil {
-				return nil, err
-			}
 		}
 	} else if err != nil {
 		return nil, err
@@ -410,9 +398,8 @@ func (s *Store) recover(ctx context.Context, image *Image, listing directoryList
 	return nil
 }
 
-// Neither LOCK nor CURRENT was observed before locking. Only create-or-open
-// may initialize an empty directory. A concurrent initializer may have added
-// LOCK or CURRENT since the preflight, in which case recheck under lock.
+// Only create-or-open may initialize an empty directory. A concurrent
+// initializer may have added LOCK since the caller's preflight.
 func checkUninitializedDir(dir string, existingOnly bool) error {
 	names, err := os.ReadDir(dir)
 	if err != nil {
@@ -424,10 +411,28 @@ func checkUninitializedDir(dir string, existingOnly bool) error {
 		}
 		return &os.PathError{Op: "open", Path: filepath.Join(dir, "CURRENT"), Err: os.ErrNotExist}
 	}
+	var hasCurrent bool
 	for _, entry := range names {
-		if entry.Name() == "LOCK" || entry.Name() == "CURRENT" {
+		switch entry.Name() {
+		case "LOCK":
 			return nil
+		case "CURRENT":
+			hasCurrent = true
 		}
+	}
+	if hasCurrent {
+		b, err := readCurrent(filepath.Join(dir, "CURRENT"))
+		if err != nil {
+			return requiredFileError("CURRENT", err)
+		}
+		if _, err := format.DecodeFrontier(b); err != nil {
+			return fmt.Errorf("CURRENT: %w", err)
+		}
+		// CURRENT can only appear after LOCK during concurrent initialization.
+		if _, err := os.Lstat(filepath.Join(dir, "LOCK")); err != nil {
+			return requiredFileError("LOCK", err)
+		}
+		return nil
 	}
 	return fmt.Errorf("%w: missing CURRENT in %s", ErrCorrupt, dir)
 }

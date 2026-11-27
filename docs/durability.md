@@ -341,7 +341,7 @@ It reports the required record and cache limits. BackupInfo.CheckLimits
 compares those requirements with a target configuration in memory.
 Restore enforces the target limits before staging, then independently validates
 the staged image and its size requirements before publishing a new closed
-database. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
+database with a synced LOCK file. Existing destinations remain untouched. Uncertain output rename/parent sync is reported
 explicitly and does not poison an otherwise healthy source DB.
 
 `InspectKey` takes exclusive ownership of an existing LOCK with a read-only
