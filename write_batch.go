@@ -23,6 +23,32 @@ type WriteBatch struct {
 	arena []byte
 }
 
+// WriteBatchSizer plans a [WriteBatch] from encoded key and value lengths
+// before copying inputs. It uses constant space.
+// Initialize it with [DB.WriteBatchSizer]. Copy it before calling
+// [WriteBatchSizer.Add] to try a proposed append or reserve capacity for
+// trailing records. When sharing a sizer across goroutines, synchronize calls
+// to Add and copies of the sizer.
+//
+// A plan that fits satisfies the configured size and count limits for the
+// described inputs. Every encoded record counts, including duplicates and
+// Deletes of absent keys. [DB.Apply] determines the actual space required at
+// commit time and checks database health.
+type WriteBatchSizer engine.WriteBatchSizer
+
+// WriteBatchSizer returns an empty plan with this DB's effective limits.
+func (db *DB) WriteBatchSizer() WriteBatchSizer {
+	return WriteBatchSizer((*engine.DB)(db).WriteBatchSizer())
+}
+
+// Add charges one proposed operation at its encoded key and value lengths.
+// For a Delete, pass zero value bytes. On error, the plan is unchanged.
+// An aggregate [BatchRecordBytesLimit] error leaves exact admission to
+// [DB.Apply], which folds duplicate keys and elides absent Deletes.
+func (s *WriteBatchSizer) Add(keyBytes, valueBytes uint64) error {
+	return (*engine.WriteBatchSizer)(s).Add(keyBytes, valueBytes)
+}
+
 // Put queues an upsert of key and value. Both slices are copied into internal
 // contiguous storage immediately, so callers can reuse scratch buffers across calls.
 func (b *WriteBatch) Put(key, value []byte) {

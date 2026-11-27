@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"maps"
@@ -632,6 +633,240 @@ func TestBackupPinsPointInTimeAcrossWritesAndCompaction(t *testing.T) {
 	status := db.AutoCompactionStatus()
 	if err != nil || result.PinnedRetiredDataBytes != 0 || status.UnlinkedBytes-beforeRelease < uint64(pinnedFile.Size.Load()) {
 		t.Fatalf("deferred cleanup: manual %+v automatic %+v error %v", result, status, err)
+	}
+}
+
+func TestBackupWithSnapshotMatchesRestoredCutWhileWritersProceed(t *testing.T) {
+	copyStarted, resumeCopy := make(chan struct{}), make(chan struct{})
+	readStarted, resumeRead := make(chan struct{}), make(chan struct{})
+	releaseCopy := sync.OnceFunc(func() { close(resumeCopy) })
+	releaseRead := sync.OnceFunc(func() { close(resumeRead) })
+	var armed atomic.Bool
+	fs := &storage.IO{Hook: func(point string) error {
+		if point == "backup.copy:before" && armed.CompareAndSwap(true, false) {
+			close(copyStarted)
+			<-resumeCopy
+		}
+		return nil
+	}}
+	db := newTestDB(t, testOptions(), fs)
+	defer releaseCopy()
+	defer releaseRead()
+	mustPut(t, db, "a", "old")
+	mustPut(t, db, "d", "present at capture")
+	target := filepath.Join(t.TempDir(), "backup")
+	pinned := testLoc(t, db, "a").Segment
+	var snapshot *Snapshot
+	var digest [sha256.Size]byte
+	var sequence uint64
+	armed.Store(true)
+	done := make(chan error, 1)
+	go func() {
+		done <- db.BackupWithSnapshot(t.Context(), target, func(s *Snapshot) error {
+			snapshot = s
+			close(readStarted)
+			<-resumeRead
+			value, err := s.Get([]byte("a"))
+			if err != nil || string(value) != "old" {
+				return fmt.Errorf("captured value %q, error %v", value, err)
+			}
+			sequence = s.Sequence()
+			digest, err = backupRangeDigest(s, t.Context())
+			return err
+		})
+	}()
+	waitForPhase := func(phase <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-phase:
+		case err := <-done:
+			t.Fatalf("backup ended before phase: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("backup did not reach phase")
+		}
+	}
+	writeWhileBlocked := func(write func() error) {
+		t.Helper()
+		written := make(chan error, 1)
+		go func() { written <- write() }()
+		select {
+		case err := <-written:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("writer blocked while backup was outside capture")
+		}
+	}
+	waitForPhase(copyStarted)
+	writeWhileBlocked(func() error { return db.Put([]byte("a"), []byte("new")) })
+	releaseCopy()
+	waitForPhase(readStarted)
+	writeWhileBlocked(func() error { return db.Delete([]byte("d")) })
+	for i := range 8 {
+		mustPut(t, db, fmt.Sprint(i), "tail")
+	}
+	if result, err := db.Compact(t.Context()); err != nil || result.PinnedRetiredDataBytes == 0 {
+		t.Fatalf("compaction during snapshot callback: %+v, %v", result, err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup published before callback finished: %v", err)
+	}
+	releaseRead()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.Get([]byte("a")); !errors.Is(err, ErrClosed) {
+		t.Fatalf("borrowed snapshot still readable: %v", err)
+	}
+	waitForUnlink(t, db, pinned.Path)
+	info, err := VerifyBackup(t.Context(), target)
+	if err != nil || sequence != 2 || info.LastUserSequence != sequence || info.LiveKeys != 2 {
+		t.Fatalf("snapshot sequence %d, backup %+v, %v", sequence, info, err)
+	}
+	restored := filepath.Join(t.TempDir(), "restored")
+	if err := Restore(t.Context(), RestoreRequest{Source: target, Destination: restored}); err != nil {
+		t.Fatal(err)
+	}
+	copyDB, err := Open(restored, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer copyDB.Close()
+	copySnapshot, err := copyDB.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer copySnapshot.Close()
+	copyDigest, err := backupRangeDigest(copySnapshot, t.Context())
+	if err != nil || copyDigest != digest || copySnapshot.Sequence() != sequence {
+		t.Fatalf("restored sequence %d, digest %x, error %v; captured sequence %d, digest %x", copySnapshot.Sequence(), copyDigest, err, sequence, digest)
+	}
+	wantValue(t, copyDB, "a", "old")
+	wantValue(t, copyDB, "d", "present at capture")
+	wantValue(t, db, "a", "new")
+}
+
+func backupRangeDigest(snapshot *Snapshot, ctx context.Context) ([sha256.Size]byte, error) {
+	h := sha256.New()
+	var lengths [16]byte
+	for row, err := range snapshot.ScanRange(ctx, []byte("a"), []byte("e"), false) {
+		if err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		binary.BigEndian.PutUint64(lengths[:8], uint64(len(row.Key)))
+		binary.BigEndian.PutUint64(lengths[8:], uint64(len(row.Value)))
+		h.Write(lengths[:])
+		h.Write(row.Key)
+		h.Write(row.Value)
+	}
+	return [sha256.Size]byte(h.Sum(nil)), nil
+}
+
+func TestBackupWithSnapshotClosesBorrowedViewOnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		hook          string
+		callbackCalls int
+		want          error
+		published     bool
+	}{
+		{name: "existing destination", want: os.ErrExist},
+		{name: "copy", hook: "backup.copy:before", want: syscall.EIO},
+		{name: "missing required key", callbackCalls: 1, want: ErrNotFound},
+		{name: "cancel", callbackCalls: 1, want: context.Canceled},
+		{name: "uncertain", hook: "backup.rename:after", callbackCalls: 1, want: ErrCommitUncertain, published: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDBWithHooks(t, testOptions(), &storage.IO{Hook: func(point string) error {
+				if point == tc.hook {
+					return syscall.EIO
+				}
+				return nil
+			}}, parkedMaintenance())
+			mustPut(t, db, "a", "old")
+			segment := testLoc(t, db, "a").Segment
+			parent := t.TempDir()
+			dest := filepath.Join(parent, "backup")
+			if tc.want == os.ErrExist {
+				if err := os.Mkdir(dest, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var snapshot *Snapshot
+			var calls int
+			err := db.BackupWithSnapshot(ctx, dest, func(s *Snapshot) error {
+				snapshot = s
+				calls++
+				switch tc.want {
+				case ErrNotFound:
+					_, err := s.Get([]byte("required"))
+					return err
+				case context.Canceled:
+					cancel()
+				}
+				return nil
+			})
+			if !errors.Is(err, tc.want) || calls != tc.callbackCalls {
+				t.Fatalf("backup error %v, inspect called %d times", err, calls)
+			}
+			if snapshot != nil {
+				if _, err := snapshot.Get([]byte("a")); !errors.Is(err, ErrClosed) {
+					t.Fatalf("borrowed snapshot still readable: %v", err)
+				}
+			}
+			if segment.HasRetentionPin() {
+				t.Fatal("failed backup leaked a retention pin")
+			}
+			entries, listErr := os.ReadDir(parent)
+			wantEntries := 0
+			if tc.published || tc.want == os.ErrExist {
+				wantEntries = 1
+			}
+			if listErr != nil || len(entries) != wantEntries || len(entries) > 0 && entries[0].Name() != "backup" {
+				t.Fatalf("destination parent contents %v, %v", entries, listErr)
+			}
+			if tc.published {
+				if _, err := VerifyBackup(t.Context(), dest); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantValue(t, db, "a", "old")
+		})
+	}
+}
+
+func TestBackupWithSnapshotRejectsCRCValidActiveDataSubstitution(t *testing.T) {
+	db := newTestDBWithHooks(t, testOptions(), nil, parkedMaintenance())
+	mustPut(t, db, "a", "old")
+	loc := testLoc(t, db, "a")
+	if loc.Segment.ID != db.store.Current.ActiveID {
+		t.Fatal("test requires an active DATA record")
+	}
+	fd, err := os.OpenFile(loc.Segment.Path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fd.WriteAt(format.EncodeRecord(format.Put, loc.Sequence, []byte("a"), []byte("new")), loc.RecordOffset)
+	if err := errors.Join(err, fd.Close()); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	called := false
+	err = db.BackupWithSnapshot(t.Context(), filepath.Join(parent, "backup"), func(*Snapshot) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrCorrupt) || called {
+		t.Fatalf("accepted substituted active DATA: callback %v, error %v", called, err)
+	}
+	if _, err := db.Get([]byte("a")); !errors.Is(err, ErrUnhealthy) {
+		t.Fatalf("active DATA mismatch did not fail-stop database: %v", err)
+	}
+	if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
+		t.Fatalf("failed copy left entries: %v, %v", entries, err)
 	}
 }
 

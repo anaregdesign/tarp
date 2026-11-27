@@ -38,6 +38,13 @@ func (s *Snapshot) Get(key []byte) ([]byte, error) {
 	return (*engine.Snapshot)(s).Get(key)
 }
 
+// GetContext reads an independently owned value from the captured sequence.
+// It observes cancellation like [DB.GetContext]. Use it for point reads
+// alongside a cancellable scan of the same snapshot.
+func (s *Snapshot) GetContext(ctx context.Context, key []byte) ([]byte, error) {
+	return (*engine.Snapshot)(s).GetContext(ctx, key)
+}
+
 // BatchGet reads keys from this snapshot in input order. It enforces
 // [MaxBatchGetEntries] and Options.MaxBatchGetValueBytes identically to [DB.BatchGet].
 func (s *Snapshot) BatchGet(keys [][]byte) ([]BatchResult, error) {

@@ -32,16 +32,14 @@ func (s TypedSnapshot[K, V]) Sequence() uint64 {
 
 // Get returns the decoded value of key in this snapshot, or the zero value of V and an error.
 func (s TypedSnapshot[K, V]) Get(key K) (V, error) {
-	var zero V
-	k, err := s.codecs.encodeKey(key)
-	if err != nil {
-		return zero, err
-	}
-	data, err := s.snap.Get(k)
-	if err != nil {
-		return zero, err
-	}
-	return decodeValue(s.codecs.valueCodec, data)
+	return s.GetContext(context.Background(), key)
+}
+
+// GetContext reads and decodes the value of key from this snapshot. It
+// observes cancellation like [Snapshot.GetContext]. User codec calls already
+// in progress run to completion.
+func (s TypedSnapshot[K, V]) GetContext(ctx context.Context, key K) (V, error) {
+	return s.codecs.getContext(ctx, key, s.snap)
 }
 
 // BatchGet reads and decodes keys from this snapshot in input order.

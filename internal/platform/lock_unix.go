@@ -26,6 +26,16 @@ type DirectoryLock struct {
 }
 
 func Lock(dir string) (*DirectoryLock, error) {
+	return lockDirectory(dir, os.O_CREATE|os.O_RDWR)
+}
+
+// LockExisting acquires the same exclusive ownership as Lock using a
+// read-only descriptor. A missing LOCK is left missing.
+func LockExisting(dir string) (*DirectoryLock, error) {
+	return lockDirectory(dir, os.O_RDONLY)
+}
+
+func lockDirectory(dir string, flags int) (*DirectoryLock, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return nil, err
@@ -43,9 +53,14 @@ func Lock(dir string) (*DirectoryLock, error) {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(name, flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
+	}
+	if st, err := f.Stat(); err != nil {
+		return nil, errors.Join(err, f.Close())
+	} else if !st.Mode().IsRegular() {
+		return nil, errors.Join(fmt.Errorf("platform: LOCK is not regular"), f.Close())
 	}
 	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		closeErr := f.Close()

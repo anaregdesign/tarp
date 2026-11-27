@@ -296,7 +296,7 @@ func TestScanStopsWithoutExtraReadsOrLeases(t *testing.T) {
 	baseline := segment.References()
 	check := func(wantReads int64) {
 		t.Helper()
-		if reads.Load() != wantReads || segment.References() != baseline || db.active != 0 {
+		if reads.Load() != wantReads || segment.References() != baseline || db.store.HasDataRetentionPin(segment) || db.active != 0 {
 			t.Fatalf("reads %d, refs %d, active %d", reads.Load(), segment.References(), db.active)
 		}
 	}
@@ -343,13 +343,13 @@ func requireScanError(t *testing.T, seq iter.Seq2[Entry, error], want error) {
 // Cancel as soon as capture pins the first file, without relying on timing.
 type cancelOnScanPin struct {
 	context.Context
-	segment     *storage.DataSegment
-	initialRefs int64
-	cancel      context.CancelFunc
+	db      *DB
+	segment *storage.DataSegment
+	cancel  context.CancelFunc
 }
 
 func (c cancelOnScanPin) Err() error {
-	if c.segment.References() > c.initialRefs {
+	if c.db.store.HasDataRetentionPin(c.segment) {
 		c.cancel()
 	}
 	return c.Context.Err()
@@ -363,8 +363,8 @@ func TestScanReleasesPartialCapture(t *testing.T) {
 	baseline := segment.References()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	requireScanError(t, db.Scan(cancelOnScanPin{ctx, segment, baseline, cancel}), context.Canceled)
-	if segment.References() != baseline || db.active != 0 {
+	requireScanError(t, db.Scan(cancelOnScanPin{ctx, db, segment, cancel}), context.Canceled)
+	if segment.References() != baseline || db.store.HasDataRetentionPin(segment) || db.active != 0 {
 		t.Fatal("partial capture retained resources")
 	}
 }

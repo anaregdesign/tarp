@@ -104,6 +104,14 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	return (*engine.DB)(db).Get(key)
 }
 
+// GetContext reads an independently owned value like [DB.Get]. A context
+// canceled before lookup returns its error. Cancellation can also interrupt
+// DATA repair or a wait for another caller's repair. An in-progress filesystem
+// call may finish before GetContext returns.
+func (db *DB) GetContext(ctx context.Context, key []byte) ([]byte, error) {
+	return (*engine.DB)(db).GetContext(ctx, key)
+}
+
 // Entry pairs a key and value for BatchPut and Scan. Both slices belong to the caller.
 type Entry = engine.Entry
 

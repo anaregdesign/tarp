@@ -11,6 +11,19 @@ import (
 // Backup durably publishes a consistent point-in-time directory while writes
 // continue. Destination must not exist, and its parent must be caller-controlled.
 func (db *DB) Backup(ctx context.Context, destination string) error {
+	return db.backupImage(ctx, destination, nil)
+}
+
+// BackupWithSnapshot gives the caller a borrowed view of the frozen backup cut
+// while its validated copy is still private.
+func (db *DB) BackupWithSnapshot(ctx context.Context, destination string, inspect func(*Snapshot) error) error {
+	if inspect == nil {
+		return operationError("backup", "snapshot", errors.New("tarp: nil snapshot callback"))
+	}
+	return db.backupImage(ctx, destination, inspect)
+}
+
+func (db *DB) backupImage(ctx context.Context, destination string, inspect func(*Snapshot) error) error {
 	if err := db.admit(); err != nil {
 		return err
 	}
@@ -45,15 +58,32 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 		db.writer.Unlock()
 		return operationError("backup", "capture", err)
 	}
-	db.writer.Unlock()
 	defer capture.Release()
+	var snapshot *Snapshot
+	if inspect != nil {
+		snapshot, err = db.captureSnapshot()
+		if err != nil {
+			db.writer.Unlock()
+			return err
+		}
+		defer snapshot.Close()
+	}
+	db.writer.Unlock()
 	yield := func() error {
 		return db.yieldToWriter(ctx, "backup.paced:after")
 	}
+	var beforePublish func() error
+	if inspect != nil {
+		beforePublish = func() error { return inspect(snapshot) }
+	}
 	err = db.store.RetryMaintenance(ctx, capture.Segments, func() error {
-		return storage.Backup(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex)
+		return storage.Backup(ctx, capture, db.store.Config, db.store.IO, destination, yield, db.newIndex, beforePublish)
 	}, nil)
 	if err != nil {
+		var inspection *storage.BackupInspectionError
+		if errors.As(err, &inspection) {
+			return &OpError{Operation: "backup", Phase: "snapshot", Outcome: NotApplied, Err: err}
+		}
 		var source *storage.SourceError
 		if errors.As(err, &source) {
 			db.readFailure(err)

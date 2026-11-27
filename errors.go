@@ -74,12 +74,12 @@ type OpError = engine.OpError
 // the costs do not fit in uint64.
 type SizeError = engine.SizeError
 
-// BatchKeyError identifies the first empty input key in BatchGet, BatchPut,
-// BatchDelete or Apply, or the first missing key in BatchDelete. Operation names the
-// method. Index is the zero-based position in the original request, including
-// duplicates. Typed batches check the encoded key, so a codec can produce an
-// empty key from a nonzero Go value. Err matches ErrEmptyKey or ErrNotFound
-// via errors.Is.
+// BatchKeyError identifies an empty input key in BatchGet, BatchPut,
+// BatchDelete, Apply, or WriteBatchSizer.Add. BatchDelete also uses it for
+// missing keys. Operation names the method. Index is the zero-based position
+// in the original request, including duplicates. Typed batches check the
+// encoded key, so a codec can produce an empty key from a nonzero Go value.
+// Err matches ErrEmptyKey or ErrNotFound via errors.Is.
 type BatchKeyError = engine.BatchKeyError
 
 // BatchLimitKind identifies which batch limit was exceeded. The limits count input

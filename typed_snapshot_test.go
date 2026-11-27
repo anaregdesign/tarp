@@ -15,6 +15,38 @@ type snapshotCompositeKey struct {
 	Tag       string
 }
 
+func TestTypedGetContextSkipsCodecsWhenCanceled(t *testing.T) {
+	db := openPublicDB(t, t.TempDir(), tarp.Options{})
+	view, err := tarp.Bind(db, rejectingStringCodec{errors.New("key codec was called")}, tarp.StringCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := view.Put("key", "previous"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := view.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Close()
+	if err := view.Put("key", "current"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, test := range []struct {
+		get  func(context.Context, string) (string, error)
+		want string
+	}{{view.GetContext, "current"}, {snapshot.GetContext, "previous"}} {
+		if got, err := test.get(ctx, "rejected"); got != "" || !errors.Is(err, context.Canceled) {
+			t.Fatalf("pre-canceled typed lookup = %q, %v", got, err)
+		}
+		if got, err := test.get(t.Context(), "key"); got != test.want || err != nil {
+			t.Fatalf("typed lookup = %q, %v, want %q", got, err, test.want)
+		}
+	}
+}
+
 func TestTypedSnapshotReadsKeepOriginalBindingDuringCodecCalls(t *testing.T) {
 	db := openPublicDB(t, t.TempDir(), tarp.Options{})
 	if err := db.Put([]byte("k"), []byte("invalid first")); err != nil {

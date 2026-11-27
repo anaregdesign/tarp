@@ -150,6 +150,23 @@ type Store struct {
 	IndexCheckpointValidated bool
 	// LargestLiveValueBytes is the largest live value at indexed Open.
 	LargestLiveValueBytes int64
+	// ReaderRetainsData reports captured index views that keep a DATA file
+	// alive. Install it before admitting engine operations.
+	ReaderRetainsData func(uint64) bool
+}
+
+func (s *Store) readerRetainsData(f *DataSegment) bool {
+	return s.ReaderRetainsData != nil && s.ReaderRetainsData(f.ID)
+}
+
+// HasDataRetentionPin reports references considered in cleaner ranking.
+func (s *Store) HasDataRetentionPin(f *DataSegment) bool {
+	return f.HasRetentionPin() || s.readerRetainsData(f)
+}
+
+// DataReferenced reports every kind of reference that prevents retiring DATA.
+func (s *Store) DataReferenced(f *DataSegment) bool {
+	return f.References() != 0 || s.readerRetainsData(f)
 }
 
 func DataName(uuid [16]byte, id uint64) string {
@@ -727,6 +744,9 @@ func (s *Store) Read(loc Location, key string) ([]byte, error) {
 }
 
 func (s *Store) ReadContext(ctx context.Context, loc Location, key string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := s.IO.Check("read:before"); err != nil {
 		return nil, loc.readError(err)
 	}
@@ -737,6 +757,9 @@ func (s *Store) ReadContext(ctx context.Context, loc Location, key string) ([]by
 				return nil, err
 			}
 			return nil, loc.readError(err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		value, err = s.readValue(loc, key)
 		if err != nil {
@@ -870,8 +893,8 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 			if id != s.Current.ActiveID && selected[id] {
 				continue
 			}
-			if f := s.Segments[id]; !selected[id] && f != nil && f.References() != 0 {
-				// A parity publisher may still own its source pin.
+			if f := s.Segments[id]; !selected[id] && f != nil && s.DataReferenced(f) {
+				// An existing reader or parity publisher may still need the file.
 				continue
 			}
 		case "DATA":
@@ -879,7 +902,7 @@ func (s *Store) cleanupValidated(ctx context.Context, objects []directoryObject)
 				continue
 			}
 			if f := s.Segments[id]; f != nil {
-				if f.References() != 0 {
+				if s.DataReferenced(f) {
 					s.retireData(f)
 					pinned += f.Size.Load()
 					continue

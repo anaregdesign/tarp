@@ -73,10 +73,14 @@ type DB struct {
 	// Only Compact sets or clears this under writer while it owns the cleaner
 	// gate. indexGate guards the staged keys during that interval.
 	memoryRemap *memoryCheckpointRemap
+	// Protected by writer. Selected DATA accounting can be incomplete until
+	// relocation finishes after a checkpoint or cleaning publication.
+	layoutRemapping bool
 
 	// Keep the workers last so their growth cannot shift the fields used by Get.
-	parity  parityWorker
-	cleaner cleaner
+	readSegments scanSegmentSets
+	parity       parityWorker
+	cleaner      cleaner
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
@@ -133,6 +137,7 @@ func openDB(ctx context.Context, dir string, opts Options, existingOnly bool, fs
 	db.publishedSeq = s.Current.LastUserSequence
 	db.stats.LiveKeys = uint64(keys.Count())
 	db.initDataStats()
+	s.ReaderRetainsData = db.readSegments.retains
 	// Finish opening a fresh, empty database once initialization has published
 	// CURRENT. Only recovery has a cancellable index to hand off to the worker.
 	if err := ctx.Err(); err != nil && !s.Created {
@@ -190,14 +195,25 @@ func countLookup(counter *uint64) {
 
 // Get returns an independently owned value, or ErrNotFound.
 func (db *DB) Get(key []byte) ([]byte, error) {
+	return db.GetContext(context.Background(), key)
+}
+
+// GetContext reads a live key and allows ctx to cancel a wait for DATA repair.
+func (db *DB) GetContext(ctx context.Context, key []byte) ([]byte, error) {
 	if err := db.admit(); err != nil {
 		return nil, err
 	}
 	defer db.done()
+	if ctx == nil {
+		return nil, validContextError("get")
+	}
 	if len(key) == 0 {
 		return nil, ErrEmptyKey
 	}
 	for first := true; ; first = false {
+		if err := ctx.Err(); err != nil {
+			return nil, operationError("get", "context", err)
+		}
 		db.state.Lock()
 		if err := db.health(); err != nil {
 			db.state.Unlock()
@@ -260,12 +276,15 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 			return nil, ErrNotFound
 		}
 		k := string(key)
-		value, err := db.store.Read(loc, k)
+		value, err := db.store.ReadContext(ctx, loc, k)
 		loc.Segment.Unpin()
 		if db.cleaner.pinned.Load() {
 			db.notifyCleaner()
 		}
 		if err != nil {
+			if err == ctx.Err() {
+				return nil, operationError("get", "context", err)
+			}
 			if storage.IsDataUnavailable(err) {
 				// A writer may have replaced or deleted this key while the
 				// read was trying to reconstruct the old immutable file.
@@ -280,6 +299,9 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 				db.poison(err)
 			}
 			return nil, operationError("get", "read", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, operationError("get", "context", err)
 		}
 		db.state.Lock()
 		if err := db.health(); err != nil {
@@ -462,7 +484,9 @@ func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc, old storage.Lo
 		invalidatedSealed = old.Segment != loc.Segment
 		old.Segment.LiveBytes.Add(-old.RecordBytes)
 		db.stats.LiveRecordBytes -= uint64(old.RecordBytes)
-		db.dropLocation(old.Segment)
+		if kind == format.Delete || old.Segment != loc.Segment {
+			db.dropLocation(old.Segment)
+		}
 	}
 	if kind == format.Delete {
 		loc.Segment.DeleteBytes.Add(loc.RecordBytes)
@@ -473,7 +497,9 @@ func (db *DB) applyMutation(kind uint8, entry ownedMutation, loc, old storage.Lo
 		if old.Segment == nil {
 			db.stats.LiveKeys++
 		}
-		db.addLocation(loc.Segment)
+		if old.Segment != loc.Segment {
+			db.addLocation(loc.Segment)
+		}
 		loc.Segment.LiveBytes.Add(loc.RecordBytes)
 		db.stats.LiveRecordBytes += uint64(loc.RecordBytes)
 		if loc.ValueBytes > db.maxSeenValueBytes {
@@ -532,6 +558,7 @@ func (db *DB) Close() error {
 	db.state.Lock()
 	db.readStatsLocked(&db.stats)
 	db.segments, db.cache = nil, nil
+	db.readSegments.invalidate()
 	db.state.Unlock()
 	err := publicCause(errors.Join(checkpointErr, parityErr, errors.Join(unavailable...), db.keys.Close(), db.store.Close()))
 	if f := db.failed.Load(); f != nil {

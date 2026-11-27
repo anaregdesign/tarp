@@ -28,6 +28,7 @@ type Capture struct {
 	Catalog         format.Catalog
 	Manifest        []byte
 	Segments        []CapturedSegment
+	activeDigest    [sha256.Size]byte
 	orderedSnapshot bool
 }
 
@@ -46,7 +47,9 @@ func (s *Store) Capture() (*Capture, error) {
 			c.Segments = append(c.Segments, CapturedSegment{Segment: s.Segments[entry.ID], Entry: entry})
 		}
 	}
-	c.Segments = append(c.Segments, CapturedSegment{Segment: s.Segments[active.ID], Entry: active})
+	activeSegment := s.Segments[active.ID]
+	activeSegment.activeDigest.Sum(c.activeDigest[:0])
+	c.Segments = append(c.Segments, CapturedSegment{Segment: activeSegment, Entry: active})
 	for i := range c.Segments {
 		captured := &c.Segments[i]
 		captured.liveKeys = captured.Segment.LiveKeys.Load()

@@ -104,12 +104,32 @@ func decodeValue[V any](codec Codec[V], data []byte) (V, error) {
 
 // Get returns the decoded value or the zero value of V and an error.
 func (db View[K, V]) Get(key K) (V, error) {
+	return db.GetContext(context.Background(), key)
+}
+
+// GetContext reads and decodes the value of key, observing cancellation like
+// [DB.GetContext]. User codec calls already in progress run to completion.
+func (db View[K, V]) GetContext(ctx context.Context, key K) (V, error) {
+	return db.getContext(ctx, key, nil)
+}
+
+func (db *View[K, V]) getContext(ctx context.Context, key K, snapshot *Snapshot) (V, error) {
 	var zero V
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return zero, &OpError{Operation: "get", Phase: "context", Outcome: NotApplied, Err: err}
+		}
+	}
 	k, err := db.encodeKey(key)
 	if err != nil {
 		return zero, err
 	}
-	data, err := db.core.Get(k)
+	var data []byte
+	if snapshot == nil {
+		data, err = db.core.GetContext(ctx, k)
+	} else {
+		data, err = snapshot.GetContext(ctx, k)
+	}
 	if err != nil {
 		return zero, err
 	}

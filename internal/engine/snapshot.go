@@ -19,7 +19,7 @@ type Snapshot struct {
 	refs              int  // 1 while open + 1 per in-flight operation/iterator
 	closing           bool // true once Close has been called
 	view              index.View
-	segments          map[uint64]*storage.DataSegment
+	segments          *scanSegmentSet
 	seq               uint64
 	revision          uint64
 	maxSeenValueBytes int64
@@ -32,7 +32,11 @@ func (db *DB) Snapshot() (*Snapshot, error) {
 		return nil, err
 	}
 	defer db.done()
+	return db.captureSnapshot()
+}
 
+// captureSnapshot requires an admitted operation.
+func (db *DB) captureSnapshot() (*Snapshot, error) {
 	db.indexGate.RLock()
 	db.state.Lock()
 	if err := db.health(); err != nil {
@@ -94,7 +98,7 @@ func (s *Snapshot) isClosing() bool {
 	return c
 }
 
-func (s *Snapshot) freeResources(view index.View, segments map[uint64]*storage.DataSegment) {
+func (s *Snapshot) freeResources(view index.View, segments *scanSegmentSet) {
 	if view != nil {
 		view.Close()
 	}
@@ -117,6 +121,11 @@ func (s *Snapshot) Close() error {
 
 // Get returns an independently owned value at s.Sequence(), or ErrNotFound.
 func (s *Snapshot) Get(key []byte) ([]byte, error) {
+	return s.GetContext(context.Background(), key)
+}
+
+// GetContext allows ctx to cancel a wait for DATA repair of a captured value.
+func (s *Snapshot) GetContext(ctx context.Context, key []byte) ([]byte, error) {
 	if err := s.acquire(); err != nil {
 		return nil, err
 	}
@@ -128,8 +137,14 @@ func (s *Snapshot) Get(key []byte) ([]byte, error) {
 	}
 	defer db.done()
 
+	if ctx == nil {
+		return nil, validContextError("get")
+	}
 	if len(key) == 0 {
 		return nil, ErrEmptyKey
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, operationError("get", "context", err)
 	}
 
 	db.state.Lock()
@@ -180,19 +195,25 @@ func (s *Snapshot) Get(key []byte) ([]byte, error) {
 		db.state.Unlock()
 	}
 
-	segment := s.segments[addr.FileID]
+	segment := s.segments.files[addr.FileID]
 	if segment == nil {
 		err := missingDataSegment(addr.FileID)
 		db.poison(err)
 		return nil, operationError("get", "index", err)
 	}
 
-	value, err := db.store.Read(storage.At(segment, addr), k)
+	value, err := db.store.ReadContext(ctx, storage.At(segment, addr), k)
 	if err != nil {
+		if err == ctx.Err() {
+			return nil, operationError("get", "context", err)
+		}
 		db.readFailure(err)
 		return nil, operationError("get", "read", err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, operationError("get", "context", err)
+	}
 	db.state.Lock()
 	if err := db.health(); err != nil {
 		db.state.Unlock()
@@ -281,7 +302,7 @@ func (s *Snapshot) readBatch(keys [][]byte) ([]BatchResult, error) {
 	}
 	db.state.Unlock()
 
-	plan, err := db.planIndexedBatch(s.view, s.segments, keys, results, uncached, s.maxSeenValueBytes)
+	plan, err := db.planIndexedBatch(s.view, s.segments.files, keys, results, uncached, s.maxSeenValueBytes)
 	if err != nil {
 		return nil, err
 	}

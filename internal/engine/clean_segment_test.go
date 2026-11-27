@@ -96,7 +96,7 @@ func testSegmentCleaningRebasesOnConcurrentTail(t *testing.T, opts Options) {
 		t.Fatalf("capture lost its old file: pinned %d err %v", pinned, err)
 	}
 	backupDir := filepath.Join(t.TempDir(), "backup")
-	if err := storage.Backup(ctx, capture, db.store.Config, db.store.IO, backupDir, nil, db.newIndex); err != nil {
+	if err := storage.Backup(ctx, capture, db.store.Config, db.store.IO, backupDir, nil, db.newIndex, nil); err != nil {
 		t.Fatal(err)
 	}
 	capture.Release()

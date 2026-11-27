@@ -33,6 +33,8 @@ func failedDataRead(err error) *dataReadError {
 		switch e := err.(type) {
 		case *dataReadError:
 			return e
+		case *BackupInspectionError:
+			return nil
 		case interface{ Unwrap() []error }:
 			causes := e.Unwrap()
 			if len(causes) != 1 {

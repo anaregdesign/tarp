@@ -30,8 +30,8 @@ func CheckBatchKey(operation string, i int, key []byte) error {
 	return nil
 }
 
-func (db *DB) addBatchRecordBytes(index int, used, recordBytes uint64) (uint64, error) {
-	limit := uint64(min(db.opts.TargetSegmentBytes-format.SegmentHeaderBytes, int64(math.MaxInt)))
+func (o Options) addBatchRecordBytes(index int, used, recordBytes uint64) (uint64, error) {
+	limit := uint64(min(o.TargetSegmentBytes-format.SegmentHeaderBytes, int64(math.MaxInt)))
 	// Used fits a segment minus its header; recordBytes is either a validated
 	// Put or the record header plus one native-length delete key.
 	actual := used + recordBytes
@@ -70,7 +70,7 @@ func (db *DB) PreparePuts(count int, entryAt func(int) (Entry, error)) (Prepared
 		if size := db.opts.checkEntryLimits(keyBytes, valueBytes); size != nil {
 			return PreparedBatch{}, &BatchLimitError{Kind: BatchEntrySizeLimit, Index: i, Entry: size}
 		}
-		used, err = db.addBatchRecordBytes(i, used, entrysize.RecordBytes(keyBytes, valueBytes))
+		used, err = db.opts.addBatchRecordBytes(i, used, entrysize.RecordBytes(keyBytes, valueBytes))
 		if err != nil {
 			return PreparedBatch{}, err
 		}
@@ -103,7 +103,7 @@ func (db *DB) PrepareDeletes(count int, keyAt func(int) ([]byte, error)) (Prepar
 		if slots[slot] != 0 {
 			continue
 		}
-		used, err = db.addBatchRecordBytes(i, used, entrysize.RecordBytes(uint64(len(key)), 0))
+		used, err = db.opts.addBatchRecordBytes(i, used, entrysize.RecordBytes(uint64(len(key)), 0))
 		if err != nil {
 			return PreparedBatch{}, err
 		}

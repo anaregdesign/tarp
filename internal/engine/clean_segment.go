@@ -133,9 +133,13 @@ func (db *DB) cleanSegment(ctx context.Context, entries ...format.CatalogEntry) 
 		newData.addSegment(n, 0)
 	}
 	db.replaceDataStats(oldData, newData)
+	db.layoutRemapping = true
 	db.writer.Unlock()
 
 	db.relocate(moves, storage.RelocationBatchCount, "clean.remap:after", false)
+	db.writer.Lock()
+	db.layoutRemapping = false
+	db.writer.Unlock()
 	if err := db.health(); err != nil {
 		return &OpError{Operation: "clean", Phase: "post-publication", Outcome: Committed, Err: err}
 	}

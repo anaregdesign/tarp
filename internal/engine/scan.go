@@ -44,7 +44,7 @@ func (db *DB) scanEntries(ctx context.Context, snapshot *Snapshot, query index.S
 }
 
 // The index and the DATA segment pins must describe the same point in time.
-func (db *DB) captureScan(ctx context.Context, snapshot *Snapshot, query index.Scan, op string) (index.ScanView, map[uint64]*storage.DataSegment, error) {
+func (db *DB) captureScan(ctx context.Context, snapshot *Snapshot, query index.Scan, op string) (index.ScanView, *scanSegmentSet, error) {
 	if err := db.admit(); err != nil {
 		return index.ScanView{}, nil, err
 	}
@@ -67,7 +67,7 @@ func (db *DB) captureScan(ctx context.Context, snapshot *Snapshot, query index.S
 	if err != nil {
 		return index.ScanView{}, nil, operationError(op, "context", err)
 	}
-	var segments map[uint64]*storage.DataSegment
+	var segments *scanSegmentSet
 	if op == "scan" {
 		segments = db.pinScanSegments()
 	}
@@ -108,7 +108,7 @@ func (db *DB) walkSnapshot(ctx context.Context, snapshot *Snapshot, query index.
 		}
 		var value []byte
 		if readValues {
-			value, result = db.readScanValue(ctx, segments[a.FileID], a, k)
+			value, result = db.readScanValue(ctx, segments.files[a.FileID], a, k)
 			if result != nil {
 				return false
 			}
@@ -197,25 +197,8 @@ func (db *DB) readScanValue(ctx context.Context, segment *storage.DataSegment, a
 	return value, nil
 }
 
-// pinScanSegments runs under indexGate while the reader captures its view.
-func (db *DB) pinScanSegments() map[uint64]*storage.DataSegment {
-	segments := make(map[uint64]*storage.DataSegment, len(db.segments))
-	for id, segment := range db.segments {
-		segment.PinRetained()
-		segments[id] = segment
-	}
-	return segments
-}
-
-func (db *DB) unpinScanSegments(segments map[uint64]*storage.DataSegment) {
-	for _, segment := range segments {
-		segment.UnpinRetained()
-		db.notifyCleanerIfUnpinned(segment)
-	}
-}
-
 func (db *DB) notifyCleanerIfUnpinned(segment *storage.DataSegment) {
-	if segment.References() == 0 {
+	if !db.store.DataReferenced(segment) {
 		db.notifyCleaner()
 	}
 }

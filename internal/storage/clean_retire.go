@@ -99,7 +99,7 @@ func (s *Store) retireKnown(remaining int) (unlinked, pinned int64, pending bool
 		return removed, err
 	}
 	for id, f := range s.retired {
-		if f.References() != 0 {
+		if s.DataReferenced(f) {
 			pinned += min(f.Size.Load(), math.MaxInt64-pinned)
 			continue
 		}

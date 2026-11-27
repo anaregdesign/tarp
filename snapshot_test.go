@@ -113,9 +113,28 @@ func TestSnapshotPointInTimeIsolationCompactionAndCacheIsolation(t *testing.T) {
 			if snap1.Sequence() != 41 {
 				t.Fatalf("snap1.Sequence() = %d, want 41", snap1.Sequence())
 			}
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+			beforeCache := db.Stats().ValueCache
+			for _, key := range []string{"k-00", "k-01"} {
+				if got, err := snap1.GetContext(canceled, []byte(key)); got != nil || !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled GetContext(%q) = %q, %v", key, got, err)
+				}
+			}
+			if after := db.Stats().ValueCache; after != beforeCache {
+				t.Fatalf("canceled reads changed cache stats: before=%+v after=%+v", beforeCache, after)
+			}
+			v00, err := snap1.GetContext(ctx, []byte("k-00"))
+			if err != nil || !bytes.HasPrefix(v00, []byte("v1-00-")) {
+				t.Fatalf("warm GetContext(k-00) = %q, %v", v00, err)
+			}
+			v00[0] = 'X'
+			if got, err := db.GetContext(ctx, []byte("k-00")); err != nil || !bytes.HasPrefix(got, []byte("v1-00-")) {
+				t.Fatalf("warm DB.GetContext(k-00) = %q, %v", got, err)
+			}
 
 			// While snap1 is at current revision, reading cold k-01 populates ValueCache cleanly.
-			v01, err := snap1.Get([]byte("k-01"))
+			v01, err := snap1.GetContext(ctx, []byte("k-01"))
 			if err != nil || !bytes.HasPrefix(v01, []byte("v1-01-")) {
 				t.Fatalf("snap1.Get(k-01) before writes = %q, %v", v01, err)
 			}
@@ -148,7 +167,7 @@ func TestSnapshotPointInTimeIsolationCompactionAndCacheIsolation(t *testing.T) {
 			// Verify snap1 STILL observes exact v1 values (no ValueCache v2 leakage!) and deleted keys!
 			for i := range 40 {
 				k := []byte(fmt.Sprintf("k-%02d", i))
-				got, err := snap1.Get(k)
+				got, err := snap1.GetContext(ctx, k)
 				wantPrefix := fmt.Sprintf("v1-%02d-", i)
 				if err != nil || !bytes.HasPrefix(got, []byte(wantPrefix)) {
 					t.Fatalf("snap1.Get(%q) = %q, %v; want prefix %q", k, got, err, wantPrefix)

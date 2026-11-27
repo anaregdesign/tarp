@@ -9,6 +9,45 @@ import (
 	"github.com/anaregdesign/tarp/internal/storage"
 )
 
+// WriteBatchSizer estimates the space needed by an atomic WriteBatch using
+// only the operation lengths and the DB's effective options.
+type WriteBatchSizer struct {
+	opts        Options
+	count       int
+	recordBytes uint64
+}
+
+func (db *DB) WriteBatchSizer() WriteBatchSizer {
+	return WriteBatchSizer{opts: db.opts}
+}
+
+// Add charges an encoded key and value length. For Delete, pass zero value
+// bytes. Add checks each entry and counts every input at its full encoded
+// record size. If the updated plan fits, Add records the operation and returns
+// nil. On error the plan is unchanged. Apply checks actual space after
+// folding duplicate keys and eliding absent Deletes.
+func (s *WriteBatchSizer) Add(keyBytes, valueBytes uint64) error {
+	if s.opts.MaxRecordBytes == 0 {
+		return errors.New("tarp: initialize WriteBatchSizer with DB.WriteBatchSizer")
+	}
+	if err := CheckBatchCount(s.count+1, MaxWriteBatchEntries); err != nil {
+		return err
+	}
+	if keyBytes == 0 {
+		return &BatchKeyError{Operation: "WriteBatchSizer.Add", Index: s.count, Err: ErrEmptyKey}
+	}
+	if size := s.opts.checkEntryLimits(keyBytes, valueBytes); size != nil {
+		return &BatchLimitError{Kind: BatchEntrySizeLimit, Index: s.count, Entry: size}
+	}
+	used, err := s.opts.addBatchRecordBytes(s.count, s.recordBytes, entrysize.RecordBytes(keyBytes, valueBytes))
+	if err != nil {
+		return err
+	}
+	s.count++
+	s.recordBytes = used
+	return nil
+}
+
 // MixedOp represents one operation supplied to PrepareMixed.
 type MixedOp struct {
 	Key    []byte
@@ -167,7 +206,7 @@ func (b PreparedMixedBatch) apply() error {
 			hasPut = true
 		}
 		recordBytes := entrysize.RecordBytes(uint64(len(rec.Key)), uint64(len(rec.Value)))
-		used, err = db.addBatchRecordBytes(item.inputIndex, used, recordBytes)
+		used, err = db.opts.addBatchRecordBytes(item.inputIndex, used, recordBytes)
 		if err != nil {
 			return err
 		}

@@ -99,7 +99,7 @@ func (e *SizeError) Unwrap() error { return ErrTooLarge }
 
 // BatchKeyError identifies an empty input key or a missing BatchDelete key.
 type BatchKeyError struct {
-	Operation string // BatchGet, BatchPut, BatchDelete or Apply.
+	Operation string // BatchGet, BatchPut, BatchDelete, Apply or WriteBatchSizer.Add.
 	Index     int    // Zero-based position in the original request.
 	Err       error  // ErrEmptyKey or ErrNotFound.
 }
@@ -127,8 +127,8 @@ type BatchLimitError struct {
 	Index int
 	// Actual and Limit are input counts for BatchInputCountLimit, or encoded
 	// record bytes for BatchRecordBytesLimit, or returned value bytes for
-	// BatchGetValueBytesLimit. Actual includes the offending input
-	// and counts each distinct delete key once. Both fields are zero for
+	// BatchGetValueBytesLimit. Actual includes the offending input.
+	// BatchDelete charges each distinct key once. Both fields are zero for
 	// BatchEntrySizeLimit, whose Entry reports both record and value cache limits.
 	Actual, Limit uint64
 	Entry         *SizeError
