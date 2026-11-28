@@ -12,12 +12,13 @@ import (
 	"github.com/anaregdesign/tarp/internal/format"
 )
 
-// The same four Put records fill the default 4 MiB target exactly. One prior
+// The same four Put records fill the configured 4 MiB target exactly. One prior
 // Put for the first key forces rotation and leaves the same final key/value set.
 func BenchmarkBatchPutSegmentBoundary(b *testing.B) {
 	const targetBytes = 4 << 20
 	const batchBytes = targetBytes - format.SegmentHeaderBytes
 	const count = 4
+	options := tarp.Options{TargetSegmentBytes: targetBytes}
 	keys := make([][]byte, count)
 	entries := make([]tarp.Entry, count)
 	for i := range entries {
@@ -36,7 +37,7 @@ func BenchmarkBatchPutSegmentBoundary(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				dir := filepath.Join(b.TempDir(), "db")
-				db, err := tarp.Open(dir, tarp.Options{})
+				db, err := tarp.Open(dir, options)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -69,7 +70,7 @@ func BenchmarkBatchPutSegmentBoundary(b *testing.B) {
 				if err := db.Close(); err != nil {
 					b.Fatal(err)
 				}
-				verifyWriteGroup(b, dir, tarp.Options{}, keys, entries, "Put")
+				verifyWriteGroup(b, dir, options, keys, entries, "Put")
 			}
 		})
 	}
