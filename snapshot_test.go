@@ -248,6 +248,11 @@ func TestSnapshotPointInTimeIsolationCompactionAndCacheIsolation(t *testing.T) {
 			if _, err := snap1.Get([]byte("k-00")); !errors.Is(err, tarp.ErrClosed) {
 				t.Fatalf("Get after snap1.Close = %v, want ErrClosed", err)
 			}
+			// Drain any background PARITY protection that still holds a pin on
+			// the old DATA. Protection started now sees the current layout.
+			if err := db.ProtectParity(ctx); err != nil {
+				t.Fatalf("ProtectParity after snap1.Close: %v", err)
+			}
 			compAfter, err := db.Compact(ctx)
 			if err != nil {
 				t.Fatalf("Compact after snap1.Close: %v", err)
