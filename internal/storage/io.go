@@ -17,6 +17,8 @@ import (
 type IO struct {
 	Hook    func(string) error
 	WriteAt func(*os.File, []byte, int64) (int, error)
+	// AvailableBytes overrides the filesystem sample for ordered checkpoint staging.
+	AvailableBytes func(string) (uint64, error)
 	// Wrote observes the bytes accepted by each write, including short writes.
 	Wrote func(point string, bytes int)
 	// OpenRead observes bytes returned by reads of selected DATA and INDEX

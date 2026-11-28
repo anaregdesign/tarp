@@ -50,6 +50,12 @@ Qualify the same-handle mechanism first. Until durable summaries are implemented
 
 ## Building the initial checkpoint
 
+On a healthy DB with a zero DATA checkpoint cutoff, every live encoded record
+requires space in a new snapshot segment. If this minimum exceeds the current
+staging allowance after the foreground reserve, `Compact` reports `ErrNoSpace`
+with `NotApplied` before sealing the active log or scanning records. Builds that
+pass this check still charge output, PARITY, and scratch as they stage files.
+
 1. Reuse the seal, capture and pin steps under the writer gate. Capture the index view and its live count at the same boundary. Scan, sort, read values and prepare PARITY outside the gate. The existing Memory view clones its map during capture. Measure this pause and its memory separately from the sorter.
 2. In the healthy path, stream the selected DATA in catalog and file-offset order. Validate each header, record CRC, sealed digest and sequence interval, including superseded Puts and Deletes. Feed key, address and record kinds to the existing stable external replay sorter in both index modes. Its reducer already checks per-key transitions at the pruned-through sequence and emits one winning address per surviving key in encoded-key order. Compare every emitted address, including lengths and sequence, with the captured view, and check the final count against the captured live count. This uses one history sort for validation and ordering. [Replay reducer](../internal/storage/replay_sort.go) and [current copy validation](../internal/storage/checkpoint.go).
 3. Read the winning records from the pinned sources. Start with a byte-bounded window of key-ordered winners. Within a window, issue reads in source file and offset order, validate key, sequence, lengths and CRC, then emit in the original key order. Stream a single record larger than the window through a fixed-size copy buffer. Use the existing snapshot writer for segment rollover at the effective `TargetSegmentBytes`, digest, sync and old-to-new relocations. The cost relative to source-order copy is a second read of the live payload, potentially scattered, plus sort-run I/O. Sorting keys separately within each source file would leave frequently scanned prefixes spread across those files.

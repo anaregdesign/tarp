@@ -81,8 +81,8 @@ func CampaignCases(group string) ([]PowerCase, error) {
 	add("exhaustion", "exhaustion", "exhaustion.complete", 1)
 	extended := func(category, mode string, points ...string) {
 		for _, index := range []string{"btree", "memory"} {
-			if mode == "index-close" && index == "memory" {
-				continue // Memory Close deliberately does not publish an INDEX.
+			if index == "memory" && (mode == "index-close" || mode == "staged-apply") {
+				continue
 			}
 			for _, point := range points {
 				phases := []string{point + ":before", point + ":after"}
@@ -110,6 +110,8 @@ func CampaignCases(group string) ([]PowerCase, error) {
 		}
 		extended("batches", mode, "operation.ack")
 	}
+	extended("staged", "staged-apply", "staged.data.sync", "staged.catalog.dirsync:after",
+		"staged.current.rename", "staged.current.dirsync", "operation.ack:after")
 	for _, mode := range []string{"clean-single", "clean-group", "clean-repack"} {
 		extended("cleaner", mode, "clean.output.sync", "clean.parity.sync", "clean.parity.rename",
 			"clean.catalog.sync", "clean.catalog.dirsync", "clean.current.sync", "clean.current.rename",

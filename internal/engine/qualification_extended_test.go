@@ -29,6 +29,8 @@ func extendedCaseOptions(cfg qualification.PowerCase) Options {
 	switch cfg.Mode {
 	case "clean-group":
 		opts.MaxRecordBytes, opts.TargetSegmentBytes = 768, 1024
+	case "staged-apply":
+		opts.TargetSegmentBytes = 6 << 10
 	case "ordered-initial", "ordered-delta", "ordered-reuse":
 		opts.MaxRecordBytes, opts.TargetSegmentBytes = 128, 256
 	}
@@ -36,11 +38,15 @@ func extendedCaseOptions(cfg qualification.PowerCase) Options {
 }
 
 func emitBatch(kind string, mutations []qualification.OracleMutation) {
+	emitMutations("TARP_BATCH_"+kind, mutations)
+}
+
+func emitMutations(marker string, mutations []qualification.OracleMutation) {
 	data, err := json.Marshal(mutations)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("TARP_BATCH_%s %s\n", kind, hex.EncodeToString(data))
+	fmt.Printf("%s %s\n", marker, hex.EncodeToString(data))
 }
 
 // The same fixtures run in guarded VMs and ordinary process-cut reachability
@@ -159,6 +165,38 @@ func runExtendedPowerCase(t *testing.T, cfg qualification.PowerCase, dir, output
 			t.Fatal(err)
 		}
 		emitBatch("ACK", mutations)
+	case "staged-apply":
+		put("gone", "old")
+		put("hot", "old")
+		put("keep", "preserved")
+		put("progress", "before")
+		if err := db.CheckpointIndex(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		before := db.store.Current.LastUserSequence
+		sealed := db.store.CatalogEntries().Len()
+		mutations := []qualification.OracleMutation{
+			{Key: []byte("gone"), Delete: true},
+			{Key: []byte("hot"), Value: bytes.Repeat([]byte("h"), 3000)},
+			{Key: []byte("missing"), Delete: true},
+			{Key: []byte("node"), Value: bytes.Repeat([]byte("n"), 3000)},
+			{Key: []byte("progress"), Value: []byte("after")},
+		}
+		emitMutations("TARP_STAGED_INTENT", mutations)
+		armed.Store(true)
+		if err := db.ApplyStaged(t.Context(), func(yield func(MixedOp, error) bool) {
+			for _, mutation := range mutations {
+				if !yield(MixedOp{Key: mutation.Key, Value: mutation.Value, Delete: mutation.Delete}, nil) {
+					return
+				}
+			}
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if db.store.Current.LastUserSequence != before+4 || db.store.CatalogEntries().Len() <= sealed {
+			t.Fatal("fixture did not advance by one whole mixed commit across multiple DATA segments")
+		}
+		emitMutations("TARP_STAGED_ACK", mutations)
 	case "clean-single", "clean-group", "clean-repack":
 		switch cfg.Mode {
 		case "clean-single":
@@ -350,7 +388,7 @@ func TestExtendedQualificationPhaseReachability(t *testing.T) {
 		}
 		t.Fatal("unknown process-cut case")
 	}
-	for _, group := range []string{"batches", "cleaner", "ordered", "indexes", "repair"} {
+	for _, group := range []string{"batches", "staged", "cleaner", "ordered", "indexes", "repair"} {
 		cases, err := qualification.CampaignCases(group)
 		if err != nil {
 			t.Fatal(err)
@@ -397,6 +435,9 @@ func TestExtendedQualificationPhaseReachability(t *testing.T) {
 				}
 				defer db.Close()
 				sequence := Observe(db).Frontier().LastUserSequence
+				if low, high := oracle.PowerCutSequenceRange(cfg.Mode); sequence < low || sequence > high {
+					t.Fatalf("recovered sequence %d outside expected [%d,%d]", sequence, low, high)
+				}
 				if _, err := oracle.VerifyAt(sequence, Observe(db).LiveKeys(), func(key []byte) ([]byte, bool, error) {
 					value, err := db.Get(key)
 					if errors.Is(err, ErrNotFound) {

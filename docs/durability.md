@@ -137,6 +137,22 @@ The recorded whole-VM matrix at `d89f7b8` used an external batch-aware
 witness to verify whole-batch recovery across 100 cuts per Go family. It
 predates mixed Apply and the 65,535-input write limit.
 
+ApplyStaged accepts final mutations in strictly increasing encoded-key order
+on the B+tree backend. It validates and spools the stream outside the writer
+gate. Under the gate it evaluates Deletes against the latest committed view
+and elides missing keys. It stages checked DATA in consecutive raw logs and
+prepares a private B+tree root. Staging memory tracks the current record,
+the bounded pager and the accounting for affected segments. Staging never
+rewrites unchanged DATA.
+
+Every candidate DATA file is synced before the staged catalog append, whose
+directory sync makes the DATA names and MANIFEST durable. One replacement
+CURRENT selects the new active segment, catalog and complete sequence range.
+Previously captured Snapshots retain their old root and DATA pins. New
+Snapshot and point readers see the old view until the index and accounting
+are published together. Known-unpublished candidates are discarded. An
+uncertain selector preserves the candidate files and requires reopen.
+
 An unknown outer signature in an existing `CURRENT` returns
 `ErrUnsupportedFormat` before any repair, initialization or cleanup. For the
 supported layout, recovery locks the directory and validates the selected `CURRENT`, its

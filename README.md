@@ -419,6 +419,23 @@ If the candidate and marker exceed a nonempty chunk's capacity, finalize that
 chunk, start a new plan and check both sizes again before copying the candidate.
 Use `Apply` to publish each chunk with its actual marker.
 
+### Larger atomic updates
+
+For one atomic update spanning several DATA segments, use
+`db.ApplyStaged(ctx, changes)` on a B+tree DB. The iterator yields
+`tarp.StagedMutation` values in strictly increasing encoded-key order.
+Supply the final operation for each key. A Delete of an absent key
+is a no-op. Put a progress or receipt key in the same stream when it
+must become visible with the rest of the mutations.
+
+ApplyStaged accepts up to 1,048,576 input operations, 64 GiB of encoded
+input and 1,024 new DATA segments per commit. It uses a private disk spool
+and stages new DATA before it publishes either result. Allow space for
+the spool, new DATA and index workspace. The writer gate is held during
+candidate DATA preparation and publication. A successful commit clears
+the value cache. See [the durability contract](docs/durability.md#commit-and-recovery)
+for the recovery outcomes.
+
 ## Consistent read snapshots
 
 Call `db.Snapshot()` on a `DB`, `TypedDB`, or `View` to capture a consistent
@@ -598,7 +615,7 @@ the commit sync protocol.
 | `ValueCacheBudgetBytes` | 128 MiB | Total logical charge of keys, values and entry metadata in the value LRU. A Put must fit as a single entry. |
 | `MaxRecordBytes` | 1 MiB | One encoded record, including its 48-byte header, key and value. |
 | `TargetSegmentBytes` | 256 MiB | Target size for each new log or snapshot segment. Bounds the total input to small-segment repacking and the output of grouped log cleaning. |
-| `ReadFileHandles` | 256 | Maximum number of reusable DATA handles for cache misses. The DB can store more files than it keeps open. |
+| `ReadFileHandles` | 256 | Maximum number of reusable DATA handles for cache misses. These handles share the process descriptor limit with other files. On descriptor exhaustion, Tarp retries once after evicting an idle DATA handle when one is available. |
 | `BatchGetReadConcurrency` | 16 | Maximum simultaneous DATA record reads across all `BatchGet` calls on this DB. |
 | `MaxBatchGetValueBytes` | 64 MiB | Maximum total encoded value bytes in one BatchGet, including duplicate inputs. |
 

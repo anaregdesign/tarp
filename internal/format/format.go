@@ -127,6 +127,12 @@ func DecodeRecordHeader(b []byte, available int64) (RecordHeader, error) {
 	return decodeRecordHeader(b, available, &scratch)
 }
 
+// ValidPayload verifies the lengths and checksum of a decoded record.
+func (r RecordHeader) ValidPayload(key, value []byte) bool {
+	return int64(len(key)) == r.KeyBytes && int64(len(value)) == r.ValueBytes &&
+		crc32.Update(crc32.Checksum(key, table), table, value) == r.PayloadCRC
+}
+
 // A sequential decoder can reuse its checksum scratch across a whole file.
 func decodeRecordHeader(b []byte, available int64, scratch *[RecordHeaderBytes]byte) (RecordHeader, error) {
 	var r RecordHeader

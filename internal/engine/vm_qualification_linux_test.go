@@ -217,8 +217,8 @@ func verifyVMCampaign(t *testing.T, cfg qualification.PowerCase, dir, output str
 			t.Fatalf("Full/Indexed recovered different state: %s != %s", got, digest)
 		}
 		indexedUsed = indexed.store.IndexCheckpointValidated
-		if strings.HasPrefix(cfg.Mode, "index-") && cfg.Phase == "index.current.dirsync:after" && !indexedUsed {
-			t.Fatal("durably published INDEX was not validated on Indexed Open")
+		if (cfg.Mode == "staged-apply" || strings.HasPrefix(cfg.Mode, "index-") && cfg.Phase == "index.current.dirsync:after") && !indexedUsed {
+			t.Fatal("durably published INDEX was not reused on Indexed Open")
 		}
 		indexedVerified = true
 		if err := indexed.Close(); err != nil {

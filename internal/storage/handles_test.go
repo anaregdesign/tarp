@@ -5,11 +5,24 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/anaregdesign/tarp/internal/format"
 )
+
+func TestReadDescriptorPressureDoesNotHideOtherFailures(t *testing.T) {
+	pressure := &os.PathError{Op: "open", Path: "DATA", Err: syscall.EMFILE}
+	if !IsReadDescriptorPressure(pressure) {
+		t.Fatalf("descriptor pressure misclassified: %v", pressure)
+	}
+	for _, err := range []error{ErrCorrupt, syscall.EIO, os.ErrPermission} {
+		if IsReadDescriptorPressure(errors.Join(pressure, err)) {
+			t.Fatalf("descriptor pressure hides %v", err)
+		}
+	}
+}
 
 func TestLeasedForeignDataStillFailsIdentityAfterAnotherReaderRepairs(t *testing.T) {
 	fixture, s, f := openedRepairFixture(t)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/anaregdesign/tarp/internal/format"
 )
@@ -49,9 +50,15 @@ func newHandles(limit int) *handles {
 	return h
 }
 
+// IsReadDescriptorPressure reports exhaustion without masking independent I/O errors.
+func IsReadDescriptorPressure(err error) bool {
+	return onlyCauses(err, syscall.EMFILE)
+}
+
 func (h *handles) acquire(f *DataSegment) (*handle, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	var exhausted error
 	for {
 		if got := h.items[f]; got != nil {
 			got.used++
@@ -60,13 +67,18 @@ func (h *handles) acquire(f *DataSegment) (*handle, error) {
 		}
 		if h.lru.Len() < h.limit {
 			fd, err := OpenRegular(f.Path)
-			if err != nil {
+			if err == nil {
+				got := &handle{segment: f, fd: fd, used: 1}
+				got.node = h.lru.PushFront(got)
+				h.items[f] = got
+				return got, nil
+			}
+			if exhausted != nil || !IsReadDescriptorPressure(err) {
 				return nil, err
 			}
-			got := &handle{segment: f, fd: fd, used: 1}
-			got.node = h.lru.PushFront(got)
-			h.items[f] = got
-			return got, nil
+			// Other users of the process descriptor table can reach its
+			// limit first. Free one cached descriptor and retry the open.
+			exhausted = err
 		}
 		var idle *handle
 		for n := h.lru.Back(); n != nil; n = n.Prev() {
@@ -82,6 +94,9 @@ func (h *handles) acquire(f *DataSegment) (*handle, error) {
 				return nil, err
 			}
 			continue
+		}
+		if exhausted != nil {
+			return nil, exhausted
 		}
 		h.cond.Wait()
 	}

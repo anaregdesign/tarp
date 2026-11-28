@@ -38,22 +38,21 @@ func ParseOracle(line string) (OracleEvent, bool, error) {
 		return OracleEvent{}, false, nil
 	}
 	parts := strings.Fields(line)
-	if len(parts) == 2 && (parts[0] == "TARP_BATCH_INTENT" || parts[0] == "TARP_BATCH_ACK" || parts[0] == "TARP_BATCH_NOT_APPLIED") {
-		data, err := hex.DecodeString(parts[1])
-		if err != nil {
-			return OracleEvent{}, false, err
-		}
-		var mutations []OracleMutation
-		if err := json.Unmarshal(data, &mutations); err != nil {
-			return OracleEvent{}, false, err
-		}
-		return OracleEvent{Type: strings.ToLower(strings.TrimPrefix(parts[0], "TARP_")), Mutations: mutations}, true, nil
-	}
 	if len(parts) == 2 && parts[0] == "TARP_PHASE" {
 		return OracleEvent{Type: "phase", Phase: parts[1]}, true, nil
 	}
 	if len(parts) == 2 {
 		switch parts[0] {
+		case "TARP_BATCH_INTENT", "TARP_BATCH_ACK", "TARP_BATCH_NOT_APPLIED", "TARP_STAGED_INTENT", "TARP_STAGED_ACK":
+			data, err := hex.DecodeString(parts[1])
+			if err != nil {
+				return OracleEvent{}, false, err
+			}
+			var mutations []OracleMutation
+			if err := json.Unmarshal(data, &mutations); err != nil {
+				return OracleEvent{}, false, err
+			}
+			return OracleEvent{Type: strings.ToLower(strings.TrimPrefix(parts[0], "TARP_")), Mutations: mutations}, true, nil
 		case "TARP_CAPTURE", "TARP_READS", "TARP_PINNED", "TARP_REUSED":
 			value, err := strconv.ParseUint(parts[1], 10, 64)
 			if err != nil {
@@ -136,11 +135,11 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 		}
 		deleting := event.Type == "ack_delete" || event.Type == "intent_delete"
 		switch event.Type {
-		case "batch_intent", "batch_ack", "batch_not_applied":
+		case "batch_intent", "batch_ack", "batch_not_applied", "staged_intent", "staged_ack":
 			if _, err := batchMutations(event); err != nil {
 				return nil, err
 			}
-			if event.Type == "batch_intent" {
+			if event.Type == "batch_intent" || event.Type == "staged_intent" {
 				if oracle.pending != nil {
 					return nil, errors.New("batch overlaps another pending mutation")
 				}
@@ -153,14 +152,22 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 				break
 			}
 			pending := oracle.pending
-			if pending == nil || pending.Type != "batch_intent" || !reflect.DeepEqual(pending.Mutations, event.Mutations) {
+			want := "batch_intent"
+			if event.Type == "staged_ack" {
+				want = "staged_intent"
+			}
+			if pending == nil || pending.Type != want || !reflect.DeepEqual(pending.Mutations, event.Mutations) {
 				return nil, errors.New("batch outcome differs from pending batch")
 			}
 			mutations, _ := batchMutations(*pending)
 			for _, m := range mutations {
 				key := string(m.Key)
-				if event.Type == "batch_ack" {
+				if event.Type == "batch_ack" || event.Type == "staged_ack" {
 					if m.Delete && !oracle.values[key].Present {
+						if event.Type == "staged_ack" {
+							oracle.values[key] = oracleValue{Key: m.Key}
+							continue
+						}
 						return nil, errors.New("acknowledged batch Delete of an absent key")
 					}
 					oracle.values[key] = oracleValue{Key: m.Key, Value: m.Value, Present: !m.Delete}
@@ -197,7 +204,8 @@ func ReplayOracle(events []OracleEvent, allowEmptyInitialization bool) (*Oracle,
 			oracle.pending = &pending
 		case "not_applied", "error_committed":
 			pending := oracle.pending
-			if pending == nil || pending.Type == "batch_intent" || !bytes.Equal(pending.Key, event.Key) || len(event.Value) != 0 {
+			if pending == nil || (pending.Type != "intent" && pending.Type != "intent_delete") ||
+				!bytes.Equal(pending.Key, event.Key) || len(event.Value) != 0 {
 				return nil, errors.New("definitive outcome does not match a pending mutation")
 			}
 			if event.Type == "error_committed" {
@@ -240,6 +248,16 @@ func batchMutations(event OracleEvent) ([]OracleMutation, error) {
 	if len(event.Mutations) == 0 || len(event.Mutations) > 2048 || len(event.Key) != 0 || len(event.Value) != 0 {
 		return nil, errors.New("invalid bounded batch witness")
 	}
+	if event.Type == "staged_intent" || event.Type == "staged_ack" {
+		var previous []byte
+		for _, m := range event.Mutations {
+			if bytes.Compare(m.Key, previous) <= 0 || m.Delete && len(m.Value) != 0 {
+				return nil, errors.New("invalid or unordered staged mutation")
+			}
+			previous = m.Key
+		}
+		return event.Mutations, nil
+	}
 	deleting := event.Mutations[0].Delete
 	seen := make(map[string]bool)
 	var effective []OracleMutation
@@ -259,7 +277,7 @@ func (o *Oracle) pendingMutations() []OracleMutation {
 	if o.pending == nil {
 		return nil
 	}
-	if o.pending.Type == "batch_intent" {
+	if o.pending.Type == "batch_intent" || o.pending.Type == "staged_intent" {
 		mutations, _ := batchMutations(*o.pending)
 		return mutations
 	}
@@ -268,22 +286,31 @@ func (o *Oracle) pendingMutations() []OracleMutation {
 
 func (o *Oracle) SequenceRange() (uint64, uint64) {
 	pending := o.pendingMutations()
+	committed := o.lastUserSequence + uint64(len(pending))
 	for _, mutation := range pending {
 		if mutation.Delete && !o.values[string(mutation.Key)].Present {
+			if o.pending.Type == "staged_intent" {
+				committed-- // ApplyStaged elides deletes of absent keys.
+				continue
+			}
 			// Delete and BatchDelete reject absent keys before publication.
 			return o.lastUserSequence, o.lastUserSequence
 		}
 	}
-	return o.lastUserSequence, o.lastUserSequence + uint64(len(pending))
+	return o.lastUserSequence, committed
 }
 
 // PowerCutSequenceRange constrains a pending mutation at its own publication
 // barrier. In other campaign modes a barrier can belong to maintenance.
 func (o *Oracle) PowerCutSequenceRange(mode string) (uint64, uint64) {
 	low, high := o.SequenceRange()
+	phase := o.Phase
+	if mode == "staged-apply" {
+		phase = strings.TrimPrefix(phase, "staged.")
+	}
 	switch mode {
-	case "put", "delete", "insert", "reinsert", "rotate", "batch-put", "batch-delete", "batch-rotate", "pager-exhaustion":
-		switch o.Phase {
+	case "put", "delete", "insert", "reinsert", "rotate", "batch-put", "batch-delete", "batch-rotate", "staged-apply", "pager-exhaustion":
+		switch phase {
 		case "data.write:before", "data.write:after", "data.sync:before", "data.sync:after",
 			"segment.write:before", "segment.write:after",
 			"segment.sync:before", "segment.sync:after", "catalog.write:before", "catalog.write:after",

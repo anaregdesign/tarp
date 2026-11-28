@@ -37,6 +37,10 @@ The runner builds a measurement-only Go source overlay with counters for directo
 
 ## Selectable key indexes
 
+The bounded [key-family layout evaluation](benchmarks/key-family-layout.md)
+compares chronological DATA and two ordered checkpoint output layouts with
+the same logical cut, B+tree budgets and cross-family updates.
+
 For a new edge-prefix comparison, run
 `benchmark/scripts/container-edge-prefix.sh /path/to/new-results`. The filter
 and prefix arms both default to the current commit. To compare revisions,

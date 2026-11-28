@@ -117,6 +117,17 @@ func (db *DB) checkpointAttempt(ctx context.Context, mode checkpointMode) (resul
 		db.writer.Unlock()
 		return CompactResult{UnlinkedBytes: n, PinnedRetiredDataBytes: pinned}, compactCleanupError(err)
 	}
+	if mode == keyOrder && !hasDamage && db.store.Catalog.CheckpointCutoffSequence == 0 {
+		// A zero DATA cutoff excludes reusable snapshot segments. At this
+		// cut every live record must be staged while source DATA remains selected.
+		db.state.Lock()
+		liveBytes := db.stats.LiveRecordBytes
+		db.state.Unlock()
+		if err := db.store.CheckInitialOrderedSpace(liveBytes); err != nil {
+			db.writer.Unlock()
+			return result, operationError("compact", "space reserve", err)
+		}
+	}
 	if db.store.Current.ActiveCommittedEndOffset != format.SegmentHeaderBytes {
 		if err := db.sealActive(); err != nil {
 			db.storageFailure(err)

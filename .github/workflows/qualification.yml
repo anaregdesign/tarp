@@ -39,7 +39,7 @@ on:
         required: true
         default: smoke
         type: choice
-        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, batches, cleaner, ordered, indexes, repair, pager, all]
+        options: [smoke, initialize, mutate, checkpoint, snapshots, recovery, exhaustion, batches, staged, cleaner, ordered, indexes, repair, pager, all]
       case:
         description: Optional exact case name for a focused reproduction
         required: false

@@ -103,7 +103,7 @@ func TestExtendedCampaignGroupsAreBoundedAndDisjoint(t *testing.T) {
 	seen := make(map[string]bool)
 	var count int
 	for _, group := range []string{"initialize", "mutate", "checkpoint", "snapshots", "recovery", "exhaustion",
-		"batches", "cleaner", "ordered", "indexes", "repair", "pager"} {
+		"batches", "staged", "cleaner", "ordered", "indexes", "repair", "pager"} {
 		cases, err := CampaignCases(group)
 		if err != nil || len(cases) == 0 || len(cases) > 192 {
 			t.Fatalf("unbounded/empty campaign group %q: %d %v", group, len(cases), err)
@@ -251,6 +251,48 @@ func TestMutationPowerCutSequenceRange(t *testing.T) {
 				t.Errorf("unrelated publication constrained pending write to [%d,%d]", lo, hi)
 			}
 		}
+	}
+}
+
+func TestStagedApplyPowerCutSequenceRange(t *testing.T) {
+	cases, err := CampaignCases("staged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const old, committed = 2, 4
+	mutations := []OracleMutation{
+		{Key: []byte("absent"), Delete: true},
+		{Key: []byte("new"), Value: []byte("committed")},
+		{Key: []byte("old"), Delete: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			events := []OracleEvent{
+				{Type: "ack", Key: []byte("old"), Value: []byte("present")},
+				{Type: "ack", Key: []byte("keep"), Value: []byte("preserved")},
+				{Type: "staged_intent", Mutations: mutations},
+			}
+			low, high := uint64(old), uint64(old)
+			switch tc.Phase {
+			case "staged.current.rename:after", "staged.current.dirsync:before":
+				high = committed
+			case "operation.ack:after":
+				events = append(events, OracleEvent{Type: "staged_ack", Mutations: mutations})
+				fallthrough
+			case "staged.current.dirsync:after":
+				low, high = committed, committed
+			}
+			oracle, err := ReplayOracle(append(events, OracleEvent{Type: "phase", Phase: tc.Phase}), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lo, hi := oracle.PowerCutSequenceRange(tc.Mode); lo != low || hi != high {
+				t.Fatalf("phase %s: got [%d,%d], want [%d,%d]", tc.Phase, lo, hi, low, high)
+			}
+			if _, err := oracle.StateAt(old + 1); err == nil {
+				t.Fatal("oracle accepted a sequence within the staged commit")
+			}
+		})
 	}
 }
 

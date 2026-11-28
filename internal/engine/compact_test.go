@@ -82,6 +82,106 @@ func TestCompactCanceledWaitingForWriterPreservesFrontier(t *testing.T) {
 	}
 }
 
+func TestInitialKeyOrderCompactRejectsKnownSpaceShortfallBeforeSealing(t *testing.T) {
+	var available uint64
+	var scans, writes int
+	fs := &storage.IO{
+		AvailableBytes: func(string) (uint64, error) { return available, nil },
+		Hook: func(point string) error {
+			switch point {
+			case "compact.scan:before":
+				scans++
+			case "compact.segment.write:before", "compact.write:before":
+				writes++
+			}
+			return nil
+		},
+	}
+	opts := testOptions()
+	opts.IndexMode = IndexMemory
+	db := newTestDBWithHooks(t, opts, fs, parkedMaintenance())
+	large := strings.Repeat("v", 60)
+	for _, key := range []string{"c", "b", "a"} {
+		mustPut(t, db, key, large)
+	}
+	mustPut(t, db, "c", "latest")
+	before := db.store.Current
+	if before.ActiveCommittedEndOffset == format.SegmentHeaderBytes || db.store.CatalogEntries().Len() == 0 {
+		t.Fatal("fixture requires both sealed DATA and a nonempty active log")
+	}
+	const allowance = 64
+	target := uint64(opts.TargetSegmentBytes)
+	available = allowance + target + format.ParitySidecarBytes(target) +
+		format.CatalogEncodedBytes(db.store.CatalogEntries().Len()+1) + format.FrontierBytes + 4*4096
+	minimum := db.Stats().LiveRecordBytes
+	files := directoryBytes(t, db.store.Dir)
+	result, err := db.CompactByKey(t.Context())
+	var op *OpError
+	if !errors.Is(err, ErrNoSpace) || !errors.As(err, &op) || op.Outcome != NotApplied || op.Phase != "space reserve" || result != (CompactResult{}) {
+		t.Fatalf("impossible ordered checkpoint returned %+v, %v", result, err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("at least %d bytes", minimum)) ||
+		!strings.Contains(err.Error(), fmt.Sprintf("%d staging bytes available", allowance)) {
+		t.Fatalf("expected required lower bound and staging availability, got %v", err)
+	}
+	if db.store.Current != before || scans != 0 || writes != 0 || !maps.Equal(directoryBytes(t, db.store.Dir), files) {
+		t.Fatalf("rejected checkpoint changed selection or performed work: %d scans, %d writes", scans, writes)
+	}
+	wantValue(t, db, "c", "latest")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenWithHooks(db.store.Dir, opts, fs, parkedMaintenance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.store.Current != before {
+		t.Fatalf("reopen changed the rejected checkpoint frontier from %+v to %+v", before, reopened.store.Current)
+	}
+	for _, key := range []string{"a", "b"} {
+		wantValue(t, reopened, key, large)
+	}
+	wantValue(t, reopened, "c", "latest")
+	available = 1 << 20
+	if _, err := reopened.CompactByKey(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if scans == 0 || writes == 0 {
+		t.Fatalf("successful retry performed %d scans and %d writes", scans, writes)
+	}
+	checkKeyOrderedSnapshot(t, reopened, map[string]uint64{"a": 3, "b": 2, "c": 4})
+}
+
+func TestOrderedDeltaCompactCanFitWithLessSpaceThanAllLiveRecords(t *testing.T) {
+	available := uint64(1 << 20)
+	fs := &storage.IO{AvailableBytes: func(string) (uint64, error) { return available, nil }}
+	opts := Options{MaxRecordBytes: 64, TargetSegmentBytes: format.SegmentHeaderBytes + 64}
+	db := newTestDBWithHooks(t, opts, fs, parkedMaintenance())
+	for i := range 32 {
+		mustPut(t, db, fmt.Sprintf("k%02d", i), "original")
+	}
+	if _, err := db.CompactByKey(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	stable := testLoc(t, db, "k00")
+	mustPut(t, db, "k31", "updated")
+	const allowance = 1024
+	if db.Stats().LiveRecordBytes <= allowance {
+		t.Fatal("fixture should exceed the given staging allowance for a full rewrite")
+	}
+	target := uint64(opts.TargetSegmentBytes)
+	available = allowance + target + format.ParitySidecarBytes(target) +
+		format.CatalogEncodedBytes(db.store.CatalogEntries().Len()+1) + format.FrontierBytes + 4*4096
+	if _, err := db.CompactByKey(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if testLoc(t, db, "k00") != stable {
+		t.Fatal("ordered delta replaced an untouched snapshot segment")
+	}
+	wantValue(t, db, "k31", "updated")
+}
+
 func TestCompactCanceledBetweenOutputFiles(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
