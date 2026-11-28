@@ -61,7 +61,11 @@ func applyCatalogEdits(catalog format.Catalog, edits []format.CatalogEdit) (form
 			next.PrunedThroughSequence < catalog.PrunedThroughSequence {
 			return format.Catalog{}, fmt.Errorf("%w: invalid catalog edit", ErrCorrupt)
 		}
-		if next.ActiveID != catalog.ActiveID {
+		if edit.StagedAppend {
+			if !validStagedCatalogAppend(catalog, entries, edit) {
+				return format.Catalog{}, fmt.Errorf("%w: invalid staged catalog append", ErrCorrupt)
+			}
+		} else if next.ActiveID != catalog.ActiveID {
 			if edit.Start != entries.Len() || edit.Remove != 0 || len(next.Entries) != 1 ||
 				next.Entries[0].ID != catalog.ActiveID || next.Entries[0].Kind != format.RawLogKind {
 				return format.Catalog{}, fmt.Errorf("%w: invalid catalog rotation", ErrCorrupt)
@@ -72,4 +76,22 @@ func applyCatalogEdits(catalog format.Catalog, edits []format.CatalogEdit) (form
 	}
 	catalog.Entries = entries.Slice(0, entries.Len())
 	return catalog, format.ValidateCatalog(catalog)
+}
+
+func validStagedCatalogAppend(prior format.Catalog, entries CatalogEntries, edit format.CatalogEdit) bool {
+	next := edit.Catalog
+	if edit.Start != entries.Len() || edit.Remove != 0 || next.ActiveID <= prior.ActiveID ||
+		next.Index != prior.Index || next.PrunedThroughSequence != prior.PrunedThroughSequence {
+		return false
+	}
+	previous := prior.ActiveID - 1
+	for _, entry := range next.Entries {
+		if entry.Kind != format.RawLogKind || entry.ID <= previous || entry.ID >= next.ActiveID {
+			return false
+		}
+		previous = entry.ID
+	}
+	// The combined catalog validation checks record lengths, digests and
+	// consecutive logical sequence intervals.
+	return true
 }

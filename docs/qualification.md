@@ -166,7 +166,7 @@ Recorded controls:
 `tarpqual -list-cases all` prints the named matrix without starting a guest.
 The optional `campaign` mode first reruns the independent device controls,
 then executes a selected group (`smoke`, `initialize`, `mutate`, `checkpoint`,
-`snapshots`, `recovery`, `exhaustion`, `batches`, `cleaner`, `ordered`, `indexes`,
+`snapshots`, `recovery`, `exhaustion`, `batches`, `staged`, `cleaner`, `ordered`, `indexes`,
 `repair`, or `pager`). `all` enumerates the complete catalog, which exceeds the
 192-case execution limit; select a bounded group or an exact case. A single exact case name can be selected
 for reproduction. Each case has a disclosed seed and occurrence, a fresh
@@ -208,6 +208,10 @@ duplicate Deletes. Delete duplicates consume only one effective record per
 key. Only the two complete batch endpoints are accepted: no intermediate
 sequence or mixture of old/new key states is permitted. Batch protocol lines
 are bounded to 1 MiB, journals to 8 MiB and batches to 2,048 witnessed inputs.
+The `staged` group cuts one mixed staged commit across two DATA segments. It
+checks candidate DATA sync, durable MANIFEST preparation, CURRENT replacement
+and acknowledgment. Both recovery modes validate the complete committed cut.
+The Indexed check must reuse the previous INDEX and replay any selected tail.
 The private-pager fixture stages 1,536 long keys against real guest ENOSPC,
 requires a scratch-file write failure before any DATA write, checks healthy
 `NotApplied` rollback, frees space and retries before a final whole-VM cut.

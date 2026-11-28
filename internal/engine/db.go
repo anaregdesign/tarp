@@ -82,6 +82,7 @@ type DB struct {
 	readSegments scanSegmentSets
 	parity       parityWorker
 	cleaner      cleaner
+	staging      atomic.Bool // one ApplyStaged spool per DB
 }
 
 // Open creates or reopens a database and starts automatic incremental compaction.
@@ -157,10 +158,10 @@ func (db *DB) health() error {
 
 func (db *DB) poison(err error) { db.failed.CompareAndSwap(nil, &failure{err: publicCause(err)}) }
 
-// A failed read of one immutable DATA record can be reported to its caller
-// while the index and the writer's commit frontier remain usable.
+// Unavailable immutable DATA and descriptor exhaustion are reported to their
+// caller while the index and the writer's commit frontier remain usable.
 func (db *DB) readFailure(err error) {
-	if !storage.IsDataUnavailable(err) {
+	if !storage.IsDataUnavailable(err) && !storage.IsReadDescriptorPressure(err) {
 		db.poison(err)
 	}
 }
@@ -297,7 +298,7 @@ func (db *DB) GetContext(ctx context.Context, key []byte) ([]byte, error) {
 					continue
 				}
 			} else {
-				db.poison(err)
+				db.readFailure(err)
 			}
 			return nil, operationError("get", "read", err)
 		}

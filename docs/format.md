@@ -138,7 +138,7 @@ end is discardable after validation and compatible-options checks.
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
-| 0 | 8 | `TARPMNFT`, `TARPMNED`, or `TARPBKUP` |
+| 0 | 8 | `TARPMNFT`, `TARPMNED`, `TARPMNSA`, or `TARPBKUP` |
 | 8 | 2 | Reserved |
 | 10 | 2 | Reserved |
 | 12 | 8 | Payload length, exactly file size minus 32 |
@@ -154,6 +154,14 @@ position (u64), and a removed entry count (u64). The remaining bytes encode a
 catalog payload with the replacement header and zero or one inserted entry.
 A rotation appends the sealed active segment. Cleaning replaces or removes
 one consecutive range. An INDEX-only publication changes the header.
+
+A `TARPMNSA` object uses the same payload framing for a staged append.
+Its splice position is the end of the preceding catalog and its removal
+count is zero. It can append up to 1,024 sealed raw log segments. The
+nonempty former active segment, when present, is first. A header-only
+former active segment is omitted. Inserted DATA IDs increase up to the
+new active ID, which identifies the last file of the staged commit.
+The cutoff, pruning boundary and INDEX descriptor are preserved.
 
 `CURRENT` authenticates the newest object. Recovery follows the authenticated
 predecessors back to a base, then applies edits from oldest to newest before

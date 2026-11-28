@@ -34,6 +34,14 @@ func (s *Store) CatalogEditBytes() uint64 {
 	return format.MaxCatalogEditBytes + format.FrontierBytes
 }
 
+// StagedCatalogBytes bounds metadata for a staged append at the current cut.
+func (s *Store) StagedCatalogBytes() uint64 {
+	if len(s.catalogChain) > maxCatalogEdits {
+		return format.CatalogEncodedBytes(s.catalogEntries.Len()+format.MaxStagedCatalogEntries) + format.FrontierBytes
+	}
+	return format.MaxStagedCatalogEditBytes + format.FrontierBytes
+}
+
 func (s *Store) NeedsCatalogRebase() bool { return len(s.catalogChain) > rebaseCatalogAt }
 
 // RebaseCatalog checkpoints an immutable catalog view while callers continue
@@ -77,6 +85,24 @@ func (s *Store) publishCatalogEdit(catalog format.Catalog, start, remove int, in
 
 func (s *Store) publishCatalogMetadata(catalog format.Catalog, candidate format.Frontier, actor string) error {
 	return s.publishCatalogEdit(catalog, s.catalogEntries.Len(), 0, nil, candidate, actor, nil)
+}
+
+func (s *Store) publishStagedCatalogAppend(catalog format.Catalog, inserted []format.CatalogEntry, candidate format.Frontier) error {
+	const actor = "staged."
+	start := s.catalogEntries.Len()
+	entries := s.catalogEntries.splice(start, 0, inserted)
+	if len(s.catalogChain) > maxCatalogEdits {
+		return s.publishCatalogBase(catalog, entries, candidate, actor, nil)
+	}
+	editCatalog := catalog
+	editCatalog.Entries = inserted
+	edit := format.CatalogEdit{
+		PreviousID: s.Current.ManifestID, PreviousDigest: s.Current.ManifestDigest,
+		Start: start, Catalog: editCatalog, StagedAppend: true,
+	}
+	return s.publishCatalogObject(catalog, entries, candidate, actor, nil, true, func() []byte {
+		return format.EncodeCatalogEdit(edit)
+	})
 }
 
 func (s *Store) publishCatalogObject(catalog format.Catalog, entries CatalogEntries, candidate format.Frontier, actor string, offGate func(func() error) error, incremental bool, encode func() []byte) (result error) {

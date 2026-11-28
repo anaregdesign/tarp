@@ -283,6 +283,7 @@ func FuzzDecoders(f *testing.F) {
 		EncodeSegmentHeader(SegmentHeader{ID: 1, Kind: CleanedLogKind}),
 		EncodeCatalog(Catalog{ActiveID: 1}),
 		EncodeCatalogEdit(CatalogEdit{PreviousID: 2, PreviousDigest: [32]byte{1}, Catalog: Catalog{ActiveID: 1}}),
+		EncodeCatalogEdit(CatalogEdit{PreviousID: 2, PreviousDigest: [32]byte{1}, Catalog: Catalog{ActiveID: 5}, StagedAppend: true}),
 		EncodeCatalog(Catalog{ActiveID: 1, Index: IndexCheckpoint{ID: 2, Bytes: 1024, IndexFileDigest: [32]byte{1}, CoveredLayoutFingerprint: [32]byte{2}}}),
 		EncodeCatalog(Catalog{ActiveID: 1, PrunedThroughSequence: 5, Entries: []CatalogEntry{
 			{ID: 2, DataFileDigest: [32]byte{2}, Bytes: 128, Kind: RawLogKind, FirstSequence: 1, LastSequence: 1},
