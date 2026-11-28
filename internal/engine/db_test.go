@@ -821,8 +821,10 @@ func TestGenerationExhaustionCannotWrapDuringRotation(t *testing.T) {
 			if rotate {
 				mustPut(t, db, "pad", string(make([]byte, 60)))
 			}
+			db.writer.Lock()
 			activeID := db.store.Current.ActiveID
 			db.store.Current.PublicationGeneration = math.MaxUint64 - 1
+			db.writer.Unlock()
 			err := db.Put([]byte("k"), []byte("new"))
 			if err != nil {
 				t.Fatalf("rotation=%t: %v", rotate, err)
@@ -1551,10 +1553,13 @@ func TestMissingDeletePrecedesExhaustedCountersAndPreservesBatch(t *testing.T) {
 	for _, mode := range []IndexMode{IndexMemory, IndexBTree} {
 		db := newTestDBWithHooks(t, Options{IndexMode: mode}, nil, &Hooks{CleanerStart: make(chan struct{})})
 		mustPut(t, db, "before", "preserved")
-		frontier, stats := db.store.Current, db.Stats()
+		stats := db.Stats()
+		db.writer.Lock()
+		frontier := db.store.Current
 		db.store.Current.LastUserSequence = math.MaxUint64
 		db.store.Current.PublicationGeneration = math.MaxUint64
 		exhausted := db.store.Current
+		db.writer.Unlock()
 		if err := db.Delete([]byte("missing")); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("mode %d missing Delete with exhausted counters: %v", mode, err)
 		}
@@ -1564,10 +1569,13 @@ func TestMissingDeletePrecedesExhaustedCountersAndPreservesBatch(t *testing.T) {
 		if !errors.Is(err, ErrNotFound) || !errors.As(err, &keyError) || keyError.Index != 2 {
 			t.Fatalf("mode %d missing BatchDelete with exhausted counters: %v", mode, err)
 		}
-		if got := db.Stats(); db.store.Current != exhausted || got.WriteCommits != stats.WriteCommits || got.LiveKeys != stats.LiveKeys || got.LiveRecordBytes != stats.LiveRecordBytes || got.TombstoneBytes != stats.TombstoneBytes {
+		db.writer.Lock()
+		after := db.store.Current
+		db.store.Current = frontier
+		db.writer.Unlock()
+		if got := db.Stats(); after != exhausted || got.WriteCommits != stats.WriteCommits || got.LiveKeys != stats.LiveKeys || got.LiveRecordBytes != stats.LiveRecordBytes || got.TombstoneBytes != stats.TombstoneBytes {
 			t.Fatalf("mode %d changed metadata after rejected delete, stats %+v", mode, got)
 		}
-		db.store.Current = frontier
 		wantValue(t, db, "before", "preserved")
 		if err := db.Delete([]byte("before")); err != nil {
 			t.Fatalf("mode %d retry: %v", mode, err)
